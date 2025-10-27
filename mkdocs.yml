@@ -9,6 +9,7 @@ theme:
     - navigation.instant
     - navigation.path
     - navigation.indexes
+    - navigation.tabs
     - search.suggest
   palette:
     - media: "(prefers-color-scheme)"
@@ -51,3 +52,7 @@ markdown_extensions:
 # Page tree
 nav:
   - Home: index.md
+  - NC Reviews:
+    - nc-reviews/index.md
+  - CC Reviews:
+    - cc-reviews/index.md

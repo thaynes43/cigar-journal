@@ -1,0 +1,178 @@
+# Cigar Journal MkDocs Project Rules
+
+## Project Overview
+This is a static documentation website for cigar tasting notes and reviews using MkDocs with Material theme. The site is hosted at https://hayneslab.net/cigar-journal/
+
+## Technology Stack
+- **Static Site Generator**: MkDocs
+- **Theme**: Material for MkDocs (https://squidfunk.github.io/mkdocs-material/)
+- **Content Format**: Markdown files
+- **Deployment**: GitHub Pages (via GitHub Actions)
+
+## File Structure
+```
+cigar-journal/
+├── .cursor/           # Cursor IDE configuration
+├── .github/workflows/ # GitHub Actions for deployment
+├── docs/              # Markdown documentation files
+│   └── index.md       # Homepage
+├── mkdocs.yml         # MkDocs configuration
+└── README.md          # Project documentation
+```
+
+## Content Guidelines
+
+### Cigar Review Structure
+When creating cigar review pages, follow this consistent structure:
+- **Cigar Details**: Brand, line, vitola, wrapper, binder, filler
+- **Appearance**: Visual description, construction quality
+- **Pre-light**: Aroma, cold draw notes
+- **First Third**: Initial flavors, burn quality
+- **Second Third**: Flavor development, complexity
+- **Final Third**: Finish, overall impression
+- **Rating**: Numerical score (1-10) with justification
+- **Pairing Suggestions**: Beverages, food recommendations
+
+### Markdown Best Practices
+- Use proper heading hierarchy (H1 for page titles, H2 for main sections)
+- Include frontmatter with metadata when appropriate
+- Use Material for MkDocs features like admonitions for callouts
+- Include high-quality images with proper alt text
+- Use consistent formatting for cigar specifications
+
+### Image Guidelines
+- Store images in `docs/images/` directory
+- Use descriptive filenames (e.g., `padron-1964-principle-box.jpg`)
+- Optimize images for web (JPEG for photos, PNG for graphics)
+- Include proper alt text for accessibility
+
+## MkDocs Configuration
+
+### Theme Settings
+- **Primary Color**: Indigo (light mode), Black (dark mode)
+- **Accent Color**: Indigo
+- **Features Enabled**:
+  - Navigation instant loading
+  - Navigation path breadcrumbs
+  - Navigation indexes
+  - Search suggestions
+
+### Extensions Used
+- `admonition`: For callout boxes and notes
+- `pymdownx.details`: For collapsible content sections
+- `pymdownx.superfences`: Enhanced code block support
+- `attr_list`: For adding CSS classes to elements
+- `md_in_html`: For mixing HTML and Markdown
+
+## Development Workflow
+
+### Local Development
+1. Run `mkdocs serve` to start local development server
+2. Edit markdown files in `docs/` directory
+3. Preview changes at http://127.0.0.1:8000
+4. Test on different devices and screen sizes
+
+### Content Creation Process
+1. Create new markdown file in appropriate `docs/` subdirectory
+2. Follow cigar review structure template
+3. Add page to navigation in `mkdocs.yml`
+4. Test locally before committing
+5. Commit and push to trigger GitHub Pages deployment
+
+### Deployment
+- Automatic deployment via GitHub Actions workflow
+- Site builds and deploys to GitHub Pages on push to main branch
+- URL: https://hayneslab.net/cigar-journal/
+
+## Code Style Guidelines
+
+### Markdown Formatting
+- Use consistent spacing and indentation
+- Wrap lines at 80 characters for readability
+- Use semantic HTML elements when needed
+- Follow Material for MkDocs conventions
+
+### File Naming
+- Use kebab-case for filenames (e.g., `padron-1964-principle-review.md`)
+- Use descriptive names that reflect content
+- Avoid spaces and special characters
+
+### Directory Organization
+```
+docs/
+├── index.md                    # Homepage
+├── reviews/                    # Individual cigar reviews
+│   ├── padron/
+│   ├── arturo-fuente/
+│   └── cuban/
+├── guides/                     # Educational content
+│   ├── tasting-guide.md
+│   ├── storage-tips.md
+│   └── pairing-guide.md
+├── collections/                # Cigar collections/series
+└── images/                     # All images
+    ├── cigars/
+    ├── boxes/
+    └── accessories/
+```
+
+## Quality Standards
+
+### Content Quality
+- Provide detailed, honest reviews
+- Include specific flavor notes and observations
+- Maintain consistent rating criteria
+- Update reviews if opinions change over time
+
+### Technical Quality
+- Ensure all links work correctly
+- Optimize images for fast loading
+- Test responsive design on mobile devices
+- Validate HTML output
+
+### SEO Considerations
+- Use descriptive page titles and meta descriptions
+- Include relevant keywords naturally
+- Structure content with proper headings
+- Use alt text for all images
+
+## Maintenance Tasks
+
+### Regular Updates
+- Review and update outdated information
+- Check for broken links
+- Update cigar availability and pricing
+- Refresh seasonal pairing recommendations
+
+### Performance Monitoring
+- Monitor site loading speed
+- Check mobile responsiveness
+- Verify search functionality
+- Test across different browsers
+
+## Common Commands
+```bash
+# Start local development server
+mkdocs serve
+
+# Build static site
+mkdocs build
+
+# Deploy to GitHub Pages (automatic via GitHub Actions)
+git add .
+git commit -m "Update cigar review"
+git push origin main
+```
+
+## Troubleshooting
+
+### Common Issues
+- **Build errors**: Check markdown syntax and frontmatter
+- **Missing images**: Verify file paths and image optimization
+- **Navigation issues**: Update `mkdocs.yml` nav section
+- **Deployment failures**: Check GitHub Actions logs
+
+### Resources
+- [MkDocs Documentation](https://www.mkdocs.org/)
+- [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/)
+- [Markdown Guide](https://www.markdownguide.org/)
