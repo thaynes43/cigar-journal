@@ -54,5 +54,12 @@ nav:
   - Home: index.md
   - NC Reviews:
     - nc-reviews/index.md
+    - Davidoff: nc-reviews/davidoff/index.md
+    - Padron: nc-reviews/padron/index.md
+    - Drew Estate: nc-reviews/drew-estate/index.md
+    - Oliva: nc-reviews/oliva/index.md
+    - Caldwell: nc-reviews/caldwell/index.md
   - CC Reviews:
     - cc-reviews/index.md
+    - Romeo y Julieta: cc-reviews/romeo-y-julieta/index.md
+    - Montecristo: cc-reviews/montecristo/index.md
