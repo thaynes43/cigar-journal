@@ -1,1 +1,53 @@
-site_name: My Docs
+site_name: Haynes Cigar Journal
+site_url: https://hayneslab.net/cigar-journal/
+site_author: Tom Haynes
+
+# Configuration
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.path
+    - navigation.indexes
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/link
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/toggle-switch
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/toggle-switch-off
+        name: Switch to system preference
+        
+# Plugins
+plugins:
+  - search
+
+# Hooks
+## Add 'hooks:' here
+
+# Additional configuration
+## Add 'extra:' block here
+
+# Extensions
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - attr_list
+  - md_in_html
+
+# Page tree
+nav:
+  - Home: index.md
