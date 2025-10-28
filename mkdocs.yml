@@ -64,7 +64,13 @@ nav:
       - Nicaragua: nc-reviews/davidoff/nicaragua.md
       - Escurio: nc-reviews/davidoff/escurio.md
       - Winston Churchill: nc-reviews/davidoff/winston-churchill.md
-    - Padron: nc-reviews/padron/index.md
+    - Padron:
+      - nc-reviews/padron/index.md
+      - 1964 Natural: nc-reviews/padron/1964-natural.md
+      - 1964 Maduro: nc-reviews/padron/1964-maduro.md
+      - 1926 Natural: nc-reviews/padron/1926-natural.md
+      - 1926 Maduro: nc-reviews/padron/1926-maduro.md
+      - 3000 Maduro: nc-reviews/padron/3000-maduro.md
     - Drew Estate: nc-reviews/drew-estate/index.md
     - Oliva: nc-reviews/oliva/index.md
     - Caldwell: nc-reviews/caldwell/index.md
