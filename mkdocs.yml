@@ -54,7 +54,16 @@ nav:
   - Home: index.md
   - NC Reviews:
     - nc-reviews/index.md
-    - Davidoff: nc-reviews/davidoff/index.md
+    - Davidoff:
+      - nc-reviews/davidoff/index.md
+      - Winston Churchill The Late Hour: nc-reviews/davidoff/winston-churchill-the-late-hour.md
+      - Signature: nc-reviews/davidoff/signature.md
+      - Millennium: nc-reviews/davidoff/millennium.md
+      - Yamasa: nc-reviews/davidoff/yamasa.md
+      - Grand Cru: nc-reviews/davidoff/grand-cru.md
+      - Nicaragua: nc-reviews/davidoff/nicaragua.md
+      - Escurio: nc-reviews/davidoff/escurio.md
+      - Winston Churchill: nc-reviews/davidoff/winston-churchill.md
     - Padron: nc-reviews/padron/index.md
     - Drew Estate: nc-reviews/drew-estate/index.md
     - Oliva: nc-reviews/oliva/index.md

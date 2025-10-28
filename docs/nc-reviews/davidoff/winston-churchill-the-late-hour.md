@@ -1,0 +1,5 @@
+# Winston Churchill The Late Hour
+
+## Review 1 - Grand Toro - 9/20
+
+Here we go into the Davidoff saga! Good cut on this one, burn is almost even. The cigar is beautifully crafted and feels great in my hands. Quickly I’ve realized that this is a complex cigar. Initial notes are hard to place. Creamy, sweet but malty rather than chocolate or fruits, bit of pepper in the retrohail. I catch the oak when I hold the smoke in my mouth. Sophisticated would be my one word description… I’m a bit over my head with this one. In the 2/3 I’m catching an earthy note with the oak, mainly when I slowly push the smoke out my mouth. Like the oat is now retuning to the earth. A fallen tree. It is as if I’m playing a subtle game with the cigar as it guides me through a late autumn forest. The sun is periodically beaming through the wood offering a malt sweetness. The fallen leaves are damp, oak that will soon be earth. The wind is picking up, crisp and cold pepper that becomes ever more present. The pepper picks up in the final third and the oak is now charred. The creamy smoke at the start is now more powdery like cocoa with charred wood dust.

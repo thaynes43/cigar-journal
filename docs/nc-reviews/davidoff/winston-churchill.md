@@ -1,0 +1,5 @@
+# Winston Churchill
+
+Review 1 - Toro - 10/25
+
+The last of my batch of 4 packs! I will revisit each in the spring but this is likely my last Davidoff until then as it’s getting too cold for a toro. Smoke is rich and creamy from the start. Almost buttery. Cedar notes with pepper on the retrohail. Very quickly into it a hint of sweetness wrapped caramel rolls off my tongue but it’s wrapped in that savory earth I catch in Davidoff. The sweet note is more like honey than caramel now and works great withy the fresh earth body. It’s outdoorsy but elegant. The earth and honey has died down now as I burn down towards the final third, getting toasted oak or something of that nature. Maybe some coffee which I am also drinking. The final third tapers down to enjoyable notes of wood and leather with some light spice. The nicotine is strong like other Davidoff’s reminding me to go slow with the larger vitolas.
