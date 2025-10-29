@@ -2,7 +2,7 @@
 
 ## Reviews
 
-| Cigar | Times Smoked | Date First Smoked | Rating |
+| Cigar | Number of Reviews | Date First Smoked | Rating |
 |-------|--------------|-------------------|--------|
 | [1964 Natural](1964-natural.md) | 1 | 2025-09-02 | 9/10 |
 | [1964 Maduro](1964-maduro.md) | 1 | 2025-09-06 | 10 |

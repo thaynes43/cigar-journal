@@ -71,10 +71,26 @@ nav:
       - 1926 Natural: nc-reviews/padron/1926-natural.md
       - 1926 Maduro: nc-reviews/padron/1926-maduro.md
       - 3000 Maduro: nc-reviews/padron/3000-maduro.md
-    - Drew Estate: nc-reviews/drew-estate/index.md
-    - Oliva: nc-reviews/oliva/index.md
-    - Caldwell: nc-reviews/caldwell/index.md
+    - Drew Estate:
+      - nc-reviews/drew-estate/index.md
+      - Undercrown 10: nc-reviews/drew-estate/undercrown-10.md
+      - Liga Privada Anniversario: nc-reviews/drew-estate/liga-privada-anniversario.md
+      - Liga Privada T52: nc-reviews/drew-estate/liga-privada-t52.md
+      - Liga Privada No. 9: nc-reviews/drew-estate/liga-privada-no-9.md
+    - Oliva:
+      - nc-reviews/oliva/index.md
+      - Series V Melanio Maduro: nc-reviews/oliva/series-v-melanio-maduro.md
+    - Caldwell:
+      - nc-reviews/caldwell/index.md
+      - The King Is Dead: nc-reviews/caldwell/the-king-is-dead.md
+    - My Father:
+      - nc-reviews/my-father/index.md
+      - Le Bijou 1922: nc-reviews/my-father/le-bijou-1922.md
   - CC Reviews:
     - cc-reviews/index.md
-    - Romeo y Julieta: cc-reviews/romeo-y-julieta/index.md
-    - Montecristo: cc-reviews/montecristo/index.md
+    - Romeo y Julieta:
+      - cc-reviews/romeo-y-julieta/index.md
+      - Wide Churchill: cc-reviews/romeo-y-julieta/wide-churchill.md
+    - Montecristo:
+      - cc-reviews/montecristo/index.md
+      - Double Edmundo: cc-reviews/montecristo/double-edmundo.md
