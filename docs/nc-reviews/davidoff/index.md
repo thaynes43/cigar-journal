@@ -8,7 +8,7 @@ If you are just starting to explore their offerings I'd recommend smaller ring g
 
 | Cigar | Number of Reviews | Date First Smoked | Rating |
 |-------|--------------|-------------------|--------|
-| [Winston Churchill The Late Hour](winston-churchill-the-late-hour.md) | 1 | 2025-09-20 | 8/10* |
+| [Winston Churchill The Late Hour](winston-churchill-the-late-hour.md) | 1 | 2025-09-20 | 8/10 |
 | [Signature](signature.md) | 1 | 2025-09-21 | 8/10 |
 | [Millennium](millennium.md) | 1 | 2025-09-27 | 9/10 |
 | [Yamasa](yamasa.md) | 1 | 2025-09-28 | 9/10 |
