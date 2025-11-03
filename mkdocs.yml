@@ -51,7 +51,11 @@ markdown_extensions:
 
 # Page tree
 nav:
-  - Home: index.md
+  - Home:
+    - index.md
+    - Purchase History: purchase-history.md
+    - Cheat Sheet: cheat-sheet.md
+    - About the Author: about-the-author.md
   - NC Reviews:
     - nc-reviews/index.md
     - Davidoff:
