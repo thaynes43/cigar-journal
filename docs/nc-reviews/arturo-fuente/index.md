@@ -1,7 +1,7 @@
-# Caldwell
+# Arturo Fuente
 
 ## Reviews
 
 | Cigar | Number of Reviews | Date of First Review | Rating |
 |-------|--------------|-------------------|--------|
-| [The King Is Dead](the-king-is-dead.md) | 1 | 2025-10-22 | 8/*10 |
+| [OpusX Lost City](opusx-lost-city.md) | 1 | 2025-11-01 | 8.3 |

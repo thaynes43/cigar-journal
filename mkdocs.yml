@@ -86,6 +86,12 @@ nav:
     - My Father:
       - nc-reviews/my-father/index.md
       - Le Bijou 1922: nc-reviews/my-father/le-bijou-1922.md
+    - Arturo Fuente:
+      - nc-reviews/arturo-fuente/index.md
+      - OpusX Lost City: nc-reviews/arturo-fuente/opusx-lost-city.md
+    - La Flor Dominicana:
+      - nc-reviews/la-flor-dominicana/index.md
+      - La Nox: nc-reviews/la-flor-dominicana/la-nox.md
   - CC Reviews:
     - cc-reviews/index.md
     - Romeo y Julieta:
@@ -94,3 +100,6 @@ nav:
     - Montecristo:
       - cc-reviews/montecristo/index.md
       - Double Edmundo: cc-reviews/montecristo/double-edmundo.md
+    - Hoyo De Monterrey:
+      - cc-reviews/hoyo-de-monterrey/index.md
+      - Le Hoyo du Depute: cc-reviews/hoyo-de-monterrey/le-hoyo-du-depute.md

@@ -6,13 +6,13 @@ If you are just starting to explore their offerings I'd recommend smaller ring g
 
 ## Reviews
 
-| Cigar | Number of Reviews | Date First Smoked | Rating |
+| Cigar | Number of Reviews | Date of First Review | Rating |
 |-------|--------------|-------------------|--------|
 | [Winston Churchill The Late Hour](winston-churchill-the-late-hour.md) | 1 | 2025-09-20 | 8/10 |
 | [Signature](signature.md) | 1 | 2025-09-21 | 8/10 |
 | [Millennium](millennium.md) | 1 | 2025-09-27 | 9/10 |
 | [Yamasa](yamasa.md) | 1 | 2025-09-28 | 9/10 |
-| [Grand Cru](grand-cru.md) | 1 | 2025-10-05 | 10/10 |
+| [Grand Cru](grand-cru.md) | 2 | 2025-10-05 | 10/10 |
 | [Nicaragua](nicaragua.md) | 1 | 2025-10-06 | 9/10 |
 | [Escurio](escurio.md) | 1 | 2025-10-14 | 8/10 |
 | [Winston Churchill](winston-churchill.md) | 1 | 2025-10-25 | 9/10 |

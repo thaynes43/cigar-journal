@@ -2,7 +2,7 @@
 
 ## Reviews
 
-| Cigar | Number of Reviews | Date First Smoked | Rating |
+| Cigar | Number of Reviews | Date of First Review | Rating |
 |-------|--------------|-------------------|--------|
 | [Undercrown 10](undercrown-10.md) | 2 | 2025-09-04 | 7/10 |
 | [Liga Privada Anniversario](liga-privada-anniversario.md) | 1 | 2025-09-07 | 8/10 |

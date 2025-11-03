@@ -1,7 +1,8 @@
-# Caldwell
+# La Flor Dominicana
 
 ## Reviews
 
 | Cigar | Number of Reviews | Date of First Review | Rating |
 |-------|--------------|-------------------|--------|
-| [The King Is Dead](the-king-is-dead.md) | 1 | 2025-10-22 | 8/*10 |
+| [La Nox](la-nox.md) | 1 | 2025-10-31 | 9.3 |
+

@@ -1,0 +1,21 @@
+# Cigar Journal Repository Rules
+
+## Brand Index File Format
+
+When creating or updating brand index files (e.g., `docs/nc-reviews/[brand]/index.md`), the reviews table must use the following header format:
+
+```
+| Cigar | Number of Reviews | Date of First Review | Rating |
+```
+
+**Important**: The third column header must be "Date of First Review" (NOT "Date First Smoked").
+
+### Example
+
+```markdown
+## Reviews
+
+| Cigar | Number of Reviews | Date of First Review | Rating |
+|-------|--------------|-------------------|--------|
+| [Cigar Name](cigar-name.md) | 1 | 2025-11-01 | 8/10 |
+```
