@@ -16,6 +16,7 @@ Welcome to the Cuban cigar reviews section. Here you'll find detailed reviews of
 - **Bolívar**: Full-bodied Cuban strength
 - **Hoyo de Monterrey**: Medium-bodied elegance
 - **Punch**: Traditional Cuban heritage
+- **Ramon Allones**: Rich and complex Cuban profiles
 
 ## Cuban Vitolas
 
