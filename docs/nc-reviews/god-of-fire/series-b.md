@@ -1,0 +1,5 @@
+# Series B 11/16
+
+## Review 1 - Double Robusto - 11/16/2025
+
+Well constructed and easy to like expensive stick. Starts off like a spicy hot chocolate which I guess is sometimes known as a Mexican cocoa. Right from the bat I can see this is going to be a complex one and was a great choice for a NC after my CC binge. Some cedar notes mixed into the silky smooth smoke. Raisin and brown sugar come in as the first third transitions into the second. Smoke is heavier now too. Getting to the end of the second third yields some hefty chocolate notes with some lingering sweetness of dry fruit. The smoke is plentiful but drier now, less creamy. The flavors in this stick are great but for some reason I can’t get it to burn evenly. Too many touch ups knock a few points up but a problem just for this stick and not the line. Been storing this with 62% bovedas, usually get a great burn that way. 

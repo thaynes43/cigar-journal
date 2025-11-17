@@ -41,6 +41,7 @@ alwaysApply: false
    Coming Soon
    ```
 2. Update brand's `index.md` table to include new cigar row
+   - **Number of Reviews**: Set to `1` when creating a new cigar page with a review, or `0` if it's just a placeholder. Increment this number as additional reviews are added to the cigar page.
 3. Update `mkdocs.yml` navigation to add cigar under the brand's children
 4. Check top-level index files (`docs/nc-reviews/index.md` or `docs/cc-reviews/index.md`) for any needed updates
 
