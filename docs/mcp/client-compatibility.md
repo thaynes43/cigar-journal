@@ -5,8 +5,9 @@ document goes stale by design** — client products evolve independently of
 this application. Re-verify before relying on any row.
 
 ```yaml
-lastVerified: 2026-08-26        # documentation review only; empirical
-                                # verification = Phase 0 spike, not yet run
+lastVerified: 2026-08-26        # spike LIVE at https://cigars.haynesnetwork.com
+                                # (OAuth mode); Claude Code rows empirically
+                                # verified against it this date
 ```
 
 > The Cigar Journal supports journal reads and writes. Whether a particular
@@ -21,17 +22,26 @@ yet) · `unsupported`.
 
 | Capability | ChatGPT Web | Claude Code | Codex | Generic MCP client |
 |---|---|---|---|---|
-| Remote MCP (Streamable HTTP) | documented | documented | unverified | protocol-dependent |
-| OAuth 2.1 + PKCE + discovery | documented | documented | unverified | protocol-dependent |
-| Read tools | documented | documented | unverified | yes if connected |
-| Write tools | documented (Developer Mode, paid plans) | documented | unverified | yes if connected |
-| Write confirmation UX | documented (prompt unless readOnlyHint) | documented (permission prompt) | unverified | client-dependent |
-| Tool availability late in a long conversation | **unverified** | n/a (tools persist in session) | n/a | client-dependent |
-| Token refresh / long-lived link | **unverified** | unverified | unverified | client-dependent |
-| Reconnect after expiry | unverified | unverified | unverified | client-dependent |
+| Remote MCP (Streamable HTTP) | documented | **verified** 08-26 | blocked¹ | protocol-dependent |
+| OAuth 2.1 + PKCE + discovery | documented | **verified** 08-26 (DCR, S256, state, RFC 8707 resource, `offline_access`; accepts pasted redirect URL — works headless) | blocked¹ | protocol-dependent |
+| Read tools | documented | **verified** 08-26 (authless and authenticated) | blocked¹ | yes if connected |
+| Write tools | documented (Developer Mode, paid plans) | **verified** 08-26; server-derived identity confirmed on writes | blocked¹ | yes if connected |
+| Write confirmation UX | documented (prompt unless readOnlyHint) | **verified**: governed by Claude Code's own permission system (interactive prompt / `--allowedTools`), not MCP annotations | blocked¹ | client-dependent |
+| Tool availability late in a long conversation | **unverified** | **verified**: tools persist for the session | blocked¹ | client-dependent |
+| Token refresh / long-lived link | **unverified** | **verified** 08-26: silent refresh grant after 10-min token expiry, rotation honored (server `refresh_rotated`) | blocked¹ | client-dependent |
+| Reconnect after expiry | unverified | **verified** 08-26: post-expiry call succeeds with no user interaction | blocked¹ | client-dependent |
 
-Every `unverified` and `documented` cell is a Phase 0 spike deliverable;
-the spike upgrades cells to `verified`/`unsupported` with dates and notes.
+¹ Codex CLI's own ChatGPT credential expired mid-Phase 0 (refresh loop:
+"log out and sign in again") — blocked before MCP was ever exercised;
+retest after an interactive `codex login`.
+
+Environment note: clients running inside the cluster need IPv4-first DNS
+(`NODE_OPTIONS=--dns-result-order=ipv4first` for Node-based CLIs) — the
+cluster has no IPv6 egress and cigars.haynesnetwork.com publishes AAAA
+records. Irrelevant for cloud-side clients like ChatGPT Web.
+
+Remaining `unverified`/`documented` cells are Phase 0 deliverables: the
+ChatGPT Web column needs the owner's browser; Codex needs re-login.
 
 ## Workflows
 
