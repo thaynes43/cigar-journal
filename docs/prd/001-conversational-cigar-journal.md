@@ -66,10 +66,13 @@ history and derived personal profile, search, purchase log.
 R9 (must) — Archive import: legacy reviews become Smokes (provenance
 `imported`, original markdown preserved verbatim); purchase table imports;
 missing data stays null.
-R10 (must) — Market: crawl the owner's vendor sites to seed and enrich the
-catalog; periodic re-crawls record per-vendor offers (price, stock); the site
-offers price comparison per cigar. Vendor SKU → catalog matching includes a
-manual confirmation queue.
+R10 (must) — Market: crawl registry vendors to seed and enrich the catalog;
+periodic re-crawls record per-vendor offers (price, stock); the site offers
+price comparison per cigar. Vendor SKU → catalog matching includes a manual
+confirmation queue. The vendor registry is admin-managed (add/remove,
+per-vendor crawl and display toggles); the Cuban approved list syncs against
+the r/cubancigars online-stores wiki with credit, via admin-reviewed diffs,
+and unapproved crawl sources are labeled (ADR-006).
 R11 (later) — Aggregated third-party tasting notes/review data from crawled
 sites (stored as derived descriptors/statistics, not verbatim copies).
 R12 (later) — In-progress durable sessions (draft Smokes) for crash recovery
@@ -137,9 +140,12 @@ Extension points are noted in ADRs where these would attach.
   recommendedDefault: cigars.haynesnetwork.com
   decisionNeededBefore: implementation
 
-- question: Which vendor sites to crawl first (CI, Fox, 2 Guys, Mr. Cigar, ...)
-  whyItMatters: coverage, adapter effort, ToS posture per site
-  recommendedDefault: research pass proposes a shortlist with ToS assessment
+- question: Per-site ToS/robots posture for the named vendors, and whether a
+    viable third-party cigar catalog database exists (data, not prices)
+  whyItMatters: legal/etiquette posture per adapter; a catalog DB could
+    reduce crawl-based enrichment
+  recommendedDefault: research pass before the market phase; vendors are
+    already named in ADR-006 (owner, 2026-08-26)
   decisionNeededBefore: market phase
 
 - question: Real client behavior (writes, refresh, late-conversation tool

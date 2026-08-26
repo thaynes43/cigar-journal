@@ -161,9 +161,29 @@ purchase:
   pricePerStick: 1.12
   vendor: { vendorId: vn_01a1, name: "..." }
 
+vendor:                              # admin-managed registry entry
+  vendorId: vn_01a1
+  name: Fox Cigar
+  url: https://foxcigar.com/
+  focus: NC
+  crawlEnabled: true
+  displayEnabled: true
+  approval: { status: owner-added }
+
+vendor:
+  vendorId: vn_01c7
+  name: Cuban Lou's
+  url: https://www.cubanlous.com/
+  focus: CC
+  crawlEnabled: true
+  displayEnabled: true
+  approval:
+    status: unapproved               # not on the r/cubancigars approved list;
+    note: crawled for inventory depth  # data labeled as unapproved-source
+
 offer:                               # append-only crawl observation
   vendor: { vendorId: vn_01a1 }
-  listingUrl: https://vendor.example/liga-privada-no-9-toro
+  listingUrl: https://foxcigar.com/liga-privada-no-9-toro
   seenAt: 2026-09-03T04:10:00Z
   price: 15.49
   currency: USD

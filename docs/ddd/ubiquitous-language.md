@@ -21,7 +21,7 @@ a domain term.
 | **Provenance** | How a Smoke came to exist: `conversational` (via MCP), `manual` (web form), `imported` (legacy archive). Imported Smokes retain original markdown. |
 | **Personal Profile** | Derived, per-User-per-Cigar view over that User's Smokes: count, recurring Descriptors, rating stats, typical strength. Computed on read, never stored. |
 | **Purchase** | A User's acquisition record: Cigar, date, quantity, packaging, price/PPS, box date, humidor-entry date, Vendor. |
-| **Vendor** | A shop the owner buys from; a crawl source. |
+| **Vendor** | An admin-managed registry entry for a shop: crawl and price-display toggles, CC/NC focus. Cuban Vendors carry an approval status synced (with credit, via admin-reviewed diffs) from the r/cubancigars online-stores wiki; unapproved crawl sources are labeled. |
 | **Offer** | A Vendor's listing of a Cigar observed by a crawl at a point in time: price, stock state, URL. Time-series. |
 | **Listing Match** | Mapping from a Vendor's SKU/product page to a catalog Cigar: `auto`, `confirmed`, or `unmatched` (manual queue). |
 | **Mutation Envelope** | The retry-safety wrapper on every MCP mutation: a Client Request Id plus an optional expected version. |
