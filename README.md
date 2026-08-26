@@ -3,7 +3,8 @@
 A cigar journal being rebuilt from a static markdown ledger into a web
 application: journal entries with tasting notes, a maintained cigar lookup
 database, SSO and local-user login, and an MCP server so agents can turn
-smoking-session musings into structured entries.
+smoking-session musings into structured entries. Part of the haynesnetwork
+family of apps; will live at cigars.haynesnetwork.com.
 
 ## Repository
 

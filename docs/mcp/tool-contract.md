@@ -1,0 +1,389 @@
+# MCP Tool Contract
+
+Six tools over the application services, client-neutral: any MCP client
+(ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
+Schemas here are conceptual until frozen after the Phase 0 spike; field
+semantics and error codes are normative. Governing decisions: ADR-004 (auth),
+ADR-005 (integration). Client capability differences live in
+[`client-compatibility.md`](client-compatibility.md), never in this contract.
+
+## Principles
+
+1. **The transcript never arrives.** Tool arguments contain only what the
+   model synthesizes; design fields so a faithful synthesis is expressible.
+2. **Unknown is valid.** Every field the user didn't state is omitted or
+   null. A schema that forces the model to invent a value is a defect.
+   Sparse Smokes are legitimate (see minimum validity below).
+3. **No model-supplied identity.** The authenticated token determines the
+   user; no tool accepts a user reference. Cigar/smoke ids come only from
+   prior tool results, never invented.
+4. **Verbatim + normalized.** Descriptors are kebab-case tags for analytics;
+   the user's own words always travel alongside and are never rewritten.
+5. **Errors are instructions.** Machine-readable code + `recoverable` +
+   `action`, so the model can self-correct or ask the user.
+6. **Every mutation is retry-safe.** Both write tools take a
+   `clientRequestId`; replays return the original result, conflicting reuse
+   is rejected (mutation envelope below).
+7. **Reads are frictionless, writes confirm.** Read tools carry
+   `readOnlyHint: true`; a host's confirmation prompt on `save_smoke` is the
+   user's last look before persisting.
+
+Scopes: `catalog:read` (search_cigars, get_cigar), `journal:read`
+(get_my_smokes, get_smoke), `journal:write` (save_smoke, update_smoke —
+including lazy catalog create inside save). **Scope-bounded responses:**
+catalog tools include personal fields (`userSmokeCount`, `personalProfile`)
+only when the token also carries `journal:read`; otherwise those fields are
+omitted entirely. Data returned never exceeds the scopes presented.
+
+## Server instructions (sent to every client at initialize)
+
+```text
+This server manages the authenticated user's personal cigar journal.
+During an active smoking conversation, converse naturally; do not save
+observations as they happen. Use search_cigars/get_cigar when identification
+or factual cigar information helps; use get_my_smokes/get_smoke when prior
+experiences would improve comparison. When the user clearly indicates the
+cigar is finished, synthesize the conversation into one save_smoke call.
+Preserve uncertainty: omit ratings, vitolas, times, pairings, blend details,
+or tasting stages that were never established — sparse is correct. Reuse the
+same clientRequestId when retrying a mutation. The server identifies the
+user from the authorization context; never supply or infer a user id.
+```
+
+Guidance, not enforcement — the server validates every request regardless.
+
+## Mutation envelope
+
+Both mutations require:
+
+```yaml
+clientRequestId: 9f41c9d2-...   # minted once per user intent (one smoke,
+                                # one correction); reused EXACTLY on retries
+```
+
+Server behavior, decided inside the write transaction:
+
+- **First use:** commit, store `(user, clientRequestId, tool, request
+  fingerprint, result)`. Fingerprint = hash of the canonicalized arguments
+  (key-sorted, envelope fields excluded).
+- **Replay** (same key, same fingerprint): return the stored result with
+  `replayed: true`. Covers lost responses, host retries, "save that" twice.
+- **Conflicting reuse** (same key, different fingerprint):
+  `idempotency_conflict`, not recoverable — mint a new id for a new intent.
+- Keys retained ≥90 days; timestamps are never identity.
+
+`update_smoke` additionally accepts an **optional** `expectedVersion`: when
+present, mismatch returns `version_conflict` (recoverable via `get_smoke`);
+when absent, the change applies to the named fields last-write-wins,
+audit-trailed (ADR-002). Provide it when correcting stale or contested data;
+omit it for immediate conversational corrections.
+
+## Timestamp semantics
+
+`smokedAt` is provenance-aware — the model never invents time:
+
+```yaml
+smokedAt: { value: "2026-08-26T20:15:00-04:00", source: user, precision: minute }
+```
+
+- User stated a time/date → `source: user`, value as stated.
+- User said nothing → **omit the field**; the server records finalization
+  time as `source: system-finalized, precision: approximate`. A live save
+  therefore always has a useful timestamp without hallucination.
+- Imports → `source: legacy-document` (usually `precision: day`) or
+  `source: unknown` with null value.
+
+---
+
+## search_cigars — read
+
+Resolve conversational cigar mentions to catalog entries. Use when a cigar
+is named ("I'm smoking an Alma Fuego") or asked about. Not for the user's
+history.
+
+```yaml
+arguments:
+  query: alma fuego            # free text; fuzzy (trigram) matching
+  limit: 5                     # default 5, max 10
+
+result:
+  matches:
+    - cigarId: cg_01j9x2
+      canonicalName: Plasencia Alma del Fuego Concepcion
+      brand: Plasencia
+      line: Alma del Fuego
+      vitola: { name: Concepcion, lengthInches: 6.0, ringGauge: 52 }
+      type: NC
+      verification: verified
+      userSmokeCount: 3        # present only with journal:read
+  guidance: single_match       # single_match | multiple_matches | no_match
+```
+
+`multiple_matches`: ask the user naturally (vitola usually disambiguates).
+`no_match`: proceed — `save_smoke` creates the cigar from described
+attributes; do not retry search with invented details.
+
+## get_cigar — read
+
+Full catalog detail for one resolved cigar, including blend metadata where
+known (all nullable — see `docs/ddd/domain-model-examples.md`).
+
+```yaml
+arguments:
+  cigarId: cg_01j9x2
+
+result:
+  cigar:
+    cigarId: cg_01j9x2
+    canonicalName: Plasencia Alma del Fuego Concepcion
+    brand: Plasencia
+    line: Alma del Fuego
+    edition: null
+    vitola: { name: Concepcion, lengthInches: 6.0, ringGauge: 52 }
+    manufacturer: { name: Plasencia, factory: null }
+    productionCountry: Nicaragua
+    tobacco:
+      wrapper: { country: Nicaragua, region: Ometepe, varietal: null }
+      binder: { country: Nicaragua, region: null, varietal: null }
+      filler:
+        - { country: Nicaragua, region: Jalapa, varietal: null }
+    releaseYear: null
+    type: NC
+    verification: verified
+  personalProfile:             # present only with journal:read; null if never smoked
+    smokeCount: 3
+    recurringDescriptors: [citrus, baking-spice, earth]
+    rating: { average: 87, min: 84, max: 91 }
+    lastSmokedAt: "2026-07-30"
+```
+
+## get_my_smokes — read
+
+Query the authenticated user's history; returns compact summaries. Use for
+"what did I think last time," "what have I called bready," "what did I smoke
+last month." For full detail on one smoke, follow with `get_smoke`.
+
+```yaml
+arguments:                     # all optional; combine freely
+  cigarId: cg_01j9x2
+  brand: Davidoff
+  descriptor: bready           # matches normalized descriptors
+  text: sweeter than           # FTS over narrative + verbatim observations
+  smokedAfter: "2026-07-01"
+  minRating: null
+  limit: 10                    # default 10, max 25; newest first
+
+result:
+  smokes:
+    - smokeId: sm_01jab4
+      cigar: { cigarId: cg_01j9x2, canonicalName: Plasencia Alma del Fuego Concepcion }
+      smokedAt: { value: "2026-07-30T21:05:00-04:00", source: system-finalized, precision: approximate }
+      rating: 88
+      liked: true
+      descriptors: [tangerine, cream, cedar]
+      summary: >
+        Brighter than previous smokes; tangerine sweetness in the middle
+        third, cream on the finish.
+  totalMatches: 3
+```
+
+## get_smoke — read
+
+The canonical, complete representation of one Smoke: full progression with
+verbatim text, construction, context, assessment, journal prose, provenance,
+version. Use for exact comparison with the current conversation, before a
+guarded correction (`expectedVersion`), or when the user asks detail a
+summary can't answer.
+
+```yaml
+arguments:
+  smokeId: sm_01jab4
+
+result:
+  smoke:
+    smokeId: sm_01jab4
+    version: 3
+    cigar: { cigarId: cg_01j9x2, canonicalName: Plasencia Alma del Fuego Concepcion }
+    smokedAt: { value: "2026-07-30T21:05:00-04:00", source: system-finalized, precision: approximate }
+    context: { location: patio, pairing: [sparkling-water] }
+    overallDescriptors: [citrus, cream, cedar]
+    progression:
+      - stage: opening
+        approximatePosition: 0.05
+        descriptors: [black-pepper, cedar]
+        verbatim: Spice immediately but not really aggressive.
+    construction: { draw: excellent, burn: fair, smokeOutput: high, notes: null }
+    assessment: { strength: medium-full, body: full, liked: true, rating: 88, impression: "..." }
+    journal: { title: "...", narrative: "..." }
+    provenance: { source: llm-conversation, client: chatgpt-web }
+```
+
+Not for browsing — one Smoke per call, owner-only.
+
+## save_smoke — write, idempotent
+
+Persist one finished smoke. Call once, when the user indicates the smoke is
+over — never per observation, never mid-smoke.
+
+```yaml
+arguments:
+  clientRequestId: 9f41c9d2-6b7a-4c0e-a1e5-2f8f4f6f7a10
+  cigar:                         # exactly one of:
+    cigarId: cg_01j9x2           #   resolved id (preferred)
+    described:                   #   or the user's naming when no match existed
+      canonicalName: Atabey Divinos    # required; the name as the user knows it
+      brand: Atabey                    # everything else optional
+      line: null
+      vitola: { name: Divinos }
+      type: CC
+  smokedAt: { value: "2026-08-26T20:15:00-04:00", source: user, precision: minute }
+                                 # omit entirely if the user never said —
+                                 # server stamps system-finalized time
+  context:
+    location: patio
+    pairing: [sparkling-water]
+  overallDescriptors: [spice, cream, citrus]
+  progression:                   # OPTIONAL — [] / omitted is valid
+    - stage: opening             # the user's own framing, free text
+      approximatePosition: 0.05  # 0..1, null when unclear
+      descriptors: [black-pepper, cedar]
+      verbatim: >
+        Spice immediately but not really aggressive.
+    - stage: middle
+      approximatePosition: 0.5
+      descriptors: [citrus, cream]
+      specificDescriptors: [tangerine]
+      verbatim: >
+        Much smoother now. Fruit sweetness coming through — tangerine
+        might actually be right.
+  construction:
+    draw: excellent              # excellent | good | fair | poor | null
+    burn: fair
+    smokeOutput: high
+    notes: Needed a few touch-ups in the final third.
+  assessment:
+    strength: medium-full        # mild..full spectrum, null ok
+    body: full
+    liked: true                  # coarse signal when no number was given
+    rating: null                 # 0-100 ONLY if the user stated one
+    impression: >
+      Complex and easy to like; burn issues on this stick only.
+  journal:                       # optional; preserve the user's words
+    title: Alma del Fuego Concepcion — patio evening
+    narrative: |
+      Full prose entry in the user's voice...
+
+result:
+  smoke:
+    smokeId: sm_01jc8x
+    version: 1
+    url: https://cigars.haynesnetwork.com/smokes/sm_01jc8x
+    cigar: { cigarId: cg_01j9x2, verification: verified }
+  cigarCreated: false            # true when `described` created an unverified entry
+  replayed: false
+```
+
+**Minimum validity:** a cigar reference plus at least one substantive field
+(non-empty progression, overallDescriptors, journal.narrative, or
+assessment.impression). Everything else may be absent — sparse is correct,
+invented is a defect. If `described` strongly matches an existing cigar the
+server links instead of creating (`cigar_ambiguous` if it can't decide).
+
+## update_smoke — write, idempotent
+
+Correct an existing smoke ("actually the Robusto", "change my rating to 9 —
+make that 90 on your scale"). Explicit, field-scoped operations — not a
+generic patch; unlisted fields cannot be touched (no mass assignment).
+
+```yaml
+arguments:
+  clientRequestId: 7c02aa10-...
+  smokeId: sm_01jc8x
+  expectedVersion: 2             # optional; see mutation envelope
+  changes:                       # each block optional; only these exist:
+    cigar: { resolveTo: cg_01j9x7 }        # re-point to the correct catalog entry
+    smokedAt: { value: "2026-08-25T21:00:00-04:00", source: user, precision: minute }
+    context: { location: garage }
+    assessment: { rating: 90 }
+    construction: { draw: good }
+    journal: { title: null, narrative: null }   # explicit null clears; omitted keeps
+    overallDescriptors: { add: [leather], remove: [] }
+    progression:
+      append:                    # append-only; history is never rewritten
+        - stage: final inch
+          descriptors: [leather]
+          verbatim: Draw tightened up right at the end.
+
+result:
+  smoke: { smokeId: sm_01jc8x, version: 3 }
+  changedFields: [assessment.rating, cigar, progression]
+  replayed: false
+```
+
+Deletion is web-only. Imported Smokes accept structured-field changes; their
+original markdown is immutable.
+
+---
+
+## Errors
+
+Machine-readable, action-bearing, never exposing SQL, stack traces, secrets,
+or other users' existence.
+
+```yaml
+error:
+  code: cigar_ambiguous
+  message: Multiple catalog cigars match "Atabey".
+  recoverable: true
+  action: { type: ask_user }
+  candidates:
+    - { cigarId: cg_01k2m1, canonicalName: Atabey Divinos }
+    - { cigarId: cg_01k2m2, canonicalName: Atabey Ritos }
+```
+
+```yaml
+error:
+  code: version_conflict
+  expectedVersion: 3
+  currentVersion: 4
+  recoverable: true
+  action: { type: retrieve_latest_and_retry, tool: get_smoke }
+```
+
+```yaml
+error:
+  code: validation_error
+  recoverable: true
+  action: { type: fix_and_retry }
+  fields:
+    - { path: progression[0].approximatePosition, message: Must be between 0 and 1. }
+    - { path: assessment.rating, message: Must be an integer 0-100 or null. }
+```
+
+| code | recoverable | action |
+|---|---|---|
+| `validation_error` | yes | `fix_and_retry` with listed `fields` |
+| `unauthenticated` | no | `reconnect` — user relinks the connector |
+| `unauthorized` | no | none — scope/ownership; do not retry |
+| `cigar_not_found` | yes | `search_first` or use `described` |
+| `cigar_ambiguous` | yes | `ask_user` (candidates included) |
+| `smoke_not_found` | no | none — id came from nowhere; re-query history |
+| `version_conflict` | yes | `retrieve_latest_and_retry` via `get_smoke` |
+| `idempotency_conflict` | no | new `clientRequestId` for a genuinely new intent |
+| `unavailable` | yes | retry once with the same envelope, then tell the user; the fallback below preserves the entry |
+
+Idempotent replay is not an error: same envelope returns the original result
+with `replayed: true`.
+
+## Fallback without write tools
+
+If the active client cannot invoke write tools, the model emits the exact
+`save_smoke` `arguments` YAML as chat text. Two doors, one schema, same
+validation:
+
+1. **Site import page** — paste the payload; it runs the identical
+   application command (simplest, no second client needed).
+2. **Any write-capable MCP client** (Claude Code, Codex) — paste the payload
+   there and ask it to call `save_smoke` verbatim.
+
+No handoff infrastructure beyond this for MVP.
