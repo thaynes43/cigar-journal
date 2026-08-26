@@ -28,8 +28,13 @@ conversational lazy-create is mandatory regardless of crawl coverage.
   such wherever shown.
 - **Initial vendors** (owner, 2026-08-26): NC — Fox Cigar, 2 Guys Cigars,
   Cigars International, Small Batch Cigar, Holt's. CC — the r/cubancigars
-  approved list plus Cuban Lou's (inventory depth, unapproved). Each site
-  still gets a ToS/robots assessment before its adapter is built.
+  approved list plus Cuban Lou's (inventory depth, unapproved). Research
+  posture per site, the Reddit-API sync method, and catalog-DB candidates
+  (Cigar API + Wikidata) are in
+  [`.agents/reference/vendor-sources.md`](../../.agents/reference/vendor-sources.md);
+  each adapter still requires a live robots/ToS read from the crawler's own
+  environment before it is built. Crawlers work from sitemap enumeration +
+  JSON-LD Product parsing (no vendor exposes a structured product API).
 - **Crawler:** per-vendor adapters (small, disposable) run as CronJobs via
   the image's `crawl` role, only for registry vendors with crawling enabled.
   Crawl #1 is the catalog seed; subsequent runs append `offers` rows

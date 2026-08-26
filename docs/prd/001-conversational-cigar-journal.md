@@ -127,8 +127,10 @@ Extension points are noted in ADRs where these would attach.
   (ADR-005), interim full-capability clients (Claude Code/Codex), and the
   payload fallback. No vendor owns the architecture.
 - **Crawl fragility/ToS:** vendor sites change and may prohibit scraping;
-  per-vendor adapters kept small; ToS review is part of source research.
-  Gray-market CC vendors are a sensitivity to assess there.
+  per-vendor adapters kept small; live robots/ToS verification precedes each
+  adapter (research summary: `.agents/reference/vendor-sources.md` — Cigars
+  International assessed avoid; Cuban Lou's carries a US-embargo exposure
+  flag for surfacing Habanos price data, left as an admin registry decision).
 - **Verbatim third-party review text** has IP exposure — R11 stores derived
   data only.
 
@@ -141,12 +143,12 @@ endpoint live on that origin.
 ## Open questions
 
 ```yaml
-- question: Per-site ToS/robots posture for the named vendors, and whether a
-    viable third-party cigar catalog database exists (data, not prices)
-  whyItMatters: legal/etiquette posture per adapter; a catalog DB could
-    reduce crawl-based enrichment
-  recommendedDefault: research pass before the market phase; vendors are
-    already named in ADR-006 (owner, 2026-08-26)
+- question: Live robots/ToS verification per vendor (blocked from the dev
+    pod's egress) and Cigar API license/coverage check
+  whyItMatters: confirms each adapter's legal/etiquette posture and whether
+    Cigar API can seed the catalog
+  recommendedDefault: verify from the crawler's environment at the start of
+    the market phase; research summary in .agents/reference/vendor-sources.md
   decisionNeededBefore: market phase
 
 - question: Real client behavior (writes, refresh, late-conversation tool
