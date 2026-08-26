@@ -26,9 +26,9 @@ services; all business rules live below the adapters.
 Delivery: release-please, ghcr.io, keyless cosign, Kyverno verification;
 deployed via bjw-s app-template HelmRelease in haynes-ops
 (`kubernetes/main/apps/frontend/`), Traefik IngressRoute through the
-Cloudflare tunnel on a haynesnetwork.com subdomain. The MCP endpoint is
-path-routed on the same origin (`/mcp`) to keep one OAuth issuer/resource
-identity.
+Cloudflare tunnel at **cigars.haynesnetwork.com** (part of the haynesnetwork
+family of apps). The MCP endpoint is path-routed on the same origin (`/mcp`)
+to keep one OAuth issuer/resource identity.
 
 Testing (house standard): Vitest with real Postgres (Testcontainers), authz
 tests for cross-user and both visibility states, and Playwright e2e for the

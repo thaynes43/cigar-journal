@@ -132,14 +132,15 @@ Extension points are noted in ADRs where these would attach.
 - **Verbatim third-party review text** has IP exposure — R11 stores derived
   data only.
 
+## Identity
+
+**Cigar Journal**, part of the haynesnetwork family of apps, at
+**cigars.haynesnetwork.com** (owner, 2026-08-26). The OAuth issuer and MCP
+endpoint live on that origin.
+
 ## Open questions
 
 ```yaml
-- question: Product name and subdomain
-  whyItMatters: binds branding, OAuth issuer, MCP connector URL
-  recommendedDefault: cigars.haynesnetwork.com
-  decisionNeededBefore: implementation
-
 - question: Per-site ToS/robots posture for the named vendors, and whether a
     viable third-party cigar catalog database exists (data, not prices)
   whyItMatters: legal/etiquette posture per adapter; a catalog DB could
