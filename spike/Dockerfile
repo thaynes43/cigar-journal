@@ -6,7 +6,7 @@ FROM node:22-alpine AS build
 ENV PNPM_HOME=/pnpm CI=1
 RUN corepack enable
 WORKDIR /app
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY tsconfig.json ./
 COPY src ./src
@@ -16,7 +16,7 @@ FROM node:22-alpine AS prod-deps
 ENV PNPM_HOME=/pnpm CI=1
 RUN corepack enable
 WORKDIR /app
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --prod --ignore-scripts
 
 FROM node:22-alpine AS runtime
