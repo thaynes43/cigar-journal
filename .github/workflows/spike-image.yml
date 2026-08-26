@@ -7,6 +7,13 @@ on:
     paths:
       - "spike/**"
       - ".github/workflows/spike-image.yml"
+  # push events from the bot's API merges don't fire in this repo; PR events do.
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "spike/**"
+      - ".github/workflows/spike-image.yml"
   workflow_dispatch:
 
 permissions:
