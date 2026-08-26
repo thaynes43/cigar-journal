@@ -38,3 +38,5 @@ SPIKE_AUTH=oauth SPIKE_PASSCODE=secret PUBLIC_ORIGIN=http://localhost:8080 pnpm 
 ## Teardown
 
 Delete `spike/` (and this workflow) when Phase 0 concludes.
+
+Image: ghcr.io/thaynes43/cigar-journal-spike (built by spike-image workflow).
