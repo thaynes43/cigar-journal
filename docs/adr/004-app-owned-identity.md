@@ -26,7 +26,12 @@ person; multiple identities link to it:
   consents. Tokens are audience-bound to the MCP resource (RFC 8707) with
   scopes `journal:read`, `journal:write`, `catalog:read`. Lazy catalog
   creation inside `save_smoke` is covered by `journal:write` — MCP clients
-  get no direct catalog-write scope.
+  get no direct catalog-write scope. Responses are scope-bounded: catalog
+  tools return personal journal fields only when `journal:read` is present.
+  **Token lifetimes:** short-lived access tokens (~1h) with rotating refresh
+  tokens under `offline_access`, so a linked client stays authorized for
+  months without reauthentication; revocation via connector disconnect or
+  the site's connected-apps page invalidates the refresh chain.
 
 **The principal is always server-derived.** Sessions (web) and access tokens
 (MCP) resolve to a user id server-side; no API or tool accepts a user
@@ -39,8 +44,9 @@ Consent, token, and client tables live in our Postgres — we operate a small
 authorization server (rotation, revocation, token TTLs are ours). In
 exchange: MCP works identically for users who have never touched Authentik,
 which open registration requires, and losing Authentik never locks anyone
-out. Refresh-token behavior in ChatGPT is UNVERIFIED (research note) — token
-lifetimes must be validated against real reconnect behavior in Phase 4.
+out. Client-side refresh behavior (ChatGPT especially) is UNVERIFIED — the
+Phase 0 spike validates real reconnect/refresh behavior before the token
+lifetimes freeze.
 
 ## Alternatives considered
 

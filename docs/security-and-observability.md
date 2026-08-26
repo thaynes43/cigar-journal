@@ -7,13 +7,13 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
 
 | Threat | Mitigation |
 |---|---|
-| Model-supplied identity / mass assignment | No tool or API accepts a user reference; principal derives from token/session only (ADR-004). Patches are field-allowlisted; ownership checked per mutation. |
+| Model-supplied identity / mass assignment | No tool or API accepts a user reference; principal derives from token/session only (ADR-004); a `userId` in any payload is rejected as unknown input. Updates use explicit change operations (no generic patch); ownership checked per mutation. Provenance `client` is taken from the OAuth client record, never from arguments. |
 | Cross-user reads (BOLA) | Every query scoped by owner id; visibility flag checked on public paths; authz tests cover cross-user + both visibility states (PRD NFR). |
 | Prompt injection via stored content | Journal text and catalog fields returned to LLMs are data the *user* (or a crawl) wrote. Tool results carry no instructions; crawled text is normalized fields, not raw HTML. Residual risk accepted: a user can only injection-attack their own journal until journals are shared. |
 | Stored XSS in journal prose | Prose rendered as escaped text/sanitized markdown; no raw HTML from any journal or catalog field, especially on public pages. |
 | OAuth token leakage / replay | Short-lived audience-bound access tokens (RFC 8707); PKCE + state; revocation via connector disconnect and a connected-apps page; tokens never logged. |
-| Over-permissioned tools | Five tools, three scopes; no delete via MCP; catalog writes only as a side effect of `save_smoke`. |
-| Duplicate/replayed writes | Idempotency keys, unique-constrained, same-transaction (flow 004). |
+| Over-permissioned tools / scope leakage | Six tools, three scopes; no delete via MCP; catalog writes only as a side effect of `save_smoke`; responses are scope-bounded — catalog tools omit personal fields without `journal:read`. |
+| Duplicate/replayed writes | Envelope on every mutation: unique-constrained keys with request fingerprints, same-transaction; conflicting key reuse rejected (flow 004). |
 | SQL injection | Drizzle parameterized queries only; no string-built SQL (raw migrations are static files). |
 | CSRF / session fixation (web) | Better Auth defaults: same-site cookies, CSRF protection on auth routes. |
 | Crawler abuse surface | Adapters fetch only configured vendor domains (no user-supplied URLs → no SSRF path); rate-limited; robots-respecting. |

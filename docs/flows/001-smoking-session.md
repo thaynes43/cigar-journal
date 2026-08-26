@@ -1,8 +1,11 @@
 # Flow: Smoking Session
 
-- **Trigger:** the user starts discussing a cigar with an LLM client
-  (ChatGPT Web). Finalization triggers on the user signaling the smoke is
-  over.
+- **Trigger:** the user starts discussing a cigar with any MCP-connected LLM
+  client (ChatGPT Web is the design target; Claude Code/Codex work
+  identically). Finalization triggers on the user signaling the smoke is
+  over. Some hosts may require the connector to be referenced on tool-using
+  turns — a client UX constraint, not architecture; see
+  [`../mcp/client-compatibility.md`](../mcp/client-compatibility.md).
 
 ## Ordinary conversation — no backend traffic
 
@@ -12,7 +15,7 @@ sees nothing until a tool is genuinely useful.
 ```mermaid
 sequenceDiagram
     actor U as User
-    participant C as ChatGPT
+    participant C as LLM Client
     U->>C: Spice right up front but nothing intense.
     C->>U: (conversation)
     U->>C: Smoother now. Tangerine actually seems accurate.
@@ -25,7 +28,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     actor U as User
-    participant C as ChatGPT
+    participant C as LLM Client
     participant M as MCP Server
     participant A as Application
     participant P as PostgreSQL
@@ -45,7 +48,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     actor U as User
-    participant C as ChatGPT
+    participant C as LLM Client
     participant M as MCP Server
     participant A as Application
     participant D as Domain
@@ -70,4 +73,5 @@ sequenceDiagram
 - Cigar unresolvable/ambiguous → [flow 002](002-cigar-resolution.md).
 - Timeout/retry → [flow 004](004-idempotent-retry.md).
 - Write tools unavailable → model emits the `save_smoke` payload as text;
-  user pastes it into the site's import page (tool contract, fallback).
+  user pastes it into the site's import page or a write-capable client
+  (tool contract, fallback).

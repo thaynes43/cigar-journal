@@ -28,15 +28,22 @@ whether history questions need vector search.
   these. Revisit vectors only if synonym-style semantic queries ("bready" ≈
   "toasty") demonstrably fail — record that as a new ADR with the failing
   queries.
-- **Idempotency:** `idempotency_keys` (user_id, client_request_id UNIQUE,
-  smoke_id, response_hash) written in the save transaction; a replay returns
-  the stored Smoke with `replayed: true`. Keys owned by the client per save
-  intent; timestamps are never identity.
-- **Timestamps:** `timestamptz` everywhere; `smoked_at` stores the user's
-  stated time with offset, nullable for imports; `smoked_date` (date) kept
-  for imports that only know a day.
-- **Concurrency:** `smokes.version` int; web edits send expected version
-  (`stale_version` on mismatch); MCP field-scoped patches skip the check
+- **Idempotency (every mutation):** `idempotency_keys` (user_id,
+  client_request_id UNIQUE, tool, request_fingerprint, smoke_id, result
+  JSONB) written in the mutation's transaction. Fingerprint = hash of the
+  canonicalized arguments minus envelope fields. Replay (same key + same
+  fingerprint) returns the stored result with `replayed: true`; conflicting
+  reuse (same key, different fingerprint) fails `idempotency_conflict`.
+  Keys owned by the client per intent, retained ≥90 days; timestamps are
+  never identity. This makes `update_smoke`'s `progression.append`
+  retry-safe — a replayed append is recognized, not re-applied.
+- **Timestamps:** `timestamptz` everywhere. `smoked_at` is stored with its
+  provenance (`smoked_at`, `smoked_at_source` ∈ user | system-finalized |
+  legacy-document | unknown, `smoked_at_precision` ∈ minute | approximate |
+  day). Live saves without a stated time get server finalization time,
+  `system-finalized` (ADR-002).
+- **Concurrency:** `smokes.version` int; `version_conflict` on mismatch.
+  Web edits always send expected version; MCP updates send it optionally
   (ADR-002 rationale). All mutations audit in-transaction.
 
 ## Consequences

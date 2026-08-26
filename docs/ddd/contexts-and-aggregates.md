@@ -22,14 +22,17 @@ boundaries, not services.
 
 ### Smoke (root — the system's center)
 
-- **Contains:** Progression Entries, Construction, Context, Assessment,
-  Journal Entry (title + narrative), provenance, original imported markdown
-  when applicable.
+- **Contains:** Progression Entries (optional), overall Descriptors,
+  Construction, Context, Assessment, Journal Entry (title + narrative),
+  provenance-aware smoked-at, provenance, original imported markdown when
+  applicable.
 - **Why an aggregate:** all parts share one consistency boundary — a Smoke is
   saved and edited as a whole; nothing inside it is referenced from outside.
 - **Invariants:** references exactly one Cigar (R2); owner immutable; rating
-  ∈ [0,100] or null; progression positions ∈ [0,1] or null; imported originals
-  never rewritten.
+  ∈ [0,100] or null; progression positions ∈ [0,1] or null; minimum validity
+  = cigar reference + at least one substantive field (progression, overall
+  descriptors, narrative, or impression); imported originals never
+  rewritten; progression append-only through edits.
 - **Lifecycle:** `final` on creation in MVP (`draft` reserved for R12).
   Edits are field-scoped patches; every mutation writes an audit row in the
   same transaction (house pattern).
@@ -40,9 +43,15 @@ boundaries, not services.
 
 - **Why an aggregate:** shared reference data with its own lifecycle
   (verification, merge) independent of any Smoke.
-- **Invariants:** brand + line required; vitola/size/wrapper nullable;
-  `unverified` until curated or crawl-confirmed. Merging duplicates re-points
-  Smokes, Purchases, and Listing Matches; merge is curator-only.
+- **Identity:** `canonicalName` (required, human-facing — "Atabey Divinos")
+  is the reliable identity; brand is recommended, line/edition/vitola
+  optional. Real cigar naming resists a Brand → Line → Vitola hierarchy, and
+  no field may be invented to satisfy taxonomy.
+- **Invariants:** canonicalName required; blend metadata (manufacturer,
+  wrapper/binder/filler origin, dimensions, release year — see
+  [`domain-model-examples.md`](domain-model-examples.md)) all nullable;
+  `unverified` until curated or crawl-confirmed. Merging duplicates
+  re-points Smokes, Purchases, and Listing Matches; merge is curator-only.
 - Brands and vitolas are attributes/lookup values, not aggregates — they carry
   no behavior or lifecycle of their own.
 

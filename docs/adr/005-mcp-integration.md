@@ -1,67 +1,98 @@
-# ADR-005: MCP integration for ChatGPT Web and other LLM clients
+# ADR-005: MCP integration for LLM clients
 
-- **Status:** accepted
+- **Status:** accepted (revised 2026-08-26 after review)
 - **Date:** 2026-08-26
 
 ## Context
 
-The primary client is ChatGPT Web in normal Chat mode via a Developer Mode
-connector. Platform facts verified against OpenAI docs 2026-08-26: Developer
-Mode (Plus and above) supports full read+write MCP; write tools prompt the
-user for confirmation unless annotated `readOnlyHint: true`; transport is
-Streamable HTTP on a public HTTPS endpoint; auth is OAuth 2.1
-authorization-code + PKCE with RFC 9728 protected-resource metadata, RFC 8414
-AS metadata, RFC 8707 audience-bound tokens, and DCR/CIMD client
-registration; tool definitions should stay under ~5k tokens and calls return
-within ~60s; tool-list changes require a manual refresh in ChatGPT;
-`search`/`fetch` tools matter only for Deep Research mode. Claude's custom
-connectors accept the same standards stack. ChatGPT does not send the chat
-transcript to tools — tool arguments contain only what the model synthesizes.
+The desired long-term client is ChatGPT Web in normal Chat mode; Claude
+Code, Codex, Claude Desktop, and future first-party clients must work
+against the same server, and the owner will use Claude Code or Codex as the
+write-capable client whenever ChatGPT Web cannot be. Client capabilities are
+**external product surface that changes independently of this application**
+— everything below marked *client capability* was verified against official
+OpenAI docs on **2026-08-26** and must be re-verified empirically in Phase 0,
+not trusted from documentation or this ADR.
+
+Three layers are kept distinct:
+
+```yaml
+domainCapability:      { readJournal: supported, writeJournal: supported }
+mcpServerCapability:   { readTools: supported, writeTools: supported }
+clientCapability:      # per client, per plan, per date — see
+                       # docs/mcp/client-compatibility.md (expected to go stale)
+```
+
+The domain and server always expose the full interface; clients consume the
+subset they support. No subscription restriction shapes the architecture.
+
+As verified 2026-08-26: ChatGPT Developer Mode advertises full read+write
+MCP on paid plans, prompts for confirmation on writes unless a tool is
+annotated `readOnlyHint: true`, requires Streamable HTTP on public HTTPS,
+performs OAuth 2.1 authorization-code + PKCE with RFC 9728/8414/8707
+discovery and DCR/CIMD registration, refreshes tool lists manually, and
+bounds tools at roughly 5k tokens per definition and ~60s per call.
+Token-refresh behavior and whether a connector remains invocable late in a
+long conversation without being re-referenced are **undocumented — Phase 0
+questions**. ChatGPT does not transmit the chat transcript to tools.
 
 ## Decision
 
-- **Plain standards-compliant MCP server** (TypeScript SDK, Streamable HTTP)
-  at `/mcp` on the app origin — no Apps SDK, no OpenAI-specific coupling. It
-  is a thin adapter over the same application services the web uses;
-  authorization, validation, identity, and invariants all live below it.
+- **Plain standards-compliant MCP server** (official TypeScript SDK,
+  Streamable HTTP) at `/mcp` on the app origin — no Apps SDK, no
+  vendor-specific behavior. A thin adapter over the same application
+  services the web uses; authorization, validation, identity, and
+  invariants all live below it.
+- **Protocol version:** whatever the official SDK negotiates (2025-11-25
+  revision at time of writing). No hand-rolled lifecycle assumptions;
+  sequence diagrams describe architecture, and the SDK owns
+  initialize/negotiation. Protocol upgrades arrive as SDK upgrades plus a
+  Phase-0-style re-verification against live clients.
 - **Auth** per ADR-004: OAuth 2.1 + PKCE against the app's own authorization
-  server, both ChatGPT callback URLs registered, tokens audience-bound to the
-  MCP resource. No anonymous mode at launch (journals are private by
-  default); revisit an authless read-only mode if public-journal browsing
-  through MCP ever matters.
-- **Tool surface: five tools** (contract in
-  [`docs/mcp/tool-contract.md`](../mcp/tool-contract.md)): `search_cigars`,
-  `get_cigar`, `get_my_smokes` (reads, `readOnlyHint: true` — no confirmation
-  friction mid-smoke), `save_smoke`, `update_smoke` (writes — ChatGPT's
-  confirmation prompt on `save_smoke` is accepted UX: one prompt per smoke,
-  and a deliberate last-look before persisting).
-- **Design rules:** the model never invents ids, users, or timestamps it
-  doesn't know — unknown fields are omitted/null and the schema allows it;
-  errors are structured and recoverable (`cigar_ambiguous` carries
-  candidates and `suggestedAction`); `save_smoke` requires a
-  `clientRequestId` and replays idempotently; responses stay compact (no
-  unbounded lists) for the 60s/size limits.
-- **Read-only fallback** (client without write tools): the model produces the
-  exact `save_smoke` YAML payload as chat text; the site's import page
-  accepts that payload and runs the identical application command. Same
-  schema, no second code path. This also serves R12 later.
-- **Deep Research `search`/`fetch`:** not implemented at launch; noted as the
-  extension point if journal content should be reachable there.
+  server with metadata discovery, DCR and CIMD registration, audience-bound
+  tokens, and refresh-token rotation with `offline_access` so long-lived
+  client links don't force reauthentication. No anonymous mode at launch.
+- **Tool surface: six tools** (contract in
+  [`docs/mcp/tool-contract.md`](../mcp/tool-contract.md)): reads
+  `search_cigars`, `get_cigar`, `get_my_smokes`, `get_smoke` (all
+  `readOnlyHint: true`); writes `save_smoke`, `update_smoke`. Responses are
+  scope-bounded: catalog tools carry personal fields only when the token
+  also has `journal:read`. Server-level instructions teach any client the
+  intended conversational usage; the server still validates everything.
+- **Retry safety is universal:** every mutation carries the envelope
+  (`clientRequestId`, fingerprint-checked replay, `idempotency_conflict` on
+  conflicting reuse; optional `expectedVersion` on updates).
+- **Phase 0 compatibility spike is mandatory** before integration
+  investment: a throwaway authenticated MCP server with one harmless read
+  and one harmless write tool, exercised from ChatGPT Web, Claude Code, and
+  Codex, producing the compatibility matrix (connection, auth, discovery,
+  read, write, confirmation UX, reconnect, token refresh, late-conversation
+  tool availability). The matrix freezes this ADR's client assumptions.
+- **Client UX constraint, not architecture:** if ChatGPT requires the
+  connector to be referenced on the turn where a tool call is needed
+  ("@CigarJournal that's it"), that is documented workflow guidance in
+  `client-compatibility.md`. The backend stays ready for the ideal
+  always-available workflow.
+- **Read-only fallback:** the model emits the exact `save_smoke` payload as
+  text; it enters through the site's import page or any write-capable MCP
+  client. One schema, same validation, no handoff infrastructure.
+- **Deep Research `search`/`fetch`:** not implemented; noted extension point.
 
 ## Consequences
 
-Works unchanged for Claude/Claude Code and other MCP clients; ChatGPT plan
-drift degrades to the paste-payload fallback rather than breaking the domain.
-Costs: manual connector refresh on tool changes (keep the surface stable);
-write-confirmation UX is in OpenAI's hands; token-refresh behavior is
-unverified and must be validated with real reconnects in Phase 4 before the
-tool contract freezes.
+One server serves every client; ChatGPT plan drift degrades UX (fallback or
+alternate client), never the domain. Costs: we run the Phase 0 spike before
+committing integration work; the compatibility doc requires periodic
+re-verification; write-confirmation UX belongs to hosts; the contract
+freezes only after real-client evidence.
 
 ## Alternatives considered
 
-- Apps SDK app + directory publication — review process and UI machinery for
-  a personal-first product; a directory listing is a future decision.
-- `search`/`fetch`-shaped surface — wrong mode; Chat tool calling doesn't
-  need it and it obscures intent-shaped tools.
-- Per-observation write tools — contradicts the ephemeral-conversation
-  principle and would spam confirmation prompts mid-smoke.
+- Apps SDK app + directory publication — review process and UI machinery a
+  personal-first product doesn't need; revisit if it's ever distributed.
+- `search`/`fetch`-shaped surface — Deep Research's mode, not Chat tool
+  calling; obscures intent-shaped tools.
+- Per-observation write tools — contradicts ephemeral-conversation and
+  would spam confirmation prompts mid-smoke.
+- Designing around one vendor's current write availability — the exact
+  coupling this ADR exists to prevent.

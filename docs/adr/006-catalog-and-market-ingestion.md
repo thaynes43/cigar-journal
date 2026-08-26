@@ -25,7 +25,8 @@ conversational lazy-create is mandatory regardless of crawl coverage.
   before the market phase (PRD open question), with gray-market CC vendors
   assessed separately.
 - **Listing matching:** vendor listing → catalog Cigar via normalized
-  brand/line/vitola + trigram similarity; confident matches auto-link,
+  canonical name (plus brand/vitola where known) + trigram similarity;
+  confident matches auto-link,
   the rest queue for manual confirmation. Match status (`auto`/`confirmed`/
   `unmatched`) is never silently overwritten by later crawls.
 - **Price comparison (MVP):** per-cigar current offers across vendors +

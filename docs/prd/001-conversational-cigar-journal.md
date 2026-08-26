@@ -49,9 +49,13 @@ R2 (must) — Catalog invariant: a Smoke can never exist without a backing
 catalog Cigar. Unknown cigars are created (flagged `unverified`) during save.
 R3 (must) — Progression: temporal tasting stages with free-form stage labels,
 optional 0–1 position, normalized descriptors, and verbatim user language.
+Progression is optional — sparse Smokes (overall descriptors only) are valid,
+and timestamps carry provenance (user-stated / system-finalized / legacy).
 R4 (must) — Ratings: 100-point scale, optional; never fabricated.
-R5 (must) — MCP surface: search/resolve cigars, fetch cigar detail, query own
-smoking history, save a finalized smoke, update a smoke. Idempotent writes.
+R5 (must) — MCP surface, client-neutral: search/resolve cigars, fetch cigar
+detail, query own history, fetch one full smoke, save a finalized smoke,
+update a smoke. Every mutation idempotent via the envelope; identical
+behavior for ChatGPT, Claude Code, Codex, or any MCP client.
 R6 (must) — Identity: local accounts (invite-gated at launch) + Authentik OIDC
 sign-in, linked to one user. The app is the OAuth authorization server for MCP
 clients; ownership always derives from the authenticated principal.
@@ -84,9 +88,12 @@ and read-only-client handoff; see fallback in the MCP contract.
 
 ## MVP scope
 
-Phases 1–6 of the roadmap (ADR-listed stack, domain + web CRUD, archive
-import, auth, MCP read + write, market crawl + price compare). Two tracks:
-journal core ships first internally; market work never blocks it.
+Phases 0–6 of the roadmap (compatibility spike, domain + web CRUD, catalog +
+archive import, auth, MCP read + write, market crawl + price compare). Two
+tracks: journal core ships first internally; market work never blocks it.
+MCP client capability is proven empirically (Phase 0) before integration
+investment; the owner uses Claude Code or Codex for full write capability
+whenever ChatGPT Web cannot provide it.
 
 ## Non-goals
 
@@ -97,8 +104,10 @@ Extension points are noted in ADRs where these would attach.
 
 ## Success criteria
 
-- A full smoke journaled from ChatGPT Web with zero manual formatting and at
-  most one clarifying question (cigar ambiguity).
+- A full smoke journaled conversationally through MCP with zero manual
+  formatting and at most one clarifying question (cigar ambiguity) — from
+  ChatGPT Web when its capabilities allow, otherwise from Claude Code or
+  Codex against the identical server.
 - Every archive review visible in the new journal with original prose intact.
 - "What did I think of this last time?" answered correctly in-conversation.
 - A duplicate `save_smoke` retry produces exactly one Smoke.
@@ -109,9 +118,11 @@ Extension points are noted in ADRs where these would attach.
 - **Market scope in MVP** (owner's call, 2026-08-26): roughly doubles v1;
   cross-vendor product matching is the hardest data problem in the system.
   Mitigated by track separation and the manual match queue.
-- **ChatGPT platform drift:** connector/Developer Mode capabilities are
-  external and plan-dependent; mitigated by the read-only fallback flow and
-  standards-only server design (ADR-005).
+- **LLM client capability drift:** connector capabilities (ChatGPT
+  especially) are external product surface that changes independently of
+  this app; mitigated by the Phase 0 spike, the standards-only server design
+  (ADR-005), interim full-capability clients (Claude Code/Codex), and the
+  payload fallback. No vendor owns the architecture.
 - **Crawl fragility/ToS:** vendor sites change and may prohibit scraping;
   per-vendor adapters kept small; ToS review is part of source research.
   Gray-market CC vendors are a sensitivity to assess there.
@@ -131,20 +142,23 @@ Extension points are noted in ADRs where these would attach.
   recommendedDefault: research pass proposes a shortlist with ToS assessment
   decisionNeededBefore: market phase
 
-- question: ChatGPT plan capabilities at integration time
-  whyItMatters: write-tool availability and confirmation UX vary by plan
-  recommendedDefault: assume Developer Mode with write tools; verify in Phase 4
-  decisionNeededBefore: MCP write phase
+- question: Real client behavior (writes, refresh, late-conversation tool
+    availability) for ChatGPT Web, Claude Code, Codex
+  whyItMatters: decides which client delivers full capability first and
+    whether the connector needs per-turn referencing
+  recommendedDefault: run the Phase 0 spike; fill docs/mcp/client-compatibility.md
+  decisionNeededBefore: implementation (Phase 0 is first)
 ```
 
 ## Roadmap
 
 | Phase | Goal | Validation |
 |---|---|---|
-| 1 | Monorepo scaffold, domain + Postgres + migrations, basic authed web CRUD, deployed | create/edit/browse a Smoke on the cluster |
-| 2 | Archive import (reviews, purchases) | all legacy entries render; spot-check vs mkdocs |
+| 0 | MCP compatibility spike: throwaway authenticated server (one read + one write tool) exercised from ChatGPT Web, Claude Code, Codex | compatibility matrix filled with `verified` rows; OAuth + protocol choices confirmed |
+| 1 | Monorepo scaffold, domain + Postgres + migrations, basic web CRUD behind local auth, deployed | create/edit/browse a Smoke on the cluster |
+| 2 | Catalog: canonical naming, fuzzy resolution, lazy-create, blend metadata; archive import (reviews, purchases) | ambiguity + no-match flows work; all legacy entries render, spot-checked vs mkdocs |
 | 3 | Full identity: Authentik SSO, invites, visibility flag + public pages | second user invited; public journal readable anonymously |
-| 4 | MCP read + OAuth AS, ChatGPT connector linked | history questions answered in ChatGPT |
-| 5 | MCP write: `save_smoke` (+ lazy create, idempotency), `update_smoke` | end-to-end smoke journaled from ChatGPT |
-| 6 | Market: crawler seed + offers + price-compare UI (parallel from Phase 3) | prices from ≥2 vendors on cigar pages |
+| 4 | MCP read (4 tools) + OAuth AS, linked from a Phase 0-verified client | history questions answered in-conversation |
+| 5 | MCP write: `save_smoke` (+ lazy create, idempotency), `update_smoke` | end-to-end smoke journaled conversationally; replay produces no duplicate |
+| 6 | Market: crawler seed + offers + price-compare UI (parallel from Phase 2) | prices from ≥2 vendors on cigar pages |
 | 7 | Analytics: personal profiles, trends, comparisons; R11 aggregation | profile view over ≥3 smokes of one cigar |

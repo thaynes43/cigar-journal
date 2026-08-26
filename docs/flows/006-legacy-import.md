@@ -23,11 +23,15 @@ sequenceDiagram
 
 ## Rules
 
-- **Never fabricate.** Prose maps to `journal.narrative` verbatim; the
-  review-heading date → `smoked_date` (no time); vitola from the heading;
-  rating from the brand-index table when present. Everything else is null.
-  No synthesized progression stages — legacy prose wasn't written in stages,
-  and inventing them would corrupt analytics.
+- **Never fabricate.** Original prose is preserved verbatim on the Smoke;
+  the review-heading date becomes `smokedAt { value, source:
+  legacy-document, precision: day }` (or `source: unknown` with null value);
+  vitola from the heading; rating from the brand-index table when present.
+  Everything else is null — sparse historical Smokes are first-class in the
+  domain (ADR-002 minimum validity). No synthesized progression stages —
+  legacy prose wasn't written in stages, and inventing them would corrupt
+  analytics; structured parsing of prose is optional later curation, never
+  an import-time guess.
 - **Provenance:** `imported`, with source repo path and import timestamp;
   original markdown stored immutably on the Smoke and rendered on its page.
 - **Idempotent + re-runnable:** deterministic keys from source path + review

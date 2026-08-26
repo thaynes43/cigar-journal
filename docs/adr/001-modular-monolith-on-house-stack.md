@@ -31,10 +31,16 @@ path-routed on the same origin (`/mcp`) to keep one OAuth issuer/resource
 identity.
 
 Testing (house standard): Vitest with real Postgres (Testcontainers), authz
-tests for cross-user and both visibility states, MCP contract tests replaying
-recorded LLM payloads — including malformed/partial ones — and Playwright e2e
-for the web app. `GITHUB_TOKEN` downstream-trigger trap avoided via App token
-from day one.
+tests for cross-user and both visibility states, and Playwright e2e for the
+web app. MCP contract tests cover discovery, schemas, scope-bounded reads,
+mutation authorization, idempotent replay, `idempotency_conflict`,
+`version_conflict`, ambiguous cigars, sparse payloads, full-smoke retrieval,
+and LLM-shaped malformed input (`rating: "really good"`,
+`approximatePosition: 4`, injected `userId`, invented `cigarId`, empty
+progression — the last must pass). One end-to-end acceptance test plays a
+whole conversation and asserts a single Smoke with no invented fields and a
+duplicate-free replay. `GITHUB_TOKEN` downstream-trigger trap avoided via
+App token from day one.
 
 ## Consequences
 

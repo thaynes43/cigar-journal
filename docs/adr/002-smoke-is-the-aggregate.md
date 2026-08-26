@@ -21,9 +21,19 @@ Supporting decisions:
 - **Catalog invariant (owner, 2026-08-26):** a Smoke never exists without a
   backing catalog Cigar; unknown cigars are created `unverified` inside the
   save transaction.
-- **Progression** is a list of entries with free-form stage labels plus
-  optional numeric position (0–1) — not hard-coded thirds. Position enables
-  analysis; the label preserves how the user actually spoke.
+- **Progression is optional.** When present: entries with free-form stage
+  labels plus optional numeric position (0–1) — not hard-coded thirds.
+  "Creamy, bready, excellent draw, really liked it" is a valid Smoke with
+  empty progression. Minimum validity: a cigar reference plus at least one
+  substantive field (progression, overall descriptors, narrative, or
+  impression). Nothing is synthesized to fill the gaps.
+- **Overall descriptors** capture whole-smoke impressions independent of
+  stages; **`liked`** (boolean, nullable) records coarse sentiment when no
+  number was given.
+- **Smoked-at is provenance-aware** (`value`/`source`/`precision`): stated
+  by the user → `user`; unstated on a live save → server stamps finalization
+  time as `system-finalized` (system observation, not hallucination);
+  imports → `legacy-document` or `unknown`.
 - **Vocabulary:** normalized kebab-case Descriptors for search/analytics,
   always stored alongside verbatim text. No enum, no ontology; synonym
   mapping is a later curation feature over observed tags.
@@ -31,10 +41,13 @@ Supporting decisions:
   Unknown stays null everywhere — schemas must never force invention.
 - **Personal Profile** (per user per cigar) is computed on read from Smokes;
   nothing materialized until query cost proves otherwise.
-- **Editing:** field-scoped patches; audit row in the same transaction (house
-  pattern). Optimistic version check on web forms; MCP patches are
-  last-write-wins on the targeted fields — a lone user correcting their own
-  smoke doesn't race, and the audit trail preserves truth if it ever does.
+- **Editing:** explicit field-scoped change operations (never generic
+  patch); audit row in the same transaction (house pattern). Every mutation
+  is idempotent via the envelope in ADR-003. Version check: mandatory on web
+  forms; optional `expectedVersion` on MCP updates — checked when supplied,
+  otherwise last-write-wins on the targeted fields, which a lone user
+  correcting their own smoke can't race, with the audit trail preserving
+  truth if it ever happens.
 
 ## Consequences
 
