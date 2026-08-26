@@ -1,21 +1,19 @@
-# Haynes Cigar Journal
+# Cigar Journal
 
-This repository hosts markdown files that are compiled into a static website for cigar reviews.
+A cigar journal being rebuilt from a static markdown ledger into a web
+application: journal entries with tasting notes, a maintained cigar lookup
+database, SSO and local-user login, and an MCP server so agents can turn
+smoking-session musings into structured entries.
 
-The website is available at: https://hayneslab.net/cigar-journal/
+## Repository
 
-## About
+- [`archive/`](archive/README.md) — the original markdown ledger, still
+  published at [hayneslab.net/cigar-journal](https://hayneslab.net/cigar-journal/)
+  and slated for import as seed data.
+- [`docs/`](docs/README.md) — PRDs, ADRs, and domain flows.
+- [`.agents/`](.agents/README.md) — rules and reference for agents working here.
 
-This is a personal collection of cigar tasting notes and reviews, organized by brand and type. The content is built using Material for MkDocs and deployed as a static website.
+## Status
 
-## Structure
-
-- **NC Reviews**: Reviews of cigars from Nicaragua, Dominican Republic, Honduras, and other countries
-- **CC Reviews**: Reviews of authentic Cuban cigars from Habanos S.A.
-
-## Technology
-
-- Built with [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/)
-- Deployed as a static website
-- Content written in Markdown format
-- Cursor used to help maintain and structure the site while the reviews are written by a human
+Bootstrapping. The design documents in `docs/` are the current work front; no
+application code exists yet.

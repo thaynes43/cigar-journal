@@ -3,6 +3,9 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "archive/**"
+      - ".github/workflows/publishmkdocs.yml"
 permissions:
   contents: write
 jobs:
@@ -25,4 +28,4 @@ jobs:
           restore-keys: |
             mkdocs-material-
       - run: pip install mkdocs-material
-      - run: mkdocs gh-deploy --force
+      - run: mkdocs gh-deploy --force -f archive/mkdocs.yml
