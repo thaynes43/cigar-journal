@@ -61,7 +61,7 @@ export function CigarPicker({ onChange }: { onChange: (ref: CigarRef | null) => 
   if (selected) {
     return (
       <div className="flex items-center gap-3">
-        <span className="font-medium">{selected.canonicalName}</span>
+        <span className="font-display font-semibold text-ink">{selected.canonicalName}</span>
         <button
           type="button"
           className={ui.button}
@@ -136,13 +136,13 @@ export function CigarPicker({ onChange }: { onChange: (ref: CigarRef | null) => 
         autoFocus
       />
       {matches.length > 0 ? (
-        <ul className="flex flex-col rounded border border-neutral-200 dark:border-neutral-800">
+        <ul className="flex flex-col overflow-hidden rounded-field border border-line bg-surface">
           {matches.map((match) => (
-            <li key={match.cigarId} className="border-b border-neutral-100 last:border-0 dark:border-neutral-800">
+            <li key={match.cigarId} className="border-b border-line last:border-0">
               <button
                 type="button"
                 onClick={() => pick(match)}
-                className="flex w-full flex-col items-start px-3 py-2 text-left hover:bg-neutral-50 dark:hover:bg-neutral-900"
+                className="flex w-full flex-col items-start px-3 py-2 text-left transition-colors hover:bg-raised"
               >
                 <span className="font-medium">{match.canonicalName}</span>
                 <span className={`text-xs ${ui.muted}`}>

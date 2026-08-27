@@ -30,7 +30,7 @@ export function SmokeDetailsFields({
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       <div className="flex flex-wrap gap-4">
         <label className={`${ui.label} w-56`}>
           Smoked at
@@ -62,7 +62,7 @@ export function SmokeDetailsFields({
         </label>
       </div>
 
-      <div className="flex flex-wrap gap-4">
+      <div className="flex flex-wrap gap-4 border-t border-line pt-5">
         <label className={`${ui.label} w-40`}>
           Strength
           <select value={value.strength} onChange={(e) => set("strength", e.target.value)} className={ui.field}>
@@ -87,7 +87,7 @@ export function SmokeDetailsFields({
         </label>
       </div>
 
-      <div className="flex flex-wrap gap-4">
+      <div className="flex flex-wrap gap-4 border-t border-line pt-5">
         <label className={`${ui.label} w-40`}>
           Draw
           <select value={value.draw} onChange={(e) => set("draw", e.target.value as SmokeDetailsDraft["draw"])} className={ui.field}>
@@ -132,24 +132,33 @@ export function SmokeDetailsFields({
         <textarea value={value.constructionNotes} onChange={(e) => set("constructionNotes", e.target.value)} rows={2} className={ui.field} />
       </label>
 
-      <div className={ui.label}>
+      <div className={`${ui.label} border-t border-line pt-5`}>
         Descriptors
         <DescriptorsInput value={value.overallDescriptors} onChange={(next) => set("overallDescriptors", next)} />
       </div>
 
-      <label className={ui.label}>
+      <label className={`${ui.label} border-t border-line pt-5`}>
         Impression
         <textarea value={value.impression} onChange={(e) => set("impression", e.target.value)} rows={2} className={ui.field} />
       </label>
 
       <label className={ui.label}>
         Title
-        <input value={value.journalTitle} onChange={(e) => set("journalTitle", e.target.value)} className={ui.field} />
+        <input
+          value={value.journalTitle}
+          onChange={(e) => set("journalTitle", e.target.value)}
+          className={`${ui.field} font-display text-base`}
+        />
       </label>
 
       <label className={ui.label}>
         Narrative
-        <textarea value={value.journalNarrative} onChange={(e) => set("journalNarrative", e.target.value)} rows={5} className={ui.field} />
+        <textarea
+          value={value.journalNarrative}
+          onChange={(e) => set("journalNarrative", e.target.value)}
+          rows={6}
+          className={`${ui.field} font-serif text-base leading-relaxed`}
+        />
       </label>
     </div>
   );

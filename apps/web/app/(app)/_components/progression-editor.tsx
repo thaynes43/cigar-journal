@@ -61,7 +61,7 @@ export function ProgressionEditor({
         const preset = STAGE_PRESETS.find((p) => p.label === row.stage && p.position === row.position);
         const isCustom = !preset && (row.stage !== "" || row.position !== "");
         return (
-        <fieldset key={index} className={`${ui.card} flex flex-col gap-2`}>
+        <fieldset key={index} className="flex flex-col gap-3 rounded-card border border-line bg-raised p-4">
           <legend className="sr-only">Stage {index + 1}</legend>
           <div className="flex gap-2">
             <label className={`${ui.label} flex-1`}>
