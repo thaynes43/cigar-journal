@@ -19,7 +19,9 @@ COPY packages/config/package.json ./packages/config/
 COPY packages/domain/package.json ./packages/domain/
 COPY packages/db/package.json ./packages/db/
 COPY packages/auth/package.json ./packages/auth/
+COPY packages/oauth/package.json ./packages/oauth/
 COPY packages/importer/package.json ./packages/importer/
+COPY packages/mcp/package.json ./packages/mcp/
 COPY apps/web/package.json ./apps/web/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 
@@ -49,14 +51,26 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 # archive/docs is baked alongside the subtree so a one-shot k8s Job needs only
 # DATABASE_URL + flags — the CLI resolves `../archive/docs` relative to itself.
 FROM build AS import
+# hoisted linker: workspace deps (@cj/db, @cj/domain) land as REAL directories
+# with their raw-TS sources, and third-party deps sit flat at the top level.
+# The default isolated layout symlinks workspace deps back into /app/packages —
+# dangling in the runtime stage (first cluster import Job failed on it).
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    pnpm deploy --legacy --filter=@cj/importer --prod /app/importer
-# pnpm deploy leaves workspace deps as package.json stubs (no sources) under
-# BuildKit; these raw-TS packages must ship whole for tsx to resolve them.
-RUN cp -r /app/packages/db/src /app/importer/node_modules/@cj/db/src && \
-    cp -r /app/packages/db/migrations /app/importer/node_modules/@cj/db/migrations && \
-    cp -r /app/packages/domain/src /app/importer/node_modules/@cj/domain/src
+    pnpm deploy --legacy --filter=@cj/importer --prod --config.node-linker=hoisted /app/importer
 RUN mkdir -p /app/importer/archive && cp -r /app/archive/docs /app/importer/archive/docs
+
+# --- mcp: prune @cj/mcp to the production subtree the mcp role runs ---
+# The standalone MCP server (ADR-001 separate role, ADR-005). `pnpm deploy --prod`
+# copies the package source (src/*.ts, run via tsx — no build step) plus a flat
+# prod node_modules (its workspace deps @cj/oauth + @cj/domain + @cj/db, the MCP
+# SDK, express, pg, tsx) into /app/mcp. --legacy is required for non-injected
+# workspace deps; --config.node-linker=hoisted materializes the raw-TS workspace
+# sources (db/domain/oauth src + db/migrations) as real dirs instead of the
+# BuildKit symlink stubs tsx cannot resolve — the same class of fix the import
+# role's explicit source-shipping addressed, done here by the linker.
+FROM build AS mcp
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm deploy --legacy --filter=@cj/mcp --prod --config.node-linker=hoisted /app/mcp
 
 # --- runtime: minimal image; the role is selected by the container command ---
 FROM node:22-alpine AS runtime
@@ -71,6 +85,8 @@ COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static
 COPY --from=migrate /app/migrate ./migrate
 # import role: the pruned @cj/importer subtree (CLI + parsers + baked archive/docs).
 COPY --from=import /app/importer ./importer
+# mcp role: the pruned @cj/mcp subtree (server src + its own node_modules).
+COPY --from=mcp /app/mcp ./mcp
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
@@ -98,5 +114,17 @@ ENTRYPOINT ["/sbin/tini", "--"]
 #     Reads DATABASE_URL from env; resolves the owner by email and refuses (exit 1)
 #     if unknown. Idempotent: a re-run replays through the mutation envelope and
 #     duplicates nothing. Emits a terse imported/skipped/needs-review report.
-#   mcp / crawl:    future roles attach here over the same base.
+#   mcp (long-running Deployment — the MCP server, ADR-005):
+#     workingDir: /app/mcp                 # REQUIRED: `--import tsx` resolves the
+#     command: ["/sbin/tini","--","node","--import","tsx","src/index.ts"]
+#                                          # tsx loader relative to CWD; tsx lives
+#                                          # in /app/mcp/node_modules.
+#     Serves GET /healthz and the Streamable HTTP MCP transport at /mcp; listens
+#     on $PORT (contract default 8081 — SET IT, the image default PORT=3000 is a
+#     web-ism). Reads DATABASE_URL (bearer-token validation + journal reads/writes)
+#     and BETTER_AUTH_URL (RFC 8707 audience + discovery + smoke URLs) from env;
+#     fails fast if either is unset. Long-running — never exits. The web origin
+#     serves /oauth/* and /.well-known/*; this service serves ONLY /mcp on the
+#     same public origin (path-routed at the ingress).
+#   crawl:          future role attaches here over the same base.
 CMD ["node", "apps/web/server.js"]
