@@ -33,7 +33,7 @@ export function DescriptorsInput({
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5 rounded border border-neutral-300 px-2 py-1.5 dark:border-neutral-700">
+    <div className="flex flex-wrap items-center gap-1.5 rounded-field border border-line bg-bg px-2 py-1.5 transition-colors focus-within:border-accent">
       {value.map((tag) => (
         <span key={tag} className={ui.chip}>
           {tag}
@@ -41,7 +41,7 @@ export function DescriptorsInput({
             type="button"
             onClick={() => onChange(value.filter((t) => t !== tag))}
             aria-label={`Remove ${tag}`}
-            className="text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100"
+            className="text-muted transition-colors hover:text-danger"
           >
             ×
           </button>
@@ -53,7 +53,7 @@ export function DescriptorsInput({
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={onKeyDown}
         onBlur={commit}
-        className="min-w-24 flex-1 bg-transparent text-sm outline-none"
+        className="min-w-24 flex-1 bg-transparent text-sm text-ink outline-none"
       />
     </div>
   );

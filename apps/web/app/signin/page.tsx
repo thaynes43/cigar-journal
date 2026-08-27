@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { authClient } from "@/lib/auth-client";
+import { ui } from "@/lib/ui";
 
 // Only ever follow a same-origin relative path (guards against open redirect via
 // a crafted `?next=`). Used to resume an interrupted /oauth/authorize flow.
@@ -46,10 +47,12 @@ export default function SignInPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center gap-4 p-6">
-      <h1 className="text-lg font-semibold">Cigar Journal</h1>
-      <form onSubmit={onSubmit} className="flex flex-col gap-3">
-        <label className="flex flex-col gap-1 text-sm">
+    <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center gap-6 p-6">
+      <h1 className="text-center font-display text-3xl font-semibold tracking-wide text-ink">
+        Cigar Journal
+      </h1>
+      <form onSubmit={onSubmit} className={`${ui.card} flex flex-col gap-4`}>
+        <label className={ui.label}>
           Email
           <input
             type="email"
@@ -57,10 +60,10 @@ export default function SignInPage() {
             required
             value={email}
             onChange={(event) => setEmail(event.target.value)}
-            className="rounded border px-2 py-1"
+            className={ui.field}
           />
         </label>
-        <label className="flex flex-col gap-1 text-sm">
+        <label className={ui.label}>
           Password
           <input
             type="password"
@@ -68,14 +71,14 @@ export default function SignInPage() {
             required
             value={password}
             onChange={(event) => setPassword(event.target.value)}
-            className="rounded border px-2 py-1"
+            className={ui.field}
           />
         </label>
-        <button type="submit" disabled={pending} className="rounded border px-3 py-1.5 font-medium">
+        <button type="submit" disabled={pending} className={ui.primary}>
           Sign in
         </button>
         {error ? (
-          <p role="alert" className="text-sm text-red-600">
+          <p role="alert" className={ui.alert}>
             {error}
           </p>
         ) : null}

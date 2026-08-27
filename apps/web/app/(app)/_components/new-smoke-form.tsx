@@ -39,10 +39,10 @@ export function NewSmokeForm() {
   const messages = fieldMessages(save.error);
 
   return (
-    <form onSubmit={onSubmit} className="flex flex-col gap-6">
-      <h1 className="text-lg font-semibold">Record a smoke</h1>
+    <form onSubmit={onSubmit} className="mx-auto flex w-full max-w-2xl flex-col gap-6">
+      <h1 className="font-display text-2xl font-semibold text-ink">Record a smoke</h1>
 
-      <section className="flex flex-col gap-2">
+      <section className={`${ui.card} flex flex-col gap-3`}>
         <span className={ui.legend}>Cigar</span>
         <CigarPicker
           onChange={(ref) => {
@@ -53,9 +53,11 @@ export function NewSmokeForm() {
         {cigarMissing ? <p className={ui.alert}>Pick or add the cigar first.</p> : null}
       </section>
 
-      <SmokeDetailsFields value={details} onChange={setDetails} />
+      <section className={`${ui.card}`}>
+        <SmokeDetailsFields value={details} onChange={setDetails} />
+      </section>
 
-      <section className="flex flex-col gap-2">
+      <section className={`${ui.card} flex flex-col gap-3`}>
         <span className={ui.legend}>Progression</span>
         <ProgressionEditor value={progression} onChange={setProgression} />
       </section>

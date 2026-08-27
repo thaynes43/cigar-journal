@@ -8,7 +8,7 @@ import { ui } from "@/lib/ui";
 import { fieldMessages, domainErrorOf } from "@/lib/trpc/error";
 import { SmokeDetailsFields } from "./smoke-details-fields";
 import { ProgressionEditor, type ProgressionDraft } from "./progression-editor";
-import { ProgressionTimeline } from "./progression-timeline";
+import { BurnLine } from "./burn-line";
 import { detailsFromView, buildUpdateChanges, type SmokeDetailsDraft } from "./smoke-draft";
 
 export function EditSmokeForm({ smoke }: { smoke: SmokeView }) {
@@ -46,22 +46,26 @@ export function EditSmokeForm({ smoke }: { smoke: SmokeView }) {
   const messages = fieldMessages(update.error);
 
   return (
-    <div className="flex flex-col gap-6">
-      <h1 className="text-lg font-semibold">Edit smoke</h1>
-      <p className="font-medium">{smoke.cigar.canonicalName}</p>
+    <div className="mx-auto flex w-full max-w-2xl flex-col gap-6">
+      <div className="flex flex-col gap-1">
+        <h1 className="font-display text-2xl font-semibold text-ink">Edit smoke</h1>
+        <p className="font-serif text-muted">{smoke.cigar.canonicalName}</p>
+      </div>
 
       {details ? (
         <form onSubmit={onSubmit} className="flex flex-col gap-6">
-          <SmokeDetailsFields value={details} onChange={setDetails} />
+          <section className={ui.card}>
+            <SmokeDetailsFields value={details} onChange={setDetails} />
+          </section>
 
           {smoke.progression.length > 0 ? (
-            <section className="flex flex-col gap-2">
+            <section className={`${ui.card} flex flex-col gap-3`}>
               <span className={ui.legend}>Progression</span>
-              <ProgressionTimeline entries={smoke.progression} />
+              <BurnLine entries={smoke.progression} />
             </section>
           ) : null}
 
-          <section className="flex flex-col gap-2">
+          <section className={`${ui.card} flex flex-col gap-3`}>
             <span className={ui.legend}>Add progression</span>
             <ProgressionEditor value={appended} onChange={setAppended} />
           </section>
