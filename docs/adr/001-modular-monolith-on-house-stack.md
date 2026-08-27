@@ -30,7 +30,8 @@ Cloudflare tunnel at **cigars.haynesnetwork.com** (part of the haynesnetwork
 family of apps). The MCP endpoint is path-routed on the same origin (`/mcp`)
 to keep one OAuth issuer/resource identity.
 
-Testing (house standard): Vitest with real Postgres (Testcontainers), authz
+Testing (house standard): Vitest with real Postgres (embedded binary;
+Testcontainers where Docker exists), authz
 tests for cross-user and both visibility states, and Playwright e2e for the
 web app. MCP contract tests cover discovery, schemas, scope-bounded reads,
 mutation authorization, idempotent replay, `idempotency_conflict`,
