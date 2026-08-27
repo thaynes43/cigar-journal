@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/thaynes43/cigar-journal/compare/v0.4.1...v0.4.2) (2026-08-27)
+
+
+### Bug Fixes
+
+* **oauth:** consent Approve registered as deny — bind the decision ([#29](https://github.com/thaynes43/cigar-journal/issues/29)) ([0c48953](https://github.com/thaynes43/cigar-journal/commit/0c48953b02e0e342d626022ba27450229ec3176e))
+
 ## [0.4.1](https://github.com/thaynes43/cigar-journal/compare/v0.4.0...v0.4.1) (2026-08-27)
 
 
