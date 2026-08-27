@@ -42,22 +42,10 @@ export default async function ConsentPage({
       </ul>
       <form className="flex gap-3">
         <input type="hidden" name="txn" value={view.txnId} />
-        <button
-          type="submit"
-          name="decision"
-          value="approve"
-          formAction={decide}
-          className="rounded border px-3 py-1.5 font-medium"
-        >
+        <button type="submit" formAction={decide.bind(null, "approve")} className="rounded border px-3 py-1.5 font-medium">
           Approve
         </button>
-        <button
-          type="submit"
-          name="decision"
-          value="deny"
-          formAction={decide}
-          className="rounded border px-3 py-1.5 text-neutral-600"
-        >
+        <button type="submit" formAction={decide.bind(null, "deny")} className="rounded border px-3 py-1.5 text-neutral-600">
           Deny
         </button>
       </form>
