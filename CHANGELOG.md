@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/thaynes43/cigar-journal/compare/v0.3.0...v0.4.0) (2026-08-27)
+
+
+### Features
+
+* MCP adapter — the six-tool journal surface (@cj/mcp) ([#24](https://github.com/thaynes43/cigar-journal/issues/24)) ([c5e2bcd](https://github.com/thaynes43/cigar-journal/commit/c5e2bcd195ce2d80b7b70036f37f5cb5a24e3664))
+
+
+### Bug Fixes
+
+* **image:** ship workspace-dep sources in the import role ([#20](https://github.com/thaynes43/cigar-journal/issues/20)) ([b8d1965](https://github.com/thaynes43/cigar-journal/commit/b8d19652beea97fb9a29e7f6fceb3b377add14cf))
+
 ## [0.3.0](https://github.com/thaynes43/cigar-journal/compare/v0.2.0...v0.3.0) (2026-08-27)
 
 
