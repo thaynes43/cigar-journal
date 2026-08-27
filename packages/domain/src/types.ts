@@ -181,7 +181,12 @@ export interface SmokeView {
   context: SmokeContext | null;
   overallDescriptors: string[];
   progression: ProgressionEntryView[];
-  construction: { draw: DrawBurn | null; burn: DrawBurn | null; smokeOutput: SmokeOutput | null; notes: string | null };
+  construction: {
+    draw: DrawBurn | null;
+    burn: DrawBurn | null;
+    smokeOutput: SmokeOutput | null;
+    notes: string | null;
+  };
   assessment: {
     strength: string | null;
     body: string | null;
@@ -236,9 +241,11 @@ export interface CigarMatch {
   userSmokeCount: number;
 }
 
+export type SearchGuidance = "single_match" | "multiple_matches" | "brand_match" | "no_match";
+
 export interface SearchCigarsResult {
   matches: CigarMatch[];
-  guidance: "single_match" | "multiple_matches" | "no_match";
+  guidance: SearchGuidance;
 }
 
 export interface PersonalProfile {
