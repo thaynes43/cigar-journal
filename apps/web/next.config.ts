@@ -9,6 +9,17 @@ const config: NextConfig = {
   // the monorepo root so traced files resolve once workspace packages are used.
   output: "standalone",
   outputFileTracingRoot: rootDir,
+  // Workspace packages ship raw TS (no build step) — Next must transpile them.
+  transpilePackages: ["@cj/auth", "@cj/db", "@cj/domain"],
+  // Those packages are NodeNext ESM: their relative imports carry `.js`
+  // extensions that resolve to `.ts` sources. Teach webpack the same mapping.
+  webpack: (config) => {
+    config.resolve.extensionAlias = {
+      ...(config.resolve.extensionAlias as Record<string, string[]> | undefined),
+      ".js": [".ts", ".tsx", ".js"],
+    };
+    return config;
+  },
   // Linting is a dedicated CI job (`pnpm lint`), not the build's concern.
   eslint: { ignoreDuringBuilds: true },
 };
