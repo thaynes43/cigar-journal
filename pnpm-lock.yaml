@@ -38,6 +38,9 @@ importers:
       '@cj/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@cj/oauth':
+        specifier: workspace:*
+        version: link:../../packages/oauth
       '@tanstack/react-query':
         specifier: 5.101.0
         version: 5.101.0(react@19.2.8)
@@ -155,6 +158,25 @@ importers:
       '@cj/db':
         specifier: workspace:*
         version: link:../db
+      drizzle-orm:
+        specifier: ^0.44.0
+        version: 0.44.7(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0)
+    devDependencies:
+      '@cj/config':
+        specifier: workspace:*
+        version: link:../config
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+
+  packages/oauth:
+    dependencies:
+      '@cj/db':
+        specifier: workspace:*
+        version: link:../db
+      '@cj/domain':
+        specifier: workspace:*
+        version: link:../domain
       drizzle-orm:
         specifier: ^0.44.0
         version: 0.44.7(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0)

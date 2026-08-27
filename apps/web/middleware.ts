@@ -6,6 +6,9 @@ import { NextResponse, type NextRequest } from "next/server";
 // excludes the auth handler, tRPC surface, health probe, and static assets;
 // /signin is the one matched path we let through while unauthenticated. tRPC is
 // excluded so its procedures return UNAUTHORIZED instead of an HTML redirect.
+// The OAuth AS surface (`/oauth/*`) and discovery metadata (`/.well-known/*`) are
+// excluded too: metadata is public, and /oauth/authorize + /oauth/consent run
+// their own session gate (redirecting to /signin?next=… to preserve the flow).
 export function middleware(request: NextRequest) {
   if (request.nextUrl.pathname === "/signin") return NextResponse.next();
 
@@ -18,5 +21,7 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!api/auth|api/trpc|api/health|_next/static|_next/image|favicon.ico).*)"],
+  matcher: [
+    "/((?!api/auth|api/trpc|api/health|oauth|\\.well-known|_next/static|_next/image|favicon.ico).*)",
+  ],
 };

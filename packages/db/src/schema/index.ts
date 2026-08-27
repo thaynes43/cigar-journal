@@ -17,3 +17,8 @@ export * from "./offers.js";
 export * from "./purchases.js";
 export * from "./idempotency-keys.js";
 export * from "./audit-log.js";
+export * from "./oauth-client.js";
+export * from "./oauth-authorization.js";
+export * from "./oauth-authorization-code.js";
+export * from "./oauth-refresh-token.js";
+export * from "./oauth-access-token.js";

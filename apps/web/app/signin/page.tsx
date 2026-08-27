@@ -3,6 +3,13 @@
 import { useState, type FormEvent } from "react";
 import { authClient } from "@/lib/auth-client";
 
+// Only ever follow a same-origin relative path (guards against open redirect via
+// a crafted `?next=`). Used to resume an interrupted /oauth/authorize flow.
+function safeNext(raw: string | null): string {
+  if (raw && raw.startsWith("/") && !raw.startsWith("//")) return raw;
+  return "/";
+}
+
 export default function SignInPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -14,9 +21,11 @@ export default function SignInPage() {
     setPending(true);
     setError(null);
 
+    const next = safeNext(new URLSearchParams(window.location.search).get("next"));
+
     const signIn = await authClient.signIn.email({ email, password });
     if (!signIn.error) {
-      window.location.assign("/");
+      window.location.assign(next);
       return;
     }
 
@@ -28,7 +37,7 @@ export default function SignInPage() {
       name: email.split("@")[0] ?? email,
     });
     if (!signUp.error) {
-      window.location.assign("/");
+      window.location.assign(next);
       return;
     }
 
