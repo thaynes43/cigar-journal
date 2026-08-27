@@ -139,6 +139,15 @@ export interface UpdateSmokeResult {
   replayed: boolean;
 }
 
+export interface DeleteSmokeInput {
+  smokeId: string;
+  correlationId?: string;
+}
+
+export interface DeleteSmokeResult {
+  smokeId: string;
+}
+
 export interface CigarView {
   cigarId: string;
   canonicalName: string;
