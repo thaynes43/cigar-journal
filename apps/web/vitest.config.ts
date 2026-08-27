@@ -6,6 +6,9 @@ import { defineConfig } from "vitest/config";
 const webRoot = fileURLToPath(new URL(".", import.meta.url)).replace(/\/$/, "");
 
 export default defineConfig({
+  // Next's tsconfig keeps `jsx: preserve`, so tell esbuild how to compile the
+  // component render tests.
+  esbuild: { jsx: "automatic" },
   resolve: {
     alias: {
       "@": webRoot,
