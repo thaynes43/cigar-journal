@@ -39,10 +39,11 @@ export function isToolName(name: string): name is ToolName {
 // Verbatim from docs/mcp/tool-contract.md "Server instructions" block. Reproduced
 // exactly (including line breaks) — this is guidance the model reads, not code.
 //
-// The literal below is intact and begins "This server manages…". A ChatGPT client
-// once rendered it starting mid-word ("ersonal cigar journal…"), dropping the
-// leading characters; that is client-side display truncation, not a defect in this
-// string (verified against this constant and the mcp.test.ts equality assertion).
+// The literal below is intact and begins "This server manages…" (verified against
+// this constant and the mcp.test.ts equality assertion). The often-noted
+// "ersonal cigar journal…" text seen in ChatGPT is NOT this string: the owner
+// confirmed it is his own hand-typed connector description, entered with the
+// leading "P" dropped — a separate, user-entered field, not what we send here.
 export const INSTRUCTIONS = `This server manages the authenticated user's personal cigar journal.
 During an active smoking conversation, converse naturally; do not save
 observations as they happen. Use search_cigars/get_cigar when identification

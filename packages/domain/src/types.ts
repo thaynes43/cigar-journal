@@ -217,6 +217,11 @@ export interface SmokeSummary {
   liked: boolean | null;
   descriptors: string[];
   summary: string | null;
+  // The smoke's progression positions (approximate_position), nulls filtered,
+  // ordered by ordinal; empty when none. Feeds the journal-card burn-line
+  // sparkline. Web-only: the MCP adapter maps get_my_smokes explicitly and does
+  // not expose this field, keeping the tool payload contract-stable.
+  progressionPositions: number[];
   // Match provenance — present ONLY when the `text` filter was used. `matchedIn`
   // lists the prose field(s) the search hit; `matchSnippet` is a short plain-text
   // excerpt around the hit (~160 chars). Both are omitted entirely for non-text
@@ -275,4 +280,21 @@ export interface PersonalProfile {
 export interface GetCigarResult {
   cigar: CigarView;
   personalProfile: PersonalProfile | null;
+}
+
+// A catalog-only cigar summary for browse listings — no per-caller personal
+// fields (browseCigars stays catalog-scoped by design).
+export interface CatalogCigar {
+  cigarId: string;
+  canonicalName: string;
+  brand: string | null;
+  line: string | null;
+  vitola: { name: string | null; lengthInches: number | null; ringGauge: number | null };
+  type: CigarType | null;
+  verification: Verification;
+}
+
+export interface BrowseCigarsResult {
+  cigars: CatalogCigar[];
+  totalCount: number; // total catalog size, so the UI can note when the cap elides some
 }

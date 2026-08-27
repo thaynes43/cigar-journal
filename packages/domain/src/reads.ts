@@ -1,4 +1,4 @@
-import { and, eq, gte, lte, ilike, sql, desc, count, type SQL } from "drizzle-orm";
+import { and, eq, gte, lte, ilike, sql, desc, count, inArray, isNotNull, asc, type SQL } from "drizzle-orm";
 import {
   cigars,
   smokes,
@@ -20,6 +20,8 @@ import type {
   GetCigarResult,
   CigarView,
   PersonalProfile,
+  BrowseCigarsResult,
+  CatalogCigar,
 } from "./types.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
 import { normalizeDescriptor } from "./descriptors.js";
@@ -28,6 +30,7 @@ const DEFAULT_SMOKE_LIMIT = 10;
 const MAX_SMOKE_LIMIT = 25;
 const DEFAULT_SEARCH_LIMIT = 5;
 const MAX_SEARCH_LIMIT = 10;
+const BROWSE_CIGARS_LIMIT = 100;
 
 // Match-provenance snippet rendering. We use ts_headline per prose field (not
 // over the combined weighted `search` vector — ts_headline can't attribute a
@@ -264,6 +267,30 @@ async function matchProvenance(
   return map;
 }
 
+// Per-smoke progression positions for a page of smokes — the approximate_position
+// values, nulls filtered, ordered by ordinal. One batched round trip over the
+// ≤limit returned ids; feeds the journal-card burn-line sparkline (DESIGN-001).
+async function progressionPositionsBySmoke(
+  deps: Deps,
+  ids: string[],
+): Promise<Map<string, number[]>> {
+  const map = new Map<string, number[]>();
+  if (ids.length === 0) return map;
+
+  const rows = await deps.db
+    .select({ smokeId: smokeProgression.smokeId, position: smokeProgression.approximatePosition })
+    .from(smokeProgression)
+    .where(and(inArray(smokeProgression.smokeId, ids), isNotNull(smokeProgression.approximatePosition)))
+    .orderBy(smokeProgression.smokeId, asc(smokeProgression.ordinal));
+
+  for (const row of rows) {
+    const list = map.get(row.smokeId) ?? [];
+    list.push(Number(row.position));
+    map.set(row.smokeId, list);
+  }
+  return map;
+}
+
 // The authenticated user's history — compact summaries, newest first, capped.
 export async function queryMySmokes(
   deps: Deps,
@@ -287,14 +314,11 @@ export async function queryMySmokes(
     .innerJoin(cigars, eq(smokes.cigarId, cigars.id))
     .where(and(...conditions));
 
+  const ids = rows.map((r) => r.smoke.id);
+
   // Only when the caller ran a text search do we attribute the hit and excerpt it.
-  const provenance = filters.text
-    ? await matchProvenance(
-        deps,
-        rows.map((r) => r.smoke.id),
-        filters.text,
-      )
-    : null;
+  const provenance = filters.text ? await matchProvenance(deps, ids, filters.text) : null;
+  const positions = await progressionPositionsBySmoke(deps, ids);
 
   const summaries: SmokeSummary[] = rows.map((row) => {
     const summary: SmokeSummary = {
@@ -309,6 +333,7 @@ export async function queryMySmokes(
       liked: row.smoke.liked,
       descriptors: row.smoke.overallDescriptors,
       summary: deriveSummary(row.smoke),
+      progressionPositions: positions.get(row.smoke.id) ?? [],
     };
     if (provenance) {
       const p = provenance.get(row.smoke.id);
@@ -505,5 +530,40 @@ export async function getCigar(
   return {
     cigar: toCigarView(cigar),
     personalProfile: smokeRows.length > 0 ? computeProfile(smokeRows) : null,
+  };
+}
+
+function toCatalogCigar(cigar: CigarRow): CatalogCigar {
+  return {
+    cigarId: cigar.id,
+    canonicalName: cigar.canonicalName,
+    brand: cigar.brand,
+    line: cigar.line,
+    vitola: {
+      name: cigar.vitolaName,
+      lengthInches: cigar.lengthInches != null ? Number(cigar.lengthInches) : null,
+      ringGauge: cigar.ringGauge,
+    },
+    type: cigar.type,
+    verification: cigar.verification,
+  };
+}
+
+// The catalog's default browse view: alphabetical by canonical name, capped, and
+// catalog-only (no per-caller personal fields). `totalCount` lets the UI note
+// when the cap elides some. Auth-gated at the adapter; add principal-scoped
+// personal counts here only if the view later folds in the caller's history.
+export async function browseCigars(deps: Deps): Promise<BrowseCigarsResult> {
+  const rows = await deps.db
+    .select()
+    .from(cigars)
+    .orderBy(asc(cigars.canonicalName))
+    .limit(BROWSE_CIGARS_LIMIT);
+
+  const totals = await deps.db.select({ value: count() }).from(cigars);
+
+  return {
+    cigars: rows.map(toCatalogCigar),
+    totalCount: Number(totals[0]?.value ?? 0),
   };
 }

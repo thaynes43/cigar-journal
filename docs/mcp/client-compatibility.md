@@ -59,13 +59,14 @@ chase.
 refresh of a connector's tool manifest: new tool schemas and descriptions
 (e.g. the `matchedIn`/`matchSnippet` fields and the title-is-metadata
 instruction line added this slice) reach a client **only after the user
-refreshes the connector in ChatGPT settings**. The known
-"`ersonal cigar journal…`" first-character truncation of the server
-instructions reproduces from the cached OLD manifest — our `INSTRUCTIONS`
-string is verified intact (server constant + `mcp.test.ts` equality
-assertion), so the dropped leading character is client-side rendering of a
-stale cache, not a defect in what we send. Re-check the rendered instructions
-and tool descriptions after a user-initiated connector refresh.
+refreshes the connector in ChatGPT settings**. The often-noted
+"`ersonal cigar journal…`" text is neither a truncation bug nor our string:
+the owner confirmed it is his own hand-typed connector description in ChatGPT,
+entered with the leading "P" dropped. Our `INSTRUCTIONS` string — a separate,
+server-owned field — is verified intact (server constant + `mcp.test.ts`
+equality assertion), so nothing in what we send is affected. Re-check the
+rendered instructions and tool descriptions after a user-initiated connector
+refresh.
 
 ## Workflows
 

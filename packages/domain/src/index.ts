@@ -11,7 +11,7 @@ export { fingerprint } from "./fingerprint.js";
 export { saveSmoke } from "./save-smoke.js";
 export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
-export { getSmoke, queryMySmokes, searchCigars, getCigar } from "./reads.js";
+export { getSmoke, queryMySmokes, searchCigars, getCigar, browseCigars } from "./reads.js";
 
 // Catalog-invariant cigar resolution (ADR-002). Exported so the legacy importer
 // resolves/creates purchase-linked cigars through the same logic that backs

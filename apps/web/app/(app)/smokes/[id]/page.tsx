@@ -36,21 +36,35 @@ export default async function SmokeDetailPage({ params }: { params: Promise<{ id
 
   const when = formatSmokedAt(smoke.smokedAt);
   const { assessment, construction, context } = smoke;
+  const cigarHref = `/cigars/${smoke.cigar.cigarId}`;
 
   return (
     <article className="mx-auto flex max-w-3xl flex-col gap-8">
       <header className="flex items-start gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           {when ? <span className="label-caps">{when}</span> : null}
-          <h1 className="font-display text-3xl leading-tight font-semibold text-ink">
-            {smoke.journal.title ?? smoke.cigar.canonicalName}
-          </h1>
-          <Link
-            href={`/cigars/${smoke.cigar.cigarId}`}
-            className="self-start text-sm text-accent underline underline-offset-4"
-          >
-            {smoke.cigar.canonicalName}
-          </Link>
+          {smoke.journal.title ? (
+            // A real title heads the entry; the cigar name links below it.
+            <>
+              <h1 className="font-display text-3xl leading-tight font-semibold text-ink">
+                {smoke.journal.title}
+              </h1>
+              <Link
+                href={cigarHref}
+                className="self-start text-sm text-accent underline underline-offset-4"
+              >
+                {smoke.cigar.canonicalName}
+              </Link>
+            </>
+          ) : (
+            // No title: the cigar name IS the heading and links to the catalog —
+            // no duplicated secondary line beneath it.
+            <h1 className="font-display text-3xl leading-tight font-semibold text-ink">
+              <Link href={cigarHref} className="transition-colors hover:text-accent">
+                {smoke.cigar.canonicalName}
+              </Link>
+            </h1>
+          )}
         </div>
         <RatingSeal rating={assessment.rating} liked={assessment.liked} size="md" />
       </header>

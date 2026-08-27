@@ -144,6 +144,25 @@ describe("tRPC API", () => {
     expect(still.version).toBe(1);
   });
 
+  it("browses the catalog alphabetically, catalog-only", async () => {
+    await h.seedCigar({ canonicalName: "Zylophone Browse Api" });
+    await h.seedCigar({ canonicalName: "Aardvark Browse Api" });
+    const a = caller(h.deps, userA);
+
+    const result = await a.cigars.browse();
+    const names = result.cigars.map((c) => c.canonicalName);
+    expect(names.indexOf("Aardvark Browse Api")).toBeGreaterThanOrEqual(0);
+    expect(names.indexOf("Aardvark Browse Api")).toBeLessThan(names.indexOf("Zylophone Browse Api"));
+    expect(result.totalCount).toBeGreaterThanOrEqual(result.cigars.length);
+    expect(result.cigars[0]).not.toHaveProperty("userSmokeCount");
+  });
+
+  it("requires auth to browse the catalog", async () => {
+    const anon = caller(h.deps, null);
+    const err = await trpcError(anon.cigars.browse());
+    expect(err.code).toBe("UNAUTHORIZED");
+  });
+
   it("surfaces cigar search guidance shapes (single / brand / no match)", async () => {
     await h.seedCigar({ canonicalName: "Bolivar Belicosos Finos", brand: "Bolivar" });
     await h.seedCigar({ canonicalName: "Montecristo Edmundo", brand: "Montecristo" });

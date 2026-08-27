@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
-import { getSmoke, queryMySmokes, searchCigars, getCigar } from "./reads.js";
+import { getSmoke, queryMySmokes, searchCigars, getCigar, browseCigars } from "./reads.js";
 import type { Principal } from "./index.js";
 import { SmokeNotFoundError } from "./errors.js";
 
@@ -99,6 +99,56 @@ describe("read services", () => {
     const all = await queryMySmokes(h.deps, userA, { cigarId });
     expect(all.totalMatches).toBe(2); // userB's excluded
     expect(all.smokes[0]!.smokeId).toBe(recent.smoke.smokeId); // newest first
+  });
+
+  it("queryMySmokes exposes progression positions (nulls filtered, ordinal order) for the sparkline", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Burn Line Source", brand: "Spark" });
+    const withProg = await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      progression: [
+        { stage: "opening", approximatePosition: 0.1, verbatim: "start" },
+        { stage: "middle", approximatePosition: null, verbatim: "unclear position" },
+        { stage: "finish", approximatePosition: 0.9, verbatim: "end" },
+      ],
+      journal: { narrative: "Has a positioned progression." },
+    });
+    const noProg = await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      journal: { narrative: "No progression at all." },
+    });
+
+    const listed = await queryMySmokes(h.deps, userA, { cigarId });
+    const withRow = listed.smokes.find((s) => s.smokeId === withProg.smoke.smokeId)!;
+    const withoutRow = listed.smokes.find((s) => s.smokeId === noProg.smoke.smokeId)!;
+    // Nulls filtered, ordinal order preserved.
+    expect(withRow.progressionPositions).toEqual([0.1, 0.9]);
+    // Empty array when the smoke has no progression.
+    expect(withoutRow.progressionPositions).toEqual([]);
+  });
+
+  it("browseCigars lists catalog rows alphabetically, catalog-only, with a total count", async () => {
+    await h.seedCigar({ canonicalName: "Zzz Browse Omega", brand: "Zed" });
+    await h.seedCigar({
+      canonicalName: "Aaa Browse Alpha",
+      brand: "Ayy",
+      vitolaName: "Robusto",
+      type: "NC",
+    });
+
+    const result = await browseCigars(h.deps);
+    const names = result.cigars.map((c) => c.canonicalName);
+    expect(names.indexOf("Aaa Browse Alpha")).toBeGreaterThanOrEqual(0);
+    expect(names.indexOf("Aaa Browse Alpha")).toBeLessThan(names.indexOf("Zzz Browse Omega"));
+
+    // Under the cap in this suite: the page is the whole catalog.
+    expect(result.totalCount).toBe(result.cigars.length);
+
+    // Catalog-only fields — no per-caller personal counts leak in.
+    const alpha = result.cigars.find((c) => c.canonicalName === "Aaa Browse Alpha")!;
+    expect(alpha.vitola.name).toBe("Robusto");
+    expect(alpha).not.toHaveProperty("userSmokeCount");
   });
 
   it("full-text finds an imported smoke whose prose lives only in original_markdown", async () => {
