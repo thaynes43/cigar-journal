@@ -1,0 +1,15 @@
+**/node_modules
+**/.next
+**/dist
+**/coverage
+**/*.tsbuildinfo
+.git
+.github
+*.log
+.DS_Store
+
+# Not part of the application image.
+spike
+archive
+docs
+.agents
