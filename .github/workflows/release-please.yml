@@ -1,0 +1,24 @@
+name: release-please
+# Manifest-mode release-please. Runs on main; workflow_dispatch is the manual
+# fallback because bot-merge push events are unreliable in this repo.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          # App token, not GITHUB_TOKEN, so the release tag/commit can trigger
+          # the downstream image-publish workflow (added in the deploy slice).
+          # GITHUB_TOKEN-created events do not fire other workflows (ADR-001).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

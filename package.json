@@ -1,0 +1,25 @@
+{
+  "name": "cigar-journal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "build": "pnpm --filter @cj/web build",
+    "dev": "pnpm --filter @cj/web dev"
+  },
+  "devDependencies": {
+    "@cj/config": "workspace:*",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.36.0",
+    "prettier": "^3.6.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
