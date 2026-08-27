@@ -43,13 +43,14 @@ FROM build AS migrate
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm deploy --legacy --filter=@cj/db --prod /app/migrate
 
-# --- import: prune @cj/importer to its production subtree + bake archive/docs ---
+# --- import: prune @cj/importer to its production subtree + bake archive/ ---
 # The one-shot legacy importer (flow 006). `pnpm deploy --prod` copies the
 # package source (src/cli.ts + parsers, run via tsx — no build step) plus a flat
 # prod node_modules (its workspace deps @cj/domain + @cj/db, drizzle-orm, pg,
 # tsx) into /app/importer. --legacy is required for non-injected workspace deps.
-# archive/docs is baked alongside the subtree so a one-shot k8s Job needs only
-# DATABASE_URL + flags — the CLI resolves `../archive/docs` relative to itself.
+# archive/docs (archive import) AND archive/ledger (ledger reconcile) are baked
+# alongside the subtree so a one-shot k8s Job needs only DATABASE_URL + flags —
+# the CLI resolves `../archive/docs` and `../archive/ledger` relative to itself.
 FROM build AS import
 # hoisted linker: workspace deps (@cj/db, @cj/domain) land as REAL directories
 # with their raw-TS sources, and third-party deps sit flat at the top level.
@@ -57,7 +58,9 @@ FROM build AS import
 # dangling in the runtime stage (first cluster import Job failed on it).
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm deploy --legacy --filter=@cj/importer --prod --config.node-linker=hoisted /app/importer
-RUN mkdir -p /app/importer/archive && cp -r /app/archive/docs /app/importer/archive/docs
+RUN mkdir -p /app/importer/archive \
+    && cp -r /app/archive/docs /app/importer/archive/docs \
+    && cp -r /app/archive/ledger /app/importer/archive/ledger
 
 # --- mcp: prune @cj/mcp to the production subtree the mcp role runs ---
 # The standalone MCP server (ADR-001 separate role, ADR-005). `pnpm deploy --prod`
@@ -83,7 +86,7 @@ COPY --from=build /app/apps/web/.next/standalone ./
 COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static
 # migrate role: the pruned @cj/db subtree (runner + SQL + its own node_modules).
 COPY --from=migrate /app/migrate ./migrate
-# import role: the pruned @cj/importer subtree (CLI + parsers + baked archive/docs).
+# import role: the pruned @cj/importer subtree (CLI + parsers + baked archive/{docs,ledger}).
 COPY --from=import /app/importer ./importer
 # mcp role: the pruned @cj/mcp subtree (server src + its own node_modules).
 COPY --from=mcp /app/mcp ./mcp
@@ -114,6 +117,21 @@ ENTRYPOINT ["/sbin/tini", "--"]
 #     Reads DATABASE_URL from env; resolves the owner by email and refuses (exit 1)
 #     if unknown. Idempotent: a re-run replays through the mutation envelope and
 #     duplicates nothing. Emits a terse imported/skipped/needs-review report.
+#   ledger (one-shot Job, flow 006 — run AFTER the archive import above):
+#     workingDir: /app/importer            # REQUIRED: `--import tsx` resolves the
+#     command: ["/sbin/tini","--","node","--import","tsx","src/cli.ts","ledger",
+#               "--user-email","<owner-email>"]
+#                                          # tsx loader relative to CWD; tsx lives
+#                                          # in /app/importer/node_modules. Add
+#                                          # "--apply" to write (default is
+#                                          # dry-run). CSV is baked at
+#                                          # /app/importer/archive/ledger and the
+#                                          # archive table at .../archive/docs.
+#     Reconciles the ledger snapshot against the archive-imported purchases:
+#     matched rows are skipped, unmatched rows insert once under deterministic
+#     `ledger-2026-08-27#<row>` keys. Idempotent: a re-run replays, never
+#     duplicating; existing purchases are never updated or deleted. Emits a terse
+#     matched/inserted/needs-review report.
 #   mcp (long-running Deployment — the MCP server, ADR-005):
 #     workingDir: /app/mcp                 # REQUIRED: `--import tsx` resolves the
 #     command: ["/sbin/tini","--","node","--import","tsx","src/index.ts"]
