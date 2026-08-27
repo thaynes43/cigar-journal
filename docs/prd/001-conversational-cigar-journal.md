@@ -78,12 +78,15 @@ sites (stored as derived descriptors/statistics, not verbatim copies).
 R12 (later) — In-progress durable sessions (draft Smokes) for crash recovery
 and read-only-client handoff; see fallback in the MCP contract.
 R13 (later) — Inventory (owner, 2026-08-27): per-user holdings built on
-Purchases — what's in the humidor now. Cuban entries carry box codes and
-aging/authenticity fields (schema differs from NC; owner's spreadsheet
-headers to be supplied). Recording a smoke can start from an inventory pick
-(pre-resolves the cigar, minimal typing), and inventory views show the
-user's own ratings to guide what to grab next. Supersedes the earlier
-"no stock counting" non-goal.
+Purchases — what's in the humidor now. The owner's spreadsheet ledger
+(Purchases tab headers, supplied 2026-08-27: Cigar, Brand, Packaging, QTY,
+Vitola, Type, Size, Purchase Date, Humidor Data, Box Date, Retailer, PPS,
+Aging) maps 1:1 onto the imported `purchases` schema except **Aging**,
+which derives from box/humidor dates rather than being stored. Cuban
+entries additionally need box codes and authenticity fields at design time.
+Recording a smoke can start from an inventory pick (pre-resolves the cigar,
+minimal typing), and inventory views show the user's own ratings to guide
+what to grab next. Supersedes the earlier "no stock counting" non-goal.
 
 ## Non-functional requirements
 
