@@ -9,9 +9,12 @@ import { grantConsent, denyConsent } from "@cj/oauth";
 // Consent decision (server action). The principal is re-derived from the session
 // here — the form never carries a user id (ADR-004). Approve issues the code and
 // redirects to the client callback; deny redirects back with error=access_denied.
-export async function decide(formData: FormData): Promise<void> {
+// decision arrives as a bound argument: a submit button's own name/value is
+// dropped from FormData when it carries formAction={serverAction}, so a
+// name="decision" button reads as "" server-side — every click denied (hit
+// live 2026-08-27).
+export async function decide(decision: "approve" | "deny", formData: FormData): Promise<void> {
   const txnId = String(formData.get("txn") ?? "");
-  const decision = String(formData.get("decision") ?? "");
 
   const principal = await getPrincipal(await headers());
   if (!principal) {
