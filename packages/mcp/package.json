@@ -1,0 +1,29 @@
+{
+  "name": "@cj/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node --import tsx src/index.ts"
+  },
+  "dependencies": {
+    "@cj/db": "workspace:*",
+    "@cj/domain": "workspace:*",
+    "@cj/oauth": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "express": "^5.2.1",
+    "tsx": "^4.20.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cj/config": "workspace:*",
+    "@types/express": "^5.0.1",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}
