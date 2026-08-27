@@ -10,7 +10,7 @@ const config: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: rootDir,
   // Workspace packages ship raw TS (no build step) — Next must transpile them.
-  transpilePackages: ["@cj/auth", "@cj/db", "@cj/domain"],
+  transpilePackages: ["@cj/auth", "@cj/db", "@cj/domain", "@cj/oauth"],
   // Those packages are NodeNext ESM: their relative imports carry `.js`
   // extensions that resolve to `.ts` sources. Teach webpack the same mapping.
   webpack: (config) => {

@@ -38,6 +38,9 @@ importers:
       '@cj/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@cj/oauth':
+        specifier: workspace:*
+        version: link:../../packages/oauth
       '@tanstack/react-query':
         specifier: 5.101.0
         version: 5.101.0(react@19.2.8)
