@@ -30,9 +30,14 @@ Values: `verified` (proven against the Phase 0 spike, date noted) ·
 | Token refresh / long-lived link | unverified — first test was same-session; observe across days of real use | **verified** 08-26: silent refresh after 10-min token expiry, rotation honored (server `refresh_rotated`) | unverified (session outlived no token in test) | client-dependent |
 | Reconnect after expiry | unverified | **verified** 08-26: post-expiry call succeeds, no user interaction | unverified | client-dependent |
 
-¹ Owner's account, Developer Mode, 2026-08-26. Cross-client persistence
-verified end to end: a value written by ChatGPT Web was read back by both
-Claude Code and Codex through the same backend.
+¹ Owner's account, Developer Mode, 2026-08-26 (spike). **Production
+verified 2026-08-27**: ChatGPT Web connected to the real server end to end
+— DCR, PKCE authorize, session-gated consent, token exchange (1h tokens +
+refresh grant), live search_cigars/get_my_smokes calls. Two client-cache
+traps burned in: connectors cache AS metadata (root-path aliases now
+served) and consent buttons must bind the decision (Next drops submit
+name/value under formAction). Cross-client persistence verified on the
+spike: a ChatGPT write read back by both CLIs.
 
 Environment note: clients running inside the cluster need IPv4-first DNS
 (`NODE_OPTIONS=--dns-result-order=ipv4first` for Node-based CLIs) — the
