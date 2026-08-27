@@ -4,6 +4,10 @@
 // carry the query-time types. drizzle-kit is generation/inspection only.
 export * from "./_columns.js";
 export * from "./users.js";
+export * from "./session.js";
+export * from "./account.js";
+export * from "./verification.js";
+export * from "./rate-limit.js";
 export * from "./cigars.js";
 export * from "./smokes.js";
 export * from "./smoke-progression.js";
