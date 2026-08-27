@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/thaynes43/cigar-journal/compare/v0.2.0...v0.3.0) (2026-08-27)
+
+
+### Features
+
+* legacy archive importer (@cj/importer) ([#19](https://github.com/thaynes43/cigar-journal/issues/19)) ([763985b](https://github.com/thaynes43/cigar-journal/commit/763985b32013d02a12dc2cf28d71f874533c5284))
+* OAuth 2.1 authorization server (@cj/oauth) ([#18](https://github.com/thaynes43/cigar-journal/issues/18)) ([111b2d4](https://github.com/thaynes43/cigar-journal/commit/111b2d47840f6ebf7805f94dfd22e085c433e294))
+
+
+### Bug Fixes
+
+* **web:** record-form usability from first live use ([#16](https://github.com/thaynes43/cigar-journal/issues/16)) ([5779baf](https://github.com/thaynes43/cigar-journal/commit/5779baf77669409d0b21be6410249b7f6789623f))
+
 ## [0.2.0](https://github.com/thaynes43/cigar-journal/compare/v0.1.0...v0.2.0) (2026-08-27)
 
 
