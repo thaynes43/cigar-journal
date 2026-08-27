@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/thaynes43/cigar-journal/compare/v0.5.0...v0.6.0) (2026-08-27)
+
+
+### Features
+
+* **mcp:** match provenance on text search + title-is-metadata visibility + docs truth-up ([#37](https://github.com/thaynes43/cigar-journal/issues/37)) ([6910f8f](https://github.com/thaynes43/cigar-journal/commit/6910f8f974dab9fd53af130925dce51b461dc4de))
+
 ## [0.5.0](https://github.com/thaynes43/cigar-journal/compare/v0.4.2...v0.5.0) (2026-08-27)
 
 
