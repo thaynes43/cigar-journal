@@ -15,7 +15,9 @@ export interface SmokeContext {
 // The central aggregate (ADR-002). `cigar_id` is NOT NULL — the catalog
 // invariant. `smoked_at` carries its own provenance/precision. `original_markdown`
 // is immutable once set (enforced in @cj/domain, not by a DB trigger). `search`
-// is a generated tsvector over the narrative + impression for FTS.
+// is a generated tsvector over all journal prose — title, narrative, impression,
+// construction notes, and imported original markdown — weighted by signal (see
+// migration 0004); progression verbatim is searched via an EXISTS clause instead.
 export const smokes = pgTable("smokes", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id")
@@ -53,7 +55,11 @@ export const smokes = pgTable("smokes", {
   originalMarkdown: text("original_markdown"),
   version: integer("version").notNull().default(1),
   search: tsvector("search").generatedAlwaysAs(
-    sql`to_tsvector('english', coalesce(journal_narrative, '') || ' ' || coalesce(impression, ''))`,
+    sql`setweight(to_tsvector('english', coalesce(journal_title, '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(impression, '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(journal_narrative, '')), 'B') ||
+        setweight(to_tsvector('english', coalesce(construction_notes, '')), 'C') ||
+        setweight(to_tsvector('english', coalesce(original_markdown, '')), 'D')`,
   ),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

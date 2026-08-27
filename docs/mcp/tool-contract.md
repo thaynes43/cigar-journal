@@ -48,6 +48,15 @@ Preserve uncertainty: omit ratings, vitolas, times, pairings, blend details,
 or tasting stages that were never established — sparse is correct. Reuse the
 same clientRequestId when retrying a mutation. The server identifies the
 user from the authorization context; never supply or infer a user id.
+
+Field conventions:
+- rating is an integer 0-100; omit unless the user stated a number, never invent one.
+- approximatePosition and any position is a 0-1 fraction through the smoke (0 = light, 1 = nub).
+- descriptors are normalized kebab-case tags; specificDescriptors are the user's exact, unusual words kept verbatim.
+- smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time.
+- get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
+- search_cigars guidance: single_match (proceed), multiple_matches (ask the user), brand_match (ask for the line/vitola), no_match (proceed; a described save creates the cigar).
+- Combine related corrections into one update_smoke call rather than several.
 ```
 
 Guidance, not enforcement — the server validates every request regardless.
@@ -116,12 +125,22 @@ result:
       type: NC
       verification: verified
       userSmokeCount: 3        # present only with journal:read
-  guidance: single_match       # single_match | multiple_matches | no_match
+  guidance: single_match       # single_match | multiple_matches | brand_match | no_match
 ```
 
-`multiple_matches`: ask the user naturally (vitola usually disambiguates).
-`no_match`: proceed — `save_smoke` creates the cigar from described
-attributes; do not retry search with invented details.
+Guidance is the client's instruction for what to do next:
+
+- `single_match`: proceed with the top match. Emitted whenever the top hit is
+  an exact (case-insensitive) canonical-name match — remaining fuzzy hits are
+  still listed but the exact one leads — or when a single fuzzy candidate
+  stands alone.
+- `multiple_matches`: several fuzzy candidates and no clean winner — ask the
+  user naturally (vitola usually disambiguates).
+- `brand_match`: the query names only a known brand, not a specific product.
+  `matches` are that brand's catalogued cigars; ask the user for the line or
+  vitola before resolving.
+- `no_match`: proceed — `save_smoke` creates the cigar from described
+  attributes; do not retry search with invented details.
 
 ## get_cigar — read
 
@@ -168,7 +187,9 @@ arguments:                     # all optional; combine freely
   cigarId: cg_01j9x2
   brand: Davidoff
   descriptor: bready           # matches normalized descriptors
-  text: sweeter than           # FTS over narrative + verbatim observations
+  text: sweeter than           # FTS over journal title + narrative, impression,
+                               # construction notes, imported original markdown,
+                               # and progression verbatim
   smokedAfter: "2026-07-01"
   minRating: null
   limit: 10                    # default 10, max 25; newest first

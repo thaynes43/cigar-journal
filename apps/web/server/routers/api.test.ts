@@ -42,7 +42,10 @@ describe("tRPC API", () => {
   });
 
   it("runs a save → list → get → update → delete round trip, stamping manual provenance", async () => {
-    const cigarId = await h.seedCigar({ canonicalName: `Round Trip ${newRequestId()}`, brand: "Padron" });
+    const cigarId = await h.seedCigar({
+      canonicalName: `Round Trip ${newRequestId()}`,
+      brand: "Padron",
+    });
     const a = caller(h.deps, userA);
 
     const saved = await a.smokes.save({
@@ -120,7 +123,13 @@ describe("tRPC API", () => {
 
     const attempts: (() => Promise<unknown>)[] = [
       () => b.smokes.get({ smokeId }),
-      () => b.smokes.update({ clientRequestId: newRequestId(), smokeId, expectedVersion: 1, changes: { assessment: { rating: 1 } } }),
+      () =>
+        b.smokes.update({
+          clientRequestId: newRequestId(),
+          smokeId,
+          expectedVersion: 1,
+          changes: { assessment: { rating: 1 } },
+        }),
       () => b.smokes.delete({ smokeId }),
     ];
     for (const attempt of attempts) {
@@ -135,17 +144,22 @@ describe("tRPC API", () => {
     expect(still.version).toBe(1);
   });
 
-  it("surfaces cigar search guidance shapes (single / multiple / no match)", async () => {
+  it("surfaces cigar search guidance shapes (single / brand / no match)", async () => {
     await h.seedCigar({ canonicalName: "Bolivar Belicosos Finos", brand: "Bolivar" });
     await h.seedCigar({ canonicalName: "Montecristo Edmundo", brand: "Montecristo" });
     await h.seedCigar({ canonicalName: "Montecristo No. 2", brand: "Montecristo" });
     const a = caller(h.deps, userA);
 
-    expect((await a.cigars.search({ query: "Bolivar Belicosos Finos" })).guidance).toBe("single_match");
+    // Exact canonical name → single_match.
+    expect((await a.cigars.search({ query: "Bolivar Belicosos Finos" })).guidance).toBe(
+      "single_match",
+    );
 
-    const multiple = await a.cigars.search({ query: "Montecristo" });
-    expect(multiple.guidance).toBe("multiple_matches");
-    expect(multiple.matches.length).toBeGreaterThanOrEqual(2);
+    // A bare brand name → brand_match, returning that brand's cigars.
+    const brand = await a.cigars.search({ query: "Montecristo" });
+    expect(brand.guidance).toBe("brand_match");
+    expect(brand.matches.length).toBeGreaterThanOrEqual(2);
+    expect(brand.matches.every((m) => m.brand === "Montecristo")).toBe(true);
 
     expect((await a.cigars.search({ query: "qqqq no such brand zzzz" })).guidance).toBe("no_match");
   });

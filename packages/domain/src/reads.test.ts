@@ -21,12 +21,23 @@ describe("read services", () => {
   });
 
   it("getSmoke returns the full aggregate to its owner and hides it from others", async () => {
-    const cigarId = await h.seedCigar({ canonicalName: "Trinidad Fundadores", brand: "Trinidad", type: "CC" });
+    const cigarId = await h.seedCigar({
+      canonicalName: "Trinidad Fundadores",
+      brand: "Trinidad",
+      type: "CC",
+    });
     const saved = await saveSmoke(h.deps, userA, {
       clientRequestId: newRequestId(),
       cigar: { cigarId },
       overallDescriptors: ["honey", "hay"],
-      progression: [{ stage: "opening", approximatePosition: 0.1, descriptors: ["honey"], verbatim: "Sweet start." }],
+      progression: [
+        {
+          stage: "opening",
+          approximatePosition: 0.1,
+          descriptors: ["honey"],
+          verbatim: "Sweet start.",
+        },
+      ],
       assessment: { rating: 88, liked: true, impression: "Elegant." },
       journal: { title: "Fundadores", narrative: "A classic light Cuban." },
     });
@@ -36,12 +47,17 @@ describe("read services", () => {
     expect(view.progression[0]!.approximatePosition).toBe(0.1);
     expect(view.assessment.rating).toBe(88);
 
-    const error = await getSmoke(h.deps, userB, { smokeId: saved.smoke.smokeId }).catch((e: unknown) => e);
+    const error = await getSmoke(h.deps, userB, { smokeId: saved.smoke.smokeId }).catch(
+      (e: unknown) => e,
+    );
     expect(error).toBeInstanceOf(SmokeNotFoundError);
   });
 
   it("queryMySmokes filters by descriptor and full-text, newest first, scoped to the caller", async () => {
-    const cigarId = await h.seedCigar({ canonicalName: "Liga Privada No. 9", brand: "Drew Estate" });
+    const cigarId = await h.seedCigar({
+      canonicalName: "Liga Privada No. 9",
+      brand: "Drew Estate",
+    });
 
     h.setNow(new Date("2026-06-01T12:00:00Z"));
     await saveSmoke(h.deps, userA, {
@@ -56,7 +72,9 @@ describe("read services", () => {
       clientRequestId: newRequestId(),
       cigar: { cigarId },
       overallDescriptors: ["espresso"],
-      progression: [{ stage: "middle", descriptors: ["bready"], verbatim: "A bready middle third." }],
+      progression: [
+        { stage: "middle", descriptors: ["bready"], verbatim: "A bready middle third." },
+      ],
       journal: { narrative: "Drier today, more toast." },
     });
 
@@ -83,24 +101,62 @@ describe("read services", () => {
     expect(all.smokes[0]!.smokeId).toBe(recent.smoke.smokeId); // newest first
   });
 
-  it("searchCigars gives single/multiple/no-match guidance via trigram", async () => {
+  it("full-text finds an imported smoke whose prose lives only in original_markdown", async () => {
+    const cigarId = await h.seedCigar({
+      canonicalName: "Padron 1964 Anniversary",
+      brand: "Padron",
+    });
+    // Imported shape: narrative/impression null; content is in original_markdown.
+    const imported = await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      provenance: { source: "legacy-import", client: "nc-reviews/padron/1964.md#1" },
+      originalMarkdown:
+        "## Review 1 - Torpedo\n\nBurn started off beautifully and stayed razor sharp.",
+    });
+
+    const byText = await queryMySmokes(h.deps, userA, { text: "burn" });
+    expect(byText.smokes.map((s) => s.smokeId)).toContain(imported.smoke.smokeId);
+  });
+
+  it("searchCigars gives single/multiple/brand/no-match guidance via trigram", async () => {
     await h.seedCigar({ canonicalName: "Ashton VSG Sorcerer", brand: "Ashton" });
     await h.seedCigar({ canonicalName: "Atabey Divinos", brand: "Atabey" });
     await h.seedCigar({ canonicalName: "Atabey Ritos", brand: "Atabey" });
 
-    const single = await searchCigars(h.deps, userA, { query: "Ashton VSG Sorcerer" });
+    // Exact (case-insensitive) canonical hit → single_match, even mixed-case.
+    const single = await searchCigars(h.deps, userA, { query: "ashton vsg sorcerer" });
     expect(single.guidance).toBe("single_match");
+    expect(single.matches[0]!.canonicalName).toBe("Ashton VSG Sorcerer");
 
-    const multiple = await searchCigars(h.deps, userA, { query: "Atabey" });
-    expect(multiple.guidance).toBe("multiple_matches");
-    expect(multiple.matches.length).toBeGreaterThanOrEqual(2);
+    // A bare brand → brand_match, returning that brand's cigars to disambiguate.
+    const brand = await searchCigars(h.deps, userA, { query: "Atabey" });
+    expect(brand.guidance).toBe("brand_match");
+    expect(brand.matches.length).toBe(2);
+    expect(brand.matches.every((m) => m.brand === "Atabey")).toBe(true);
 
     const none = await searchCigars(h.deps, userA, { query: "zzzzz nonexistent brand" });
     expect(none.guidance).toBe("no_match");
   });
 
+  it("searchCigars returns single_match with trailing fuzzy hits on an exact top match", async () => {
+    // An exact canonical hit plus a near-name that also trigram-matches.
+    await h.seedCigar({ canonicalName: "Montecristo No. 2", brand: "Montecristo" });
+    await h.seedCigar({ canonicalName: "Montecristo No. 4", brand: "Montecristo" });
+
+    const result = await searchCigars(h.deps, userA, { query: "Montecristo No. 2" });
+    expect(result.guidance).toBe("single_match");
+    expect(result.matches[0]!.canonicalName).toBe("Montecristo No. 2");
+    // The other fuzzy hit is still listed, not dropped.
+    expect(result.matches.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("getCigar computes a personal profile over multiple smokes", async () => {
-    const cigarId = await h.seedCigar({ canonicalName: "Fuente Fuente OpusX", brand: "Arturo Fuente", type: "NC" });
+    const cigarId = await h.seedCigar({
+      canonicalName: "Fuente Fuente OpusX",
+      brand: "Arturo Fuente",
+      type: "NC",
+    });
 
     const ratings = [84, 90, 88];
     const dates = ["2026-01-10T12:00:00Z", "2026-03-20T12:00:00Z", "2026-05-30T12:00:00Z"];

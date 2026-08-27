@@ -15,7 +15,13 @@ import {
   type SaveSmokeInput,
   type UpdateSmokeInput,
 } from "@cj/domain";
-import { SERVER_INFO, INSTRUCTIONS, PERSONAL_SCOPE, TOOL_SCOPES, type ToolName } from "./constants.js";
+import {
+  SERVER_INFO,
+  INSTRUCTIONS,
+  PERSONAL_SCOPE,
+  TOOL_SCOPES,
+  type ToolName,
+} from "./constants.js";
 import type { McpAuthExtra } from "./auth.js";
 import {
   searchCigarsSchema,
@@ -79,7 +85,12 @@ async function run(
     return result;
   } catch (error) {
     const payload = toErrorPayload(error, correlationId);
-    mcpEvent("tool_error", { tool, correlationId, code: payload.code, latencyMs: Date.now() - started });
+    mcpEvent("tool_error", {
+      tool,
+      correlationId,
+      code: payload.code,
+      latencyMs: Date.now() - started,
+    });
     return errorResult(payload);
   }
 }
@@ -99,7 +110,11 @@ function toSaveInput(args: SaveSmokeArgs, clientId: string, correlationId: strin
   };
 }
 
-function toUpdateInput(args: UpdateSmokeArgs, clientId: string, correlationId: string): UpdateSmokeInput {
+function toUpdateInput(
+  args: UpdateSmokeArgs,
+  clientId: string,
+  correlationId: string,
+): UpdateSmokeInput {
   return {
     clientRequestId: args.clientRequestId,
     smokeId: args.smokeId,
@@ -120,13 +135,16 @@ export function createMcpServer(deps: Deps): McpServer {
     {
       title: "Search cigars",
       description:
-        "Resolve a conversational cigar mention to catalog entries by fuzzy name. Use when a cigar is named or asked about, not for the user's own history.",
+        "Resolve a conversational cigar mention to catalog entries by fuzzy name. Use when a cigar is named or asked about, not for the user's own history. Read `guidance`: single_match (proceed with the top hit), brand_match (only a brand was named — ask for the line/vitola), multiple_matches (ask the user), no_match (proceed; a described save_smoke creates the cigar).",
       inputSchema: searchCigarsSchema,
       annotations: { readOnlyHint: true, title: "Search cigars" },
     },
     (args, extra) =>
       run("search_cigars", extra.authInfo, async ({ principal, scopes }) => {
-        const result = await searchCigars(deps, principal, { query: args.query, limit: args.limit });
+        const result = await searchCigars(deps, principal, {
+          query: args.query,
+          limit: args.limit,
+        });
         const personal = scopes.includes(PERSONAL_SCOPE);
         const matches = result.matches.map((m) => ({
           cigarId: m.cigarId,
@@ -159,7 +177,9 @@ export function createMcpServer(deps: Deps): McpServer {
         // personalProfile is present (possibly null) only with journal:read;
         // otherwise the key is omitted entirely — data never exceeds scope.
         return jsonResult(
-          personal ? { cigar: result.cigar, personalProfile: result.personalProfile } : { cigar: result.cigar },
+          personal
+            ? { cigar: result.cigar, personalProfile: result.personalProfile }
+            : { cigar: result.cigar },
         );
       }),
   );
@@ -169,7 +189,7 @@ export function createMcpServer(deps: Deps): McpServer {
     {
       title: "Get my smokes",
       description:
-        "Search the authenticated user's own smoke history, newest first, as compact summaries. Use for comparisons like what they thought last time or what they have called bready.",
+        "Search the authenticated user's own smoke history, newest first, as compact summaries. Use for comparisons like what they thought last time or what they have called bready. The `text` filter is full-text over journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.",
       inputSchema: getMySmokesSchema,
       annotations: { readOnlyHint: true, title: "Get my smokes" },
     },
@@ -211,7 +231,12 @@ export function createMcpServer(deps: Deps): McpServer {
       description:
         "Persist one finished smoke, called once when the user signals the cigar is over — never per observation. Omit anything the user did not establish; sparse is correct.",
       inputSchema: saveSmokeSchema,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Save smoke" },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Save smoke",
+      },
     },
     (args, extra) =>
       run("save_smoke", extra.authInfo, async ({ principal, clientId }, correlationId) => {
@@ -240,11 +265,20 @@ export function createMcpServer(deps: Deps): McpServer {
       description:
         "Apply explicit, field-scoped corrections to an existing smoke (rating, cigar, appended stages). Reuse the clientRequestId on retries; unlisted fields are never touched.",
       inputSchema: updateSmokeSchema,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Update smoke" },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Update smoke",
+      },
     },
     (args, extra) =>
       run("update_smoke", extra.authInfo, async ({ principal, clientId }, correlationId) => {
-        const result = await updateSmoke(deps, principal, toUpdateInput(args, clientId, correlationId));
+        const result = await updateSmoke(
+          deps,
+          principal,
+          toUpdateInput(args, clientId, correlationId),
+        );
         return jsonResult(result);
       }),
   );

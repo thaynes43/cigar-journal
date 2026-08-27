@@ -42,7 +42,11 @@ function toSmokeView(
   return {
     smokeId: smoke.id,
     version: smoke.version,
-    cigar: { cigarId: cigar.id, canonicalName: cigar.canonicalName, verification: cigar.verification },
+    cigar: {
+      cigarId: cigar.id,
+      canonicalName: cigar.canonicalName,
+      verification: cigar.verification,
+    },
     smokedAt: {
       value: smoke.smokedAt ? smoke.smokedAt.toISOString() : null,
       source: smoke.smokedAtSource,
@@ -77,9 +81,20 @@ function toSmokeView(
 }
 
 // The canonical, complete representation of one Smoke — owner-only.
-export async function getSmoke(deps: Deps, principal: Principal, args: { smokeId: string }): Promise<SmokeView> {
+export async function getSmoke(
+  deps: Deps,
+  principal: Principal,
+  args: { smokeId: string },
+): Promise<SmokeView> {
   const rows = await deps.db
-    .select({ smoke: smokes, cigar: { id: cigars.id, canonicalName: cigars.canonicalName, verification: cigars.verification } })
+    .select({
+      smoke: smokes,
+      cigar: {
+        id: cigars.id,
+        canonicalName: cigars.canonicalName,
+        verification: cigars.verification,
+      },
+    })
     .from(smokes)
     .innerJoin(cigars, eq(smokes.cigarId, cigars.id))
     .where(eq(smokes.id, args.smokeId))
@@ -112,7 +127,8 @@ function smokeConditions(principal: Principal, filters: QueryMySmokesFilters): S
   }
 
   if (filters.text) {
-    // Generated tsvector covers narrative + impression (ADR-003); the EXISTS
+    // Generated tsvector covers all journal prose — title, narrative, impression,
+    // construction notes, imported original markdown (migration 0004); the EXISTS
     // clause extends FTS to progression verbatim per the tool contract.
     conditions.push(
       sql`(${smokes.search} @@ websearch_to_tsquery('english', ${filters.text}) OR EXISTS (
@@ -189,7 +205,30 @@ interface CigarMatchRow {
   user_smoke_count: number | string;
 }
 
-// Resolve conversational cigar mentions via trigram matching.
+function toCigarMatch(row: CigarMatchRow): CigarMatch {
+  return {
+    cigarId: row.id,
+    canonicalName: row.canonical_name,
+    brand: row.brand,
+    line: row.line,
+    vitola: {
+      name: row.vitola_name,
+      lengthInches: row.length_inches != null ? Number(row.length_inches) : null,
+      ringGauge: row.ring_gauge,
+    },
+    type: row.type,
+    verification: row.verification,
+    userSmokeCount: Number(row.user_smoke_count),
+  };
+}
+
+// Resolve conversational cigar mentions via trigram matching. Guidance tells the
+// client how to act (documented in docs/mcp/tool-contract.md search_cigars):
+//   single_match    — top hit is an exact canonical name; proceed with it.
+//   brand_match     — the query is only a brand name; ask the user for the line
+//                     or vitola. matches are that brand's catalogued cigars.
+//   multiple_matches— several fuzzy hits and no clean brand/exact winner; ask.
+//   no_match        — nothing plausible; a described save creates the cigar.
 export async function searchCigars(
   deps: Deps,
   principal: Principal,
@@ -206,25 +245,30 @@ export async function searchCigars(
     ORDER BY GREATEST(similarity(c.canonical_name, ${query}), similarity(coalesce(c.brand, ''), ${query})) DESC
     LIMIT ${limit}
   `);
-  const rows = result.rows as unknown as CigarMatchRow[];
+  const matches: CigarMatch[] = (result.rows as unknown as CigarMatchRow[]).map(toCigarMatch);
 
-  const matches: CigarMatch[] = rows.map((row) => ({
-    cigarId: row.id,
-    canonicalName: row.canonical_name,
-    brand: row.brand,
-    line: row.line,
-    vitola: {
-      name: row.vitola_name,
-      lengthInches: row.length_inches != null ? Number(row.length_inches) : null,
-      ringGauge: row.ring_gauge,
-    },
-    type: row.type,
-    verification: row.verification,
-    userSmokeCount: Number(row.user_smoke_count),
-  }));
+  if (matches.length === 0) return { matches, guidance: "no_match" };
 
-  const guidance =
-    matches.length === 0 ? "no_match" : matches.length === 1 ? "single_match" : "multiple_matches";
+  // An exact (case-insensitive) canonical-name hit is a confident resolution even
+  // when weaker fuzzy hits trail it — proceed with the top match, keep the rest.
+  if (matches[0]!.canonicalName.toLowerCase() === query.toLowerCase()) {
+    return { matches, guidance: "single_match" };
+  }
+
+  // The query names only a brand (no specific product): return that brand's
+  // catalogued cigars and ask the user to narrow to a line/vitola.
+  const brandRows = await deps.db.execute(sql`
+    SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches, c.ring_gauge, c.type, c.verification,
+      (SELECT count(*) FROM smokes s WHERE s.cigar_id = c.id AND s.user_id = ${principal.userId}) AS user_smoke_count
+    FROM cigars c
+    WHERE lower(c.brand) = lower(${query})
+    ORDER BY c.canonical_name
+    LIMIT ${limit}
+  `);
+  const brandMatches = (brandRows.rows as unknown as CigarMatchRow[]).map(toCigarMatch);
+  if (brandMatches.length > 0) return { matches: brandMatches, guidance: "brand_match" };
+
+  const guidance = matches.length === 1 ? "single_match" : "multiple_matches";
   return { matches, guidance };
 }
 
@@ -310,7 +354,11 @@ function computeProfile(
 }
 
 // Full catalog detail plus the caller's Personal Profile (null if never smoked).
-export async function getCigar(deps: Deps, principal: Principal, args: { cigarId: string }): Promise<GetCigarResult> {
+export async function getCigar(
+  deps: Deps,
+  principal: Principal,
+  args: { cigarId: string },
+): Promise<GetCigarResult> {
   const rows = await deps.db.select().from(cigars).where(eq(cigars.id, args.cigarId)).limit(1);
   const cigar = rows[0];
   if (!cigar) throw new CigarNotFoundError();

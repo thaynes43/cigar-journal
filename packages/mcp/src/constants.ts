@@ -38,6 +38,11 @@ export function isToolName(name: string): name is ToolName {
 
 // Verbatim from docs/mcp/tool-contract.md "Server instructions" block. Reproduced
 // exactly (including line breaks) — this is guidance the model reads, not code.
+//
+// The literal below is intact and begins "This server manages…". A ChatGPT client
+// once rendered it starting mid-word ("ersonal cigar journal…"), dropping the
+// leading characters; that is client-side display truncation, not a defect in this
+// string (verified against this constant and the mcp.test.ts equality assertion).
 export const INSTRUCTIONS = `This server manages the authenticated user's personal cigar journal.
 During an active smoking conversation, converse naturally; do not save
 observations as they happen. Use search_cigars/get_cigar when identification
@@ -47,4 +52,13 @@ cigar is finished, synthesize the conversation into one save_smoke call.
 Preserve uncertainty: omit ratings, vitolas, times, pairings, blend details,
 or tasting stages that were never established — sparse is correct. Reuse the
 same clientRequestId when retrying a mutation. The server identifies the
-user from the authorization context; never supply or infer a user id.`;
+user from the authorization context; never supply or infer a user id.
+
+Field conventions:
+- rating is an integer 0-100; omit unless the user stated a number, never invent one.
+- approximatePosition and any position is a 0-1 fraction through the smoke (0 = light, 1 = nub).
+- descriptors are normalized kebab-case tags; specificDescriptors are the user's exact, unusual words kept verbatim.
+- smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time.
+- get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
+- search_cigars guidance: single_match (proceed), multiple_matches (ask the user), brand_match (ask for the line/vitola), no_match (proceed; a described save creates the cigar).
+- Combine related corrections into one update_smoke call rather than several.`;
