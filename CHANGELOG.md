@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/thaynes43/cigar-journal/compare/v0.6.0...v0.7.0) (2026-08-27)
+
+
+### Features
+
+* **web:** catalog browse, journal sparkline, smoke-title nit, doc fix ([#40](https://github.com/thaynes43/cigar-journal/issues/40)) ([2c2dedb](https://github.com/thaynes43/cigar-journal/commit/2c2dedbb1eb8d4d8110b4e3c87dd6691745cc88b))
+
 ## [0.6.0](https://github.com/thaynes43/cigar-journal/compare/v0.5.0...v0.6.0) (2026-08-27)
 
 
