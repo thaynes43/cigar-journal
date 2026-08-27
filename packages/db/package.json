@@ -5,10 +5,13 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./schema": "./src/schema/index.ts"
+    "./schema": "./src/schema/index.ts",
+    "./testing": "./src/testing/embedded-pg.ts",
+    "./migrate": "./src/scripts/migrate.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migrate": "tsx src/scripts/migrate.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.44.0",
@@ -17,6 +20,8 @@
   "devDependencies": {
     "@cj/config": "workspace:*",
     "@types/pg": "^8.15.0",
-    "drizzle-kit": "^0.31.0"
+    "drizzle-kit": "^0.31.0",
+    "embedded-postgres": "16.14.0-beta.17",
+    "tsx": "^4.19.0"
   }
 }

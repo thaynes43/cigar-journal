@@ -7,3 +7,6 @@ packages:
 # non-interactive. Same lesson the spike carried — keep the gate, extend the list.
 allowBuilds:
   esbuild: true
+  # Ships the Postgres 16 binaries the test suite runs against (no Docker in
+  # this env); its postinstall rehydrates the shared-library symlinks.
+  "@embedded-postgres/linux-x64": true

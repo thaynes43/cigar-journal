@@ -9,7 +9,12 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@cj/db": "workspace:*",
+    "drizzle-orm": "^0.44.0"
+  },
   "devDependencies": {
-    "@cj/config": "workspace:*"
+    "@cj/config": "workspace:*",
+    "embedded-postgres": "16.14.0-beta.17"
   }
 }
