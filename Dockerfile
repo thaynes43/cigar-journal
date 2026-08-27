@@ -51,6 +51,11 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 FROM build AS import
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm deploy --legacy --filter=@cj/importer --prod /app/importer
+# pnpm deploy leaves workspace deps as package.json stubs (no sources) under
+# BuildKit; these raw-TS packages must ship whole for tsx to resolve them.
+RUN cp -r /app/packages/db/src /app/importer/node_modules/@cj/db/src && \
+    cp -r /app/packages/db/migrations /app/importer/node_modules/@cj/db/migrations && \
+    cp -r /app/packages/domain/src /app/importer/node_modules/@cj/domain/src
 RUN mkdir -p /app/importer/archive && cp -r /app/archive/docs /app/importer/archive/docs
 
 # --- runtime: minimal image; the role is selected by the container command ---
