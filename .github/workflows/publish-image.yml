@@ -1,0 +1,88 @@
+name: publish-image
+# Build, push, and keyless-sign the production Cigar Journal image (ADR-001:
+# release-please -> ghcr -> keyless cosign -> Kyverno verification).
+#
+# Triggers:
+#   release: published    -> push tags vX.Y.Z + sha-<short>, then cosign sign.
+#     release-please tags vX.Y.Z with an App token so this event actually fires
+#     (a GITHUB_TOKEN-created release would not — ADR-001).
+#   workflow_dispatch     -> manual push of the current ref (tag sha-<short>).
+#   pull_request (paths)  -> BUILD ONLY, no push. Push events from the bot's API
+#     merges are unreliable in this repo, so the PR build is the reliable proof
+#     that the image still builds.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/publish-image.yml"
+
+# packages:write pushes to GHCR (publishing triggers nothing downstream, so
+# GITHUB_TOKEN is sufficient). id-token:write mints the OIDC token cosign uses
+# for keyless signing; the signature's subject is this workflow's identity,
+# which the haynes-ops Kyverno policy verifies.
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  IMAGE: ghcr.io/thaynes43/cigar-journal
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # vX.Y.Z only on a release; sha-<short> always (build provenance).
+          tags: |
+            type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
+            type=sha,prefix=sha-,format=short
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # PR builds prove the image compiles; they must not touch the registry.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless signing over the pushed digest (covers every tag on it). The
+      # OIDC identity is this workflow, so a verifier pins the signer to this
+      # repo's publish-image.yml rather than a key that could leak.
+      - name: Sign the published image (keyless)
+        if: github.event_name != 'pull_request'
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
