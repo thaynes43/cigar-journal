@@ -10,3 +10,12 @@ export function smokeRequestId(relpath: string, reviewNumber: number): string {
 export function purchaseRequestId(rowNumber: number): string {
   return `legacy-purchase:purchase-history.md#${rowNumber}`;
 }
+
+// Ledger-snapshot reconciliation keys (flow 006): the snapshot date plus the
+// 1-based CSV data-row ordinal. Distinct namespace from the archive
+// `purchase-history.md` keys so a ledger insert of the same purchase never
+// collides with (or replays as) its archive counterpart — the reconciler
+// decides matches by content, the key only guards re-runs of the ledger itself.
+export function ledgerPurchaseRequestId(rowOrdinal: number): string {
+  return `ledger-2026-08-27#${rowOrdinal}`;
+}

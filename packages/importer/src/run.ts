@@ -192,7 +192,10 @@ export async function runImport(options: RunOptions): Promise<ImportReport> {
       continue;
     }
 
-    const result = await writePurchase(deps, principal, row);
+    const result = await writePurchase(deps, principal, row, {
+      clientRequestId: purchaseRequestId(row.rowNumber),
+      ref,
+    });
     if (result.status === "imported") report.purchases.imported += 1;
     else if (result.status === "replayed") report.purchases.replayed += 1;
     else report.purchases.skipped += 1;
