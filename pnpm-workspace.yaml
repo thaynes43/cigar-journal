@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Build scripts are opt-in since pnpm 10. esbuild (pulled in transitively by the
+# toolchain) ships a native binary via a build script; allow it so installs stay
+# non-interactive. Same lesson the spike carried — keep the gate, extend the list.
+allowBuilds:
+  esbuild: true

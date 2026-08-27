@@ -2,3 +2,11 @@ archive/site/
 .cache/
 __pycache__/
 .venv/
+
+# Node / pnpm workspace
+node_modules/
+.next/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
