@@ -8,6 +8,10 @@ family of apps; will live at cigars.haynesnetwork.com.
 
 ## Repository
 
+- [`apps/`](apps/) — deployables. `web` is the Next.js site (App Router,
+  standalone).
+- [`packages/`](packages/) — internal packages exporting raw TS: `config`
+  (shared tsconfig/eslint), `domain` (`@cj/domain`), `db` (`@cj/db`).
 - [`archive/`](archive/README.md) — the original markdown ledger, still
   published at [hayneslab.net/cigar-journal](https://hayneslab.net/cigar-journal/)
   and slated for import as seed data.
@@ -16,5 +20,5 @@ family of apps; will live at cigars.haynesnetwork.com.
 
 ## Status
 
-Bootstrapping. The design documents in `docs/` are the current work front; no
-application code exists yet.
+Bootstrapping. The design documents in `docs/` are the current work front; the
+Phase 1 monorepo scaffold is in place, with slices building on it next.
