@@ -199,6 +199,16 @@ export interface SmokeView {
   originalMarkdown: string | null;
 }
 
+// Which prose field a text search hit — the provenance behind a match, so the
+// client can show WHY a result matched without a follow-up get_smoke.
+export type MatchField =
+  | "title"
+  | "narrative"
+  | "impression"
+  | "constructionNotes"
+  | "originalMarkdown"
+  | "progression";
+
 export interface SmokeSummary {
   smokeId: string;
   cigar: { cigarId: string; canonicalName: string };
@@ -207,6 +217,12 @@ export interface SmokeSummary {
   liked: boolean | null;
   descriptors: string[];
   summary: string | null;
+  // Match provenance — present ONLY when the `text` filter was used. `matchedIn`
+  // lists the prose field(s) the search hit; `matchSnippet` is a short plain-text
+  // excerpt around the hit (~160 chars). Both are omitted entirely for non-text
+  // queries, so a filter-only or descriptor query is byte-for-byte unchanged.
+  matchedIn?: MatchField[];
+  matchSnippet?: string | null;
 }
 
 export interface QueryMySmokesFilters {

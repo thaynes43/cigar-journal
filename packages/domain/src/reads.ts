@@ -13,6 +13,7 @@ import type {
   QueryMySmokesFilters,
   QueryMySmokesResult,
   SmokeSummary,
+  MatchField,
   SearchCigarsArgs,
   SearchCigarsResult,
   CigarMatch,
@@ -27,6 +28,18 @@ const DEFAULT_SMOKE_LIMIT = 10;
 const MAX_SMOKE_LIMIT = 25;
 const DEFAULT_SEARCH_LIMIT = 5;
 const MAX_SEARCH_LIMIT = 10;
+
+// Match-provenance snippet rendering. We use ts_headline per prose field (not
+// over the combined weighted `search` vector — ts_headline can't attribute a
+// fragment back to one weighted source, so a per-field call is the pragmatic
+// choice) and wrap each hit in sentinel delimiters we strip in JS, yielding a
+// PLAIN-TEXT excerpt (the snippet is provenance, not display markup). The
+// sentinels are code points that never occur in cigar prose; stripping them is
+// a no-op on the rare chance they do.
+const HL_START = "⟪"; // ⟪
+const HL_STOP = "⟫"; // ⟫
+const HEADLINE_OPTS = `StartSel=${HL_START},StopSel=${HL_STOP},MaxWords=24,MinWords=10,MaxFragments=1`;
+const MATCH_SNIPPET_MAX = 160;
 
 function clamp(value: number | undefined, fallback: number, max: number): number {
   const n = value ?? fallback;
@@ -152,6 +165,105 @@ function deriveSummary(smoke: SmokeRow): string | null {
   return null;
 }
 
+// Strip the ts_headline sentinels, collapse whitespace, and cap at ~160 chars —
+// the excerpt is provenance for the model, not rendered markup.
+function cleanSnippet(raw: string | null): string | null {
+  if (raw == null) return null;
+  const stripped = raw
+    .replace(/[⟪⟫]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (stripped.length === 0) return null;
+  if (stripped.length <= MATCH_SNIPPET_MAX) return stripped;
+  return `${stripped.slice(0, MATCH_SNIPPET_MAX - 1).trimEnd()}…`;
+}
+
+interface MatchProvenanceRow {
+  id: string;
+  m_title: boolean;
+  m_narrative: boolean;
+  m_impression: boolean;
+  m_construction: boolean;
+  m_markdown: boolean;
+  m_progression: boolean;
+  snippet: string | null;
+}
+
+interface MatchProvenance {
+  matchedIn: MatchField[];
+  matchSnippet: string | null;
+}
+
+// For a page of already-matched smokes, attribute the text hit to its prose
+// field(s) and produce one excerpt. One extra indexed-PK round trip, run only
+// when `text` was used and only over the ≤limit returned ids. Per-field matches
+// are consistent with the combined `search` vector: setweight changes weights,
+// not which lexemes are present, so `search @@ q` is true iff some field here is
+// (progression is the EXISTS clause, mirroring queryMySmokes).
+async function matchProvenance(
+  deps: Deps,
+  ids: string[],
+  text: string,
+): Promise<Map<string, MatchProvenance>> {
+  const map = new Map<string, MatchProvenance>();
+  if (ids.length === 0) return map;
+
+  const q = sql`websearch_to_tsquery('english', ${text})`;
+  const opts = HEADLINE_OPTS;
+  const idList = sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `,
+  );
+
+  const result = await deps.db.execute(sql`
+    SELECT s.id AS id,
+      to_tsvector('english', coalesce(s.journal_title, '')) @@ ${q} AS m_title,
+      to_tsvector('english', coalesce(s.journal_narrative, '')) @@ ${q} AS m_narrative,
+      to_tsvector('english', coalesce(s.impression, '')) @@ ${q} AS m_impression,
+      to_tsvector('english', coalesce(s.construction_notes, '')) @@ ${q} AS m_construction,
+      to_tsvector('english', coalesce(s.original_markdown, '')) @@ ${q} AS m_markdown,
+      EXISTS (
+        SELECT 1 FROM smoke_progression p
+        WHERE p.smoke_id = s.id
+          AND to_tsvector('english', coalesce(p.verbatim, '')) @@ ${q}
+      ) AS m_progression,
+      CASE
+        WHEN to_tsvector('english', coalesce(s.journal_title, '')) @@ ${q}
+          THEN ts_headline('english', s.journal_title, ${q}, ${opts})
+        WHEN to_tsvector('english', coalesce(s.journal_narrative, '')) @@ ${q}
+          THEN ts_headline('english', s.journal_narrative, ${q}, ${opts})
+        WHEN to_tsvector('english', coalesce(s.impression, '')) @@ ${q}
+          THEN ts_headline('english', s.impression, ${q}, ${opts})
+        WHEN to_tsvector('english', coalesce(s.construction_notes, '')) @@ ${q}
+          THEN ts_headline('english', s.construction_notes, ${q}, ${opts})
+        WHEN to_tsvector('english', coalesce(s.original_markdown, '')) @@ ${q}
+          THEN ts_headline('english', s.original_markdown, ${q}, ${opts})
+        ELSE (
+          SELECT ts_headline('english', p.verbatim, ${q}, ${opts})
+          FROM smoke_progression p
+          WHERE p.smoke_id = s.id
+            AND to_tsvector('english', coalesce(p.verbatim, '')) @@ ${q}
+          ORDER BY p.ordinal
+          LIMIT 1
+        )
+      END AS snippet
+    FROM smokes s
+    WHERE s.id IN (${idList})
+  `);
+
+  for (const row of result.rows as unknown as MatchProvenanceRow[]) {
+    const matchedIn: MatchField[] = [];
+    if (row.m_title) matchedIn.push("title");
+    if (row.m_narrative) matchedIn.push("narrative");
+    if (row.m_impression) matchedIn.push("impression");
+    if (row.m_construction) matchedIn.push("constructionNotes");
+    if (row.m_markdown) matchedIn.push("originalMarkdown");
+    if (row.m_progression) matchedIn.push("progression");
+    map.set(row.id, { matchedIn, matchSnippet: cleanSnippet(row.snippet) });
+  }
+  return map;
+}
+
 // The authenticated user's history — compact summaries, newest first, capped.
 export async function queryMySmokes(
   deps: Deps,
@@ -175,19 +287,36 @@ export async function queryMySmokes(
     .innerJoin(cigars, eq(smokes.cigarId, cigars.id))
     .where(and(...conditions));
 
-  const summaries: SmokeSummary[] = rows.map((row) => ({
-    smokeId: row.smoke.id,
-    cigar: { cigarId: row.cigarId, canonicalName: row.canonicalName },
-    smokedAt: {
-      value: row.smoke.smokedAt ? row.smoke.smokedAt.toISOString() : null,
-      source: row.smoke.smokedAtSource,
-      precision: row.smoke.smokedAtPrecision,
-    },
-    rating: row.smoke.rating,
-    liked: row.smoke.liked,
-    descriptors: row.smoke.overallDescriptors,
-    summary: deriveSummary(row.smoke),
-  }));
+  // Only when the caller ran a text search do we attribute the hit and excerpt it.
+  const provenance = filters.text
+    ? await matchProvenance(
+        deps,
+        rows.map((r) => r.smoke.id),
+        filters.text,
+      )
+    : null;
+
+  const summaries: SmokeSummary[] = rows.map((row) => {
+    const summary: SmokeSummary = {
+      smokeId: row.smoke.id,
+      cigar: { cigarId: row.cigarId, canonicalName: row.canonicalName },
+      smokedAt: {
+        value: row.smoke.smokedAt ? row.smoke.smokedAt.toISOString() : null,
+        source: row.smoke.smokedAtSource,
+        precision: row.smoke.smokedAtPrecision,
+      },
+      rating: row.smoke.rating,
+      liked: row.smoke.liked,
+      descriptors: row.smoke.overallDescriptors,
+      summary: deriveSummary(row.smoke),
+    };
+    if (provenance) {
+      const p = provenance.get(row.smoke.id);
+      summary.matchedIn = p?.matchedIn ?? [];
+      summary.matchSnippet = p?.matchSnippet ?? null;
+    }
+    return summary;
+  });
 
   return { smokes: summaries, totalMatches: Number(totals[0]?.value ?? 0) };
 }

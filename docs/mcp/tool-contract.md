@@ -55,6 +55,7 @@ Field conventions:
 - descriptors are normalized kebab-case tags; specificDescriptors are the user's exact, unusual words kept verbatim.
 - smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time.
 - get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
+- a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - search_cigars guidance: single_match (proceed), multiple_matches (ask the user), brand_match (ask for the line/vitola), no_match (proceed; a described save creates the cigar).
 - Combine related corrections into one update_smoke call rather than several.
 ```
@@ -205,8 +206,19 @@ result:
       summary: >
         Brighter than previous smokes; tangerine sweetness in the middle
         third, cream on the finish.
+      matchedIn: [narrative, progression]   # present ONLY when `text` was used
+      matchSnippet: >                        # short plain-text excerpt (~160 chars)
+        ...much sweeter than the last one, tangerine right in the middle...
   totalMatches: 3
 ```
+
+**Match provenance (text search only).** When the `text` filter is used, each
+result carries `matchedIn` — the prose field(s) the search hit, any of
+`title`, `narrative`, `impression`, `constructionNotes`, `originalMarkdown`,
+`progression` — and `matchSnippet`, a short plain-text excerpt (~160 chars)
+around the hit. Together they let the model show *why* a legacy or imported
+smoke matched without a follow-up `get_smoke`. Both keys are **omitted
+entirely** for non-text queries (descriptor/brand/date/rating filters).
 
 ## get_smoke — read
 
@@ -307,8 +319,12 @@ result:
 **Minimum validity:** a cigar reference plus at least one substantive field
 (non-empty progression, overallDescriptors, journal.narrative, or
 assessment.impression). Everything else may be absent — sparse is correct,
-invented is a defect. If `described` strongly matches an existing cigar the
-server links instead of creating (`cigar_ambiguous` if it can't decide).
+invented is a defect. **`journal.title` is metadata, not content — a title
+alone does not satisfy this minimum** (a title-only save is rejected as a
+`validation_error`; the rule is correct per ADR-002, but the schema
+`.describe()` and server instructions now say so up front). If `described`
+strongly matches an existing cigar the server links instead of creating
+(`cigar_ambiguous` if it can't decide).
 
 ## update_smoke — write, idempotent
 

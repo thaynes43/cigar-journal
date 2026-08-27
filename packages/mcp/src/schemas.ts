@@ -192,7 +192,12 @@ const assessment = z
 
 const journal = z
   .object({
-    title: z.string().nullish().describe("Short title for the entry, if the user framed one."),
+    title: z
+      .string()
+      .nullish()
+      .describe(
+        "Short title for the entry, if the user framed one. A title alone does NOT satisfy minimum content — it is metadata, so pair it with at least one observation, descriptor, impression, or narrative.",
+      ),
     narrative: z
       .string()
       .nullish()
