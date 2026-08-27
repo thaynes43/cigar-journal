@@ -3,7 +3,6 @@ import { vendors, purchases, idempotencyKeys, auditLog } from "@cj/db";
 import { resolveCigar, fingerprint, CigarAmbiguousError, type Deps, type Principal, type Tx } from "@cj/domain";
 import type { ParsedPurchase } from "./purchases-parse.js";
 import type { NeedsReview } from "./report.js";
-import { purchaseRequestId } from "./keys.js";
 
 // Importer-owned purchase writer. Purchases are a separate aggregate root with
 // no domain service (a purchase is an acquisition, not an experience — ADR-002),
@@ -11,6 +10,15 @@ import { purchaseRequestId } from "./keys.js";
 // domain's resolveCigar so purchase-linked cigars uphold the same catalog
 // invariant. Idempotency reuses the idempotency_keys envelope keyed by the
 // deterministic row id, written in the same transaction as the effect.
+//
+// The caller supplies the deterministic key + source ref (archive
+// `purchase-history.md#N` or ledger `ledger-2026-08-27#N`), so both the archive
+// import and the ledger reconciler share this one write path — never a fork.
+
+export interface PurchaseSource {
+  clientRequestId: string; // deterministic idempotency key
+  ref: string; // source ref for audit correlation + needs-review notes
+}
 
 export interface PurchaseWriteResult {
   status: "imported" | "replayed" | "skipped";
@@ -34,14 +42,17 @@ export async function writePurchase(
   deps: Deps,
   principal: Principal,
   purchase: ParsedPurchase,
+  source: PurchaseSource,
 ): Promise<PurchaseWriteResult> {
-  const clientRequestId = purchaseRequestId(purchase.rowNumber);
+  const clientRequestId = source.clientRequestId;
   const requestFingerprint = fingerprint({
     canonicalName: purchase.canonicalName,
     purchasedAt: purchase.purchasedAt,
     quantity: purchase.quantity,
+    packaging: purchase.packaging,
     pricePerStick: purchase.pricePerStick,
     retailer: purchase.retailer,
+    notes: purchase.notes,
   });
 
   try {
@@ -58,7 +69,8 @@ export async function writePurchase(
       const cigar = await resolveCigar(tx, {
         described: {
           canonicalName: purchase.canonicalName,
-          brand: purchase.brand,
+          // An empty brand (the ledger "???" unknown case) resolves as null, not "".
+          brand: purchase.brand.trim() || null,
           type: purchase.type,
           vitola: { name: purchase.vitola, lengthInches: purchase.lengthInches, ringGauge: purchase.ringGauge },
         },
@@ -76,6 +88,7 @@ export async function writePurchase(
           humidorAt: purchase.humidorAt,
           pricePerStick: purchase.pricePerStick,
           vendorId: vendor?.id ?? null,
+          notes: purchase.notes,
         })
         .returning({ id: purchases.id });
       const purchaseId = inserted[0]!.id;
@@ -109,7 +122,7 @@ export async function writePurchase(
         vendorCreated: false,
         note: {
           kind: "purchase",
-          ref: `purchase-history.md#${purchase.rowNumber}`,
+          ref: source.ref,
           reason: `ambiguous cigar match for "${purchase.canonicalName}" → skipped`,
         },
       };

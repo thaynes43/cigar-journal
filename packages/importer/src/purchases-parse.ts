@@ -14,7 +14,8 @@ const EMPTY_PLACEHOLDER = new Set(["-", ""]);
 
 // Known brand drift (archive-format.md + obvious abbreviations). Detection only
 // — the value drives a report note, never a silent rename of the written cigar.
-const BRAND_DRIFT = new Map<string, string>([
+// Exported so the ledger reconciler shares one drift table (flow 006).
+export const BRAND_DRIFT = new Map<string, string>([
   ["lfd", "La Flor Dominicana"],
   ["rockey patel", "Rocky Patel"],
   ["hdm", "Hoyo de Monterrey"],
@@ -45,31 +46,38 @@ export interface ParsedPurchase {
   boxDate: string | null;
   retailer: string | null; // vendor name; null when placeholder
   pricePerStick: string | null; // numeric string for the numeric column
+  notes: string | null; // free-text carried verbatim (ledger "Aging"); null for the archive table
   placeholderNotes: PurchaseFieldNote[]; // flagged placeholders only
   brandDrift: string | null; // suggested canonical when the brand is a known alias
 }
 
-function classify(raw: string): { value: string | null; kind: PlaceholderKind } {
+// Placeholder classification, size/price coercion, and brand normalization are
+// exported so the ledger reconciler applies the exact same rules (flow 006) —
+// one interpretation of the source, never a forked second parser.
+export function classify(raw: string): { value: string | null; kind: PlaceholderKind } {
   const s = raw.trim();
   if (EMPTY_PLACEHOLDER.has(s)) return { value: null, kind: "empty" };
   if (FLAGGED_PLACEHOLDER.has(s.toLowerCase())) return { value: null, kind: "flagged" };
   return { value: s, kind: null };
 }
 
-function parseSize(raw: string | null): { lengthInches: number | null; ringGauge: number | null } {
+export function parseSize(raw: string | null): {
+  lengthInches: number | null;
+  ringGauge: number | null;
+} {
   if (!raw) return { lengthInches: null, ringGauge: null };
   const m = /(\d+(?:\.\d+)?)\s*"?\s*[x×]\s*(\d+)/i.exec(raw);
   if (!m) return { lengthInches: null, ringGauge: null };
   return { lengthInches: Number(m[1]), ringGauge: Number(m[2]) };
 }
 
-function parsePrice(raw: string | null): string | null {
+export function parsePrice(raw: string | null): string | null {
   if (!raw) return null;
   const m = /-?\d+(?:\.\d+)?/.exec(raw.replace(/[$,]/g, ""));
   return m ? m[0] : null;
 }
 
-function normalizeBrand(brand: string): string {
+export function normalizeBrand(brand: string): string {
   return brand.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
@@ -139,6 +147,7 @@ export function parsePurchaseHistory(markdown: string): ParsedPurchase[] {
       boxDate: boxDate.value ? parseLegacyDate(boxDate.value) : null,
       retailer: retailer.value,
       pricePerStick: parsePrice(pps.value),
+      notes: null, // the archive purchase table has no free-text column
       placeholderNotes: notes,
       brandDrift: drift,
     };
