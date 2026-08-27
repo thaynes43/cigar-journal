@@ -23,5 +23,17 @@ export const db: Database = new Proxy({} as Database, {
   },
 });
 
-export { schema };
+// Explicit client over a given connection string, with its own pool. Used by
+// the migrate runner and tests, where the ambient DATABASE_URL singleton is the
+// wrong lifecycle. Callers own `pool.end()`.
+export function createDatabase(connectionString: string): { db: Database; pool: Pool } {
+  const pool = new Pool({ connectionString });
+  return { db: drizzle(pool, { schema }), pool };
+}
+
+export { schema, Pool };
 export type { Database };
+
+// Re-export the tables and their row/value types so consumers have one import
+// surface (`@cj/db`) for both the client and the schema.
+export * from "./schema/index.js";
