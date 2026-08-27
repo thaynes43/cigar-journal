@@ -7,11 +7,15 @@
 
 1. Model calls `search_cigars` with the user's phrasing; trigram matching
    tolerates partial names and misspellings.
-2. `single_match` → proceed with the `cigarId`. High-confidence single result
-   needs no user interruption.
-3. `multiple_matches` → the model disambiguates *conversationally* (vitola
-   usually settles it), then proceeds. Never guesses.
-4. `no_match` → no interruption mid-smoke; at finalize, `save_smoke` carries
+2. `single_match` → proceed with the `cigarId`. Emitted when the top hit is an
+   exact (case-insensitive) canonical-name match — trailing fuzzy hits stay
+   listed — or a single fuzzy candidate stands alone. No user interruption.
+3. `brand_match` → the query named only a known brand, not a product. `matches`
+   are that brand's catalogued cigars; the model asks for the line/vitola
+   before resolving.
+4. `multiple_matches` → several fuzzy candidates and no clean winner; the model
+   disambiguates *conversationally* (vitola usually settles it). Never guesses.
+5. `no_match` → no interruption mid-smoke; at finalize, `save_smoke` carries
    `described` attributes — `canonicalName` as the user knows it, other
    taxonomy only if actually known — and the server creates an `unverified`
    catalog entry inside the save transaction (catalog invariant,
@@ -25,7 +29,7 @@ sequenceDiagram
     participant M as MCP Server
     U->>C: I'm smoking an Atabey.
     C->>M: search_cigars { query: "Atabey" }
-    M-->>C: multiple_matches [Atabey Divinos, Atabey Ritos]
+    M-->>C: brand_match [Atabey Divinos, Atabey Ritos]
     C->>U: Nice — the Divinos or the Ritos?
     U->>C: The Divinos.
     Note over C: Holds cigarId cg_01k2m1 for the session.
@@ -35,7 +39,11 @@ sequenceDiagram
 
 Catalog Cigar only. Server-side strong-match check prevents `described` from
 duplicating an existing entry (`cigar_ambiguous` if it can't decide);
-verification/merge stay curator-only.
+verification/merge stay curator-only. The strong-match check also guards
+against collapsing number-distinct names: a candidate whose digit/alphanumeric
+model tokens conflict with the query's (e.g. "1964 Maduro" vs "1926 Maduro",
+"Liga Privada T52" vs "…No. 9") is disqualified from strong-linking even at a
+high trigram score, so it creates a new entry rather than mislinking.
 
 ## Failure modes
 

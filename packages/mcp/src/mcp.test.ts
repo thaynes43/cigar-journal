@@ -50,7 +50,9 @@ function payloadOf(result: CallToolResult): unknown {
 }
 
 function errorOf(result: CallToolResult): Record<string, unknown> {
-  expect(result.isError, `expected an isError result, got: ${JSON.stringify(result.content)}`).toBe(true);
+  expect(result.isError, `expected an isError result, got: ${JSON.stringify(result.content)}`).toBe(
+    true,
+  );
   const parsed = payloadOf(result) as { error: Record<string, unknown> };
   return parsed.error;
 }
@@ -69,7 +71,10 @@ describe("@cj/mcp adapter", () => {
   let ownerCatalogJournal: string;
   let otherFull: string;
 
-  async function mintToken(scopes: string[], userId: string): Promise<{ token: string; clientId: string }> {
+  async function mintToken(
+    scopes: string[],
+    userId: string,
+  ): Promise<{ token: string; clientId: string }> {
     const db = h.pg.db;
     const reg = await registerClient(db, {
       redirect_uris: [REDIRECT],
@@ -122,7 +127,11 @@ describe("@cj/mcp adapter", () => {
     }
   }
 
-  async function call(client: Client, name: string, args: Record<string, unknown>): Promise<CallToolResult> {
+  async function call(
+    client: Client,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
     return (await client.callTool({ name, arguments: args })) as CallToolResult;
   }
 
@@ -205,12 +214,20 @@ describe("@cj/mcp adapter", () => {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name).sort();
       expect(names).toEqual(
-        ["get_cigar", "get_my_smokes", "get_smoke", "save_smoke", "search_cigars", "update_smoke"].sort(),
+        [
+          "get_cigar",
+          "get_my_smokes",
+          "get_smoke",
+          "save_smoke",
+          "search_cigars",
+          "update_smoke",
+        ].sort(),
       );
 
       const readOnly = (name: string): boolean | undefined =>
         tools.find((t) => t.name === name)?.annotations?.readOnlyHint;
-      for (const r of ["search_cigars", "get_cigar", "get_my_smokes", "get_smoke"]) expect(readOnly(r)).toBe(true);
+      for (const r of ["search_cigars", "get_cigar", "get_my_smokes", "get_smoke"])
+        expect(readOnly(r)).toBe(true);
       for (const w of ["save_smoke", "update_smoke"]) expect(readOnly(w)).not.toBe(true);
     });
   });
@@ -218,11 +235,12 @@ describe("@cj/mcp adapter", () => {
   // ---- read happy paths + scope-bounding ------------------------------------
 
   it("search_cigars resolves a seeded cigar; personal userSmokeCount is journal:read-bounded", async () => {
+    // "Plasencia" is only a brand → brand_match, returning that brand's cigars.
     // Without journal:read — no personal field.
     await withClient(ownerCatalogOnly, async (client) => {
       const result = await call(client, "search_cigars", { query: "Plasencia" });
       const data = payloadOf(result) as { matches: Record<string, unknown>[]; guidance: string };
-      expect(data.guidance).toBe("single_match");
+      expect(data.guidance).toBe("brand_match");
       expect(data.matches[0]!.cigarId).toBe(primaryCigarId);
       expect(data.matches[0]).not.toHaveProperty("userSmokeCount");
     });
@@ -381,7 +399,9 @@ describe("@cj/mcp adapter", () => {
       expect(second.replayed).toBe(true);
       expect(second.smoke.smokeId).toBe(first.smoke.smokeId);
 
-      const list = payloadOf(await call(client, "get_my_smokes", { text: "Replay-safety check." })) as {
+      const list = payloadOf(
+        await call(client, "get_my_smokes", { text: "Replay-safety check." }),
+      ) as {
         totalMatches: number;
       };
       expect(list.totalMatches).toBe(1);
@@ -431,7 +451,9 @@ describe("@cj/mcp adapter", () => {
   it("conversation: search (no match) → save described → list → get → update rating → replay update", async () => {
     await withClient(ownerFull, async (client) => {
       // 1. The user names a cigar not in the catalog.
-      const search = payloadOf(await call(client, "search_cigars", { query: "Nonexistent Nebula 9000" })) as {
+      const search = payloadOf(
+        await call(client, "search_cigars", { query: "Nonexistent Nebula 9000" }),
+      ) as {
         guidance: string;
         matches: unknown[];
       };
@@ -445,11 +467,21 @@ describe("@cj/mcp adapter", () => {
           clientRequestId: saveReqId,
           cigar: { described: { canonicalName: "Nebula 9000 Toro", brand: "Nebula", type: "NC" } },
           overallDescriptors: ["spice", "cream"],
-          progression: [{ stage: "opening", approximatePosition: 0.05, descriptors: ["black-pepper"], verbatim: "Peppery start." }],
+          progression: [
+            {
+              stage: "opening",
+              approximatePosition: 0.05,
+              descriptors: ["black-pepper"],
+              verbatim: "Peppery start.",
+            },
+          ],
           assessment: { liked: true, impression: "Promising unknown stick." },
           journal: { title: "Nebula debut", narrative: "First time with this one." },
         }),
-      ) as { smoke: { smokeId: string; version: number; cigar: { cigarId: string } }; cigarCreated: boolean };
+      ) as {
+        smoke: { smokeId: string; version: number; cigar: { cigarId: string } };
+        cigarCreated: boolean;
+      };
       expect(saved.cigarCreated).toBe(true);
       const smokeId = saved.smoke.smokeId;
       const createdCigarId = saved.smoke.cigar.cigarId;
