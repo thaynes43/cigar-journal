@@ -5,6 +5,7 @@ import {
   resolveAuthorizationClient,
   validateAuthorizationParams,
   OAuthError,
+  issuerOrigin,
 } from "@cj/oauth";
 
 // Authorization endpoint (RFC 6749 §4.1.1 + PKCE + RFC 8707). Requires an
@@ -69,7 +70,9 @@ export async function GET(req: Request): Promise<Response> {
   const principal = await getPrincipal(req.headers);
   if (!principal) {
     const next = `${url.pathname}${url.search}`;
-    return Response.redirect(new URL(`/signin?next=${encodeURIComponent(next)}`, url.origin).href, 302);
+    // issuerOrigin, not url.origin: behind the tunnel req.url carries the
+    // pod's listen address (0.0.0.0:3000) — a browser can't follow that.
+    return Response.redirect(new URL(`/signin?next=${encodeURIComponent(next)}`, issuerOrigin()).href, 302);
   }
 
   // 4. Persist the pending transaction and move to consent.
@@ -80,5 +83,5 @@ export async function GET(req: Request): Promise<Response> {
     state: state ?? undefined,
     validated,
   });
-  return Response.redirect(new URL(`/oauth/consent?txn=${encodeURIComponent(txnId)}`, url.origin).href, 302);
+  return Response.redirect(new URL(`/oauth/consent?txn=${encodeURIComponent(txnId)}`, issuerOrigin()).href, 302);
 }
