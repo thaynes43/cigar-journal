@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.0](https://github.com/thaynes43/cigar-journal/compare/v0.4.2...v0.5.0) (2026-08-27)
+
+
+### Features
+
+* **archive:** ledger Purchases snapshot (2026-08-27) + R13 seed note ([#31](https://github.com/thaynes43/cigar-journal/issues/31)) ([02ea5a0](https://github.com/thaynes43/cigar-journal/commit/02ea5a00a574ee8d4cec103767591533d878a345))
+* **importer:** ledger reconciliation subcommand ([#34](https://github.com/thaynes43/cigar-journal/issues/34)) ([3940512](https://github.com/thaynes43/cigar-journal/commit/3940512e838746daa7e2f58f47b978b9f1120b10))
+* MCP field-test fixes — search coverage, match guard, guidance ([#35](https://github.com/thaynes43/cigar-journal/issues/35)) ([f02470b](https://github.com/thaynes43/cigar-journal/commit/f02470ba3362eac304e9dffa098171841b7010ad))
+
 ## [0.4.2](https://github.com/thaynes43/cigar-journal/compare/v0.4.1...v0.4.2) (2026-08-27)
 
 
