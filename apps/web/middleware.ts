@@ -22,6 +22,6 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!api/auth|api/trpc|api/health|oauth|\\.well-known|_next/static|_next/image|favicon.ico).*)",
+    "/((?!api/auth|api/trpc|api/health|oauth|authorize|token|register|revoke|\\.well-known|_next/static|_next/image|favicon.ico).*)",
   ],
 };
