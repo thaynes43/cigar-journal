@@ -1,21 +1,14 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
-import type { ReactNode } from "react";
 import type { CigarView, GetCigarResult, Tobacco } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
 import { formatSmokedAt, formatDay } from "@/lib/format";
 import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
-
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <dt className={`text-xs ${ui.muted}`}>{label}</dt>
-      <dd>{children}</dd>
-    </div>
-  );
-}
+import { BandTile } from "../../_components/band-tile";
+import { RatingSeal } from "../../_components/rating-seal";
+import { VitalsBlock } from "../../_components/vitals-block";
 
 function vitola(cigar: CigarView): string | null {
   const dims =
@@ -58,80 +51,90 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
   const blend = cigar.tobacco ? blendLines(cigar.tobacco) : [];
 
   return (
-    <div className="flex flex-col gap-6">
-      <header className="flex items-center gap-3">
-        <h1 className="text-lg font-semibold">{cigar.canonicalName}</h1>
-        {cigar.verification === "unverified" ? <span className={ui.chip}>unverified</span> : null}
+    <div className="mx-auto flex max-w-3xl flex-col gap-8">
+      <header className="flex flex-col gap-5 sm:flex-row sm:gap-6">
+        <div className="w-40 shrink-0 sm:w-52">
+          <BandTile
+            name={cigar.canonicalName}
+            vitola={cigar.vitola.name}
+            type={cigar.type}
+            size="hero"
+          />
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <h1 className="font-display text-2xl leading-tight font-semibold text-ink">
+              {cigar.canonicalName}
+            </h1>
+            {cigar.verification === "unverified" ? (
+              <span className={`${ui.chipOutline} self-start`}>unverified</span>
+            ) : null}
+          </div>
+          <VitalsBlock
+            items={[
+              { label: "Brand", value: cigar.brand },
+              { label: "Line", value: cigar.line },
+              { label: "Edition", value: cigar.edition },
+              { label: "Vitola", value: vitola(cigar) },
+              { label: "Type", value: cigar.type },
+              { label: "Manufacturer", value: cigar.manufacturer },
+              { label: "Factory", value: cigar.factory },
+              { label: "Country", value: cigar.productionCountry },
+              { label: "Released", value: cigar.releaseYear },
+            ]}
+          />
+        </div>
       </header>
 
-      <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-        {cigar.brand ? <Fact label="Brand">{cigar.brand}</Fact> : null}
-        {cigar.line ? <Fact label="Line">{cigar.line}</Fact> : null}
-        {cigar.edition ? <Fact label="Edition">{cigar.edition}</Fact> : null}
-        {vitola(cigar) ? <Fact label="Vitola">{vitola(cigar)}</Fact> : null}
-        {cigar.type ? <Fact label="Type">{cigar.type}</Fact> : null}
-        {cigar.manufacturer ? <Fact label="Manufacturer">{cigar.manufacturer}</Fact> : null}
-        {cigar.factory ? <Fact label="Factory">{cigar.factory}</Fact> : null}
-        {cigar.productionCountry ? <Fact label="Country">{cigar.productionCountry}</Fact> : null}
-        {cigar.releaseYear != null ? <Fact label="Released">{cigar.releaseYear}</Fact> : null}
-      </dl>
-
       {cigar.blendNotes || blend.length > 0 ? (
-        <section className="flex flex-col gap-2">
-          <h2 className="text-sm font-semibold">Blend</h2>
-          {cigar.blendNotes ? <p className="text-sm">{cigar.blendNotes}</p> : null}
-          {blend.length > 0 ? (
-            <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-              {blend.map((line) => (
-                <Fact key={line.label} label={line.label}>
-                  {line.value}
-                </Fact>
-              ))}
-            </dl>
+        <section className="flex flex-col gap-3">
+          <h2 className="label-caps">Blend</h2>
+          {cigar.blendNotes ? (
+            <p className="font-serif text-[0.9375rem] leading-relaxed text-ink">{cigar.blendNotes}</p>
           ) : null}
+          <VitalsBlock items={blend} />
         </section>
       ) : null}
 
       {personalProfile ? (
-        <section className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="text-sm font-semibold">Your history</h2>
-          <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-            <Fact label="Smokes">{personalProfile.smokeCount}</Fact>
-            {personalProfile.rating ? (
-              <Fact label="Rating">
-                {personalProfile.rating.average} ({personalProfile.rating.min}–{personalProfile.rating.max})
-              </Fact>
-            ) : null}
-            {personalProfile.typicalStrength ? <Fact label="Strength">{personalProfile.typicalStrength}</Fact> : null}
-            {formatDay(personalProfile.lastSmokedAt) ? (
-              <Fact label="Last smoked">{formatDay(personalProfile.lastSmokedAt)}</Fact>
-            ) : null}
-          </dl>
+        <section className="flex flex-col gap-4 rounded-card border border-accent/30 bg-surface p-5">
+          <h2 className="label-caps text-accent">Your history</h2>
           {personalProfile.recurringDescriptors.length > 0 ? (
-            <Chips items={personalProfile.recurringDescriptors} />
+            <Chips items={personalProfile.recurringDescriptors.slice(0, 3)} />
           ) : null}
+          <VitalsBlock
+            items={[
+              { label: "Smokes", value: personalProfile.smokeCount },
+              {
+                label: "Rating",
+                value: personalProfile.rating
+                  ? `${personalProfile.rating.average} (${personalProfile.rating.min}–${personalProfile.rating.max})`
+                  : null,
+              },
+              { label: "Strength", value: personalProfile.typicalStrength },
+              { label: "Last smoked", value: formatDay(personalProfile.lastSmokedAt) },
+            ]}
+          />
         </section>
       ) : null}
 
       {smokes.length > 0 ? (
-        <section className="flex flex-col gap-2">
-          <h2 className="text-sm font-semibold">Your smokes</h2>
-          <ul className="flex flex-col divide-y divide-neutral-200 dark:divide-neutral-800">
+        <section className="flex flex-col gap-3">
+          <h2 className="label-caps">Your smokes</h2>
+          <ul className="flex flex-col gap-3">
             {smokes.map((smoke) => {
               const when = formatSmokedAt(smoke.smokedAt);
               return (
-                <li key={smoke.smokeId} className="py-3">
-                  <Link href={`/smokes/${smoke.smokeId}`} className="flex flex-col gap-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm">{when ?? "—"}</span>
-                      {smoke.liked ? (
-                        <span className="text-red-600 dark:text-red-500" aria-label="Liked">
-                          ♥
-                        </span>
-                      ) : null}
-                      {smoke.rating != null ? <span className="ml-auto text-sm font-medium">{smoke.rating}</span> : null}
+                <li key={smoke.smokeId}>
+                  <Link
+                    href={`/smokes/${smoke.smokeId}`}
+                    className="flex items-center gap-4 rounded-card border border-line bg-surface p-4 transition-colors hover:border-accent/60"
+                  >
+                    <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                      <span className="label-caps">{when ?? "—"}</span>
+                      <Chips items={smoke.descriptors.slice(0, 4)} />
                     </div>
-                    <Chips items={smoke.descriptors.slice(0, 4)} />
+                    <RatingSeal rating={smoke.rating} liked={smoke.liked} size="sm" />
                   </Link>
                 </li>
               );

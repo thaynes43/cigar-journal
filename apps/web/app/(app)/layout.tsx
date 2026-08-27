@@ -17,23 +17,25 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   return (
     <TRPCProvider>
       <div className="min-h-screen">
-        <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-neutral-200 px-6 py-3 dark:border-neutral-800">
-          <Link href="/" className="font-semibold">
-            Cigar Journal
-          </Link>
-          <nav className="flex items-center gap-4 text-sm">
-            <Link href="/cigars" className="text-neutral-600 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100">
-              Catalog
+        <header className="border-b border-line bg-surface">
+          <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-x-8 gap-y-2 px-6 py-4">
+            <Link href="/" className="font-display text-lg font-semibold tracking-wide text-ink">
+              Cigar Journal
             </Link>
-            <Link href="/smokes/new" className="text-neutral-600 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100">
-              Record a smoke
-            </Link>
-          </nav>
-          <div className="ml-auto">
-            <SignOutButton />
+            <nav className="flex items-center gap-6">
+              <Link href="/cigars" className="label-caps transition-colors hover:text-accent">
+                Catalog
+              </Link>
+              <Link href="/smokes/new" className="label-caps transition-colors hover:text-accent">
+                Record a smoke
+              </Link>
+            </nav>
+            <div className="ml-auto">
+              <SignOutButton />
+            </div>
           </div>
         </header>
-        <main className="mx-auto max-w-3xl p-6">{children}</main>
+        <main className="mx-auto w-full max-w-5xl px-6 py-8">{children}</main>
       </div>
     </TRPCProvider>
   );

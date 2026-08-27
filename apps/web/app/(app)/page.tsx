@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { getServerCaller } from "@/lib/trpc/server";
 import { formatSmokedAt } from "@/lib/format";
-import { ui } from "@/lib/ui";
+import { BandTile } from "./_components/band-tile";
+import { RatingSeal } from "./_components/rating-seal";
 import { Chips } from "./_components/chips";
 
 // The journal: the signed-in user's smokes, newest first.
@@ -11,9 +12,9 @@ export default async function JournalPage() {
 
   if (smokes.length === 0) {
     return (
-      <p>
+      <p className="mx-auto max-w-2xl py-16 text-center font-serif text-lg">
         No smokes yet.{" "}
-        <Link href="/smokes/new" className="underline">
+        <Link href="/smokes/new" className="text-accent underline underline-offset-4">
           Record your first.
         </Link>
       </p>
@@ -21,23 +22,33 @@ export default async function JournalPage() {
   }
 
   return (
-    <ul className="flex flex-col divide-y divide-neutral-200 dark:divide-neutral-800">
+    <ul className="mx-auto flex max-w-3xl flex-col gap-4">
       {smokes.map((smoke) => {
         const when = formatSmokedAt(smoke.smokedAt);
         return (
-          <li key={smoke.smokeId} className="py-3">
-            <Link href={`/smokes/${smoke.smokeId}`} className="flex flex-col gap-1">
-              <div className="flex items-center gap-2">
-                <span className="font-medium">{smoke.cigar.canonicalName}</span>
-                {smoke.liked ? (
-                  <span className="text-red-600 dark:text-red-500" aria-label="Liked">
-                    ♥
-                  </span>
+          <li key={smoke.smokeId}>
+            <Link
+              href={`/smokes/${smoke.smokeId}`}
+              className="flex gap-4 rounded-card border border-line bg-surface p-4 transition-colors hover:border-accent/60"
+            >
+              <BandTile name={smoke.cigar.canonicalName} size="thumb" />
+              <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                <div className="flex items-start gap-3">
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="font-display text-lg leading-snug font-semibold text-ink">
+                      {smoke.cigar.canonicalName}
+                    </span>
+                    {when ? <span className="label-caps">{when}</span> : null}
+                  </div>
+                  <RatingSeal rating={smoke.rating} liked={smoke.liked} size="sm" />
+                </div>
+                {smoke.summary ? (
+                  <p className="line-clamp-2 font-serif text-[0.9375rem] leading-relaxed text-muted">
+                    {smoke.summary}
+                  </p>
                 ) : null}
-                {smoke.rating != null ? <span className="ml-auto text-sm font-medium">{smoke.rating}</span> : null}
+                <Chips items={smoke.descriptors.slice(0, 4)} />
               </div>
-              {when ? <span className={`text-sm ${ui.muted}`}>{when}</span> : null}
-              <Chips items={smoke.descriptors.slice(0, 4)} />
             </Link>
           </li>
         );
