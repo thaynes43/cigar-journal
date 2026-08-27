@@ -77,6 +77,13 @@ R11 (later) — Aggregated third-party tasting notes/review data from crawled
 sites (stored as derived descriptors/statistics, not verbatim copies).
 R12 (later) — In-progress durable sessions (draft Smokes) for crash recovery
 and read-only-client handoff; see fallback in the MCP contract.
+R13 (later) — Inventory (owner, 2026-08-27): per-user holdings built on
+Purchases — what's in the humidor now. Cuban entries carry box codes and
+aging/authenticity fields (schema differs from NC; owner's spreadsheet
+headers to be supplied). Recording a smoke can start from an inventory pick
+(pre-resolves the cigar, minimal typing), and inventory views show the
+user's own ratings to guide what to grab next. Supersedes the earlier
+"no stock counting" non-goal.
 
 ## Non-functional requirements
 
