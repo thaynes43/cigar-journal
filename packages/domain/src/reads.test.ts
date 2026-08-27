@@ -117,6 +117,50 @@ describe("read services", () => {
 
     const byText = await queryMySmokes(h.deps, userA, { text: "burn" });
     expect(byText.smokes.map((s) => s.smokeId)).toContain(imported.smoke.smokeId);
+
+    // Match provenance: the hit is attributed to original_markdown and carries a
+    // plain-text excerpt around the term, so the client sees WHY it matched
+    // without a follow-up get_smoke.
+    const hit = byText.smokes.find((s) => s.smokeId === imported.smoke.smokeId)!;
+    expect(hit.matchedIn).toEqual(["originalMarkdown"]);
+    expect(hit.matchSnippet).toBeTruthy();
+    expect(hit.matchSnippet!.toLowerCase()).toContain("burn");
+    // Plain text — the ts_headline sentinels never leak into the excerpt.
+    expect(hit.matchSnippet).not.toMatch(/[⟪⟫]/);
+    expect(hit.matchSnippet!.length).toBeLessThanOrEqual(160);
+  });
+
+  it("attributes a text hit to journal fields and omits provenance on non-text queries", async () => {
+    const cigarId = await h.seedCigar({
+      canonicalName: "Oliva Serie V Melanio",
+      brand: "Oliva",
+    });
+    const saved = await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["espresso"],
+      progression: [
+        { stage: "finish", descriptors: ["cocoa"], verbatim: "A gorgeous leathery finish." },
+      ],
+      assessment: { impression: "Leathery depth throughout." },
+      journal: { title: "Melanio night", narrative: "Rich and leathery from first light." },
+    });
+
+    // "leathery" appears in narrative, impression, and progression verbatim.
+    const byText = await queryMySmokes(h.deps, userA, { text: "leathery" });
+    const hit = byText.smokes.find((s) => s.smokeId === saved.smoke.smokeId)!;
+    expect(hit.matchedIn).toContain("narrative");
+    expect(hit.matchedIn).toContain("impression");
+    expect(hit.matchedIn).toContain("progression");
+    expect(hit.matchedIn).not.toContain("title"); // title has no "leathery"
+    expect(hit.matchSnippet!.toLowerCase()).toContain("leather");
+
+    // A non-text query (descriptor filter) is byte-for-byte unchanged — no
+    // matchedIn / matchSnippet keys at all.
+    const byDescriptor = await queryMySmokes(h.deps, userA, { descriptor: "espresso" });
+    const plain = byDescriptor.smokes.find((s) => s.smokeId === saved.smoke.smokeId)!;
+    expect(plain).not.toHaveProperty("matchedIn");
+    expect(plain).not.toHaveProperty("matchSnippet");
   });
 
   it("searchCigars gives single/multiple/brand/no-match guidance via trigram", async () => {

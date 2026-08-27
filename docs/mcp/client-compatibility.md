@@ -44,6 +44,29 @@ Environment note: clients running inside the cluster need IPv4-first DNS
 cluster has no IPv6 egress and cigars.haynesnetwork.com publishes AAAA
 records. Irrelevant for cloud-side clients like ChatGPT Web.
 
+## Known platform behaviors (ChatGPT Web)
+
+**Call latency is ChatGPT-platform-side, not ours (2026-08-27).** Second
+field test: end-to-end tool calls stay ~5–7 s each, *unchanged* after the
+server switched to MCP JSON response mode (`MCP_JSON_RESPONSE=true`).
+Server-side handling is ~4 ms (per-tool `latencyMs` in the structured logs),
+so the ~5–7 s is overhead inside the ChatGPT platform (model round-trip +
+connector transport), not the Cigar Journal server. No server-side lever
+meaningfully moves it — treat it as a platform property, not a regression to
+chase.
+
+**Connector manifest staleness (2026-08-27).** ChatGPT exposes no model-side
+refresh of a connector's tool manifest: new tool schemas and descriptions
+(e.g. the `matchedIn`/`matchSnippet` fields and the title-is-metadata
+instruction line added this slice) reach a client **only after the user
+refreshes the connector in ChatGPT settings**. The known
+"`ersonal cigar journal…`" first-character truncation of the server
+instructions reproduces from the cached OLD manifest — our `INSTRUCTIONS`
+string is verified intact (server constant + `mcp.test.ts` equality
+assertion), so the dropped leading character is client-side rendering of a
+stale cache, not a defect in what we send. Re-check the rendered instructions
+and tool descriptions after a user-initiated connector refresh.
+
 ## Workflows
 
 **Ideal (design target):** the user talks to ChatGPT normally for the whole

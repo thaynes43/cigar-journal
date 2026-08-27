@@ -189,7 +189,7 @@ export function createMcpServer(deps: Deps): McpServer {
     {
       title: "Get my smokes",
       description:
-        "Search the authenticated user's own smoke history, newest first, as compact summaries. Use for comparisons like what they thought last time or what they have called bready. The `text` filter is full-text over journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.",
+        "Search the authenticated user's own smoke history, newest first, as compact summaries. Use for comparisons like what they thought last time or what they have called bready. The `text` filter is full-text over journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim. When `text` is used, each result carries `matchedIn` (which prose field(s) hit) and `matchSnippet` (a short excerpt around the hit) so you can see why it matched without a follow-up get_smoke.",
       inputSchema: getMySmokesSchema,
       annotations: { readOnlyHint: true, title: "Get my smokes" },
     },

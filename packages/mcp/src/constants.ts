@@ -60,5 +60,6 @@ Field conventions:
 - descriptors are normalized kebab-case tags; specificDescriptors are the user's exact, unusual words kept verbatim.
 - smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time.
 - get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
+- a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - search_cigars guidance: single_match (proceed), multiple_matches (ask the user), brand_match (ask for the line/vitola), no_match (proceed; a described save creates the cigar).
 - Combine related corrections into one update_smoke call rather than several.`;
