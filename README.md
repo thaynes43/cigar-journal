@@ -20,5 +20,6 @@ family of apps; will live at cigars.haynesnetwork.com.
 
 ## Status
 
-Bootstrapping. The design documents in `docs/` are the current work front; the
-Phase 1 monorepo scaffold is in place, with slices building on it next.
+Phase 1 application complete — domain, Postgres schema, local auth, and the
+journal/catalog UI — deploying to cigars.haynesnetwork.com. Next: archive
+import and the MCP server.
