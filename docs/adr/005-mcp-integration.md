@@ -26,15 +26,24 @@ clientCapability:      # per client, per plan, per date — see
 The domain and server always expose the full interface; clients consume the
 subset they support. No subscription restriction shapes the architecture.
 
-As verified 2026-08-26: ChatGPT Developer Mode advertises full read+write
-MCP on paid plans, prompts for confirmation on writes unless a tool is
-annotated `readOnlyHint: true`, requires Streamable HTTP on public HTTPS,
+As verified 2026-08-26 (docs): ChatGPT Developer Mode advertises full
+read+write MCP on paid plans, requires Streamable HTTP on public HTTPS,
 performs OAuth 2.1 authorization-code + PKCE with RFC 9728/8414/8707
 discovery and DCR/CIMD registration, refreshes tool lists manually, and
-bounds tools at roughly 5k tokens per definition and ~60s per call.
-Token-refresh behavior and whether a connector remains invocable late in a
-long conversation without being re-referenced are **undocumented — Phase 0
-questions**. ChatGPT does not transmit the chat transcript to tools.
+bounds tools at roughly 5k tokens per definition and ~60s per call. ChatGPT
+does not transmit the chat transcript to tools.
+
+**Phase 0 ran 2026-08-26 and its empirical results supersede the doc-based
+claims** (full matrix: [`client-compatibility.md`](../mcp/client-compatibility.md)):
+all three target clients — ChatGPT Web (owner's account), Claude Code, and
+Codex — completed remote connection, OAuth, reads, and writes against the
+live spike, and a value written by ChatGPT was read back by both CLIs.
+Notably, ChatGPT executed the write **without** the documented confirmation
+prompt; `readOnlyHint` annotations stay regardless, since confirmation is
+host-owned and changeable. Claude Code additionally proved silent refresh
+with rotation after token expiry. Still open to observation during real
+use: ChatGPT's refresh behavior over multi-day links and connector
+availability late in very long conversations.
 
 ## Decision
 
