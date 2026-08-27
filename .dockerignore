@@ -10,6 +10,9 @@
 
 # Not part of the application image.
 spike
-archive
 docs
 .agents
+
+# NOTE: archive/ is intentionally NOT ignored — the `import` role bakes
+# archive/docs into its subtree. It enters the intermediate build stage only;
+# the shipped web/migrate runtimes copy specific paths, never archive/.
