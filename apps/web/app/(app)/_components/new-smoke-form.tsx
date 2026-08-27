@@ -23,9 +23,16 @@ export function NewSmokeForm() {
     onSuccess: (result) => router.push(`/smokes/${result.smoke.smokeId}`),
   });
 
+  const [cigarMissing, setCigarMissing] = useState(false);
+
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!cigar) return;
+    if (!cigar) {
+      setCigarMissing(true);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    setCigarMissing(false);
     save.mutate(buildSaveInput(requestId.current, cigar, details, progression));
   }
 
@@ -37,7 +44,13 @@ export function NewSmokeForm() {
 
       <section className="flex flex-col gap-2">
         <span className={ui.legend}>Cigar</span>
-        <CigarPicker onChange={setCigar} />
+        <CigarPicker
+          onChange={(ref) => {
+            setCigar(ref);
+            if (ref) setCigarMissing(false);
+          }}
+        />
+        {cigarMissing ? <p className={ui.alert}>Pick or add the cigar first.</p> : null}
       </section>
 
       <SmokeDetailsFields value={details} onChange={setDetails} />
@@ -58,7 +71,7 @@ export function NewSmokeForm() {
       ) : null}
 
       <div className="flex gap-3">
-        <button type="submit" disabled={!cigar || save.isPending} className={ui.primary}>
+        <button type="submit" disabled={save.isPending} className={ui.primary}>
           Save
         </button>
         <button type="button" onClick={() => router.push("/")} className={ui.button}>

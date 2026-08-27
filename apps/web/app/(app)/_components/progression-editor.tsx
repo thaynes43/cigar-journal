@@ -34,6 +34,16 @@ export function toProgressionInput(rows: ProgressionDraft[]): ProgressionEntryIn
     );
 }
 
+// The traditional stages people actually use; picking one sets the analytic
+// position automatically. "Custom" reveals free-form stage + percent fields.
+const STAGE_PRESETS = [
+  { label: "Opening", position: "0.05" },
+  { label: "First third", position: "0.15" },
+  { label: "Second third", position: "0.5" },
+  { label: "Final third", position: "0.85" },
+  { label: "Finish", position: "0.95" },
+] as const;
+
 export function ProgressionEditor({
   value,
   onChange,
@@ -47,26 +57,61 @@ export function ProgressionEditor({
 
   return (
     <div className="flex flex-col gap-3">
-      {value.map((row, index) => (
+      {value.map((row, index) => {
+        const preset = STAGE_PRESETS.find((p) => p.label === row.stage && p.position === row.position);
+        const isCustom = !preset && (row.stage !== "" || row.position !== "");
+        return (
         <fieldset key={index} className={`${ui.card} flex flex-col gap-2`}>
           <legend className="sr-only">Stage {index + 1}</legend>
           <div className="flex gap-2">
             <label className={`${ui.label} flex-1`}>
               Stage
-              <input value={row.stage} onChange={(e) => update(index, { stage: e.target.value })} className={ui.field} />
-            </label>
-            <label className={`${ui.label} w-28`}>
-              Position
-              <input
-                type="number"
-                min={0}
-                max={1}
-                step={0.05}
-                value={row.position}
-                onChange={(e) => update(index, { position: e.target.value })}
+              <select
+                value={preset ? preset.label : isCustom ? "custom" : ""}
+                onChange={(e) => {
+                  const next = STAGE_PRESETS.find((p) => p.label === e.target.value);
+                  if (next) update(index, { stage: next.label, position: next.position });
+                  else if (e.target.value === "custom") update(index, { stage: row.stage || "", position: "" });
+                  else update(index, { stage: "", position: "" });
+                }}
                 className={ui.field}
-              />
+              >
+                <option value="">—</option>
+                {STAGE_PRESETS.map((p) => (
+                  <option key={p.label} value={p.label}>
+                    {p.label}
+                  </option>
+                ))}
+                <option value="custom">Custom</option>
+              </select>
             </label>
+            {isCustom ? (
+              <>
+                <label className={`${ui.label} flex-1`}>
+                  Name
+                  <input
+                    value={row.stage}
+                    onChange={(e) => update(index, { stage: e.target.value })}
+                    className={ui.field}
+                  />
+                </label>
+                <label className={`${ui.label} w-28`}>
+                  Through (%)
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={row.position === "" ? "" : String(Math.round(Number(row.position) * 100))}
+                    onChange={(e) => {
+                      const pct = e.target.value === "" ? "" : String(Math.min(100, Math.max(0, Number(e.target.value))) / 100);
+                      update(index, { position: pct });
+                    }}
+                    className={ui.field}
+                  />
+                </label>
+              </>
+            ) : null}
           </div>
           <div className={ui.label}>
             Descriptors
@@ -89,7 +134,8 @@ export function ProgressionEditor({
             Remove stage
           </button>
         </fieldset>
-      ))}
+        );
+      })}
       <button type="button" onClick={() => onChange([...value, emptyRow()])} className={`${ui.button} self-start`}>
         Add stage
       </button>

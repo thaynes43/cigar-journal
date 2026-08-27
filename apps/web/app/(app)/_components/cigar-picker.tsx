@@ -53,7 +53,9 @@ export function CigarPicker({ onChange }: { onChange: (ref: CigarRef | null) => 
   function toDescribe() {
     setSelected(null);
     setMode("describe");
-    emitDescribed(described);
+    // Carry the search text in as the name — it's what the user calls it.
+    const seeded = described.canonicalName ? described : { ...described, canonicalName: query.trim() };
+    emitDescribed(seeded);
   }
 
   if (selected) {
@@ -150,9 +152,11 @@ export function CigarPicker({ onChange }: { onChange: (ref: CigarRef | null) => 
             </li>
           ))}
         </ul>
+      ) : search.isSuccess && debouncedQuery.trim().length >= 2 ? (
+        <p className={ui.muted}>Not in the catalog yet.</p>
       ) : null}
       <button type="button" className={`${ui.button} self-start`} onClick={toDescribe}>
-        Describe it
+        Add new
       </button>
     </div>
   );
