@@ -129,6 +129,46 @@ describe("saveSmoke", () => {
     expect(all).toHaveLength(1);
   });
 
+  it("accepts an imported smoke whose only substantive content is originalMarkdown", async () => {
+    const input: SaveSmokeInput = {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "God of Fire Series B", brand: "God of Fire", type: "NC" } },
+      smokedAt: { value: "2025-11-16", source: "legacy-document", precision: "day" },
+      assessment: { rating: 82 },
+      journal: { title: "Series B 11/16", narrative: null },
+      provenance: { source: "legacy-import", client: "nc-reviews/god-of-fire/series-b.md#1" },
+      originalMarkdown: "## Review 1 - Double Robusto - 11/16/2025\n\nWell constructed and easy to like.",
+    };
+    const result = await saveSmoke(h.deps, user, input);
+    expect(result.cigarCreated).toBe(true);
+
+    const smoke = (await h.deps.db.select().from(smokes).where(eq(smokes.id, result.smoke.smokeId)))[0]!;
+    expect(smoke.provenanceSource).toBe("legacy-import");
+    expect(smoke.originalMarkdown).toContain("## Review 1 - Double Robusto - 11/16/2025");
+    expect(smoke.journalNarrative).toBeNull();
+    expect(smoke.rating).toBe(82);
+    // Heading date → day-precision, legacy-document provenance.
+    expect(smoke.smokedAtSource).toBe("legacy-document");
+    expect(smoke.smokedAtPrecision).toBe("day");
+    expect(smoke.overallDescriptors).toEqual([]);
+    // Import audit rows are attributed to the import actor.
+    const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.smokeId, result.smoke.smokeId));
+    expect(audits[0]!.actor).toBe("import");
+  });
+
+  it("stamps an omitted legacy-import smokedAt as unknown with a null value", async () => {
+    const result = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "La Flor Dominicana La Nox", brand: "La Flor Dominicana", type: "NC" } },
+      provenance: { source: "legacy-import", client: "nc-reviews/la-flor-dominicana/la-nox.md#1" },
+      originalMarkdown: "## Rview 1 - Toro - 10/31\n\nHalloween pick.",
+    });
+    const smoke = (await h.deps.db.select().from(smokes).where(eq(smokes.id, result.smoke.smokeId)))[0]!;
+    expect(smoke.smokedAt).toBeNull();
+    expect(smoke.smokedAtSource).toBe("unknown");
+    expect(smoke.smokedAtPrecision).toBeNull();
+  });
+
   it("rejects a smoke with no substantive field (minimum validity)", async () => {
     const cigarId = await h.seedCigar({ canonicalName: "Arturo Fuente 8-5-8" });
     const error = await saveSmoke(h.deps, user, {

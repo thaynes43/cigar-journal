@@ -12,3 +12,8 @@ export { saveSmoke } from "./save-smoke.js";
 export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
 export { getSmoke, queryMySmokes, searchCigars, getCigar } from "./reads.js";
+
+// Catalog-invariant cigar resolution (ADR-002). Exported so the legacy importer
+// resolves/creates purchase-linked cigars through the same logic that backs
+// saveSmoke, rather than reimplementing trigram matching (flow 006).
+export { resolveCigar, type ResolvedCigar } from "./cigar-resolution.js";

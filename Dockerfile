@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # Multi-stage build for the Cigar Journal image (node:22-alpine, non-root, tini
-# for signals). One image serves multiple roles (ADR-001): `web` (default) and
-# `migrate` today; `mcp`/`crawl` attach later over the same base. The role is
-# chosen by overriding the container command in k8s — see the ROLE DISPATCH
-# marker at the runtime stage for the exact command arrays.
+# for signals). One image serves multiple roles (ADR-001): `web` (default),
+# `migrate`, and `import` (one-shot legacy archive import, flow 006) today;
+# `mcp`/`crawl` attach later over the same base. The role is chosen by overriding
+# the container command in k8s — see the ROLE DISPATCH marker at the runtime
+# stage for the exact command arrays.
 
 FROM node:22-alpine AS base
 ENV PNPM_HOME=/pnpm CI=1
@@ -18,6 +19,7 @@ COPY packages/config/package.json ./packages/config/
 COPY packages/domain/package.json ./packages/domain/
 COPY packages/db/package.json ./packages/db/
 COPY packages/auth/package.json ./packages/auth/
+COPY packages/importer/package.json ./packages/importer/
 COPY apps/web/package.json ./apps/web/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 
@@ -39,6 +41,18 @@ FROM build AS migrate
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm deploy --legacy --filter=@cj/db --prod /app/migrate
 
+# --- import: prune @cj/importer to its production subtree + bake archive/docs ---
+# The one-shot legacy importer (flow 006). `pnpm deploy --prod` copies the
+# package source (src/cli.ts + parsers, run via tsx — no build step) plus a flat
+# prod node_modules (its workspace deps @cj/domain + @cj/db, drizzle-orm, pg,
+# tsx) into /app/importer. --legacy is required for non-injected workspace deps.
+# archive/docs is baked alongside the subtree so a one-shot k8s Job needs only
+# DATABASE_URL + flags — the CLI resolves `../archive/docs` relative to itself.
+FROM build AS import
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm deploy --legacy --filter=@cj/importer --prod /app/importer
+RUN mkdir -p /app/importer/archive && cp -r /app/archive/docs /app/importer/archive/docs
+
 # --- runtime: minimal image; the role is selected by the container command ---
 FROM node:22-alpine AS runtime
 RUN apk add --no-cache tini
@@ -50,6 +64,8 @@ COPY --from=build /app/apps/web/.next/standalone ./
 COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static
 # migrate role: the pruned @cj/db subtree (runner + SQL + its own node_modules).
 COPY --from=migrate /app/migrate ./migrate
+# import role: the pruned @cj/importer subtree (CLI + parsers + baked archive/docs).
+COPY --from=import /app/importer ./importer
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
@@ -66,5 +82,16 @@ ENTRYPOINT ["/sbin/tini", "--"]
 #     Applies /app/migrate/migrations/*.sql under a cluster-wide advisory lock,
 #     then exits 0 (idempotent; re-runs are safe). Fails non-zero with a clear
 #     message if DATABASE_URL is unset or the database is unreachable.
+#   import (one-shot Job, flow 006 — run AFTER the migrate role):
+#     workingDir: /app/importer            # REQUIRED: `--import tsx` resolves the
+#     command: ["/sbin/tini","--","node","--import","tsx","src/cli.ts",
+#               "--user-email","<owner-email>","--dry-run"]
+#                                          # tsx loader relative to CWD; tsx lives
+#                                          # in /app/importer/node_modules. Drop
+#                                          # "--dry-run" to apply. Archive is baked
+#                                          # at /app/importer/archive/docs (default).
+#     Reads DATABASE_URL from env; resolves the owner by email and refuses (exit 1)
+#     if unknown. Idempotent: a re-run replays through the mutation envelope and
+#     duplicates nothing. Emits a terse imported/skipped/needs-review report.
 #   mcp / crawl:    future roles attach here over the same base.
 CMD ["node", "apps/web/server.js"]
