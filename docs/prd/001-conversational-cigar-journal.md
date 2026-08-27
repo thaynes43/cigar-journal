@@ -87,6 +87,10 @@ entries additionally need box codes and authenticity fields at design time.
 Recording a smoke can start from an inventory pick (pre-resolves the cigar,
 minimal typing), and inventory views show the user's own ratings to guide
 what to grab next. Supersedes the earlier "no stock counting" non-goal.
+Seed data: `archive/ledger/purchases-2026-08-27.csv` (103 rows, supersets
+the imported table — a reconciliation import is queued). The sheet's other
+tabs surfaced two future candidates: humidification-device maintenance
+schedules and Cuban procurement/intake reconciliation.
 
 ## Non-functional requirements
 
