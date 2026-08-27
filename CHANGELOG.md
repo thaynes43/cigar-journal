@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/thaynes43/cigar-journal/compare/v0.4.0...v0.4.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* **web:** root-path OAuth aliases for stale client caches ([#25](https://github.com/thaynes43/cigar-journal/issues/25)) ([52583e6](https://github.com/thaynes43/cigar-journal/commit/52583e6547ca8f9885b57daa0ccac292b1a8523d))
+
 ## [0.4.0](https://github.com/thaynes43/cigar-journal/compare/v0.3.0...v0.4.0) (2026-08-27)
 
 
