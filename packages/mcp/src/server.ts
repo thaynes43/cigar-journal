@@ -204,7 +204,23 @@ export function createMcpServer(deps: Deps): McpServer {
           minRating: args.minRating ?? undefined,
           limit: args.limit,
         });
-        return jsonResult(result);
+        // Map explicitly to the contract summary shape. `progressionPositions` is
+        // a web-only field on SmokeSummary (feeds the journal-card sparkline) and
+        // is deliberately excluded here to keep this tool's payload contract-stable.
+        // matchedIn/matchSnippet keep their conditional presence (text queries only).
+        const smokes = result.smokes.map((s) => ({
+          smokeId: s.smokeId,
+          cigar: s.cigar,
+          smokedAt: s.smokedAt,
+          rating: s.rating,
+          liked: s.liked,
+          descriptors: s.descriptors,
+          summary: s.summary,
+          ...(s.matchedIn !== undefined
+            ? { matchedIn: s.matchedIn, matchSnippet: s.matchSnippet }
+            : {}),
+        }));
+        return jsonResult({ smokes, totalMatches: result.totalMatches });
       }),
   );
 
