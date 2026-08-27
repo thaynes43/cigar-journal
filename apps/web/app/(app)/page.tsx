@@ -1,3 +1,3 @@
 export default function HomePage() {
-  return <main>Cigar Journal</main>;
+  return <p>Cigar Journal</p>;
 }

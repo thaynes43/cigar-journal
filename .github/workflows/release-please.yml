@@ -13,8 +13,16 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    env:
+      RP_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
     steps:
+      # The App-token secret is provisioned at the deploy slice; until then
+      # skip cleanly instead of failing every merge to main.
+      - name: Skip until RELEASE_PLEASE_TOKEN exists
+        if: env.RP_TOKEN == ''
+        run: echo "RELEASE_PLEASE_TOKEN not configured; skipping."
       - uses: googleapis/release-please-action@v4
+        if: env.RP_TOKEN != ''
         with:
           # App token, not GITHUB_TOKEN, so the release tag/commit can trigger
           # the downstream image-publish workflow (added in the deploy slice).
