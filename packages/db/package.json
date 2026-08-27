@@ -1,0 +1,22 @@
+{
+  "name": "@cj/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.44.0",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "@cj/config": "workspace:*",
+    "@types/pg": "^8.15.0",
+    "drizzle-kit": "^0.31.0"
+  }
+}
