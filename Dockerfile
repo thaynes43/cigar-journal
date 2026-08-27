@@ -49,13 +49,12 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 # archive/docs is baked alongside the subtree so a one-shot k8s Job needs only
 # DATABASE_URL + flags — the CLI resolves `../archive/docs` relative to itself.
 FROM build AS import
+# hoisted linker: workspace deps (@cj/db, @cj/domain) land as REAL directories
+# with their raw-TS sources, and third-party deps sit flat at the top level.
+# The default isolated layout symlinks workspace deps back into /app/packages —
+# dangling in the runtime stage (first cluster import Job failed on it).
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    pnpm deploy --legacy --filter=@cj/importer --prod /app/importer
-# pnpm deploy leaves workspace deps as package.json stubs (no sources) under
-# BuildKit; these raw-TS packages must ship whole for tsx to resolve them.
-RUN cp -r /app/packages/db/src /app/importer/node_modules/@cj/db/src && \
-    cp -r /app/packages/db/migrations /app/importer/node_modules/@cj/db/migrations && \
-    cp -r /app/packages/domain/src /app/importer/node_modules/@cj/domain/src
+    pnpm deploy --legacy --filter=@cj/importer --prod --config.node-linker=hoisted /app/importer
 RUN mkdir -p /app/importer/archive && cp -r /app/archive/docs /app/importer/archive/docs
 
 # --- runtime: minimal image; the role is selected by the container command ---
