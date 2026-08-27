@@ -78,11 +78,13 @@ export function validateSaveInput(input: SaveSmokeInput): void {
     (input.progression?.length ?? 0) > 0 ||
     (input.overallDescriptors?.length ?? 0) > 0 ||
     isNonEmpty(input.journal?.narrative) ||
-    isNonEmpty(input.assessment?.impression);
+    isNonEmpty(input.assessment?.impression) ||
+    isNonEmpty(input.originalMarkdown);
   if (!substantive) {
     errors.push({
       path: "smoke",
-      message: "At least one of progression, overallDescriptors, journal.narrative, or assessment.impression is required.",
+      message:
+        "At least one of progression, overallDescriptors, journal.narrative, assessment.impression, or originalMarkdown is required.",
     });
   }
 
