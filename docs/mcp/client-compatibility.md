@@ -68,6 +68,17 @@ equality assertion), so nothing in what we send is affected. Re-check the
 rendered instructions and tool descriptions after a user-initiated connector
 refresh.
 
+## ChatGPT manifest caching (verified 2026-08-27/28)
+
+Tool *descriptions* and input *schemas* are cached separately, and schema
+cache is **per-conversation**: after the user refreshes the connector in
+settings, an existing conversation keeps serving stale input schemas while
+a brand-new chat sees the current manifest (verified live: fresh session
+reported the rating bounds, position semantics, and title rule; the same
+checks were stale in the pre-refresh conversation). Practical rule: after
+any tool-schema deploy, refresh the connector once, then start a new chat.
+Deleting/re-adding the connector is not required.
+
 ## Workflows
 
 **Ideal (design target):** the user talks to ChatGPT normally for the whole
