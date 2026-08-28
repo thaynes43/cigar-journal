@@ -18,3 +18,14 @@ export const ui = {
   muted: "text-muted",
   card: "rounded-card border border-line bg-surface p-5",
 } as const;
+
+// The want mark's single control shape (DESIGN-002 WantToggle): chip-shaped,
+// accent-filled when set, outlined when unset. The want mark spends the single
+// amber accent — that is what the accent is reserved for (meaning), which is why
+// want gets no second color. Shared by the interactive toggle (a <button>) and
+// its static tile-badge variant (a <span>).
+export const wantChip = {
+  base: "inline-flex items-center gap-1 rounded-chip px-2.5 py-0.5 text-xs font-medium",
+  set: "bg-accent text-accent-ink",
+  unset: "border border-line text-muted",
+} as const;

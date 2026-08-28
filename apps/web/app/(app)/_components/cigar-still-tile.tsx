@@ -3,11 +3,13 @@ import type { CatalogCigarTile } from "@cj/domain";
 import { ui } from "@/lib/ui";
 import { BandTile } from "./band-tile";
 import { RatingSeal } from "./rating-seal";
+import { WantBadge } from "./want-badge";
 
 // The "episode" still: a 16:9 tile for one cigar at its vitola. Below the art,
-// a one-line name, a `vitola · type` subtitle, and a single badge row (capped at
-// three): dimensions, the caller's smoke count, and their rating seal. Art is
-// the BandTile fallback until an ADR-007 ProductPhoto lands via `imageUrl`.
+// a one-line name, a `vitola · type` subtitle, and a badge row capped at three
+// (DESIGN-002): the want mark and the rating seal lead; the caller's smoke count
+// then dimensions fill the rest, dims yielding first. Art is the BandTile
+// fallback until an ADR-007 ProductPhoto lands via `imageUrl`.
 export function CigarStillTile({
   cigar,
   imageUrl,
@@ -20,7 +22,27 @@ export function CigarStillTile({
     cigar.vitola.lengthInches != null && cigar.vitola.ringGauge != null
       ? `${cigar.vitola.lengthInches}" × ${cigar.vitola.ringGauge}`
       : null;
-  const hasBadges = dims != null || cigar.userSmokeCount > 0 || cigar.userRating != null;
+
+  // Cap three, by priority (DESIGN-002): want and the seal are always kept; the
+  // remaining slot(s) go to smoked-count, then dims. Visual order places the
+  // filler chips first, then want, then the seal (rightmost).
+  const want = cigar.wanted ? <WantBadge key="want" /> : null;
+  const seal =
+    cigar.userRating != null ? <RatingSeal key="seal" rating={cigar.userRating} size="sm" /> : null;
+  const filler = [
+    cigar.userSmokeCount > 0 ? (
+      <span key="smoked" className={ui.chip}>
+        smoked ×{cigar.userSmokeCount}
+      </span>
+    ) : null,
+    dims ? (
+      <span key="dims" className={`${ui.chipOutline} tabular-nums`}>
+        {dims}
+      </span>
+    ) : null,
+  ].filter((node) => node !== null);
+  const fillerSlots = Math.max(0, 3 - (want ? 1 : 0) - (seal ? 1 : 0));
+  const badges = [...filler.slice(0, fillerSlots), want, seal].filter((node) => node !== null);
 
   return (
     <Link href={`/cigars/${cigar.cigarId}`} className="group flex h-full flex-col gap-2">
@@ -34,14 +56,8 @@ export function CigarStillTile({
       <div className="flex min-w-0 flex-col gap-1">
         <span className="truncate font-display font-semibold text-ink">{cigar.canonicalName}</span>
         {subtitle ? <span className="label-caps truncate">{subtitle}</span> : null}
-        {hasBadges ? (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {dims ? <span className={`${ui.chipOutline} tabular-nums`}>{dims}</span> : null}
-            {cigar.userSmokeCount > 0 ? (
-              <span className={ui.chip}>smoked ×{cigar.userSmokeCount}</span>
-            ) : null}
-            <RatingSeal rating={cigar.userRating} size="sm" />
-          </div>
+        {badges.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-1.5">{badges}</div>
         ) : null}
       </div>
     </Link>

@@ -1,11 +1,12 @@
 import { z } from "zod";
-import { searchCigars, getCigar, getCigarOffers, browseCigars } from "@cj/domain";
+import { searchCigars, getCigar, getCigarOffers, browseCigars, setWant } from "@cj/domain";
 import { router, authedProcedure } from "../trpc";
 
-// Catalog reads. `search` and `get` are scoped to the caller because their
-// results fold in the caller's own history (per-match smoke count; the Personal
-// Profile on detail). `browse` and `offers` are catalog/market-only — auth-gated
-// but principal-free, since market data is identical for every viewer.
+// Catalog reads plus the want mark. `search` and `get` are scoped to the caller
+// because their results fold in the caller's own history (per-match smoke count;
+// the Personal Profile and want overlay on detail). `browse` and `offers` are
+// catalog/market-only — auth-gated but principal-free, since market data is
+// identical for every viewer.
 export const cigarsRouter = router({
   browse: authedProcedure.query(({ ctx }) => browseCigars(ctx.deps)),
 
@@ -20,4 +21,13 @@ export const cigarsRouter = router({
   offers: authedProcedure
     .input(z.object({ cigarId: z.string() }))
     .query(({ ctx, input }) => getCigarOffers(ctx.deps, input)),
+
+  // The single want mark (PRD-003 R-WANT). Idempotent set/clear; provenance is
+  // stamped `manual` — the web is the manual writer, a client can't spoof it. No
+  // input field for the note in v1 (owner's default), so the web never sends one.
+  setWant: authedProcedure
+    .input(z.object({ cigarId: z.string(), wanted: z.boolean() }))
+    .mutation(({ ctx, input }) =>
+      setWant(ctx.deps, ctx.principal, { ...input, provenance: { source: "manual" } }),
+    ),
 });

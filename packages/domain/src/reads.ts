@@ -5,6 +5,7 @@ import {
   smokeProgression,
   smokePhotos,
   productPhotos,
+  wants,
   type CigarRow,
   type SmokeRow,
   type SmokeProgressionRow,
@@ -616,10 +617,20 @@ export async function getCigar(
     .where(eq(productPhotos.cigarId, args.cigarId))
     .limit(1);
 
+  // The caller's want overlay (PRD-003 R-WANT-3): whether they marked this cigar
+  // and the optional MCP-authored note. Principal-scoped — never another user's.
+  const wantRows = await deps.db
+    .select({ note: wants.note })
+    .from(wants)
+    .where(and(eq(wants.cigarId, args.cigarId), eq(wants.userId, principal.userId)))
+    .limit(1);
+
   return {
     cigar: toCigarView(cigar),
     personalProfile: smokeRows.length > 0 ? computeProfile(smokeRows) : null,
     hasProductPhoto: photoRows.length > 0,
+    wanted: wantRows.length > 0,
+    wantNote: wantRows[0]?.note ?? null,
   };
 }
 

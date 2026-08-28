@@ -228,7 +228,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the ten tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
+  it("lists exactly the eleven tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -245,6 +245,7 @@ describe("@cj/mcp adapter", () => {
           "record_purchase",
           "save_smoke",
           "search_cigars",
+          "set_want",
           "update_smoke",
         ].sort(),
       );
@@ -253,7 +254,14 @@ describe("@cj/mcp adapter", () => {
         tools.find((t) => t.name === name)?.annotations?.readOnlyHint;
       for (const r of ["search_cigars", "get_cigar", "get_my_smokes", "get_smoke", "get_my_inventory"])
         expect(readOnly(r)).toBe(true);
-      for (const w of ["save_smoke", "add_cigar", "record_purchase", "update_smoke", "add_smoke_photo"])
+      for (const w of [
+        "save_smoke",
+        "add_cigar",
+        "record_purchase",
+        "update_smoke",
+        "add_smoke_photo",
+        "set_want",
+      ])
         expect(readOnly(w)).not.toBe(true);
     });
   });
@@ -284,11 +292,13 @@ describe("@cj/mcp adapter", () => {
       const data = payloadOf(result) as Record<string, unknown>;
       expect((data.cigar as { canonicalName: string }).canonicalName).toContain("Alma del Fuego");
       expect(data).not.toHaveProperty("personalProfile");
+      expect(data).not.toHaveProperty("wanted"); // want overlay is journal:read-bounded
     });
     await withClient(ownerCatalogJournal, async (client) => {
       const result = await call(client, "get_cigar", { cigarId: primaryCigarId });
       const data = payloadOf(result) as Record<string, unknown>;
       expect(data).toHaveProperty("personalProfile"); // present (may be null) with journal:read
+      expect(data).toHaveProperty("wanted"); // want overlay present with journal:read
     });
   });
 
@@ -857,6 +867,91 @@ describe("@cj/mcp adapter", () => {
         holdings: { cigar: { cigarId: string } }[];
       };
       expect(inv.holdings.some((hh) => hh.cigar.cigarId === cigarId)).toBe(false);
+    });
+  });
+
+  // ---- set_want + record_purchase want flag ---------------------------------
+
+  it("set_want marks and clears a cigar idempotently; get_cigar reflects it under journal:read", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Wanted Wide Churchill", brand: "WW" });
+    await withClient(ownerFull, async (client) => {
+      const marked = payloadOf(
+        await call(client, "set_want", { cigarId, wanted: true, note: "for the holidays" }),
+      ) as { cigarId: string; wanted: boolean; note: string | null; changed: boolean };
+      expect(marked).toMatchObject({ cigarId, wanted: true, note: "for the holidays", changed: true });
+
+      // Idempotent re-mark: no change.
+      const again = payloadOf(await call(client, "set_want", { cigarId, wanted: true })) as {
+        changed: boolean;
+      };
+      expect(again.changed).toBe(false);
+
+      // get_cigar (journal:read on ownerFull) reflects the want.
+      const got = payloadOf(await call(client, "get_cigar", { cigarId })) as { wanted: boolean };
+      expect(got.wanted).toBe(true);
+
+      // Clear it; get_cigar flips back.
+      const cleared = payloadOf(await call(client, "set_want", { cigarId, wanted: false })) as {
+        wanted: boolean;
+        note: string | null;
+      };
+      expect(cleared.wanted).toBe(false);
+      expect(cleared.note).toBeNull();
+      expect((payloadOf(await call(client, "get_cigar", { cigarId })) as { wanted: boolean }).wanted).toBe(
+        false,
+      );
+    });
+  });
+
+  it("rejects set_want for a token without journal:write: 403", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerCatalogJournal}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "set_want", arguments: { cigarId: primaryCigarId, wanted: true } },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+  });
+
+  it("set_want isolates by caller — another user's mark never appears in get_cigar", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Want Isolation Robusto", brand: "WI" });
+    await withClient(ownerFull, async (client) => {
+      await call(client, "set_want", { cigarId, wanted: true });
+    });
+    await withClient(otherFull, async (client) => {
+      const got = payloadOf(await call(client, "get_cigar", { cigarId })) as { wanted: boolean };
+      expect(got.wanted).toBe(false);
+    });
+  });
+
+  it("record_purchase carries wanted:true when the cigar was on the want list (never auto-cleared)", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Buy What You Want Toro", brand: "BW" });
+    await withClient(ownerFull, async (client) => {
+      await call(client, "set_want", { cigarId, wanted: true });
+      const bought = payloadOf(
+        await call(client, "record_purchase", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId },
+          quantity: 3,
+        }),
+      ) as { wanted: boolean };
+      expect(bought.wanted).toBe(true);
+      // Buying did not clear the want — the model is expected to OFFER the clear.
+      expect((payloadOf(await call(client, "get_cigar", { cigarId })) as { wanted: boolean }).wanted).toBe(
+        true,
+      );
+    });
+  });
+
+  it("set_want on an unknown cigar returns cigar_not_found", async () => {
+    await withClient(ownerFull, async (client) => {
+      const result = await call(client, "set_want", { cigarId: randomUUID(), wanted: true });
+      expect(errorOf(result).code).toBe("cigar_not_found");
     });
   });
 
