@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Seven tools over the application services, client-neutral: any MCP client
+Nine tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -30,8 +30,8 @@ ADR-005 (integration). Client capability differences live in
 
 Scopes: `catalog:read` (search_cigars, get_cigar), `journal:read`
 (get_my_smokes, get_smoke, get_my_inventory), `journal:write` (save_smoke,
-update_smoke — including lazy catalog create inside save). **Scope-bounded
-responses:**
+add_cigar, record_purchase, update_smoke — including lazy catalog create inside
+save/add and the enrichment queue write). **Scope-bounded responses:**
 catalog tools include personal fields (`userSmokeCount`, `personalProfile`)
 only when the token also carries `journal:read`; otherwise those fields are
 omitted entirely. Data returned never exceeds the scopes presented.
@@ -49,6 +49,15 @@ Preserve uncertainty: omit ratings, vitolas, times, pairings, blend details,
 or tasting stages that were never established — sparse is correct. Reuse the
 same clientRequestId when retrying a mutation. The server identifies the
 user from the authorization context; never supply or infer a user id.
+
+When the user smokes or acquires something search_cigars does not match, fill
+the gap first: add_cigar creates an unverified catalog entry from their words
+and queues background enrichment (specs + a product photo), so the later
+save_smoke links to a real cigar; record_purchase logs an acquisition and
+auto-creates a described cigar the same way. record_purchase is also how the
+humidor count is corrected — the ledger is append-only and holdings are derived,
+so a miscount is fixed with a negative-quantity row (say why in notes), never an
+edit. Record only what the user stated: never invent a price, date, or vendor.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -375,6 +384,76 @@ alone does not satisfy this minimum** (a title-only save is rejected as a
 `.describe()` and server instructions now say so up front). If `described`
 strongly matches an existing cigar the server links instead of creating
 (`cigar_ambiguous` if it can't decide).
+
+## add_cigar — write, idempotent
+
+Create an unverified catalog entry from the user's own naming when search_cigars
+matched nothing, and queue background enrichment so the crawler fills the specs
+and a product photo. Use before `save_smoke`/`record_purchase` when the cigar is
+missing. Resolve-or-create is the exact path `save_smoke` uses for a described
+cigar (exact-name link, `cigar_ambiguous` when it can't decide, unverified
+create otherwise); this tool adds only the enrichment queue.
+
+```yaml
+arguments:
+  clientRequestId: 3b9f1c22-...
+  cigar:                         # the described-cigar shape from save_smoke
+    canonicalName: Quasar Comet 7 Toro   # required; the name as the user knows it
+    brand: Quasar                        # everything else optional
+    vitola: { name: Toro }
+    type: NC
+  requestEnrichment: true        # optional, default true
+
+result:
+  cigar: { cigarId: cg_01k9, canonicalName: Quasar Comet 7 Toro, verification: unverified }
+  created: true                  # false when the name linked to an existing entry
+  enrichmentQueued: true         # a request was enqueued (or reused if already pending)
+  guidance: created              # created | already_existed
+  replayed: false
+```
+
+Enrichment is queued at most once per cigar: skipped when a pending or fulfilled
+request already exists, or when the entry already has both a product photo and
+full vitola dimensions (nothing left to fill). A described name that matches two
+catalog rows returns `cigar_ambiguous` with candidates, exactly as `save_smoke`.
+
+## record_purchase — write, idempotent
+
+Append an acquisition to the humidor ledger — or correct the count. Everything
+is a purchase row: the ledger is append-only and holdings stay derived, so a
+miscount is fixed with a negative-quantity row, never an edit. A described cigar
+with no catalog match is auto-created and its enrichment queued (the `add_cigar`
+path); a resolved id links directly.
+
+```yaml
+arguments:
+  clientRequestId: 8c14aa7e-...
+  cigar:                         # exactly one of cigarId / described (as save_smoke)
+    cigarId: cg_01j9x2
+  quantity: 10                   # integer, non-zero; NEGATIVE corrects an over-count
+  purchasedAt: "2026-01-10"      # optional; only what the user stated
+  packaging: box                 # optional
+  boxDate: null                  # optional
+  humidorAt: "2025-06-01"        # optional
+  pricePerStick: 12.5            # optional — never invented
+  vendorName: Small Batch Cigar  # optional; matched to the registry case-insensitively,
+                                 # an unknown name is kept in notes ("vendor: X")
+  notes: null                    # REQUIRED when quantity is negative (the reason)
+
+result:
+  purchaseId: pu_01kd
+  cigar: { cigarId: cg_01j9x2, canonicalName: Plasencia Alma del Fuego Concepcion, verification: verified }
+  holdingAfter:
+    totalAcquired: 10            # sum of the caller's lot quantities for this cigar
+    remaining: 7                 # max(0, totalAcquired − smokes since first purchase)
+  replayed: false
+```
+
+Only stated facts travel — never invent a price, date, or vendor. A negative
+quantity without `notes` is a `validation_error` (the correction must carry its
+reason); a zero quantity is rejected. Provenance is server-stamped
+`llm-conversation`; the vendor registry is admin data and is never created from a
+conversational mention.
 
 ## update_smoke — write, idempotent
 

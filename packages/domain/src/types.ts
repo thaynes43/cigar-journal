@@ -113,6 +113,50 @@ export interface SaveSmokeResult {
   replayed: boolean;
 }
 
+// Gap-fill: create an unverified catalog entry from the user's words and queue
+// background enrichment. `cigar` is the described cigar directly (not wrapped in
+// a ref) — add_cigar exists precisely because nothing matched.
+export interface AddCigarInput {
+  clientRequestId: string;
+  cigar: DescribedCigarInput;
+  requestEnrichment?: boolean; // default true
+  provenance?: ProvenanceInput;
+  correlationId?: string;
+}
+
+export interface AddCigarResult {
+  cigar: SavedCigar;
+  created: boolean; // false when the described name linked to an existing entry
+  enrichmentQueued: boolean;
+  replayed: boolean;
+}
+
+// Gap-fill: append an acquisition (or a correction) to the purchases ledger. The
+// ledger is append-only and holdings stay derived, so a miscount is fixed with a
+// negative-quantity row, not an edit. A described cigar auto-creates + enqueues
+// enrichment through the same path add_cigar uses.
+export interface RecordPurchaseInput {
+  clientRequestId: string;
+  cigar: CigarRef;
+  quantity: number; // integer, non-zero; negative corrects the count (requires notes)
+  purchasedAt?: string | null; // ISO date (YYYY-MM-DD)
+  packaging?: string | null;
+  boxDate?: string | null; // ISO date
+  humidorAt?: string | null; // ISO date
+  pricePerStick?: number | null;
+  vendorName?: string | null; // resolved case-insensitively; unknown names go to notes
+  notes?: string | null;
+  provenance?: ProvenanceInput;
+  correlationId?: string;
+}
+
+export interface RecordPurchaseResult {
+  purchaseId: string;
+  cigar: SavedCigar;
+  holdingAfter: { totalAcquired: number; remaining: number };
+  replayed: boolean;
+}
+
 export interface UpdateSmokeChanges {
   cigar?: { resolveTo: string };
   smokedAt?: SmokedAtInput;

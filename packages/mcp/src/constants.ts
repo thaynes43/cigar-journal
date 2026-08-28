@@ -1,11 +1,11 @@
 // Server identity, scope map, and the verbatim server instructions the tool
-// contract mandates. These are the client-facing surface: the seven tool names,
+// contract mandates. These are the client-facing surface: the nine tool names,
 // the scopes each demands, and the instruction text every client receives at
 // initialize (docs/mcp/tool-contract.md).
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The seven tools, exactly per the contract. Reads are annotated readOnlyHint.
+// The nine tools, exactly per the contract. Reads are annotated readOnlyHint.
 export const TOOL_NAMES = [
   "search_cigars",
   "get_cigar",
@@ -13,6 +13,8 @@ export const TOOL_NAMES = [
   "get_smoke",
   "get_my_inventory",
   "save_smoke",
+  "add_cigar",
+  "record_purchase",
   "update_smoke",
 ] as const;
 
@@ -28,6 +30,8 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   get_smoke: ["journal:read"],
   get_my_inventory: ["journal:read"],
   save_smoke: ["journal:write"],
+  add_cigar: ["journal:write"],
+  record_purchase: ["journal:write"],
   update_smoke: ["journal:write"],
 };
 
@@ -56,6 +60,15 @@ Preserve uncertainty: omit ratings, vitolas, times, pairings, blend details,
 or tasting stages that were never established — sparse is correct. Reuse the
 same clientRequestId when retrying a mutation. The server identifies the
 user from the authorization context; never supply or infer a user id.
+
+When the user smokes or acquires something search_cigars does not match, fill
+the gap first: add_cigar creates an unverified catalog entry from their words
+and queues background enrichment (specs + a product photo), so the later
+save_smoke links to a real cigar; record_purchase logs an acquisition and
+auto-creates a described cigar the same way. record_purchase is also how the
+humidor count is corrected — the ledger is append-only and holdings are derived,
+so a miscount is fixed with a negative-quantity row (say why in notes), never an
+edit. Record only what the user stated: never invent a price, date, or vendor.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.

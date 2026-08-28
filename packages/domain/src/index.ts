@@ -9,10 +9,12 @@ export { normalizeDescriptor, normalizeDescriptors } from "./descriptors.js";
 export { fingerprint } from "./fingerprint.js";
 
 export { saveSmoke } from "./save-smoke.js";
+export { addCigar } from "./add-cigar.js";
+export { recordPurchase } from "./record-purchase.js";
 export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
 export { getSmoke, queryMySmokes, searchCigars, getCigar, browseCigars } from "./reads.js";
-export { getMyInventory } from "./inventory.js";
+export { getMyInventory, deriveHoldingSummary } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
 
 // Review-bound smoke photos (ADR-007). Storage is passed explicitly to the
@@ -33,3 +35,7 @@ export {
 // resolves/creates purchase-linked cigars through the same logic that backs
 // saveSmoke, rather than reimplementing trigram matching (flow 006).
 export { resolveCigar, type ResolvedCigar } from "./cigar-resolution.js";
+
+// The conversational gap-fill resolve-or-create + enrichment queue. add_cigar
+// and record_purchase share this so the described-cigar path never forks.
+export { resolveAndEnrich, maybeQueueEnrichment, type ResolveAndEnrichResult } from "./enrichment.js";

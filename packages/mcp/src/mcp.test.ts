@@ -15,7 +15,7 @@ import {
 } from "@cj/oauth";
 import { createHarness, type DomainHarness } from "@cj/domain/testing";
 import type { Principal } from "@cj/domain";
-import { purchases, vendors } from "@cj/db";
+import { purchases, vendors, enrichmentRequests } from "@cj/db";
 import { buildApp } from "./app.js";
 import { INSTRUCTIONS } from "./constants.js";
 
@@ -136,6 +136,15 @@ describe("@cj/mcp adapter", () => {
     return (await client.callTool({ name, arguments: args })) as CallToolResult;
   }
 
+  // Enrichment-queue rows for one cigar, filtered in JS (this package does not
+  // depend on drizzle-orm operators directly).
+  async function enrichmentRows(
+    cigarId: string,
+  ): Promise<{ cigarId: string; status: string; requestedBy: string | null }[]> {
+    const all = await h.pg.db.select().from(enrichmentRequests);
+    return all.filter((r) => r.cigarId === cigarId);
+  }
+
   beforeAll(async () => {
     process.env.BETTER_AUTH_URL = ORIGIN;
     process.env.MCP_JSON_RESPONSE = "true";
@@ -208,7 +217,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the seven tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
+  it("lists exactly the nine tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -216,10 +225,12 @@ describe("@cj/mcp adapter", () => {
       const names = tools.map((t) => t.name).sort();
       expect(names).toEqual(
         [
+          "add_cigar",
           "get_cigar",
           "get_my_inventory",
           "get_my_smokes",
           "get_smoke",
+          "record_purchase",
           "save_smoke",
           "search_cigars",
           "update_smoke",
@@ -230,7 +241,8 @@ describe("@cj/mcp adapter", () => {
         tools.find((t) => t.name === name)?.annotations?.readOnlyHint;
       for (const r of ["search_cigars", "get_cigar", "get_my_smokes", "get_smoke", "get_my_inventory"])
         expect(readOnly(r)).toBe(true);
-      for (const w of ["save_smoke", "update_smoke"]) expect(readOnly(w)).not.toBe(true);
+      for (const w of ["save_smoke", "add_cigar", "record_purchase", "update_smoke"])
+        expect(readOnly(w)).not.toBe(true);
     });
   });
 
@@ -683,6 +695,156 @@ describe("@cj/mcp adapter", () => {
       };
       expect(replay.replayed).toBe(true);
       expect(replay.smoke.version).toBe(2);
+    });
+  });
+
+  // ---- gap-fill: add_cigar + record_purchase --------------------------------
+
+  it("add_cigar creates an unverified entry, queues enrichment (row visible in DB), and replays", async () => {
+    await withClient(ownerFull, async (client) => {
+      // Nothing matches → the model creates from the user's words.
+      const search = payloadOf(await call(client, "search_cigars", { query: "Quasar Comet 7" })) as {
+        guidance: string;
+      };
+      expect(search.guidance).toBe("no_match");
+
+      const clientRequestId = randomUUID();
+      const args = {
+        clientRequestId,
+        cigar: { canonicalName: "Quasar Comet 7 Toro", brand: "Quasar", type: "NC" },
+      };
+      const created = payloadOf(await call(client, "add_cigar", args)) as {
+        cigar: { cigarId: string; verification: string };
+        created: boolean;
+        enrichmentQueued: boolean;
+        guidance: string;
+        replayed: boolean;
+      };
+      expect(created.created).toBe(true);
+      expect(created.enrichmentQueued).toBe(true);
+      expect(created.guidance).toBe("created");
+      expect(created.replayed).toBe(false);
+      expect(created.cigar.verification).toBe("unverified");
+
+      // The enrichment queue row is really in the DB, owned by the requester.
+      const queued = await enrichmentRows(created.cigar.cigarId);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]!.status).toBe("pending");
+      expect(queued[0]!.requestedBy).toBe(owner.userId);
+
+      // Replay: same envelope + args → original result, no duplicate enrichment.
+      const replay = payloadOf(await call(client, "add_cigar", args)) as {
+        cigar: { cigarId: string };
+        replayed: boolean;
+      };
+      expect(replay.replayed).toBe(true);
+      expect(replay.cigar.cigarId).toBe(created.cigar.cigarId);
+      expect(await enrichmentRows(created.cigar.cigarId)).toHaveLength(1);
+    });
+  });
+
+  it("rejects add_cigar for a token without journal:write: 403", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerCatalogJournal}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "add_cigar",
+          arguments: { clientRequestId: randomUUID(), cigar: { canonicalName: "Scope Probe" } },
+        },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+  });
+
+  it("record_purchase logs an acquisition of a described cigar and returns holdingAfter", async () => {
+    await withClient(ownerFull, async (client) => {
+      const data = payloadOf(
+        await call(client, "record_purchase", {
+          clientRequestId: randomUUID(),
+          cigar: { described: { canonicalName: "Pulsar Prime Robusto", brand: "Pulsar", type: "NC" } },
+          quantity: 5,
+          purchasedAt: "2026-02-01",
+          packaging: "box",
+          pricePerStick: 9.5,
+        }),
+      ) as {
+        purchaseId: string;
+        cigar: { cigarId: string; verification: string };
+        holdingAfter: { totalAcquired: number; remaining: number };
+        replayed: boolean;
+      };
+      expect(data.purchaseId).toBeTruthy();
+      expect(data.cigar.verification).toBe("unverified"); // described → auto-created
+      expect(data.holdingAfter).toEqual({ totalAcquired: 5, remaining: 5 });
+
+      // A described purchase queues enrichment through the same path add_cigar uses.
+      expect(await enrichmentRows(data.cigar.cigarId)).toHaveLength(1);
+
+      // It shows up in the humidor.
+      const inv = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: { cigar: { cigarId: string }; remaining: number }[];
+      };
+      expect(inv.holdings.find((hh) => hh.cigar.cigarId === data.cigar.cigarId)!.remaining).toBe(5);
+    });
+  });
+
+  it("record_purchase corrects an over-count with a negative-quantity row", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Correction Corona", brand: "Correction" });
+    await withClient(ownerFull, async (client) => {
+      const bought = payloadOf(
+        await call(client, "record_purchase", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId },
+          quantity: 3,
+        }),
+      ) as { holdingAfter: { totalAcquired: number } };
+      expect(bought.holdingAfter.totalAcquired).toBe(3);
+
+      const corrected = payloadOf(
+        await call(client, "record_purchase", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId },
+          quantity: -1,
+          notes: "Miscounted the box.",
+        }),
+      ) as { holdingAfter: { totalAcquired: number; remaining: number } };
+      expect(corrected.holdingAfter.totalAcquired).toBe(2);
+      expect(corrected.holdingAfter.remaining).toBe(2);
+    });
+  });
+
+  it("record_purchase rejects a negative quantity with no notes: validation_error on notes", async () => {
+    await withClient(ownerFull, async (client) => {
+      const result = await call(client, "record_purchase", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId: primaryCigarId },
+        quantity: -2,
+      });
+      const error = errorOf(result);
+      expect(error.code).toBe("validation_error");
+      expect((error.fields as { path: string }[]).some((f) => f.path === "notes")).toBe(true);
+    });
+  });
+
+  it("record_purchase is scoped to the caller — another user never sees the lot", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Private Panatela", brand: "Private" });
+    await withClient(ownerFull, async (client) => {
+      await call(client, "record_purchase", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId },
+        quantity: 4,
+      });
+    });
+    await withClient(otherFull, async (client) => {
+      const inv = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: { cigar: { cigarId: string } }[];
+      };
+      expect(inv.holdings.some((hh) => hh.cigar.cigarId === cigarId)).toBe(false);
     });
   });
 });

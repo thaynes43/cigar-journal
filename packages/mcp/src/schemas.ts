@@ -345,9 +345,80 @@ export const updateSmokeSchema = z
   })
   .strict();
 
+// ---- gap-fill write tools --------------------------------------------------
+
+export const addCigarSchema = z
+  .object({
+    clientRequestId: z
+      .string()
+      .describe(
+        "A UUID minted once per user intent; reuse EXACTLY on retries so replays are recognized.",
+      ),
+    // The described-cigar shape from save_smoke — used directly here because
+    // add_cigar exists precisely when nothing in the catalog matched.
+    cigar: describedCigar.describe(
+      "The cigar to create, named as fully as the user can — confirm the fullest name first (search_cigars guidance applies) so you don't create a near-duplicate. canonicalName required; everything else optional.",
+    ),
+    requestEnrichment: z
+      .boolean()
+      .optional()
+      .describe(
+        "Queue a background enrichment request to fill missing specs and a product photo. Defaults to true; set false only to suppress the crawl.",
+      ),
+  })
+  .strict();
+
+export const recordPurchaseSchema = z
+  .object({
+    clientRequestId: z
+      .string()
+      .describe(
+        "A UUID minted once per user intent; reuse EXACTLY on retries so replays are recognized.",
+      ),
+    cigar: cigarRef,
+    quantity: z
+      .number()
+      .int()
+      .describe(
+        "Sticks acquired, a positive integer. Use a NEGATIVE integer to correct an over-count; never zero. When negative, notes MUST say why.",
+      ),
+    purchasedAt: z
+      .string()
+      .nullish()
+      .describe("Purchase date as 'YYYY-MM-DD', only if stated. Never invent it."),
+    packaging: z
+      .string()
+      .nullish()
+      .describe("How it was bought, e.g. box, 5-pack, single. Omit if unstated."),
+    boxDate: z.string().nullish().describe("Box date/code as 'YYYY-MM-DD', if on the box."),
+    humidorAt: z
+      .string()
+      .nullish()
+      .describe("Date it entered the humidor as 'YYYY-MM-DD', if stated."),
+    pricePerStick: z
+      .number()
+      .nullish()
+      .describe("Price per stick in dollars, only if stated. Never invent it."),
+    vendorName: z
+      .string()
+      .nullish()
+      .describe(
+        "Shop/vendor name as the user said it; matched to the registry case-insensitively, otherwise kept in notes. Omit if unstated.",
+      ),
+    notes: z
+      .string()
+      .nullish()
+      .describe(
+        "Free-text notes. REQUIRED when quantity is negative — record the reason for the correction.",
+      ),
+  })
+  .strict();
+
 export type SearchCigarsArgs = z.infer<typeof searchCigarsSchema>;
 export type GetCigarArgs = z.infer<typeof getCigarSchema>;
 export type GetMySmokesArgs = z.infer<typeof getMySmokesSchema>;
 export type GetSmokeArgs = z.infer<typeof getSmokeSchema>;
 export type SaveSmokeArgs = z.infer<typeof saveSmokeSchema>;
 export type UpdateSmokeArgs = z.infer<typeof updateSmokeSchema>;
+export type AddCigarArgs = z.infer<typeof addCigarSchema>;
+export type RecordPurchaseArgs = z.infer<typeof recordPurchaseSchema>;

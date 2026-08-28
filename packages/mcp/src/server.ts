@@ -3,6 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import {
   saveSmoke,
+  addCigar,
+  recordPurchase,
   updateSmoke,
   getSmoke,
   queryMySmokes,
@@ -15,6 +17,8 @@ import {
   type Principal,
   type SaveSmokeInput,
   type UpdateSmokeInput,
+  type AddCigarInput,
+  type RecordPurchaseInput,
 } from "@cj/domain";
 import {
   SERVER_INFO,
@@ -31,14 +35,18 @@ import {
   getSmokeSchema,
   saveSmokeSchema,
   updateSmokeSchema,
+  addCigarSchema,
+  recordPurchaseSchema,
   type SaveSmokeArgs,
   type UpdateSmokeArgs,
+  type AddCigarArgs,
+  type RecordPurchaseArgs,
 } from "./schemas.js";
 import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./results.js";
 import { smokeUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The seven-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The nine-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -106,6 +114,39 @@ function toSaveInput(args: SaveSmokeArgs, clientId: string, correlationId: strin
   const base = args as unknown as Omit<SaveSmokeInput, "provenance" | "correlationId">;
   return {
     ...base,
+    provenance: { source: "llm-conversation", client: clientId },
+    correlationId,
+  };
+}
+
+function toAddCigarInput(args: AddCigarArgs, clientId: string, correlationId: string): AddCigarInput {
+  return {
+    clientRequestId: args.clientRequestId,
+    // The described-cigar shape matches DescribedCigarInput; the domain re-checks it.
+    cigar: args.cigar as unknown as AddCigarInput["cigar"],
+    requestEnrichment: args.requestEnrichment,
+    provenance: { source: "llm-conversation", client: clientId },
+    correlationId,
+  };
+}
+
+function toRecordPurchaseInput(
+  args: RecordPurchaseArgs,
+  clientId: string,
+  correlationId: string,
+): RecordPurchaseInput {
+  return {
+    clientRequestId: args.clientRequestId,
+    // cigarRef union mirrors CigarRef; quantity/date/price leaves are domain-checked.
+    cigar: args.cigar as unknown as RecordPurchaseInput["cigar"],
+    quantity: args.quantity,
+    purchasedAt: args.purchasedAt,
+    packaging: args.packaging,
+    boxDate: args.boxDate,
+    humidorAt: args.humidorAt,
+    pricePerStick: args.pricePerStick,
+    vendorName: args.vendorName,
+    notes: args.notes,
     provenance: { source: "llm-conversation", client: clientId },
     correlationId,
   };
@@ -306,6 +347,63 @@ export function createMcpServer(deps: Deps): McpServer {
             },
           },
           cigarCreated: result.cigarCreated,
+          replayed: result.replayed,
+        });
+      }),
+  );
+
+  server.registerTool(
+    "add_cigar",
+    {
+      title: "Add cigar",
+      description:
+        "The user names a cigar missing from the catalog. Confirm the fullest name first (search_cigars guidance applies); the entry is created unverified from their words and a background enrichment request is queued to fill specs and a product photo. Use before save_smoke or record_purchase when nothing matches. `guidance` is 'created' for a new entry or 'already_existed' when the name linked to an existing one.",
+      inputSchema: addCigarSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Add cigar",
+      },
+    },
+    (args, extra) =>
+      run("add_cigar", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+        const result = await addCigar(deps, principal, toAddCigarInput(args, clientId, correlationId));
+        return jsonResult({
+          cigar: result.cigar,
+          created: result.created,
+          enrichmentQueued: result.enrichmentQueued,
+          guidance: result.created ? "created" : "already_existed",
+          replayed: result.replayed,
+        });
+      }),
+  );
+
+  server.registerTool(
+    "record_purchase",
+    {
+      title: "Record purchase",
+      description:
+        "Append an acquisition to the humidor ledger, or correct the count. quantity is a positive integer for a purchase; it may be NEGATIVE to correct an over-count — say why in notes. Record only stated facts (never invent a price, date, or vendor); a described cigar with no catalog match is auto-created and its enrichment queued. Corrections are rows too — holdings stay derived. Output: purchaseId, cigar, and holdingAfter { totalAcquired, remaining }.",
+      inputSchema: recordPurchaseSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Record purchase",
+      },
+    },
+    (args, extra) =>
+      run("record_purchase", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+        const result = await recordPurchase(
+          deps,
+          principal,
+          toRecordPurchaseInput(args, clientId, correlationId),
+        );
+        return jsonResult({
+          purchaseId: result.purchaseId,
+          cigar: result.cigar,
+          holdingAfter: result.holdingAfter,
           replayed: result.replayed,
         });
       }),
