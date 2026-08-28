@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/thaynes43/cigar-journal/compare/v0.15.0...v0.16.0) (2026-08-28)
+
+
+### Features
+
+* **web:** brand and line tiles borrow a representative product photo ([#84](https://github.com/thaynes43/cigar-journal/issues/84)) ([b848a8c](https://github.com/thaynes43/cigar-journal/commit/b848a8ced16200d2578806e6b34a0a2116eba1f9))
+
 ## [0.15.0](https://github.com/thaynes43/cigar-journal/compare/v0.14.0...v0.15.0) (2026-08-28)
 
 
