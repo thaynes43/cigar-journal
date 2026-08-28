@@ -1,0 +1,22 @@
+# foxcigar.com robots.txt (trimmed to the shapes probed 2026-08-28)
+User-agent: *
+Allow: /
+Content-Signal: search=yes, ai-train=no, use=reference
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: GPTBot
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+User-agent: *
+Disallow: /wp-admin/
+Allow: /wp-admin/admin-ajax.php
+
+Sitemap: https://foxcigar.com/sitemap.xml

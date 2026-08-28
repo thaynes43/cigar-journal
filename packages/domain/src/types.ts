@@ -343,6 +343,9 @@ export interface PersonalProfile {
 export interface GetCigarResult {
   cigar: CigarView;
   personalProfile: PersonalProfile | null;
+  // Whether a crawler-captured product photo exists (ADR-007); drives the detail
+  // hero image via the authed proxy route.
+  hasProductPhoto: boolean;
 }
 
 // A catalog-only cigar summary for browse listings — no per-caller personal
@@ -385,6 +388,9 @@ export interface BrowseBrandsResult {
 export interface CatalogCigarTile extends CatalogCigar {
   userSmokeCount: number;
   userRating: number | null;
+  // Whether a crawler-captured product photo exists (ADR-007). The tile links to
+  // the authed thumb proxy when true; the BandTile art shows otherwise.
+  hasProductPhoto: boolean;
 }
 
 // One line's cigars within a brand page — the haynesnetwork "season".

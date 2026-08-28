@@ -39,3 +39,6 @@ export { resolveCigar, type ResolvedCigar } from "./cigar-resolution.js";
 // The conversational gap-fill resolve-or-create + enrichment queue. add_cigar
 // and record_purchase share this so the described-cigar path never forks.
 export { resolveAndEnrich, maybeQueueEnrichment, type ResolveAndEnrichResult } from "./enrichment.js";
+// Product photos (ADR-007). Catalog-scoped (not owner-scoped); the serving route
+// authorizes any signed-in user. Written by the crawler, read here for the proxy.
+export { getProductPhoto, type ProductPhotoObject } from "./product-photos.js";

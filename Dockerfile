@@ -23,6 +23,7 @@ COPY packages/oauth/package.json ./packages/oauth/
 COPY packages/importer/package.json ./packages/importer/
 COPY packages/mcp/package.json ./packages/mcp/
 COPY packages/photos/package.json ./packages/photos/
+COPY packages/crawler/package.json ./packages/crawler/
 COPY apps/web/package.json ./apps/web/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 
@@ -76,6 +77,19 @@ FROM build AS mcp
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm deploy --legacy --filter=@cj/mcp --prod --config.node-linker=hoisted /app/mcp
 
+# --- crawl: prune @cj/crawler to the production subtree the crawl role runs ---
+# The vendor crawler (ADR-006 separate role). `pnpm deploy --prod` copies the
+# package source (src/*.ts — adapters + core, run via tsx, no build step) plus a
+# flat prod node_modules (its workspace deps @cj/domain + @cj/db + @cj/photos, the
+# photos pipeline's sharp/heic-convert, the S3 client, drizzle-orm, pg, tsx) into
+# /app/crawler. --legacy is required for non-injected workspace deps;
+# --config.node-linker=hoisted materializes the raw-TS workspace sources
+# (db/domain/photos src + db/migrations) as real dirs instead of the BuildKit
+# symlink stubs tsx cannot resolve — the same linker fix the mcp role uses.
+FROM build AS crawl
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm deploy --legacy --filter=@cj/crawler --prod --config.node-linker=hoisted /app/crawler
+
 # --- runtime: minimal image; the role is selected by the container command ---
 FROM node:22-alpine AS runtime
 RUN apk add --no-cache tini
@@ -91,6 +105,8 @@ COPY --from=migrate /app/migrate ./migrate
 COPY --from=import /app/importer ./importer
 # mcp role: the pruned @cj/mcp subtree (server src + its own node_modules).
 COPY --from=mcp /app/mcp ./mcp
+# crawl role: the pruned @cj/crawler subtree (adapters + core + its own node_modules).
+COPY --from=crawl /app/crawler ./crawler
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
@@ -145,5 +161,18 @@ ENTRYPOINT ["/sbin/tini", "--"]
 #     fails fast if either is unset. Long-running — never exits. The web origin
 #     serves /oauth/* and /.well-known/*; this service serves ONLY /mcp on the
 #     same public origin (path-routed at the ingress).
-#   crawl:          future role attaches here over the same base.
+#   crawl (CronJob or one-shot Job — the vendor crawler, ADR-006):
+#     workingDir: /app/crawler             # REQUIRED: `--import tsx` resolves the
+#     command: ["/sbin/tini","--","node","--import","tsx","src/cli.ts",
+#               "--vendor","fox-cigar","--mode","seed"]
+#                                          # tsx loader relative to CWD; tsx lives
+#                                          # in /app/crawler/node_modules. Modes:
+#                                          # seed | offers | enrich. Add "--dry-run"
+#                                          # to report without writing, "--limit N"
+#                                          # to bound a partial run.
+#     Reads DATABASE_URL (catalog/offers/match writes) and, optionally, PHOTOS_S3_*
+#     (product-photo capture — skipped with the photos-disabled note when unset).
+#     Resolves/creates the vendor registry row, refuses to crawl a path robots.txt
+#     disallows, rate-limits every fetch (≥2.5s), and brackets the run in a
+#     crawl_runs row. Exits 0 on success, 1 on a run failure.
 CMD ["node", "apps/web/server.js"]
