@@ -21,6 +21,10 @@ export const purchases = pgTable("purchases", {
   pricePerStick: numeric("price_per_stick"),
   vendorId: uuid("vendor_id").references(() => vendors.id),
   notes: text("notes"),
+  // Provenance: null for the legacy ledger import, 'llm-conversation' for
+  // conversational rows (including negative-quantity corrections), 'manual'
+  // for web entry. The ledger is append-only; holdings stay derived.
+  source: text("source"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
