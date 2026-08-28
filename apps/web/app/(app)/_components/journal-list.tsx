@@ -85,7 +85,12 @@ export function JournalList() {
                     <span className="font-display text-lg leading-snug font-semibold text-ink">
                       {smoke.cigar.canonicalName}
                     </span>
-                    <LocalDate format="smokedAt" value={smoke.smokedAt} className="label-caps" />
+                    <div className="flex items-center gap-2">
+                      <LocalDate format="smokedAt" value={smoke.smokedAt} className="label-caps" />
+                      {smoke.fromHumidor ? (
+                        <span className={ui.chipOutline}>humidor</span>
+                      ) : null}
+                    </div>
                   </div>
                   <RatingSeal rating={smoke.rating} liked={smoke.liked} size="sm" />
                 </div>

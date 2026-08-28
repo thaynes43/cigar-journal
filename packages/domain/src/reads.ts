@@ -4,12 +4,14 @@ import {
   smokes,
   smokeProgression,
   smokePhotos,
+  smokeConsumptions,
   productPhotos,
   wants,
   type CigarRow,
   type SmokeRow,
   type SmokeProgressionRow,
   type SmokePhotoRow,
+  type SmokeConsumptionRow,
 } from "@cj/db";
 import type { Deps, Principal } from "./deps.js";
 import type {
@@ -120,6 +122,7 @@ function toSmokeView(
   cigar: { id: string; canonicalName: string; verification: CigarRow["verification"] },
   progression: SmokeProgressionRow[],
   photos: SmokePhotoRow[],
+  consumption: SmokeConsumptionRow | undefined,
 ): SmokeView {
   return {
     smokeId: smoke.id,
@@ -129,6 +132,9 @@ function toSmokeView(
       canonicalName: cigar.canonicalName,
       verification: cigar.verification,
     },
+    consumption: consumption
+      ? { purchaseId: consumption.purchaseId, source: consumption.source }
+      : null,
     smokedAt: {
       value: smoke.smokedAt ? smoke.smokedAt.toISOString() : null,
       source: smoke.smokedAtSource,
@@ -197,7 +203,14 @@ export async function getSmoke(
     .where(eq(smokePhotos.smokeId, args.smokeId))
     .orderBy(smokePhotos.createdAt);
 
-  return toSmokeView(row.smoke, row.cigar, progression, photos);
+  // The explicit humidor link, if any (ADR-008). At most one per smoke.
+  const consumptionRows = await deps.db
+    .select()
+    .from(smokeConsumptions)
+    .where(eq(smokeConsumptions.smokeId, args.smokeId))
+    .limit(1);
+
+  return toSmokeView(row.smoke, row.cigar, progression, photos, consumptionRows[0]);
 }
 
 function smokeConditions(principal: Principal, filters: QueryMySmokesFilters): SQL[] {
@@ -363,6 +376,9 @@ export async function queryMySmokes(
       canonicalName: cigars.canonicalName,
       // Correlated count of review photos — feeds the web card's photo badge.
       photoCount: sql<number>`(SELECT count(*) FROM smoke_photos p WHERE p.smoke_id = ${smokes.id})`,
+      // Whether the smoke has an explicit humidor link (ADR-008) — feeds the
+      // web card's "humidor" provenance tag. Web-only, like photoCount.
+      fromHumidor: sql<boolean>`EXISTS (SELECT 1 FROM smoke_consumptions sc WHERE sc.smoke_id = ${smokes.id})`,
     })
     .from(smokes)
     .innerJoin(cigars, eq(smokes.cigarId, cigars.id))
@@ -399,6 +415,7 @@ export async function queryMySmokes(
       summary: deriveSummary(row.smoke),
       strength: row.smoke.strength,
       photoCount: Number(row.photoCount),
+      fromHumidor: Boolean(row.fromHumidor),
     };
     if (provenance) {
       const p = provenance.get(row.smoke.id);

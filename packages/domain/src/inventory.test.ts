@@ -25,11 +25,12 @@ describe("getMyInventory", () => {
   }
 
   // A smoke of the cigar with an optional rating, an explicit date, or (nullTime)
-  // no time at all — the shape an imported smoke lands in.
+  // no time at all — the shape an imported smoke lands in. `fromHumidor` attaches
+  // the explicit consumption link (ADR-008): only a linked smoke deducts.
   async function smoke(
     user: Principal,
     cigarId: string,
-    opts: { rating?: number; smokedAt?: string; nullTime?: boolean } = {},
+    opts: { rating?: number; smokedAt?: string; nullTime?: boolean; fromHumidor?: boolean } = {},
   ): Promise<void> {
     await saveSmoke(h.deps, user, {
       clientRequestId: newRequestId(),
@@ -40,6 +41,7 @@ describe("getMyInventory", () => {
         ? { smokedAt: { value: opts.smokedAt, source: "user" as const, precision: "day" as const } }
         : {}),
       ...(opts.nullTime ? { provenance: { source: "legacy-import" as const } } : {}),
+      ...(opts.fromHumidor != null ? { consumption: { fromHumidor: opts.fromHumidor } } : {}),
     });
   }
 
@@ -61,36 +63,56 @@ describe("getMyInventory", () => {
     expect(totalSticksRemaining).toBe(15);
   });
 
-  it("derives remaining from smokes since first purchase, counts null-timed smokes, floors at 0", async () => {
+  it("derives remaining from explicit consumption links, floors display at 0, surfaces over-consumption", async () => {
     const user = await h.createUser("inv-remaining@example.com");
 
-    // qty 3; one smoke BEFORE the purchase (not consumption), one after, one
-    // null-timed (post-import) → since-purchase count 2 → remaining 1, all-time 3.
+    // qty 3; two smokes explicitly from the humidor, one off-humidor (a lounge
+    // pour of a cigar he also owns) → consumed 2 → remaining 1, all-time 3.
     const c1 = await h.seedCigar({ canonicalName: "Remaining Robusto", brand: "Rem" });
     await addPurchase(user.userId, c1, { purchasedAt: "2026-03-01", quantity: 3 });
-    await smoke(user, c1, { smokedAt: "2026-01-01" }); // pre-purchase
-    await smoke(user, c1, { smokedAt: "2026-04-01" }); // post-purchase
-    await smoke(user, c1, { nullTime: true }); // no time → counts
+    await smoke(user, c1, { smokedAt: "2026-04-01", fromHumidor: true });
+    await smoke(user, c1, { nullTime: true, fromHumidor: true });
+    await smoke(user, c1, { smokedAt: "2026-01-01", fromHumidor: false }); // off-humidor → no deduction
 
-    // qty 1 but 3 post-purchase smokes → remaining floored at 0, all-time 3.
+    // qty 1 but 3 humidor consumptions → remaining floored at 0, over-consumed 2.
     const c2 = await h.seedCigar({ canonicalName: "Overdrawn Corona", brand: "Ovr" });
     await addPurchase(user.userId, c2, { purchasedAt: "2026-02-01", quantity: 1 });
-    await smoke(user, c2, { smokedAt: "2026-03-01" });
-    await smoke(user, c2, { smokedAt: "2026-03-02" });
-    await smoke(user, c2, { smokedAt: "2026-03-03" });
+    await smoke(user, c2, { smokedAt: "2026-03-01", fromHumidor: true });
+    await smoke(user, c2, { smokedAt: "2026-03-02", fromHumidor: true });
+    await smoke(user, c2, { smokedAt: "2026-03-03", fromHumidor: true });
 
     const { holdings } = await getMyInventory(h.deps, user);
     const rem = holdings.find((holding) => holding.cigar.cigarId === c1)!;
-    expect(rem.smokedCount).toBe(3); // all-time
-    expect(rem.remaining).toBe(1); // 3 acquired − 2 since-purchase
+    expect(rem.smokedCount).toBe(3); // all-time smokes
+    expect(rem.consumedCount).toBe(2); // only the two humidor-linked ones
+    expect(rem.remaining).toBe(1); // 3 acquired − 2 consumed
+    expect(rem.overConsumed).toBe(0);
 
     const over = holdings.find((holding) => holding.cigar.cigarId === c2)!;
     expect(over.smokedCount).toBe(3);
+    expect(over.consumedCount).toBe(3);
     expect(over.remaining).toBe(0); // floored, not negative
+    expect(over.overConsumed).toBe(2); // the surfaced discrepancy (1 acquired − 3 consumed)
 
     // In-stock (c1) sorts ahead of the empty (c2).
     expect(holdings[0]!.cigar.cigarId).toBe(c1);
     expect(holdings[1]!.cigar.cigarId).toBe(c2);
+  });
+
+  it("a smoke without a consumption link never deducts (the heuristic is gone)", async () => {
+    const user = await h.createUser("inv-noheuristic@example.com");
+    const cigarId = await h.seedCigar({ canonicalName: "Untouched Toro", brand: "Unt" });
+    await addPurchase(user.userId, cigarId, { purchasedAt: "2026-01-01", quantity: 5 });
+    // Three post-purchase smokes, none linked to the humidor → remaining stays 5.
+    await smoke(user, cigarId, { smokedAt: "2026-02-01" });
+    await smoke(user, cigarId, { smokedAt: "2026-03-01" });
+    await smoke(user, cigarId, { nullTime: true });
+
+    const { holdings } = await getMyInventory(h.deps, user);
+    const holding = holdings.find((hh) => hh.cigar.cigarId === cigarId)!;
+    expect(holding.smokedCount).toBe(3);
+    expect(holding.consumedCount).toBe(0);
+    expect(holding.remaining).toBe(5); // no explicit consumption → no deduction
   });
 
   it("resolves the vendor name via vendor_id and leaves a vendorless lot null", async () => {
@@ -165,12 +187,13 @@ describe("getMyInventory", () => {
     const cigarId = await h.seedCigar({ canonicalName: "Isolation Idolo", brand: "Iso" });
 
     await addPurchase(owner.userId, cigarId, { purchasedAt: "2026-01-01", quantity: 4 });
-    // The intruder smokes the same cigar but owns none of it.
-    await smoke(intruder, cigarId, { smokedAt: "2026-02-01" });
+    // The intruder smokes the same cigar from his own (nonexistent) humidor.
+    await smoke(intruder, cigarId, { smokedAt: "2026-02-01", fromHumidor: true });
 
     const ownerInv = await getMyInventory(h.deps, owner);
     expect(ownerInv.holdings).toHaveLength(1);
-    expect(ownerInv.holdings[0]!.remaining).toBe(4); // the intruder's smoke doesn't count
+    expect(ownerInv.holdings[0]!.remaining).toBe(4); // the intruder's consumption doesn't count
+    expect(ownerInv.holdings[0]!.consumedCount).toBe(0);
     expect(ownerInv.holdings[0]!.smokedCount).toBe(0);
 
     const intruderInv = await getMyInventory(h.deps, intruder);

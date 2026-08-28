@@ -7,6 +7,7 @@ import { normalizeDescriptors, verbatimDescriptors } from "./descriptors.js";
 import { resolveCigar } from "./cigar-resolution.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
+import { applyConsumptionOnSave } from "./consumption.js";
 
 // Persist one finished Smoke. Validate → resolve cigar (create unverified if
 // described) → write smoke + progression + idempotency key + audit row in ONE
@@ -95,13 +96,22 @@ async function saveWithinTx(
     );
   }
 
+  // Explicit consumption (ADR-008): link the smoke to the humidor when the caller
+  // said it came from there. Omitted/false writes nothing — unknown deducts
+  // nothing. In-transaction with the smoke and its audit.
+  const consumption = await applyConsumptionOnSave(
+    tx,
+    { smokeId: smoke.id, cigarId: cigar.cigarId, userId: principal.userId },
+    input.consumption,
+  );
+
   await tx.insert(auditLog).values({
     userId: principal.userId,
     actor: provenanceToActor(provenanceSource),
     action: "smoke.created",
     smokeId: smoke.id,
     before: null,
-    after: smokeSnapshot(smoke),
+    after: consumption ? { ...smokeSnapshot(smoke), consumption } : smokeSnapshot(smoke),
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 

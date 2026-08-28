@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import type { CigarRef } from "@cj/domain";
 import { api } from "@/lib/trpc/react";
@@ -9,6 +9,7 @@ import { fieldMessages } from "@/lib/trpc/error";
 import { CigarPicker } from "./cigar-picker";
 import { SmokeDetailsFields } from "./smoke-details-fields";
 import { ProgressionEditor, type ProgressionDraft } from "./progression-editor";
+import { ConsumptionControl, type ConsumptionDraft } from "./consumption-control";
 import { emptyDetails, buildSaveInput, type SmokeDetailsDraft } from "./smoke-draft";
 
 export function NewSmokeForm() {
@@ -18,6 +19,28 @@ export function NewSmokeForm() {
   const [progression, setProgression] = useState<ProgressionDraft[]>([]);
   // One request id per intent, so a retried submit is an idempotent replay.
   const requestId = useRef(crypto.randomUUID());
+
+  // A resolved cigar id lets us read its holding: whether to show "From my
+  // humidor" and default it on (remaining > 0). A described (unresolved) cigar
+  // has no holding yet, so the control never shows (ADR-008 / DESIGN-002).
+  const cigarId = cigar && "cigarId" in cigar ? cigar.cigarId : null;
+  const holdingQuery = api.inventory.forCigar.useQuery(
+    { cigarId: cigarId ?? "" },
+    { enabled: Boolean(cigarId) },
+  );
+  const holding = cigarId ? holdingQuery.data : undefined;
+  const [consumption, setConsumption] = useState<ConsumptionDraft>({
+    fromHumidor: false,
+    purchaseId: null,
+  });
+  // Default on when there is stock; reset whenever the resolved holding changes.
+  useEffect(() => {
+    setConsumption(
+      holding?.hasHolding
+        ? { fromHumidor: holding.remaining > 0, purchaseId: null }
+        : { fromHumidor: false, purchaseId: null },
+    );
+  }, [holding?.cigarId, holding?.hasHolding, holding?.remaining]);
 
   const save = api.smokes.save.useMutation({
     onSuccess: (result) => router.push(`/smokes/${result.smoke.smokeId}`),
@@ -33,7 +56,15 @@ export function NewSmokeForm() {
       return;
     }
     setCigarMissing(false);
-    save.mutate(buildSaveInput(requestId.current, cigar, details, progression));
+    save.mutate(
+      buildSaveInput(
+        requestId.current,
+        cigar,
+        details,
+        progression,
+        holding?.hasHolding ? consumption : null,
+      ),
+    );
   }
 
   const messages = fieldMessages(save.error);
@@ -52,6 +83,8 @@ export function NewSmokeForm() {
         />
         {cigarMissing ? <p className={ui.alert}>Pick or add the cigar first.</p> : null}
       </section>
+
+      <ConsumptionControl holding={holding} value={consumption} onChange={setConsumption} />
 
       <section className={`${ui.card}`}>
         <SmokeDetailsFields value={details} onChange={setDetails} />

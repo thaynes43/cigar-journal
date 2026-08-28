@@ -71,6 +71,14 @@ function InventoryGrid({ holdings }: { holdings: InventoryHolding[] }) {
                     <span className="font-display text-lg font-semibold text-ink tabular-nums">
                       {holding.remaining} left
                     </span>
+                    {holding.overConsumed > 0 ? (
+                      // Over-consumption is surfaced, not hidden by the floor
+                      // (ADR-008 / DESIGN-002 §4): more smokes are linked to the
+                      // humidor than were acquired — a missing acquisition row.
+                      <span className="text-xs font-medium text-danger tabular-nums">
+                        −{holding.overConsumed}
+                      </span>
+                    ) : null}
                     {holding.agingSince ? (
                       <span className="text-xs text-muted">
                         since <LocalDate format="monthYear" value={holding.agingSince} />

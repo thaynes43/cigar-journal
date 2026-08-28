@@ -207,6 +207,29 @@ const journal = z
   })
   .strict();
 
+// Explicit humidor deduction (ADR-008). The ONLY way a smoke deducts a stick from
+// inventory. Include it only when provenance is known — from the ask-once beat
+// ("From your humidor?") or something the user already said. OMIT the whole block
+// when unknown: omitted deducts nothing, and the schema never forces a guess.
+const consumption = z
+  .object({
+    fromHumidor: z
+      .boolean()
+      .describe(
+        "true when this stick came from the user's own humidor (deducts one from inventory); false when it did not (a lounge pour, a gift, a sample — no deduction). Set it only from what the user confirmed or stated; never guess.",
+      ),
+    purchaseId: z
+      .string()
+      .nullish()
+      .describe(
+        "Lot id (a purchaseId from get_my_inventory) when the user attributed the stick to a specific lot. Omit unless they picked one.",
+      ),
+  })
+  .strict()
+  .describe(
+    "Whether the smoke came from the user's humidor. Omit entirely when unknown — omitted deducts nothing; never default it.",
+  );
+
 // ---- read tools ------------------------------------------------------------
 
 export const searchCigarsSchema = z
@@ -284,6 +307,7 @@ export const saveSmokeSchema = z
     construction: construction.optional(),
     assessment: assessment.optional(),
     journal: journal.nullish(),
+    consumption: consumption.optional(),
   })
   .strict();
 
@@ -320,6 +344,11 @@ const updateChanges = z
       .strict()
       .optional()
       .describe("Append-only — existing progression history is never rewritten."),
+    consumption: consumption
+      .optional()
+      .describe(
+        "Set/clear/re-attribute the humidor link (ADR-008): fromHumidor true sets it (with purchaseId to attribute a lot), false clears it. Omit to leave it untouched. Re-pointing the cigar clears a now-foreign lot automatically.",
+      ),
   })
   .strict()
   .describe(

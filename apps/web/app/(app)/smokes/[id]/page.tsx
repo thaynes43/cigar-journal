@@ -68,6 +68,10 @@ export default async function SmokeDetailPage({ params }: { params: Promise<{ id
               </Link>
             </h1>
           )}
+          {smoke.consumption ? (
+            // Provenance at a glance: this stick came from the caller's humidor.
+            <span className={`${ui.chipOutline} self-start`}>humidor</span>
+          ) : null}
         </div>
         <RatingSeal rating={assessment.rating} liked={assessment.liked} size="md" />
       </header>

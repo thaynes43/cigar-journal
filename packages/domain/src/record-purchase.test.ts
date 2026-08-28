@@ -144,9 +144,10 @@ describe("recordPurchase", () => {
     expect((error as ValidationError).fields.some((f) => f.path === "quantity")).toBe(true);
   });
 
-  it("counts the caller's smokes since first purchase in remaining", async () => {
+  it("counts the caller's explicit humidor consumptions in remaining", async () => {
     const cigarId = await h.seedCigar({ canonicalName: "Consumed Churchill", brand: "CC" });
-    // Seed a smoke dated after the purchase, then buy — remaining reflects it.
+    // Buy, then smoke one FROM the humidor; a second smoke is off-humidor and
+    // must not deduct (ADR-008 — no derivation heuristic).
     const { saveSmoke } = await import("./save-smoke.js");
     await recordPurchase(h.deps, user, {
       clientRequestId: newRequestId(),
@@ -159,6 +160,14 @@ describe("recordPurchase", () => {
       cigar: { cigarId },
       overallDescriptors: ["marker"],
       smokedAt: { value: "2026-02-01", source: "user", precision: "day" },
+      consumption: { fromHumidor: true },
+    });
+    await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["lounge"],
+      smokedAt: { value: "2026-02-05", source: "user", precision: "day" },
+      consumption: { fromHumidor: false }, // off-humidor → no deduction
     });
     const again = await recordPurchase(h.deps, user, {
       clientRequestId: newRequestId(),
@@ -166,7 +175,7 @@ describe("recordPurchase", () => {
       quantity: 2,
       purchasedAt: "2026-03-01",
     });
-    // 5 acquired, 1 smoked since first purchase → remaining 4.
+    // 5 acquired, 1 explicitly consumed from the humidor → remaining 4.
     expect(again.holdingAfter.totalAcquired).toBe(5);
     expect(again.holdingAfter.remaining).toBe(4);
   });

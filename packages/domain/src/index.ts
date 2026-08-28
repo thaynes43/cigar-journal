@@ -19,7 +19,7 @@ export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, browse
 // verify entries, and the admin queue. Curator-only — each service re-checks
 // the principal role.
 export { mergeCigars, verifyCigar, dismissDuplicate, curationQueue } from "./curation.js";
-export { getMyInventory, deriveHoldingSummary } from "./inventory.js";
+export { getMyInventory, deriveHoldingSummary, getHoldingForCigar } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
 
 // The single want mark (PRD-003 R-WANT). setWant sets/clears (idempotent,

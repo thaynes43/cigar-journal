@@ -13,6 +13,7 @@ export * from "./duplicate-dismissals.js";
 export * from "./smokes.js";
 export * from "./smoke-progression.js";
 export * from "./smoke-photos.js";
+export * from "./smoke-consumptions.js";
 export * from "./photo-upload-tokens.js";
 export * from "./vendors.js";
 export * from "./listing-matches.js";

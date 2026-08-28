@@ -84,6 +84,14 @@ request: call set_want with wanted false. When record_purchase returns wanted:tr
 the user just acquired something they had marked as wanted — offer to clear it
 (never clear it silently).
 
+A saved smoke can deduct one stick from the user's humidor — but only when they
+say so. When the resolved cigar shows holdings, ask once at finish, "From your
+humidor?"; skip the question when there are no holdings or the user already said
+where the stick came from. Pass consumption { fromHumidor: true } when it came
+from their humidor (add purchaseId only if they named a specific lot),
+{ fromHumidor: false } when it did not (lounge, gift, sample). Omit consumption
+when unknown — an omitted block deducts nothing; never invent the provenance.
+
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
 - approximatePosition and any position is a 0-1 fraction through the smoke (0 = light, 1 = nub).

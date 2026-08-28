@@ -29,7 +29,11 @@ function freePort(): Promise<number> {
   });
 }
 
-export async function startTestPostgres(): Promise<TestPostgres> {
+// A throwaway Postgres 16 instance with NO migrations applied — the empty
+// substrate. Tests that need to observe a specific migration (e.g. the 0008
+// consumption backfill running against pre-seeded rows) migrate a subset
+// themselves. Most callers want startTestPostgres (raw + migrate to head).
+export async function startRawTestPostgres(): Promise<TestPostgres> {
   const dir = mkdtempSync(join(tmpdir(), "cj-pg-"));
   const port = await freePort();
   const pg = new EmbeddedPostgres({
@@ -44,7 +48,6 @@ export async function startTestPostgres(): Promise<TestPostgres> {
   await pg.initialise();
   await pg.start();
   const url = `postgresql://postgres:postgres@127.0.0.1:${port}/postgres`;
-  await migrate(url);
   const { db, pool } = createDatabase(url);
   return {
     db,
@@ -55,4 +58,10 @@ export async function startTestPostgres(): Promise<TestPostgres> {
       rmSync(dir, { recursive: true, force: true });
     },
   };
+}
+
+export async function startTestPostgres(): Promise<TestPostgres> {
+  const raw = await startRawTestPostgres();
+  await migrate(raw.url);
+  return raw;
 }

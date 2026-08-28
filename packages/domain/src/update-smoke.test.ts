@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { smokes, smokeProgression, auditLog } from "@cj/db";
+import { smokes, smokeProgression, smokeConsumptions, purchases, auditLog } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import { updateSmoke } from "./update-smoke.js";
@@ -155,5 +155,94 @@ describe("updateSmoke", () => {
     expect(error).toBeInstanceOf(SmokeNotFoundError);
     const smoke = (await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId)))[0]!;
     expect(smoke.rating).toBe(80); // untouched
+  });
+
+  // ---- explicit consumption (ADR-008) --------------------------------------
+
+  async function consumptionRow(id: string) {
+    const rows = await h.deps.db
+      .select()
+      .from(smokeConsumptions)
+      .where(eq(smokeConsumptions.smokeId, id));
+    return rows[0] ?? null;
+  }
+
+  it("sets, then clears the humidor link, reporting and auditing each op", async () => {
+    const setResult = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: { consumption: { fromHumidor: true } },
+    });
+    expect(setResult.changedFields).toContain("consumption");
+    expect((await consumptionRow(smokeId))?.source).toBe("user");
+
+    const clearResult = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: { consumption: { fromHumidor: false } },
+    });
+    expect(clearResult.changedFields).toContain("consumption");
+    expect(await consumptionRow(smokeId)).toBeNull();
+
+    // The link's movement rides the update audit rows (before/after consumption).
+    const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.smokeId, smokeId));
+    const withConsumption = audits.filter(
+      (a) => a.action === "smoke.updated" && (a.after as { consumption?: unknown }).consumption !== undefined,
+    );
+    expect(withConsumption.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("re-attributes the consumption to a different owned lot", async () => {
+    const [lotA] = await h.deps.db
+      .insert(purchases)
+      .values({ userId: user.userId, cigarId, quantity: 5, purchasedAt: "2026-01-01" })
+      .returning({ id: purchases.id });
+    const [lotB] = await h.deps.db
+      .insert(purchases)
+      .values({ userId: user.userId, cigarId, quantity: 5, purchasedAt: "2026-02-01" })
+      .returning({ id: purchases.id });
+
+    await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: { consumption: { fromHumidor: true, purchaseId: lotA!.id } },
+    });
+    expect((await consumptionRow(smokeId))?.purchaseId).toBe(lotA!.id);
+
+    await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: { consumption: { fromHumidor: true, purchaseId: lotB!.id } },
+    });
+    expect((await consumptionRow(smokeId))?.purchaseId).toBe(lotB!.id);
+  });
+
+  it("clears a now-foreign lot when the smoke is re-pointed to another cigar", async () => {
+    // A smoke consuming lot L of cigar A; re-pointing it to cigar B makes L
+    // foreign, so the link survives but its purchase_id is cleared (ADR-008).
+    const cigarA = await h.seedCigar({ canonicalName: `Repoint A ${newRequestId()}` });
+    const cigarB = await h.seedCigar({ canonicalName: `Repoint B ${newRequestId()}` });
+    const [lotA] = await h.deps.db
+      .insert(purchases)
+      .values({ userId: user.userId, cigarId: cigarA, quantity: 3, purchasedAt: "2026-01-01" })
+      .returning({ id: purchases.id });
+    const saved = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: cigarA },
+      overallDescriptors: ["marker"],
+      consumption: { fromHumidor: true, purchaseId: lotA!.id },
+    });
+
+    const result = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId: saved.smoke.smokeId,
+      changes: { cigar: { resolveTo: cigarB } },
+    });
+    expect(result.changedFields).toContain("cigar");
+    expect(result.changedFields).toContain("consumption.purchaseId");
+
+    const row = await consumptionRow(saved.smoke.smokeId);
+    expect(row).not.toBeNull(); // the link survives
+    expect(row!.purchaseId).toBeNull(); // but the foreign lot is dropped
   });
 });
