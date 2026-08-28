@@ -11,6 +11,7 @@ import {
   searchCigars,
   getCigar,
   getMyInventory,
+  setWant,
   addSmokePhoto,
   mintPhotoUploadToken,
   UnauthenticatedError,
@@ -43,6 +44,7 @@ import {
   addCigarSchema,
   recordPurchaseSchema,
   addSmokePhotoSchema,
+  setWantSchema,
   type SaveSmokeArgs,
   type UpdateSmokeArgs,
   type AddCigarArgs,
@@ -52,7 +54,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl, uploadUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The ten-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The eleven-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -289,11 +291,12 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       run("get_cigar", extra.authInfo, async ({ principal, scopes }) => {
         const result = await getCigar(deps, principal, { cigarId: args.cigarId });
         const personal = scopes.includes(PERSONAL_SCOPE);
-        // personalProfile is present (possibly null) only with journal:read;
-        // otherwise the key is omitted entirely — data never exceeds scope.
+        // personalProfile and the want overlay are present only with journal:read;
+        // otherwise the keys are omitted entirely — data never exceeds scope. The
+        // note is web-detail display only and stays off the tool payload.
         return jsonResult(
           personal
-            ? { cigar: result.cigar, personalProfile: result.personalProfile }
+            ? { cigar: result.cigar, personalProfile: result.personalProfile, wanted: result.wanted }
             : { cigar: result.cigar },
         );
       }),
@@ -457,7 +460,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Record purchase",
       description:
-        "Append an acquisition to the humidor ledger, or correct the count. quantity is a positive integer for a purchase; it may be NEGATIVE to correct an over-count — say why in notes. Record only stated facts (never invent a price, date, or vendor); a described cigar with no catalog match is auto-created and its enrichment queued. Corrections are rows too — holdings stay derived. Output: purchaseId, cigar, and holdingAfter { totalAcquired, remaining }.",
+        "Append an acquisition to the humidor ledger, or correct the count. quantity is a positive integer for a purchase; it may be NEGATIVE to correct an over-count — say why in notes. Record only stated facts (never invent a price, date, or vendor); a described cigar with no catalog match is auto-created and its enrichment queued. Corrections are rows too — holdings stay derived. Output: purchaseId, cigar, holdingAfter { totalAcquired, remaining }, and wanted — when wanted is true the user just bought something on their want list, so offer to clear it with set_want (never clear it silently).",
       inputSchema: recordPurchaseSchema,
       annotations: {
         readOnlyHint: false,
@@ -477,6 +480,9 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           purchaseId: result.purchaseId,
           cigar: result.cigar,
           holdingAfter: result.holdingAfter,
+          // Acquisition never auto-clears a want (R-WANT-2); this flag lets the
+          // model OFFER the clear via set_want. Never silent.
+          wanted: result.wanted,
           replayed: result.replayed,
         });
       }),
@@ -580,6 +586,33 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           uploadUrl: uploadUrl(minted.token),
           expiresAt: minted.expiresAt,
         });
+      }),
+  );
+
+  server.registerTool(
+    "set_want",
+    {
+      title: "Set want",
+      description:
+        "Mark a catalog cigar as wanted, or clear the mark. Wanting is independent of owning or smoking it — smoking never clears a want, and it is cleared only on request. Set `wanted` true to mark, false to clear; add a `note` only if the user gave a reason. Idempotent: repeating a call is a safe no-op (no clientRequestId needed). Output: cigarId, wanted, note, changed.",
+      inputSchema: setWantSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Set want",
+      },
+    },
+    (args, extra) =>
+      run("set_want", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+        const result = await setWant(deps, principal, {
+          cigarId: args.cigarId,
+          wanted: args.wanted,
+          note: args.note,
+          provenance: { source: "llm-conversation", client: clientId },
+          correlationId,
+        });
+        return jsonResult(result);
       }),
   );
 

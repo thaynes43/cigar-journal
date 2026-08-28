@@ -1,11 +1,11 @@
 // Server identity, scope map, and the verbatim server instructions the tool
-// contract mandates. These are the client-facing surface: the ten tool names,
+// contract mandates. These are the client-facing surface: the eleven tool names,
 // the scopes each demands, and the instruction text every client receives at
 // initialize (docs/mcp/tool-contract.md).
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The ten tools, exactly per the contract. Reads are annotated readOnlyHint.
+// The eleven tools, exactly per the contract. Reads are annotated readOnlyHint.
 export const TOOL_NAMES = [
   "search_cigars",
   "get_cigar",
@@ -17,6 +17,7 @@ export const TOOL_NAMES = [
   "record_purchase",
   "update_smoke",
   "add_smoke_photo",
+  "set_want",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -35,6 +36,7 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   record_purchase: ["journal:write"],
   update_smoke: ["journal:write"],
   add_smoke_photo: ["journal:write"],
+  set_want: ["journal:write"],
 };
 
 // Personal fields on catalog tools require this additional scope.
@@ -75,6 +77,12 @@ Photos attach through add_smoke_photo, never save_smoke: attach the image to tha
 tool call itself and the server files it under the smoke; with no image the tool
 returns a one-time link to hand the user for a phone upload. A photo never blocks
 saving the smoke.
+
+set_want flags (or clears) a catalog cigar the user wants; wanting is independent
+of owning or smoking — smoking never clears a want. Clear one only on an explicit
+request: call set_want with wanted false. When record_purchase returns wanted:true
+the user just acquired something they had marked as wanted — offer to clear it
+(never clear it silently).
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
