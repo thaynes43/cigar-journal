@@ -294,9 +294,18 @@ async function verifyWithinTx(
 export async function dismissDuplicate(
   deps: Deps,
   principal: Principal,
-  input: DismissDuplicateInput,
+  rawInput: DismissDuplicateInput,
 ): Promise<DismissDuplicateResult> {
   assertCurator(principal);
+  // Canonical lowercase form up front: the id-ordering below and the table's
+  // CHECK compare as Postgres uuids, and JS string comparison only agrees with
+  // that for lowercase hex. Also keeps the self-pair guard and the idempotency
+  // fingerprint insensitive to input casing.
+  const input: DismissDuplicateInput = {
+    ...rawInput,
+    cigarAId: rawInput.cigarAId.toLowerCase(),
+    cigarBId: rawInput.cigarBId.toLowerCase(),
+  };
   if (input.cigarAId === input.cigarBId) {
     throw new ValidationError([{ path: "cigarBId", message: "A pair needs two distinct cigars." }]);
   }

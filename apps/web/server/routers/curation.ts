@@ -12,22 +12,22 @@ export const curationRouter = router({
     .input(
       z.object({
         clientRequestId: z.string(),
-        sourceCigarId: z.string(),
-        targetCigarId: z.string(),
+        sourceCigarId: z.string().uuid(),
+        targetCigarId: z.string().uuid(),
       }),
     )
     .mutation(({ ctx, input }) => mergeCigars(ctx.deps, ctx.principal, input)),
 
   verify: adminProcedure
-    .input(z.object({ clientRequestId: z.string(), cigarId: z.string() }))
+    .input(z.object({ clientRequestId: z.string(), cigarId: z.string().uuid() }))
     .mutation(({ ctx, input }) => verifyCigar(ctx.deps, ctx.principal, input)),
 
   dismiss: adminProcedure
     .input(
       z.object({
         clientRequestId: z.string(),
-        cigarAId: z.string(),
-        cigarBId: z.string(),
+        cigarAId: z.string().uuid(),
+        cigarBId: z.string().uuid(),
       }),
     )
     .mutation(({ ctx, input }) => dismissDuplicate(ctx.deps, ctx.principal, input)),

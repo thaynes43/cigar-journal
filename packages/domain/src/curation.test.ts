@@ -383,12 +383,12 @@ describe("curation", () => {
       );
       expect(surfaced).toBeDefined();
 
-      // Dismiss in REVERSED order relative to the stored id-ordering — the
-      // service normalizes, so direction must not matter.
+      // Dismiss in REVERSED order and with uppercased input — the service
+      // normalizes casing and id-ordering, so neither must matter.
       const [lo, hi] = natural < maduro ? [natural, maduro] : [maduro, natural];
       const result = await dismissDuplicate(h.deps, admin, {
         clientRequestId: newRequestId(),
-        cigarAId: hi,
+        cigarAId: hi.toUpperCase(),
         cigarBId: lo,
       });
       expect(result).toMatchObject({ cigarAId: lo, cigarBId: hi, replayed: false });

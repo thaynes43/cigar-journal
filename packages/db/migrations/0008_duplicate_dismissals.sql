@@ -6,7 +6,8 @@
 -- then on. Pairs are stored id-ordered (a < b) to match the queue's
 -- c1.id < c2.id join, enforced by CHECK. Rows cascade with either cigar — a
 -- merge or delete makes the verdict moot — and survive the dismissing
--- curator's departure (SET NULL, same posture as audit_log.user_id).
+-- curator's departure (dismissed_by drops to NULL; the verdict outlives the
+-- account because it is about the catalog, not the curator).
 
 CREATE TABLE duplicate_dismissals (
   cigar_a_id   uuid NOT NULL REFERENCES cigars (id) ON DELETE CASCADE,
