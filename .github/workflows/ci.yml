@@ -35,7 +35,18 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+      # Log downloads are unreachable from the ops pod (egress allowlist), so a
+      # failure's tail goes to the job summary, which the API can serve.
+      - run: pnpm test 2>&1 | tee /tmp/test-output.txt
+        shell: bash
+      - if: failure()
+        run: |
+          {
+            echo '## test failure tail'
+            echo '```'
+            tail -c 6000 /tmp/test-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     runs-on: ubuntu-latest
