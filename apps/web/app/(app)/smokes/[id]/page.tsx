@@ -4,7 +4,6 @@ import { TRPCError } from "@trpc/server";
 import type { SmokeView } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
 import { photosEnabled } from "@/lib/photos";
-import { formatSmokedAt } from "@/lib/format";
 import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
 import { RatingSeal } from "../../_components/rating-seal";
@@ -13,6 +12,8 @@ import { SmokePhotoStrip } from "../../_components/smoke-photo-strip";
 import { StrengthMeter } from "../../_components/strength-meter";
 import { VitalsBlock } from "../../_components/vitals-block";
 import { DeleteSmokeButton } from "../../_components/delete-smoke-button";
+import { LocalDate } from "../../_components/local-date";
+import { OriginalMarkdown } from "../../_components/original-markdown";
 
 function provenanceLine(provenance: SmokeView["provenance"]): string {
   switch (provenance.source) {
@@ -37,7 +38,6 @@ export default async function SmokeDetailPage({ params }: { params: Promise<{ id
     throw error;
   }
 
-  const when = formatSmokedAt(smoke.smokedAt);
   const { assessment, construction, context } = smoke;
   const cigarHref = `/cigars/${smoke.cigar.cigarId}`;
 
@@ -45,7 +45,7 @@ export default async function SmokeDetailPage({ params }: { params: Promise<{ id
     <article className="mx-auto flex max-w-3xl flex-col gap-8">
       <header className="flex items-start gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-2">
-          {when ? <span className="label-caps">{when}</span> : null}
+          <LocalDate format="smokedAt" value={smoke.smokedAt} className="label-caps" />
           {smoke.journal.title ? (
             // A real title heads the entry; the cigar name links below it.
             <>
@@ -108,9 +108,9 @@ export default async function SmokeDetailPage({ params }: { params: Promise<{ id
       {smoke.originalMarkdown ? (
         <section className="flex flex-col gap-2">
           <h2 className="label-caps">Original</h2>
-          <pre className="overflow-x-auto rounded-card border border-line bg-raised p-4 font-mono text-[0.8125rem] leading-relaxed whitespace-pre-wrap text-ink">
-            {smoke.originalMarkdown}
-          </pre>
+          <div className="flex flex-col gap-3 rounded-card border border-line bg-raised p-4">
+            <OriginalMarkdown markdown={smoke.originalMarkdown} />
+          </div>
         </section>
       ) : null}
 

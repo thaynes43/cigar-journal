@@ -122,6 +122,60 @@ describe("read services", () => {
     expect(unassessedRow.strength).toBeNull();
   });
 
+  it("queryMySmokes keyset-paginates the journal via nextCursor without dups or gaps", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Keyset Ledger", brand: "Pagination" });
+
+    // Five timestamped smokes plus one never-timestamped (legacy) tail row, so
+    // the walk crosses the smokedAt-NULLS-LAST boundary.
+    const times = [
+      "2026-01-05T09:00:00Z",
+      "2026-02-05T09:00:00Z",
+      "2026-03-05T09:00:00Z",
+      "2026-04-05T09:00:00Z",
+      "2026-05-05T09:00:00Z",
+    ];
+    for (const value of times) {
+      await saveSmoke(h.deps, userA, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        smokedAt: { value, source: "user", precision: "minute" },
+        journal: { narrative: `Seeded ${value}.` },
+      });
+    }
+    await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      provenance: { source: "legacy-import" },
+      originalMarkdown: "## Review 1 - Toro - undated\n\nNo date on this one.",
+    });
+
+    // Six < the default limit, so one page is the reference order to reproduce.
+    const full = await queryMySmokes(h.deps, userA, { cigarId });
+    expect(full.totalMatches).toBe(6);
+    expect(full.nextCursor).toBeNull();
+    expect(full.smokes[0]!.smokedAt.value).toContain("2026-05-05"); // newest first
+    expect(full.smokes[5]!.smokedAt.value).toBeNull(); // the legacy tail last
+    const expected = full.smokes.map((s) => s.smokeId);
+
+    // Walk in pages of two; the cursor must reproduce the reference order exactly.
+    const walked: string[] = [];
+    let cursor: string | null = null;
+    for (let guard = 0; guard < 10; guard++) {
+      const page = await queryMySmokes(h.deps, userA, { cigarId, limit: 2, cursor });
+      expect(page.totalMatches).toBe(6); // the total ignores the cursor
+      walked.push(...page.smokes.map((s) => s.smokeId));
+      cursor = page.nextCursor;
+      if (!cursor) break;
+    }
+    expect(cursor).toBeNull(); // the last page carries no next cursor
+    expect(walked).toEqual(expected);
+    expect(new Set(walked).size).toBe(6); // no duplicates across pages
+
+    // A malformed cursor degrades to the first page rather than erroring.
+    const degraded = await queryMySmokes(h.deps, userA, { cigarId, limit: 2, cursor: "not-base64" });
+    expect(degraded.smokes.map((s) => s.smokeId)).toEqual(expected.slice(0, 2));
+  });
+
   it("browseCigars lists catalog rows alphabetically, catalog-only, with a total count", async () => {
     await h.seedCigar({ canonicalName: "Zzz Browse Omega", brand: "Zed" });
     await h.seedCigar({

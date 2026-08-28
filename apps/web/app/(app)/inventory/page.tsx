@@ -1,9 +1,10 @@
 import Link from "next/link";
 import type { InventoryHolding } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
-import { formatDay, formatMonthYear, agingLabel } from "@/lib/format";
+import { agingLabel } from "@/lib/format";
 import { BandTile } from "../_components/band-tile";
 import { RatingSeal } from "../_components/rating-seal";
+import { LocalDate } from "../_components/local-date";
 import { InventoryViewToggle } from "./view-toggle";
 
 // Inventory: the humidor as a poster grid (default) or the ledger table
@@ -44,7 +45,6 @@ function InventoryGrid({ holdings }: { holdings: InventoryHolding[] }) {
   return (
     <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
       {holdings.map((holding) => {
-        const aging = formatMonthYear(holding.agingSince);
         return (
           <li key={holding.cigar.cigarId}>
             <Link
@@ -71,7 +71,11 @@ function InventoryGrid({ holdings }: { holdings: InventoryHolding[] }) {
                     <span className="font-display text-lg font-semibold text-ink tabular-nums">
                       {holding.remaining} left
                     </span>
-                    {aging ? <span className="text-xs text-muted">since {aging}</span> : null}
+                    {holding.agingSince ? (
+                      <span className="text-xs text-muted">
+                        since <LocalDate format="monthYear" value={holding.agingSince} />
+                      </span>
+                    ) : null}
                   </div>
                   <RatingSeal rating={holding.myRating} size="sm" />
                 </div>
@@ -133,9 +137,15 @@ function InventoryTable({ holdings }: { holdings: InventoryHolding[] }) {
               <td className="px-3 py-2 text-muted">{cigar.vitola.name ?? "—"}</td>
               <td className="px-3 py-2 text-muted">{cigar.type ?? "—"}</td>
               <td className="px-3 py-2 text-muted tabular-nums">{size(cigar) ?? "—"}</td>
-              <td className="px-3 py-2 text-muted tabular-nums">{formatDay(lot.purchasedAt) ?? "—"}</td>
-              <td className="px-3 py-2 text-muted tabular-nums">{formatDay(lot.humidorAt) ?? "—"}</td>
-              <td className="px-3 py-2 text-muted tabular-nums">{formatDay(lot.boxDate) ?? "—"}</td>
+              <td className="px-3 py-2 text-muted tabular-nums">
+                <LocalDate format="day" value={lot.purchasedAt} fallback="—" />
+              </td>
+              <td className="px-3 py-2 text-muted tabular-nums">
+                <LocalDate format="day" value={lot.humidorAt} fallback="—" />
+              </td>
+              <td className="px-3 py-2 text-muted tabular-nums">
+                <LocalDate format="day" value={lot.boxDate} fallback="—" />
+              </td>
               <td className="px-3 py-2 text-muted">{lot.vendor ?? "—"}</td>
               <td className="px-3 py-2 text-ink tabular-nums">
                 {lot.pricePerStick != null ? `$${lot.pricePerStick.toFixed(2)}` : "—"}

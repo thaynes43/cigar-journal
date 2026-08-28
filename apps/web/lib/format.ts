@@ -9,8 +9,9 @@ const MINUTE = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-// Render a Smoked-At honoring precision: day-precision drops the clock. Rendered
-// only in server components, so there is no client hydration timezone skew.
+// Render a Smoked-At honoring precision: day-precision drops the clock. Pure —
+// used both server-side and, through <LocalDate>, client-side to show each viewer
+// their own timezone without a hydration mismatch.
 export function formatSmokedAt(smokedAt: SmokedAt): string | null {
   if (!smokedAt.value) return null;
   const date = new Date(smokedAt.value);
