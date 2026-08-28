@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
 import { getServerCaller } from "@/lib/trpc/server";
+import { photosEnabled } from "@/lib/photos";
 import { EditSmokeForm } from "../../../_components/edit-smoke-form";
 
 export default async function EditSmokePage({ params }: { params: Promise<{ id: string }> }) {
@@ -9,7 +10,7 @@ export default async function EditSmokePage({ params }: { params: Promise<{ id: 
 
   try {
     const smoke = await caller.smokes.get({ smokeId: id });
-    return <EditSmokeForm smoke={smoke} />;
+    return <EditSmokeForm smoke={smoke} photosEnabled={photosEnabled} />;
   } catch (error) {
     if (error instanceof TRPCError && error.code === "NOT_FOUND") notFound();
     throw error;

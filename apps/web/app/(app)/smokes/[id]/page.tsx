@@ -78,6 +78,27 @@ export default async function SmokeDetailPage({ params }: { params: Promise<{ id
 
       <Chips items={smoke.overallDescriptors} />
 
+      {smoke.photos.length > 0 ? (
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+          {smoke.photos.map((photo) => (
+            <a
+              key={photo.photoId}
+              href={`/api/photos/${photo.photoId}`}
+              target="_blank"
+              rel="noreferrer"
+              title={photo.caption ?? undefined}
+              className="aspect-square overflow-hidden rounded-card border border-line"
+            >
+              <img
+                src={`/api/photos/${photo.photoId}/thumb`}
+                alt={photo.caption ?? photo.kind}
+                className="size-full object-cover"
+              />
+            </a>
+          ))}
+        </div>
+      ) : null}
+
       <VitalsBlock
         items={[
           {

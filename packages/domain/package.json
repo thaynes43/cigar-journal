@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@cj/db": "workspace:*",
+    "@cj/photos": "workspace:*",
     "drizzle-orm": "^0.44.0"
   },
   "devDependencies": {

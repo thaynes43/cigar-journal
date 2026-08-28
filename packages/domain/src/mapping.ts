@@ -1,5 +1,5 @@
-import type { SmokeRow, SmokeProgressionRow } from "@cj/db";
-import type { ProvenanceSource, SmokedAt, SmokedAtInput } from "./types.js";
+import type { SmokeRow, SmokeProgressionRow, SmokePhotoRow } from "@cj/db";
+import type { ProvenanceSource, SmokedAt, SmokedAtInput, SmokePhotoView } from "./types.js";
 
 // Which adapter drove a mutation, for the audit trail (audit_log.actor).
 export function provenanceToActor(source: ProvenanceSource): "web" | "mcp" | "import" {
@@ -68,4 +68,36 @@ export function smokeSnapshot(row: SmokeRow, progression?: SmokeProgressionRow[]
     }));
   }
   return snapshot;
+}
+
+// A review photo in display form — storage keys and byte size stay server-side.
+export function toSmokePhotoView(row: SmokePhotoRow): SmokePhotoView {
+  return {
+    photoId: row.id,
+    smokeId: row.smokeId,
+    kind: row.kind,
+    caption: row.caption,
+    width: row.width,
+    height: row.height,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+// JSON-safe audit snapshot for a photo — the full row, including storage keys, so
+// the audit trail can reconstruct what was added or removed.
+export function smokePhotoSnapshot(row: SmokePhotoRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    smokeId: row.smokeId,
+    userId: row.userId,
+    kind: row.kind,
+    caption: row.caption,
+    objectKey: row.objectKey,
+    thumbKey: row.thumbKey,
+    contentType: row.contentType,
+    width: row.width,
+    height: row.height,
+    bytes: row.bytes,
+    createdAt: row.createdAt.toISOString(),
+  };
 }

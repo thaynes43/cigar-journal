@@ -21,6 +21,8 @@ const DOMAIN_TO_TRPC: Record<ErrorCode, TRPCErrorCode> = {
   cigar_not_found: "NOT_FOUND",
   cigar_ambiguous: "CONFLICT",
   smoke_not_found: "NOT_FOUND",
+  photo_not_found: "NOT_FOUND",
+  photo_limit: "CONFLICT",
   version_conflict: "CONFLICT",
   idempotency_conflict: "CONFLICT",
   unavailable: "INTERNAL_SERVER_ERROR",

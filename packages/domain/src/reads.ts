@@ -3,9 +3,11 @@ import {
   cigars,
   smokes,
   smokeProgression,
+  smokePhotos,
   type CigarRow,
   type SmokeRow,
   type SmokeProgressionRow,
+  type SmokePhotoRow,
 } from "@cj/db";
 import type { Deps, Principal } from "./deps.js";
 import type {
@@ -25,6 +27,7 @@ import type {
 } from "./types.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
 import { normalizeDescriptor } from "./descriptors.js";
+import { toSmokePhotoView } from "./mapping.js";
 import { validateQueryFilters } from "./validation.js";
 
 const DEFAULT_SMOKE_LIMIT = 10;
@@ -55,6 +58,7 @@ function toSmokeView(
   smoke: SmokeRow,
   cigar: { id: string; canonicalName: string; verification: CigarRow["verification"] },
   progression: SmokeProgressionRow[],
+  photos: SmokePhotoRow[],
 ): SmokeView {
   return {
     smokeId: smoke.id,
@@ -94,6 +98,7 @@ function toSmokeView(
     journal: { title: smoke.journalTitle, narrative: smoke.journalNarrative },
     provenance: { source: smoke.provenanceSource, client: smoke.provenanceClient },
     originalMarkdown: smoke.originalMarkdown,
+    photos: photos.map(toSmokePhotoView),
   };
 }
 
@@ -125,7 +130,13 @@ export async function getSmoke(
     .where(eq(smokeProgression.smokeId, args.smokeId))
     .orderBy(smokeProgression.ordinal);
 
-  return toSmokeView(row.smoke, row.cigar, progression);
+  const photos = await deps.db
+    .select()
+    .from(smokePhotos)
+    .where(eq(smokePhotos.smokeId, args.smokeId))
+    .orderBy(smokePhotos.createdAt);
+
+  return toSmokeView(row.smoke, row.cigar, progression, photos);
 }
 
 function smokeConditions(principal: Principal, filters: QueryMySmokesFilters): SQL[] {
@@ -279,7 +290,13 @@ export async function queryMySmokes(
   const limit = clamp(filters.limit, DEFAULT_SMOKE_LIMIT, MAX_SMOKE_LIMIT);
 
   const rows = await deps.db
-    .select({ smoke: smokes, cigarId: cigars.id, canonicalName: cigars.canonicalName })
+    .select({
+      smoke: smokes,
+      cigarId: cigars.id,
+      canonicalName: cigars.canonicalName,
+      // Correlated count of review photos — feeds the web card's photo badge.
+      photoCount: sql<number>`(SELECT count(*) FROM smoke_photos p WHERE p.smoke_id = ${smokes.id})`,
+    })
     .from(smokes)
     .innerJoin(cigars, eq(smokes.cigarId, cigars.id))
     .where(and(...conditions))
@@ -311,6 +328,7 @@ export async function queryMySmokes(
       descriptors: row.smoke.overallDescriptors,
       summary: deriveSummary(row.smoke),
       strength: row.smoke.strength,
+      photoCount: Number(row.photoCount),
     };
     if (provenance) {
       const p = provenance.get(row.smoke.id);
