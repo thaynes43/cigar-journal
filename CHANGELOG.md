@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/thaynes43/cigar-journal/compare/v0.7.0...v0.8.0) (2026-08-28)
+
+
+### Features
+
+* MCP hardening from the codex adversarial iteration ([#52](https://github.com/thaynes43/cigar-journal/issues/52)) ([73c2c5a](https://github.com/thaynes43/cigar-journal/commit/73c2c5a20e778269255b52916d1974c7d5351eb6))
+
 ## [0.7.0](https://github.com/thaynes43/cigar-journal/compare/v0.6.0...v0.7.0) (2026-08-27)
 
 
