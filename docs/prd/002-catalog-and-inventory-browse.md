@@ -131,11 +131,13 @@ alerts (later phases); review aggregation (R11 constraints apply).
 4. **Collections, price alerts, Cuban authenticity fields** (specced with
    owner at design time, R13).
 
-## Open decisions
+## Decisions
 
-- Inventory default view: poster grid (consistent, mobile-strong) vs table
-  (ledger-dense). Recommendation: poster grid default with a persistent
-  table toggle; the table is the desktop management view.
+- Inventory default view (owner, 2026-08-28): poster grid with qty/aging
+  badges, with a persistent toggle to the ledger table — the table is the
+  desk-work view.
+- Build order (owner, 2026-08-28): Inventory MVP is phase 1, ahead of the
+  library IA.
 - Brand-tier grouping when a line outgrows its brand (Opus X under Arturo
   Fuente): default to the `brand` column, curators re-tier via the curation
   queue (#45) — "however the data lands," per the owner.
