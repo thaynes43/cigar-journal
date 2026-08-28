@@ -5,6 +5,7 @@
 
 ### Features
 
+* crawler substrate + Fox Cigar adapter ([#43](https://github.com/thaynes43/cigar-journal/issues/43)) ([#72](https://github.com/thaynes43/cigar-journal/issues/72)) ([6790d65](https://github.com/thaynes43/cigar-journal/commit/6790d6572739999f78d807f77fe4d26fba6caa7b))
 * **db:** market substrate schema — product photos, crawl runs, enrichment queue ([#68](https://github.com/thaynes43/cigar-journal/issues/68)) ([57da597](https://github.com/thaynes43/cigar-journal/commit/57da59770a8098694612ef168134f6d35eac0103))
 * MCP gap-fill — add_cigar and record_purchase ([#71](https://github.com/thaynes43/cigar-journal/issues/71)) ([fbf031a](https://github.com/thaynes43/cigar-journal/commit/fbf031a2c3e14a0216b2ab00fb76c169d2228b78))
 
