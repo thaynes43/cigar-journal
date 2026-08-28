@@ -19,7 +19,7 @@ export {
 } from "./core/fetcher.js";
 export { parseSitemap, collectSitemapUrls, type ParsedSitemap } from "./core/sitemap.js";
 export { extractJsonLd, type ExtractedJsonLd, type JsonLdProduct, type JsonLdOffer } from "./core/jsonld.js";
-export { normalizeListing, isCigarCategory, type NormalizedListing } from "./core/normalize.js";
+export { normalizeListing, isCigarCategory, isCigarListing, decodeEntities, type NormalizedListing } from "./core/normalize.js";
 export {
   findCatalogMatch,
   upsertListingMatch,

@@ -19,4 +19,5 @@ export const foxCigar: VendorAdapter = {
   productPathPrefix: "/shop/",
   cigarCategoryPattern: /cigar/i,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?/i,
+  excludeNamePattern: /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b/i,
 };
