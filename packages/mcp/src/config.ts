@@ -29,6 +29,12 @@ export function smokeUrl(smokeId: string): string {
   return `${issuerOrigin()}/smokes/${smokeId}`;
 }
 
+/** The single-use photo upload page for a minted token: BETTER_AUTH_URL + /u/<token>.
+ *  Mirrors smokeUrl — one public origin serves both the web app and this page. */
+export function uploadUrl(token: string): string {
+  return `${issuerOrigin()}/u/${token}`;
+}
+
 /** When true, /mcp POST replies as application/json instead of an SSE stream.
  *  Off in production (clients negotiate SSE); on in tests for easy assertions. */
 export function jsonResponseEnabled(): boolean {

@@ -30,6 +30,10 @@ export interface AddSmokePhotoInput {
   kind?: SmokePhotoKind;
   caption?: string | null;
   image: ProcessedImage;
+  // Which adapter drove the add, for the audit row. Defaults to "web" — the web
+  // upload route (and the token-backed upload page, which IS a web upload) leave
+  // it unset; the MCP add_smoke_photo tool passes "mcp".
+  actor?: "web" | "mcp";
   correlationId?: string;
 }
 
@@ -98,7 +102,7 @@ export async function addSmokePhoto(
 
       await tx.insert(auditLog).values({
         userId: principal.userId,
-        actor: "web",
+        actor: input.actor ?? "web",
         action: "smoke_photo.add",
         smokeId: input.smokeId,
         before: null,

@@ -414,6 +414,29 @@ export const recordPurchaseSchema = z
   })
   .strict();
 
+// ---- photo intake ----------------------------------------------------------
+
+// The image is NEVER an input field: it arrives attached to the tool call itself
+// (the OpenAI `_meta["openai/fileParams"]` extension) or not at all. These are
+// only the binding — which smoke, and how to classify/caption the shot.
+export const addSmokePhotoSchema = z
+  .object({
+    smokeId: z
+      .string()
+      .describe("Id of the smoke to attach the photo to, from a prior get_my_smokes/save_smoke result."),
+    kind: z
+      .enum(["cigar", "band", "construction", "burn", "other"])
+      .optional()
+      .describe(
+        "What the photo shows: cigar (the whole stick), band, construction (cap/foot/wrapper detail), burn (ash or burn line), or other. Omit to default to 'other'.",
+      ),
+    caption: z
+      .string()
+      .optional()
+      .describe("A short caption in the user's words, only if they gave one. Sparse is correct — omit rather than invent."),
+  })
+  .strict();
+
 export type SearchCigarsArgs = z.infer<typeof searchCigarsSchema>;
 export type GetCigarArgs = z.infer<typeof getCigarSchema>;
 export type GetMySmokesArgs = z.infer<typeof getMySmokesSchema>;
@@ -422,3 +445,4 @@ export type SaveSmokeArgs = z.infer<typeof saveSmokeSchema>;
 export type UpdateSmokeArgs = z.infer<typeof updateSmokeSchema>;
 export type AddCigarArgs = z.infer<typeof addCigarSchema>;
 export type RecordPurchaseArgs = z.infer<typeof recordPurchaseSchema>;
+export type AddSmokePhotoArgs = z.infer<typeof addSmokePhotoSchema>;

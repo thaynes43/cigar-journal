@@ -12,6 +12,7 @@ export type ErrorCode =
   | "smoke_not_found"
   | "photo_not_found"
   | "photo_limit"
+  | "upload_token_invalid"
   | "version_conflict"
   | "idempotency_conflict"
   | "unavailable";
@@ -143,6 +144,19 @@ export class PhotoLimitError extends DomainError {
   }
   override toPayload(): ErrorPayload {
     return { ...super.toPayload(), limit: this.limit };
+  }
+}
+
+// A photo upload link that is unknown, already used, or expired. One error for
+// all three so the page (and any caller) learns nothing about which failure it
+// was — no oracle for probing tokens. Not owner-scoped: the raw token IS the
+// authorization, so a bad token is simply invalid.
+export class UploadTokenInvalidError extends DomainError {
+  readonly code = "upload_token_invalid" as const;
+  readonly recoverable = false;
+  readonly action: ErrorAction | null = null;
+  constructor() {
+    super("The upload link is invalid or has expired.");
   }
 }
 

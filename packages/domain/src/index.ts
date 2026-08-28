@@ -35,6 +35,17 @@ export {
   type SmokePhotoObject,
 } from "./smoke-photos.js";
 
+// Short-lived, single-use photo upload links (ADR-007, issue #44 part 2). The MCP
+// add_smoke_photo tool mints one when no image was attached; the web upload page
+// consumes it. UploadTokenInvalidError rides the shared errors export.
+export {
+  mintPhotoUploadToken,
+  consumePhotoUploadToken,
+  type MintPhotoUploadTokenInput,
+  type MintedPhotoUploadToken,
+  type ConsumedPhotoUploadToken,
+} from "./photo-upload-tokens.js";
+
 // Catalog-invariant cigar resolution (ADR-002). Exported so the legacy importer
 // resolves/creates purchase-linked cigars through the same logic that backs
 // saveSmoke, rather than reimplementing trigram matching (flow 006).
