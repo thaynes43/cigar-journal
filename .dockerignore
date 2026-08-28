@@ -9,7 +9,6 @@
 .DS_Store
 
 # Not part of the application image.
-spike
 docs
 .agents
 
