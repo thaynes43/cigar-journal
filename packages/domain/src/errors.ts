@@ -24,9 +24,16 @@ export interface FieldError {
   message: string;
 }
 
+// Candidates carry the fields that distinguish otherwise same-named catalog
+// rows, so an `ask_user` action is answerable (vitola/brand/verification usually
+// separate them). When rows are genuine duplicates with no differentiators this
+// cannot help — that is a catalog-curation (merge) problem, not a surface one.
 export interface CigarCandidate {
   cigarId: string;
   canonicalName: string;
+  brand: string | null;
+  vitola: string | null;
+  verification: "verified" | "unverified";
 }
 
 export interface ErrorPayload {

@@ -62,5 +62,5 @@ Field conventions:
 - smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time.
 - get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
-- search_cigars guidance: single_match (proceed), multiple_matches (ask the user), brand_match (ask for the line/vitola), no_match (proceed; a described save creates the cigar).
+- search_cigars guidance: single_match (an exact catalog-name hit — proceed), multiple_matches (candidates without an exact hit — confirm the exact one with the user before saving), brand_match (only a brand was named — ask for the line/vitola), no_match (nothing matched — a described save creates the cigar; if the mention was partial, ask for the fuller name first to avoid a duplicate).
 - Combine related corrections into one update_smoke call rather than several.`;

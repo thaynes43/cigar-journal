@@ -338,7 +338,45 @@ describe("@cj/mcp adapter", () => {
       expect(error.code).toBe("cigar_ambiguous");
       expect(error.recoverable).toBe(true);
       expect((error.action as { type: string }).type).toBe("ask_user");
-      expect((error.candidates as unknown[]).length).toBe(2);
+      const candidates = error.candidates as Record<string, unknown>[];
+      expect(candidates.length).toBe(2);
+      // Candidates carry the differentiators that make ask_user answerable.
+      for (const c of candidates) {
+        expect(c).toHaveProperty("brand");
+        expect(c).toHaveProperty("vitola");
+        expect(c).toHaveProperty("verification");
+      }
+    });
+  });
+
+  it("smokedAt provenance is client-pinned to 'user'; a forged system/import source is rejected", async () => {
+    await withClient(ownerFull, async (client) => {
+      // A stated time with source:user persists and reads back as user provenance.
+      const saved = payloadOf(
+        await call(client, "save_smoke", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId: primaryCigarId },
+          overallDescriptors: ["provenance-user"],
+          smokedAt: { value: "2026-08-20T20:15:00-04:00", source: "user", precision: "minute" },
+        }),
+      ) as { smoke: { smokeId: string } };
+      const full = payloadOf(await call(client, "get_smoke", { smokeId: saved.smoke.smokeId })) as {
+        smoke: { smokedAt: { source: string } };
+      };
+      expect(full.smoke.smokedAt.source).toBe("user");
+
+      // Forging server/import provenance is rejected by the pinned schema — no write.
+      const forged = await call(client, "save_smoke", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId: primaryCigarId },
+        overallDescriptors: ["provenance-forged"],
+        smokedAt: {
+          value: "2026-08-20T20:15:00-04:00",
+          source: "system-finalized",
+          precision: "minute",
+        },
+      });
+      expect(forged.isError).toBe(true);
     });
   });
 

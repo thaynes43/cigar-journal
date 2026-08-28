@@ -25,6 +25,7 @@ import type {
 } from "./types.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
 import { normalizeDescriptor } from "./descriptors.js";
+import { validateQueryFilters } from "./validation.js";
 
 const DEFAULT_SMOKE_LIMIT = 10;
 const MAX_SMOKE_LIMIT = 25;
@@ -297,6 +298,7 @@ export async function queryMySmokes(
   principal: Principal,
   filters: QueryMySmokesFilters = {},
 ): Promise<QueryMySmokesResult> {
+  validateQueryFilters(filters);
   const conditions = smokeConditions(principal, filters);
   const limit = clamp(filters.limit, DEFAULT_SMOKE_LIMIT, MAX_SMOKE_LIMIT);
 
@@ -422,8 +424,15 @@ export async function searchCigars(
   const brandMatches = (brandRows.rows as unknown as CigarMatchRow[]).map(toCigarMatch);
   if (brandMatches.length > 0) return { matches: brandMatches, guidance: "brand_match" };
 
-  const guidance = matches.length === 1 ? "single_match" : "multiple_matches";
-  return { matches, guidance };
+  // Anything reaching here is fuzzy without an exact canonical hit. A LONE fuzzy
+  // candidate is NOT a confident resolution: trigram similarity is dominated by
+  // shared brand tokens, so a different product under a known brand (e.g. a query
+  // for "Arturo Fuente OpusX" against a catalogued "Arturo Fuente Hemingway")
+  // scores high and would otherwise be labelled single_match → "proceed",
+  // silently mislinking the smoke. Only an exact canonical-name hit (handled
+  // above) earns single_match; every other candidate set asks the user to
+  // confirm before saving.
+  return { matches, guidance: "multiple_matches" };
 }
 
 function toCigarView(cigar: CigarRow): CigarView {

@@ -47,6 +47,8 @@ export interface ResolvedCigar {
 interface CandidateRow {
   id: string;
   canonical_name: string;
+  brand: string | null;
+  vitola_name: string | null;
   verification: Verification;
   sim: number;
 }
@@ -83,7 +85,7 @@ export async function resolveCigar(tx: Tx, ref: CigarRef): Promise<ResolvedCigar
   }
 
   const result = await tx.execute(sql`
-    SELECT id, canonical_name, verification, similarity(canonical_name, ${name}) AS sim
+    SELECT id, canonical_name, brand, vitola_name, verification, similarity(canonical_name, ${name}) AS sim
     FROM cigars
     WHERE canonical_name % ${name}
     ORDER BY sim DESC
@@ -106,7 +108,13 @@ export async function resolveCigar(tx: Tx, ref: CigarRef): Promise<ResolvedCigar
   if (strong.length > 1) {
     throw new CigarAmbiguousError(
       name,
-      strong.map((c) => ({ cigarId: c.id, canonicalName: c.canonical_name })),
+      strong.map((c) => ({
+        cigarId: c.id,
+        canonicalName: c.canonical_name,
+        brand: c.brand,
+        vitola: c.vitola_name,
+        verification: c.verification,
+      })),
     );
   }
 

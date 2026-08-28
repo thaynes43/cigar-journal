@@ -2,6 +2,7 @@ import type {
   AssessmentInput,
   ConstructionInput,
   ProgressionEntryInput,
+  QueryMySmokesFilters,
   SaveSmokeInput,
   SmokedAtInput,
   UpdateSmokeInput,
@@ -51,7 +52,12 @@ function checkProgression(entries: ProgressionEntryInput[], errors: FieldError[]
 
 function checkSmokedAt(smokedAt: SmokedAtInput, errors: FieldError[]): void {
   if (Number.isNaN(Date.parse(smokedAt.value))) {
-    errors.push({ path: "smokedAt.value", message: "Must be a valid date-time." });
+    errors.push({
+      path: "smokedAt.value",
+      // Date-only values are accepted (precision: day), so the message must not
+      // demand a full time — mirrors the query-filter wording.
+      message: "Must be an ISO-8601 date (YYYY-MM-DD) or date-time.",
+    });
   }
   if (smokedAt.source != null && !SMOKED_AT_SOURCE.has(smokedAt.source)) {
     errors.push({ path: "smokedAt.source", message: "Invalid source." });
@@ -81,10 +87,13 @@ export function validateSaveInput(input: SaveSmokeInput): void {
     isNonEmpty(input.assessment?.impression) ||
     isNonEmpty(input.originalMarkdown);
   if (!substantive) {
+    // Message names only the client-suppliable fields: originalMarkdown is an
+    // import-only field, not part of the save_smoke tool schema, so surfacing it
+    // to a conversational client would ask for something it cannot provide.
     errors.push({
       path: "smoke",
       message:
-        "At least one of progression, overallDescriptors, journal.narrative, assessment.impression, or originalMarkdown is required.",
+        "At least one of progression, overallDescriptors, journal.narrative, or assessment.impression is required.",
     });
   }
 
@@ -96,9 +105,35 @@ export function validateSaveInput(input: SaveSmokeInput): void {
   if (errors.length > 0) throw new ValidationError(errors);
 }
 
+// A change block is meaningful only when it actually carries an operation:
+// an empty `changes` (or blocks with no operative keys, e.g. `progression:
+// { append: [] }`) would otherwise bump the version and write an audit row for
+// nothing. Mirrors buildPatch, which produces no changedFields in these cases.
+function hasAnyChange(changes: UpdateSmokeInput["changes"]): boolean {
+  if (changes.cigar) return true;
+  if (changes.smokedAt) return true;
+  if ("context" in changes) return true;
+  if (changes.assessment && Object.keys(changes.assessment).length > 0) return true;
+  if (changes.construction && Object.keys(changes.construction).length > 0) return true;
+  if (changes.journal && Object.keys(changes.journal).length > 0) return true;
+  if (
+    changes.overallDescriptors &&
+    ((changes.overallDescriptors.add?.length ?? 0) > 0 ||
+      (changes.overallDescriptors.remove?.length ?? 0) > 0)
+  ) {
+    return true;
+  }
+  if ((changes.progression?.append?.length ?? 0) > 0) return true;
+  return false;
+}
+
 export function validateUpdateInput(input: UpdateSmokeInput): void {
   const errors: FieldError[] = [];
   const changes = input.changes;
+
+  if (!hasAnyChange(changes)) {
+    errors.push({ path: "changes", message: "At least one change operation is required." });
+  }
 
   if (changes.assessment) checkAssessment(changes.assessment, "changes.assessment", errors);
   if (changes.construction) checkConstruction(changes.construction, "changes.construction", errors);
@@ -121,5 +156,20 @@ export function validateUpdateInput(input: UpdateSmokeInput): void {
     errors.push({ path: "changes.cigar.resolveTo", message: "Required." });
   }
 
+  if (errors.length > 0) throw new ValidationError(errors);
+}
+
+// Read-tool filters carry the same lenient-leaf discipline as writes: a
+// malformed date string reaches the domain and returns a structured, field-
+// pathed validation_error (fix_and_retry) rather than being handed to Postgres
+// as an invalid timestamp, which would surface as an opaque `unavailable`.
+export function validateQueryFilters(filters: QueryMySmokesFilters): void {
+  const errors: FieldError[] = [];
+  if (filters.smokedAfter != null && Number.isNaN(Date.parse(filters.smokedAfter))) {
+    errors.push({ path: "smokedAfter", message: "Must be an ISO-8601 date (YYYY-MM-DD) or date-time." });
+  }
+  if (filters.smokedBefore != null && Number.isNaN(Date.parse(filters.smokedBefore))) {
+    errors.push({ path: "smokedBefore", message: "Must be an ISO-8601 date (YYYY-MM-DD) or date-time." });
+  }
   if (errors.length > 0) throw new ValidationError(errors);
 }
