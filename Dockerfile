@@ -22,6 +22,7 @@ COPY packages/auth/package.json ./packages/auth/
 COPY packages/oauth/package.json ./packages/oauth/
 COPY packages/importer/package.json ./packages/importer/
 COPY packages/mcp/package.json ./packages/mcp/
+COPY packages/photos/package.json ./packages/photos/
 COPY apps/web/package.json ./apps/web/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 

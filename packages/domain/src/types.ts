@@ -1,4 +1,4 @@
-import type { Tobacco, SmokeContext } from "@cj/db";
+import type { Tobacco, SmokeContext, SmokePhotoKind } from "@cj/db";
 
 // Domain vocabulary — mirrors docs/ddd/ubiquitous-language.md. Value objects are
 // plain interfaces; the Smoke aggregate is assembled by the services below.
@@ -11,7 +11,7 @@ export type ProvenanceSource = "llm-conversation" | "manual" | "legacy-import";
 export type DrawBurn = "excellent" | "good" | "fair" | "poor";
 export type SmokeOutput = "low" | "medium" | "high";
 
-export type { Tobacco, SmokeContext };
+export type { Tobacco, SmokeContext, SmokePhotoKind };
 
 export interface SmokedAt {
   value: string | null; // ISO-8601 instant (stored as timestamptz), null when unknown
@@ -173,6 +173,19 @@ export interface ProgressionEntryView {
   verbatim: string | null;
 }
 
+// A review-bound photo, in display form (ADR-007). Storage keys and byte size
+// stay server-side — the bytes are served through the authed proxy route, not
+// referenced by key from a view. `createdAt` is an ISO-8601 instant.
+export interface SmokePhotoView {
+  photoId: string;
+  smokeId: string;
+  kind: SmokePhotoKind;
+  caption: string | null;
+  width: number;
+  height: number;
+  createdAt: string;
+}
+
 export interface SmokeView {
   smokeId: string;
   version: number;
@@ -197,6 +210,9 @@ export interface SmokeView {
   journal: { title: string | null; narrative: string | null };
   provenance: { source: ProvenanceSource; client: string | null };
   originalMarkdown: string | null;
+  // Review-bound photos, oldest first (ADR-007). Additive on get_smoke — the MCP
+  // tool passes SmokeView through, so the array simply appears there too.
+  photos: SmokePhotoView[];
 }
 
 // Which prose field a text search hit — the provenance behind a match, so the
@@ -221,6 +237,10 @@ export interface SmokeSummary {
   // meter. Web-only: the MCP adapter maps get_my_smokes explicitly and does
   // not expose this field, keeping the tool payload contract-stable.
   strength: string | null;
+  // How many review photos the smoke has; drives the journal-card photo badge.
+  // Web-only, like `strength`: the MCP get_my_smokes mapping omits it to keep
+  // the tool payload contract-stable.
+  photoCount: number;
   // Match provenance — present ONLY when the `text` filter was used. `matchedIn`
   // lists the prose field(s) the search hit; `matchSnippet` is a short plain-text
   // excerpt around the hit (~160 chars). Both are omitted entirely for non-text

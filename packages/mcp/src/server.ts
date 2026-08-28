@@ -204,10 +204,11 @@ export function createMcpServer(deps: Deps): McpServer {
           minRating: args.minRating ?? undefined,
           limit: args.limit,
         });
-        // Map explicitly to the contract summary shape. `strength` is a web-only
-        // field on SmokeSummary (feeds the journal-card strength meter) and is
-        // deliberately excluded here to keep this tool's payload contract-stable.
-        // matchedIn/matchSnippet keep their conditional presence (text queries only).
+        // Map explicitly to the contract summary shape. `strength` and
+        // `photoCount` are web-only fields on SmokeSummary (they feed journal-card
+        // chrome) and are deliberately excluded here to keep this tool's payload
+        // contract-stable. matchedIn/matchSnippet keep their conditional presence
+        // (text queries only).
         const smokes = result.smokes.map((s) => ({
           smokeId: s.smokeId,
           cigar: s.cigar,

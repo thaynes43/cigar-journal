@@ -10,6 +10,8 @@ export type ErrorCode =
   | "cigar_not_found"
   | "cigar_ambiguous"
   | "smoke_not_found"
+  | "photo_not_found"
+  | "photo_limit"
   | "version_conflict"
   | "idempotency_conflict"
   | "unavailable";
@@ -117,6 +119,30 @@ export class SmokeNotFoundError extends DomainError {
   readonly action: ErrorAction | null = null;
   constructor() {
     super("No smoke matches the given id.");
+  }
+}
+
+// A photo that exists but isn't the caller's, or no photo at all, is reported as
+// not-found so ownership never leaks (same principle as SmokeNotFoundError).
+export class PhotoNotFoundError extends DomainError {
+  readonly code = "photo_not_found" as const;
+  readonly recoverable = false;
+  readonly action: ErrorAction | null = null;
+  constructor() {
+    super("No photo matches the given id.");
+  }
+}
+
+// The smoke already holds the maximum number of photos.
+export class PhotoLimitError extends DomainError {
+  readonly code = "photo_limit" as const;
+  readonly recoverable = true;
+  readonly action: ErrorAction = { type: "remove_a_photo_and_retry" };
+  constructor(readonly limit: number) {
+    super(`A smoke can hold at most ${limit} photos.`);
+  }
+  override toPayload(): ErrorPayload {
+    return { ...super.toPayload(), limit: this.limit };
   }
 }
 

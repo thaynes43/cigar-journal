@@ -30,6 +30,7 @@ describe("migrations", () => {
         "offers",
         "purchases",
         "schema_migrations",
+        "smoke_photos",
         "smoke_progression",
         "smokes",
         "users",
