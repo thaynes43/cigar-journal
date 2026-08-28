@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/thaynes43/cigar-journal/compare/v0.16.0...v0.17.0) (2026-08-28)
+
+
+### Features
+
+* **web:** market prices on the cigar page ([#86](https://github.com/thaynes43/cigar-journal/issues/86)) ([c74b026](https://github.com/thaynes43/cigar-journal/commit/c74b0268cd6c0fc44fb3db4ac11913a4436592ec))
+
 ## [0.16.0](https://github.com/thaynes43/cigar-journal/compare/v0.15.0...v0.16.0) (2026-08-28)
 
 
