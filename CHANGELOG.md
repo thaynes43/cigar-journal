@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/thaynes43/cigar-journal/compare/v0.9.0...v0.10.0) (2026-08-28)
+
+
+### Features
+
+* smoke-photo substrate — storage, pipeline, upload, display (ADR-007) ([#60](https://github.com/thaynes43/cigar-journal/issues/60)) ([d0aa90b](https://github.com/thaynes43/cigar-journal/commit/d0aa90bd7b8962d75df180cbdb40fe57c6d15aa7))
+
 ## [0.9.0](https://github.com/thaynes43/cigar-journal/compare/v0.8.0...v0.9.0) (2026-08-28)
 
 
