@@ -8,6 +8,7 @@ import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
 import { BandTile } from "../../_components/band-tile";
 import { RatingSeal } from "../../_components/rating-seal";
+import { StrengthMeter } from "../../_components/strength-meter";
 import { VitalsBlock } from "../../_components/vitals-block";
 
 function vitola(cigar: CigarView): string | null {
@@ -111,7 +112,12 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
                   ? `${personalProfile.rating.average} (${personalProfile.rating.min}–${personalProfile.rating.max})`
                   : null,
               },
-              { label: "Strength", value: personalProfile.typicalStrength },
+              {
+                label: "Strength",
+                value: personalProfile.typicalStrength ? (
+                  <StrengthMeter value={personalProfile.typicalStrength} showValue />
+                ) : null,
+              },
               { label: "Last smoked", value: formatDay(personalProfile.lastSmokedAt) },
             ]}
           />

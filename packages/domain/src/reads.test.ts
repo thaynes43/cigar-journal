@@ -101,31 +101,25 @@ describe("read services", () => {
     expect(all.smokes[0]!.smokeId).toBe(recent.smoke.smokeId); // newest first
   });
 
-  it("queryMySmokes exposes progression positions (nulls filtered, ordinal order) for the sparkline", async () => {
-    const cigarId = await h.seedCigar({ canonicalName: "Burn Line Source", brand: "Spark" });
-    const withProg = await saveSmoke(h.deps, userA, {
+  it("queryMySmokes carries the assessed strength verbatim for the journal-card meter", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Strength Source", brand: "Meter" });
+    const assessed = await saveSmoke(h.deps, userA, {
       clientRequestId: newRequestId(),
       cigar: { cigarId },
-      progression: [
-        { stage: "opening", approximatePosition: 0.1, verbatim: "start" },
-        { stage: "middle", approximatePosition: null, verbatim: "unclear position" },
-        { stage: "finish", approximatePosition: 0.9, verbatim: "end" },
-      ],
-      journal: { narrative: "Has a positioned progression." },
+      assessment: { strength: "medium-full" },
+      journal: { narrative: "Assessed for strength." },
     });
-    const noProg = await saveSmoke(h.deps, userA, {
+    const unassessed = await saveSmoke(h.deps, userA, {
       clientRequestId: newRequestId(),
       cigar: { cigarId },
-      journal: { narrative: "No progression at all." },
+      journal: { narrative: "No strength stated." },
     });
 
     const listed = await queryMySmokes(h.deps, userA, { cigarId });
-    const withRow = listed.smokes.find((s) => s.smokeId === withProg.smoke.smokeId)!;
-    const withoutRow = listed.smokes.find((s) => s.smokeId === noProg.smoke.smokeId)!;
-    // Nulls filtered, ordinal order preserved.
-    expect(withRow.progressionPositions).toEqual([0.1, 0.9]);
-    // Empty array when the smoke has no progression.
-    expect(withoutRow.progressionPositions).toEqual([]);
+    const assessedRow = listed.smokes.find((s) => s.smokeId === assessed.smoke.smokeId)!;
+    const unassessedRow = listed.smokes.find((s) => s.smokeId === unassessed.smoke.smokeId)!;
+    expect(assessedRow.strength).toBe("medium-full");
+    expect(unassessedRow.strength).toBeNull();
   });
 
   it("browseCigars lists catalog rows alphabetically, catalog-only, with a total count", async () => {

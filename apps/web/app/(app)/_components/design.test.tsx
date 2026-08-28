@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BandTile, bandStop, monogram } from "./band-tile";
 import { RatingSeal } from "./rating-seal";
-import { BurnLine, BurnLineSpark, burnLayout } from "./burn-line";
+import { BurnLine, burnLayout } from "./burn-line";
+import { StrengthMeter, strengthStep } from "./strength-meter";
 import { VitalsBlock } from "./vitals-block";
 import { Chips } from "./chips";
 
@@ -124,15 +125,49 @@ describe("BurnLine", () => {
   });
 });
 
-describe("BurnLineSpark", () => {
-  it("is absent below two entries", () => {
-    expect(renderToStaticMarkup(<BurnLineSpark positions={[0.4]} />)).toBe("");
+describe("strengthStep", () => {
+  it("maps the five-step vocabulary onto the mild→full scale", () => {
+    expect(strengthStep("mild")).toBe(1);
+    expect(strengthStep("mild-medium")).toBe(2);
+    expect(strengthStep("medium")).toBe(3);
+    expect(strengthStep("medium-full")).toBe(4);
+    expect(strengthStep("full")).toBe(5);
   });
 
-  it("renders the miniature stick for a positioned progression", () => {
-    const html = renderToStaticMarkup(<BurnLineSpark positions={[0.2, 0.7]} />);
-    expect(html).toContain("rounded-r-full");
-    expect(html).toContain("linear-gradient");
+  it("normalizes case and separators", () => {
+    expect(strengthStep(" Medium to Full ")).toBe(4);
+    expect(strengthStep("MILD_MEDIUM")).toBe(2);
+    expect(strengthStep("medium / full")).toBe(4);
+  });
+
+  it("stays off the scale for free text and absence", () => {
+    expect(strengthStep("strong but smooth")).toBeNull();
+    expect(strengthStep(null)).toBeNull();
+    expect(strengthStep("")).toBeNull();
+  });
+});
+
+describe("StrengthMeter", () => {
+  it("renders nothing without a value", () => {
+    expect(renderToStaticMarkup(<StrengthMeter value={null} />)).toBe("");
+  });
+
+  it("fills the meter to the step and names it with the verbatim value", () => {
+    const html = renderToStaticMarkup(<StrengthMeter value="medium" />);
+    expect(html.match(/bg-accent/g)).toHaveLength(3);
+    expect(html.match(/bg-line/g)).toHaveLength(2);
+    expect(html).toContain('aria-label="medium"');
+  });
+
+  it("falls back to the verbatim text off-vocabulary, implying no scale", () => {
+    const html = renderToStaticMarkup(<StrengthMeter value="strong but smooth" />);
+    expect(html).toContain("strong but smooth");
+    expect(html).not.toContain("bg-accent");
+  });
+
+  it("shows the word beside the meter only when asked", () => {
+    expect(renderToStaticMarkup(<StrengthMeter value="full" />)).not.toContain(">full<");
+    expect(renderToStaticMarkup(<StrengthMeter value="full" showValue />)).toContain(">full<");
   });
 });
 

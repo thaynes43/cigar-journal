@@ -1,4 +1,4 @@
-import { and, eq, gte, lte, ilike, sql, desc, count, inArray, isNotNull, asc, type SQL } from "drizzle-orm";
+import { and, eq, gte, lte, ilike, sql, desc, count, asc, type SQL } from "drizzle-orm";
 import {
   cigars,
   smokes,
@@ -268,30 +268,6 @@ async function matchProvenance(
   return map;
 }
 
-// Per-smoke progression positions for a page of smokes — the approximate_position
-// values, nulls filtered, ordered by ordinal. One batched round trip over the
-// ≤limit returned ids; feeds the journal-card burn-line sparkline (DESIGN-001).
-async function progressionPositionsBySmoke(
-  deps: Deps,
-  ids: string[],
-): Promise<Map<string, number[]>> {
-  const map = new Map<string, number[]>();
-  if (ids.length === 0) return map;
-
-  const rows = await deps.db
-    .select({ smokeId: smokeProgression.smokeId, position: smokeProgression.approximatePosition })
-    .from(smokeProgression)
-    .where(and(inArray(smokeProgression.smokeId, ids), isNotNull(smokeProgression.approximatePosition)))
-    .orderBy(smokeProgression.smokeId, asc(smokeProgression.ordinal));
-
-  for (const row of rows) {
-    const list = map.get(row.smokeId) ?? [];
-    list.push(Number(row.position));
-    map.set(row.smokeId, list);
-  }
-  return map;
-}
-
 // The authenticated user's history — compact summaries, newest first, capped.
 export async function queryMySmokes(
   deps: Deps,
@@ -320,7 +296,6 @@ export async function queryMySmokes(
 
   // Only when the caller ran a text search do we attribute the hit and excerpt it.
   const provenance = filters.text ? await matchProvenance(deps, ids, filters.text) : null;
-  const positions = await progressionPositionsBySmoke(deps, ids);
 
   const summaries: SmokeSummary[] = rows.map((row) => {
     const summary: SmokeSummary = {
@@ -335,7 +310,7 @@ export async function queryMySmokes(
       liked: row.smoke.liked,
       descriptors: row.smoke.overallDescriptors,
       summary: deriveSummary(row.smoke),
-      progressionPositions: positions.get(row.smoke.id) ?? [],
+      strength: row.smoke.strength,
     };
     if (provenance) {
       const p = provenance.get(row.smoke.id);
