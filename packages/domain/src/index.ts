@@ -15,9 +15,10 @@ export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
 export { getSmoke, queryMySmokes, searchCigars, getCigar, browseCigars } from "./reads.js";
 
-// Catalog curation (ADR-006): merge duplicates, verify entries, and the admin
-// queue. Curator-only — each service re-checks the principal role.
-export { mergeCigars, verifyCigar, curationQueue } from "./curation.js";
+// Catalog curation (ADR-006): merge duplicates, dismiss false-positive pairs,
+// verify entries, and the admin queue. Curator-only — each service re-checks
+// the principal role.
+export { mergeCigars, verifyCigar, dismissDuplicate, curationQueue } from "./curation.js";
 export { getMyInventory, deriveHoldingSummary } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
 

@@ -12,7 +12,7 @@ import {
   auditLog,
 } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
-import { mergeCigars, verifyCigar, curationQueue } from "./curation.js";
+import { mergeCigars, verifyCigar, dismissDuplicate, curationQueue } from "./curation.js";
 import type { Principal } from "./index.js";
 import { UnauthorizedError, CigarNotFoundError, ValidationError } from "./errors.js";
 
@@ -320,6 +320,114 @@ describe("curation", () => {
       // Pairs are ordered highest-similarity first.
       const sims = queue.duplicates.map((p) => p.similarity);
       expect([...sims]).toEqual([...sims].sort((x, y) => y - x));
+    });
+
+    it("suppresses number-distinct siblings via the resolver's number-token guard", async () => {
+      // High trigram similarity, but "No. 9" vs "T52" are different products by
+      // definition — the pair must never surface as a merge candidate.
+      const no9 = await seedUnverified("Guarded Liga Privada No. 9 Toro");
+      const t52 = await seedUnverified("Guarded Liga Privada T52 Toro");
+
+      const queue = await curationQueue(h.deps, admin);
+      const pair = queue.duplicates.find(
+        (p) =>
+          (p.a.cigarId === no9 && p.b.cigarId === t52) ||
+          (p.a.cigarId === t52 && p.b.cigarId === no9),
+      );
+      expect(pair).toBeUndefined();
+    });
+  });
+
+  // --- dismissDuplicate -----------------------------------------------------
+
+  describe("dismissDuplicate", () => {
+    it("rejects a non-admin principal", async () => {
+      const error = await dismissDuplicate(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigarAId: crypto.randomUUID(),
+        cigarBId: crypto.randomUUID(),
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("rejects a self-pair with a field-pathed validation_error", async () => {
+      const id = crypto.randomUUID();
+      const error = await dismissDuplicate(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarAId: id,
+        cigarBId: id,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+    });
+
+    it("errors cigar_not_found when either side is missing", async () => {
+      const real = await seedUnverified("Dismiss Missing Partner");
+      const error = await dismissDuplicate(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarAId: real,
+        cigarBId: crypto.randomUUID(),
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CigarNotFoundError);
+    });
+
+    it("removes the pair from the queue regardless of input order, and audits", async () => {
+      const natural = await seedUnverified("Dismissal Queue Candidate Robusto Uno");
+      const maduro = await seedUnverified("Dismissal Queue Candidate Robusto Dos");
+
+      // Surfaced before the verdict.
+      const before = await curationQueue(h.deps, admin);
+      const surfaced = before.duplicates.find(
+        (p) =>
+          (p.a.cigarId === natural && p.b.cigarId === maduro) ||
+          (p.a.cigarId === maduro && p.b.cigarId === natural),
+      );
+      expect(surfaced).toBeDefined();
+
+      // Dismiss in REVERSED order and with uppercased input — the service
+      // normalizes casing and id-ordering, so neither must matter.
+      const [lo, hi] = natural < maduro ? [natural, maduro] : [maduro, natural];
+      const result = await dismissDuplicate(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarAId: hi.toUpperCase(),
+        cigarBId: lo,
+      });
+      expect(result).toMatchObject({ cigarAId: lo, cigarBId: hi, replayed: false });
+
+      const after = await curationQueue(h.deps, admin);
+      const stillThere = after.duplicates.find(
+        (p) =>
+          (p.a.cigarId === natural && p.b.cigarId === maduro) ||
+          (p.a.cigarId === maduro && p.b.cigarId === natural),
+      );
+      expect(stillThere).toBeUndefined();
+
+      const audits = await h.deps.db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.action, "cigar.dismiss_duplicate"));
+      const forPair = audits.filter(
+        (a) => (a.after as { dismissed?: { cigarAId?: string } }).dismissed?.cigarAId === lo,
+      );
+      expect(forPair).toHaveLength(1);
+    });
+
+    it("replays an identical retry, and a fresh request for the same pair is a no-op", async () => {
+      const first = await seedUnverified("Replay Dismissal Candidate Uno");
+      const second = await seedUnverified("Replay Dismissal Candidate Dos");
+      const input = {
+        clientRequestId: newRequestId(),
+        cigarAId: first,
+        cigarBId: second,
+      };
+      const initial = await dismissDuplicate(h.deps, admin, input);
+      const replayed = await dismissDuplicate(h.deps, admin, input);
+      expect(initial.replayed).toBe(false);
+      expect(replayed.replayed).toBe(true);
+
+      // A different request id for an already-dismissed pair succeeds without
+      // erroring (onConflictDoNothing) — the verdict is naturally idempotent.
+      const again = await dismissDuplicate(h.deps, admin, { ...input, clientRequestId: newRequestId() });
+      expect(again.replayed).toBe(false);
     });
   });
 });

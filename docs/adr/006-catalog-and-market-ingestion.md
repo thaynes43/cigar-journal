@@ -17,6 +17,14 @@ conversational lazy-create is mandatory regardless of crawl coverage.
   > conversational lazy-create. Lazy-created cigars are `unverified` and
   enter the curation queue; verification and duplicate-merge are
   curator-only, and merges re-point Smokes, Purchases, and Listing Matches.
+  The queue's trigram candidate generator inevitably surfaces sibling
+  products sharing a brand/line prefix, so two guards keep the backlog
+  honest: number-distinct pairs (the resolver's number-token guard — "No. 9"
+  vs "T52", "1964" vs "1926") are suppressed automatically, and for wordy
+  siblings (Natural vs Maduro) a curator records a **dismissal** ("not
+  duplicates") — a persisted, id-ordered pair verdict
+  (`duplicate_dismissals`) the queue excludes from then on; rows cascade
+  away when either cigar is merged or deleted.
 - **Vendor registry is admin-managed data, not config** (owner, 2026-08-26):
   admins add, remove, and per-vendor enable crawling and price display from
   the UI. For Cuban vendors the registry tracks an **approved** status

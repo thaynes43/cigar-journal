@@ -9,6 +9,7 @@ export * from "./account.js";
 export * from "./verification.js";
 export * from "./rate-limit.js";
 export * from "./cigars.js";
+export * from "./duplicate-dismissals.js";
 export * from "./smokes.js";
 export * from "./smoke-progression.js";
 export * from "./smoke-photos.js";

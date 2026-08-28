@@ -25,6 +25,7 @@ describe("migrations", () => {
       expect.arrayContaining([
         "audit_log",
         "cigars",
+        "duplicate_dismissals",
         "idempotency_keys",
         "listing_matches",
         "offers",
