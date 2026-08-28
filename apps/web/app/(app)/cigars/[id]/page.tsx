@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
 import type { CigarView, GetCigarResult, Tobacco } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
-import { formatSmokedAt, formatDay } from "@/lib/format";
+import { formatSmokedAt, formatDay, formatPrice, formatSeenAt } from "@/lib/format";
 import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
 import { BandTile } from "../../_components/band-tile";
@@ -49,6 +49,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
 
   const { cigar, personalProfile, hasProductPhoto } = data;
   const { smokes } = await caller.smokes.list({ cigarId: id, limit: 50 });
+  const offers = await caller.cigars.offers({ cigarId: id });
   const blend = cigar.tobacco ? blendLines(cigar.tobacco) : [];
 
   return (
@@ -103,6 +104,53 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
             <p className="font-serif text-[0.9375rem] leading-relaxed text-ink">{cigar.blendNotes}</p>
           ) : null}
           <VitalsBlock items={blend} />
+        </section>
+      ) : null}
+
+      {offers.length > 0 ? (
+        <section className="flex flex-col gap-3">
+          <h2 className="label-caps">Prices</h2>
+          <ul className="flex flex-col gap-2">
+            {offers.map((offer) => {
+              const meta = [
+                formatSeenAt(offer.seenAt),
+                offer.inStock === false ? "out of stock" : null,
+              ]
+                .filter(Boolean)
+                .join(" · ");
+              const inner = (
+                <>
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="truncate text-sm text-ink">{offer.vendor}</span>
+                    <span className="label-caps text-muted">{meta}</span>
+                  </div>
+                  <span
+                    className={`text-sm tabular-nums ${offer.price != null ? "text-ink" : "text-muted"}`}
+                  >
+                    {offer.price != null ? formatPrice(offer.price, offer.currency) : "—"}
+                  </span>
+                </>
+              );
+              return (
+                <li key={offer.vendor}>
+                  {offer.listingUrl ? (
+                    <a
+                      href={offer.listingUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-4 rounded-card border border-line bg-surface p-4 transition-colors hover:border-accent/60"
+                    >
+                      {inner}
+                    </a>
+                  ) : (
+                    <div className="flex items-center gap-4 rounded-card border border-line bg-surface p-4">
+                      {inner}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         </section>
       ) : null}
 
