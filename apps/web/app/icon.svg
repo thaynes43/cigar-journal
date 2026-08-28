@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- The burn-line stick as the mark: flat-cut foot, rounded cap, amber band
+       on the Humidor espresso ground (palette tokens from globals.css). -->
+  <rect width="32" height="32" rx="7" fill="#16110d"/>
+  <path d="M4 12h21a4 4 0 0 1 0 8H4z" fill="#b78f5c"/>
+  <rect x="21" y="12" width="2.5" height="8" fill="#d3a04a"/>
+</svg>
