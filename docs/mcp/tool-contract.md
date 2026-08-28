@@ -56,7 +56,7 @@ Field conventions:
 - smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time.
 - get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
-- search_cigars guidance: single_match (proceed), multiple_matches (ask the user), brand_match (ask for the line/vitola), no_match (proceed; a described save creates the cigar).
+- search_cigars guidance: single_match (an exact catalog-name hit — proceed), multiple_matches (candidates without an exact hit — confirm the exact one with the user before saving), brand_match (only a brand was named — ask for the line/vitola), no_match (nothing matched — a described save creates the cigar; if the mention was partial, ask for the fuller name first to avoid a duplicate).
 - Combine related corrections into one update_smoke call rather than several.
 ```
 
@@ -96,12 +96,16 @@ omit it for immediate conversational corrections.
 smokedAt: { value: "2026-08-26T20:15:00-04:00", source: user, precision: minute }
 ```
 
-- User stated a time/date → `source: user`, value as stated.
+- User stated a time/date → `source: user`, value as stated. **`source` is the
+  only provenance a client may assert, and its only accepted value is `user`**
+  (the write-tool schema pins it): a client cannot stamp `system-finalized`,
+  `legacy-document`, or `unknown` — those are server/import-owned. In practice
+  clients send `{ value, precision }` and omit `source` entirely.
 - User said nothing → **omit the field**; the server records finalization
   time as `source: system-finalized, precision: approximate`. A live save
   therefore always has a useful timestamp without hallucination.
-- Imports → `source: legacy-document` (usually `precision: day`) or
-  `source: unknown` with null value.
+- Imports (server-side path, not this tool) → `source: legacy-document`
+  (usually `precision: day`) or `source: unknown` with null value.
 
 ---
 
@@ -131,12 +135,17 @@ result:
 
 Guidance is the client's instruction for what to do next:
 
-- `single_match`: proceed with the top match. Emitted whenever the top hit is
-  an exact (case-insensitive) canonical-name match — remaining fuzzy hits are
-  still listed but the exact one leads — or when a single fuzzy candidate
-  stands alone.
-- `multiple_matches`: several fuzzy candidates and no clean winner — ask the
-  user naturally (vitola usually disambiguates).
+- `single_match`: proceed with the top match. Emitted **only** when the top hit
+  is an exact (case-insensitive) canonical-name match — remaining fuzzy hits are
+  still listed but the exact one leads. A lone fuzzy candidate is deliberately
+  **not** `single_match`: trigram similarity is dominated by shared brand tokens,
+  so a different product under a known brand (e.g. "Arturo Fuente OpusX" against
+  a catalogued "Arturo Fuente Hemingway") can score high while naming a different
+  stick — auto-proceeding there would silently mislink the smoke.
+- `multiple_matches`: one or more fuzzy candidates and no exact winner — confirm
+  the exact one with the user before saving (vitola usually disambiguates). A
+  single, non-exact candidate lands here too: surface it and confirm rather than
+  assume.
 - `brand_match`: the query names only a known brand, not a specific product.
   `matches` are that brand's catalogued cigars; ask the user for the line or
   vitola before resolving.
@@ -373,10 +382,15 @@ error:
   message: Multiple catalog cigars match "Atabey".
   recoverable: true
   action: { type: ask_user }
-  candidates:
-    - { cigarId: cg_01k2m1, canonicalName: Atabey Divinos }
-    - { cigarId: cg_01k2m2, canonicalName: Atabey Ritos }
+  candidates:                    # carry the fields that separate same-named rows
+    - { cigarId: cg_01k2m1, canonicalName: Atabey Divinos, brand: Atabey, vitola: Divinos, verification: verified }
+    - { cigarId: cg_01k2m2, canonicalName: Atabey Ritos, brand: Atabey, vitola: Ritos, verification: verified }
 ```
+
+Each candidate carries `brand`, `vitola`, and `verification` (any may be null)
+so the `ask_user` question is answerable. Truly identical duplicate rows with no
+differentiators are a catalog-curation (merge) problem, not something the client
+can resolve.
 
 ```yaml
 error:
@@ -411,6 +425,16 @@ error:
 
 Idempotent replay is not an error: same envelope returns the original result
 with `replayed: true`.
+
+**Two validation layers.** Value violations the domain owns — rating range,
+`approximatePosition` bounds, malformed `smokedAt`/`smokedAfter` dates, empty
+`update_smoke.changes` — return the structured `validation_error` above (machine
+code + `recoverable` + `action` + `fields[].path`). Schema-*shape* violations
+caught before dispatch — an unknown enum value (`draw: "silky"`), a wrong-typed
+strict field, or an unknown top-level key (an injected `userId`) — surface as a
+standard MCP protocol error (`-32602`) whose message names the offending path.
+Both are actionable; leaf types are kept lenient precisely so domain-owned value
+checks return the richer structured shape instead of an opaque protocol error.
 
 ## Fallback without write tools
 

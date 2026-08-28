@@ -135,7 +135,7 @@ export function createMcpServer(deps: Deps): McpServer {
     {
       title: "Search cigars",
       description:
-        "Resolve a conversational cigar mention to catalog entries by fuzzy name. Use when a cigar is named or asked about, not for the user's own history. Read `guidance`: single_match (proceed with the top hit), brand_match (only a brand was named — ask for the line/vitola), multiple_matches (ask the user), no_match (proceed; a described save_smoke creates the cigar).",
+        "Resolve a conversational cigar mention to catalog entries by fuzzy (trigram) name match. Use when a cigar is named or asked about, not for the user's own history. Prefer the fullest name the user gave — a bare word or a single product token may not match. Read `guidance`: single_match (an exact catalog-name hit — proceed with it), brand_match (only a brand was named — ask for the line/vitola), multiple_matches (candidates but no exact hit — confirm the exact one with the user before saving), no_match (nothing matched — a described save_smoke creates the cigar; if the mention was partial/abbreviated, ask for the fuller name first so you don't create a duplicate).",
       inputSchema: searchCigarsSchema,
       annotations: { readOnlyHint: true, title: "Search cigars" },
     },
@@ -279,7 +279,7 @@ export function createMcpServer(deps: Deps): McpServer {
     {
       title: "Update smoke",
       description:
-        "Apply explicit, field-scoped corrections to an existing smoke (rating, cigar, appended stages). Reuse the clientRequestId on retries; unlisted fields are never touched.",
+        "Apply explicit, field-scoped corrections to an existing smoke (rating, cigar, appended stages). Batch related corrections from the same exchange into ONE call rather than issuing several — one clientRequestId per correction intent. Reuse the clientRequestId on retries; unlisted fields are never touched.",
       inputSchema: updateSmokeSchema,
       annotations: {
         readOnlyHint: false,

@@ -19,7 +19,6 @@ import { z } from "zod";
 const drawBurn = z.enum(["excellent", "good", "fair", "poor"]);
 const smokeOutput = z.enum(["low", "medium", "high"]);
 const cigarType = z.enum(["NC", "CC"]);
-const smokedAtSource = z.enum(["user", "system-finalized", "legacy-document", "unknown"]);
 const smokedAtPrecision = z.enum(["minute", "approximate", "day"]);
 
 // Domain-validated leaf: a rating the user stated as a number. Typed to also
@@ -101,11 +100,14 @@ const smokedAt = z
   .object({
     value: z
       .string()
-      .describe("ISO-8601 timestamp as the user stated it, e.g. '2026-08-26T20:15:00-04:00'."),
-    source: smokedAtSource
+      .describe(
+        "When the smoke happened, as the user stated it. Use a full RFC 3339 timestamp for a stated clock time (e.g. '2026-08-26T20:15:00-04:00', precision: minute) or a 'YYYY-MM-DD' date for a date-only mention (precision: day).",
+      ),
+    source: z
+      .literal("user")
       .optional()
       .describe(
-        "Provenance of the time: 'user' when the user stated it; 'legacy-document' for imports.",
+        "Only 'user' is accepted from a client — a stated time is always user provenance. Omit it entirely when the user gave no time; the server owns system/import provenance and stamps finalize time.",
       ),
     precision: smokedAtPrecision
       .optional()
@@ -238,7 +240,12 @@ export const getMySmokesSchema = z
       .describe(
         "Full-text search over journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.",
       ),
-    smokedAfter: z.string().optional().describe("ISO date; only smokes on or after this."),
+    smokedAfter: z
+      .string()
+      .optional()
+      .describe(
+        "ISO-8601 date (YYYY-MM-DD) or date-time; only smokes on or after this. A malformed value returns a validation_error, not an empty result.",
+      ),
     minRating: z.number().nullish().describe("Only smokes rated at least this (0-100)."),
     limit: z.number().int().optional().describe("Max results, default 10, max 25; newest first."),
   })
@@ -283,7 +290,13 @@ export const saveSmokeSchema = z
 const updateChanges = z
   .object({
     cigar: z
-      .object({ resolveTo: z.string().describe("Catalog id to re-point this smoke to.") })
+      .object({
+        resolveTo: z
+          .string()
+          .describe(
+            "Catalog cigarId (from a prior search_cigars/get_my_smokes result, never invented) to re-point this smoke to.",
+          ),
+      })
       .strict()
       .optional()
       .describe("Correct the linked cigar."),
