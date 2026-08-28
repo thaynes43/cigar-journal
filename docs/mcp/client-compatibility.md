@@ -58,8 +58,12 @@ chase.
 **Connector manifest staleness (2026-08-27).** ChatGPT exposes no model-side
 refresh of a connector's tool manifest: new tool schemas and descriptions
 (e.g. the `matchedIn`/`matchSnippet` fields and the title-is-metadata
-instruction line added this slice) reach a client **only after the user
-refreshes the connector in ChatGPT settings**. The often-noted
+instruction line added this slice; the eleventh tool `set_want`, the
+`record_purchase.wanted` result field, and the `get_cigar` `wanted` overlay
+added with Want v1) reach a client **only after the user refreshes the
+connector in ChatGPT settings**. The Want v1 schema changes are additive and
+ship in one deploy — after it lands, refresh the connector once and start a new
+chat before `set_want` and the want overlays are visible to a session. The often-noted
 "`ersonal cigar journal…`" text is neither a truncation bug nor our string:
 the owner confirmed it is his own hand-typed connector description in ChatGPT,
 entered with the leading "P" dropped. Our `INSTRUCTIONS` string — a separate,

@@ -10,6 +10,7 @@ import { BandTile } from "../../_components/band-tile";
 import { RatingSeal } from "../../_components/rating-seal";
 import { StrengthMeter } from "../../_components/strength-meter";
 import { VitalsBlock } from "../../_components/vitals-block";
+import { WantToggle } from "../../_components/want-toggle";
 
 function vitola(cigar: CigarView): string | null {
   const dims =
@@ -47,7 +48,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
     throw error;
   }
 
-  const { cigar, personalProfile, hasProductPhoto } = data;
+  const { cigar, personalProfile, hasProductPhoto, wanted, wantNote } = data;
   const { smokes } = await caller.smokes.list({ cigarId: id, limit: 50 });
   const blend = cigar.tobacco ? blendLines(cigar.tobacco) : [];
 
@@ -78,6 +79,10 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
             </h1>
             {cigar.verification === "unverified" ? (
               <span className={`${ui.chipOutline} self-start`}>unverified</span>
+            ) : null}
+            <WantToggle cigarId={cigar.cigarId} initialWanted={wanted} />
+            {wantNote ? (
+              <p className="font-serif text-sm leading-relaxed text-muted">{wantNote}</p>
             ) : null}
           </div>
           <VitalsBlock

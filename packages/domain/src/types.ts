@@ -154,7 +154,40 @@ export interface RecordPurchaseResult {
   purchaseId: string;
   cigar: SavedCigar;
   holdingAfter: { totalAcquired: number; remaining: number };
+  // Whether the caller still has an active want mark on this cigar AFTER the
+  // acquisition (R-WANT-2). Acquisition never auto-clears the want — this flag
+  // exists so the surface can OFFER the clear (web: badge + Clear; MCP: the
+  // model asks). Independent of holdings; true here means "you bought something
+  // you'd marked as wanted."
+  wanted: boolean;
   replayed: boolean;
+}
+
+// The single want mark (PRD-003 R-WANT-1..3, DESIGN-002 §Want). A target-state
+// write: `wanted: true` marks it, `false` clears it — both idempotent, so a
+// repeat call is a safe no-op (no clientRequestId envelope needed, unlike the
+// append-only smoke/purchase writes). `note` is an optional free-text "why",
+// MCP-authored only in v1 (the web has no input field, owner's default). An
+// unknown cigarId returns cigar_not_found.
+export interface SetWantInput {
+  cigarId: string;
+  wanted: boolean;
+  // When setting (wanted: true): a provided note is stored; an omitted note
+  // keeps any existing note (a re-set never silently wipes it). Ignored when
+  // clearing. An empty/whitespace string is treated as no note.
+  note?: string | null;
+  provenance?: ProvenanceInput;
+  correlationId?: string;
+}
+
+export interface SetWantResult {
+  cigarId: string;
+  wanted: boolean; // the resulting state (echoes the request; idempotent)
+  note: string | null; // the note now on the mark, or null (null once cleared)
+  // Whether this call changed anything — false on an idempotent no-op (setting an
+  // already-set mark with no new note, or clearing an absent one). Drives whether
+  // an audit row was written.
+  changed: boolean;
 }
 
 export interface UpdateSmokeChanges {
@@ -355,6 +388,12 @@ export interface GetCigarResult {
   // Whether a crawler-captured product photo exists (ADR-007); drives the detail
   // hero image via the authed proxy route.
   hasProductPhoto: boolean;
+  // The caller's want overlay (PRD-003 R-WANT-3). `wanted` drives the detail-page
+  // WantToggle fill; `wantNote` is the optional MCP-authored "why" the page
+  // displays when present (no input field in v1). Principal-scoped — never
+  // another user's mark.
+  wanted: boolean;
+  wantNote: string | null;
 }
 
 // A catalog-only cigar summary for browse listings — no per-caller personal
@@ -400,6 +439,9 @@ export interface CatalogCigarTile extends CatalogCigar {
   // Whether a crawler-captured product photo exists (ADR-007). The tile links to
   // the authed thumb proxy when true; the BandTile art shows otherwise.
   hasProductPhoto: boolean;
+  // Whether the caller has marked this cigar as wanted (PRD-003 R-WANT-3); drives
+  // the tile's static want badge. Principal-scoped, never leaks across users.
+  wanted: boolean;
 }
 
 // One line's cigars within a brand page — the haynesnetwork "season".

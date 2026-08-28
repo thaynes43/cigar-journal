@@ -437,6 +437,30 @@ export const addSmokePhotoSchema = z
   })
   .strict();
 
+// ---- want ------------------------------------------------------------------
+
+// The single want mark (PRD-003 R-WANT). A target-state write: `wanted: true`
+// marks it, `false` clears it — both idempotent, so no clientRequestId envelope
+// (a repeat call is a safe no-op). Note is optional and MCP-only in v1.
+export const setWantSchema = z
+  .object({
+    cigarId: z
+      .string()
+      .describe("Catalog id from a prior search_cigars/get_cigar result. Never invented."),
+    wanted: z
+      .boolean()
+      .describe("true to mark the cigar as wanted, false to clear the mark. Idempotent either way."),
+    note: z
+      .string()
+      .nullish()
+      .describe(
+        "Optional free-text reason the user wants it, in their words. Only if they gave one — omit rather than invent. Ignored when clearing; a bare re-mark keeps any existing note.",
+      ),
+  })
+  .strict();
+
+export type SetWantArgs = z.infer<typeof setWantSchema>;
+
 export type SearchCigarsArgs = z.infer<typeof searchCigarsSchema>;
 export type GetCigarArgs = z.infer<typeof getCigarSchema>;
 export type GetMySmokesArgs = z.infer<typeof getMySmokesSchema>;

@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Ten tools over the application services, client-neutral: any MCP client
+Eleven tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -21,21 +21,23 @@ ADR-005 (integration). Client capability differences live in
    the user's own words always travel alongside and are never rewritten.
 5. **Errors are instructions.** Machine-readable code + `recoverable` +
    `action`, so the model can self-correct or ask the user.
-6. **Every mutation is retry-safe.** Both write tools take a
+6. **Every mutation is retry-safe.** Append-style write tools take a
    `clientRequestId`; replays return the original result, conflicting reuse
-   is rejected (mutation envelope below).
+   is rejected (mutation envelope below). Target-state writes (`set_want`) are
+   idempotent by nature — the desired end state is the argument — so they carry
+   no envelope: a repeat is a safe no-op.
 7. **Reads are frictionless, writes confirm.** Read tools carry
    `readOnlyHint: true`; a host's confirmation prompt on `save_smoke` is the
    user's last look before persisting.
 
 Scopes: `catalog:read` (search_cigars, get_cigar), `journal:read`
 (get_my_smokes, get_smoke, get_my_inventory), `journal:write` (save_smoke,
-add_cigar, record_purchase, update_smoke, add_smoke_photo — including lazy catalog
-create inside save/add and the enrichment queue write). **Scope-bounded
-responses:**
-catalog tools include personal fields (`userSmokeCount`, `personalProfile`)
-only when the token also carries `journal:read`; otherwise those fields are
-omitted entirely. Data returned never exceeds the scopes presented.
+add_cigar, record_purchase, update_smoke, add_smoke_photo, set_want — including
+lazy catalog create inside save/add and the enrichment queue write).
+**Scope-bounded responses:** catalog tools include personal fields
+(`userSmokeCount`, `personalProfile`, the `wanted` overlay) only when the token
+also carries `journal:read`; otherwise those fields are omitted entirely. Data
+returned never exceeds the scopes presented.
 
 ## Server instructions (sent to every client at initialize)
 
@@ -63,6 +65,12 @@ Photos attach through add_smoke_photo, never save_smoke: attach the image to tha
 tool call itself and the server files it under the smoke; with no image the tool
 returns a one-time link to hand the user for a phone upload. A photo never blocks
 saving the smoke.
+
+set_want flags (or clears) a catalog cigar the user wants; wanting is independent
+of owning or smoking — smoking never clears a want. Clear one only on an explicit
+request: call set_want with wanted false. When record_purchase returns wanted:true
+the user just acquired something they had marked as wanted — offer to clear it
+(never clear it silently).
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -199,7 +207,11 @@ result:
     recurringDescriptors: [citrus, baking-spice, earth]
     rating: { average: 87, min: 84, max: 91 }
     lastSmokedAt: "2026-07-30"
+  wanted: true                 # present only with journal:read; the caller's want mark
 ```
+
+The want `note` is web-detail display only and stays off this payload; the model
+sets/reads the flag through `set_want`.
 
 ## get_my_smokes — read
 
@@ -451,6 +463,7 @@ result:
   holdingAfter:
     totalAcquired: 10            # sum of the caller's lot quantities for this cigar
     remaining: 7                 # max(0, totalAcquired − smokes since first purchase)
+  wanted: true                 # the caller still has an active want mark on this cigar
   replayed: false
 ```
 
@@ -458,7 +471,9 @@ Only stated facts travel — never invent a price, date, or vendor. A negative
 quantity without `notes` is a `validation_error` (the correction must carry its
 reason); a zero quantity is rejected. Provenance is server-stamped
 `llm-conversation`; the vendor registry is admin data and is never created from a
-conversational mention.
+conversational mention. **`wanted`** reports whether the caller had this cigar on
+their want list — acquisition never clears it silently (R-WANT-2), so when it is
+`true` the model offers the clear (`set_want`, `wanted: false`).
 
 ## update_smoke — write, idempotent
 
@@ -560,6 +575,37 @@ bytes. Field/handle names (`download_url`, `mime_type`, the single-use upload
 link) deliberately track the in-progress MCP file-upload drafts **SEP-2356 /
 SEP-1306**, so swapping to the ratified standard later is a mechanical rename, not
 a redesign.
+
+## set_want — write, idempotent
+
+Mark a catalog cigar as wanted, or clear the mark (PRD-003 R-WANT). A single
+per-user flag, independent of owning or smoking it — smoking never clears a want,
+and it is cleared only on an explicit request. "Put the Opus on my want list" →
+`set_want wanted: true`; "take it off" → `set_want wanted: false`. When
+`record_purchase` returns `wanted: true`, the user just bought something they'd
+wanted — offer the clear here (never clear it silently).
+
+```yaml
+arguments:
+  cigarId: cg_01j9x2             # from a prior search_cigars/get_cigar result
+  wanted: true                   # true marks it, false clears it
+  note: "gift idea for Dad"      # optional; the user's own reason, only if given
+
+result:
+  cigarId: cg_01j9x2
+  wanted: true                   # the resulting state (echoes the request)
+  note: "gift idea for Dad"      # the note now on the mark, or null (null once cleared)
+  changed: true                  # false on an idempotent no-op
+```
+
+**Target-state, not append.** The desired end state *is* the argument, so the
+write is idempotent by nature and takes **no `clientRequestId`** — a repeat call
+is a safe no-op (`changed: false`). Setting an already-set mark keeps any existing
+`note` unless a new one is given (a bare re-mark never wipes the "why"); clearing
+drops the note. An unknown `cigarId` is `cigar_not_found`. The `note` is
+MCP-authored only in v1 — the web has no input field — and displays on the cigar
+detail page. Scope `journal:write`; the `wanted` overlay on `search_cigars`/
+`get_cigar` reads under `journal:read`.
 
 ---
 

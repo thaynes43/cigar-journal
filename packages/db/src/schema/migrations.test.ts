@@ -30,6 +30,7 @@ describe("migrations", () => {
         "offers",
         "photo_upload_tokens",
         "purchases",
+        "wants",
         "schema_migrations",
         "crawl_runs",
         "enrichment_requests",

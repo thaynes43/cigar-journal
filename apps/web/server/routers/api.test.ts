@@ -163,6 +163,43 @@ describe("tRPC API", () => {
     expect(err.code).toBe("UNAUTHORIZED");
   });
 
+  it("sets and clears a want mark idempotently, reflected in cigars.get, scoped to the caller", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: `Want Api ${newRequestId()}`, brand: "WA" });
+    const a = caller(h.deps, userA);
+    const b = caller(h.deps, userB);
+
+    // Not wanted initially.
+    expect((await a.cigars.get({ cigarId })).wanted).toBe(false);
+
+    // Set → get reflects it; re-set is an idempotent no-op.
+    const set = await a.cigars.setWant({ cigarId, wanted: true });
+    expect(set).toMatchObject({ cigarId, wanted: true, changed: true });
+    expect((await a.cigars.get({ cigarId })).wanted).toBe(true);
+    expect((await a.cigars.setWant({ cigarId, wanted: true })).changed).toBe(false);
+
+    // Another user never sees A's mark.
+    expect((await b.cigars.get({ cigarId })).wanted).toBe(false);
+
+    // Clear → get flips back.
+    expect((await a.cigars.setWant({ cigarId, wanted: false })).wanted).toBe(false);
+    expect((await a.cigars.get({ cigarId })).wanted).toBe(false);
+  });
+
+  it("maps a want on an unknown cigar to NOT_FOUND (cigar_not_found)", async () => {
+    const a = caller(h.deps, userA);
+    const err = await trpcError(
+      a.cigars.setWant({ cigarId: "00000000-0000-0000-0000-000000000000", wanted: true }),
+    );
+    expect(err.code).toBe("NOT_FOUND");
+    expect((err.cause as DomainError).code).toBe("cigar_not_found");
+  });
+
+  it("requires auth to set a want", async () => {
+    const anon = caller(h.deps, null);
+    const err = await trpcError(anon.cigars.setWant({ cigarId: "x", wanted: true }));
+    expect(err.code).toBe("UNAUTHORIZED");
+  });
+
   it("surfaces cigar search guidance shapes (single / brand / no match)", async () => {
     await h.seedCigar({ canonicalName: "Bolivar Belicosos Finos", brand: "Bolivar" });
     await h.seedCigar({ canonicalName: "Montecristo Edmundo", brand: "Montecristo" });

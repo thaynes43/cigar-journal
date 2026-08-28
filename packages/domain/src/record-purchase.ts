@@ -6,6 +6,7 @@ import { validateRecordPurchaseInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
 import { resolveAndEnrich } from "./enrichment.js";
 import { deriveHoldingSummary } from "./inventory.js";
+import { isWanted } from "./wants.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { provenanceToActor } from "./mapping.js";
 import type { ResolvedCigar } from "./cigar-resolution.js";
@@ -124,10 +125,16 @@ async function recordWithinTx(
   // Derived stock picture AFTER this row lands (same formula as getMyInventory).
   const holdingAfter = await deriveHoldingSummary(tx, principal.userId, cigar.cigarId);
 
+  // Acquisition never auto-clears a want (R-WANT-2) — we only report it so the
+  // surface can OFFER the clear. Read the caller's current mark (unchanged by
+  // this write) to carry the flag out.
+  const wanted = await isWanted(tx, principal.userId, cigar.cigarId);
+
   const result: RecordPurchaseResult = {
     purchaseId,
     cigar: { cigarId: cigar.cigarId, canonicalName: cigar.canonicalName, verification: cigar.verification },
     holdingAfter,
+    wanted,
     replayed: false,
   };
 
