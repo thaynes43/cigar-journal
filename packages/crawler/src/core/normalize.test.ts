@@ -62,7 +62,7 @@ describe("decodeEntities", () => {
 });
 
 describe("isCigarListing", () => {
-  const listing = (name) => ({
+  const listing = (name: string) => ({
     name,
     priceCents: null,
     currency: null,
