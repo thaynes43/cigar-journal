@@ -1,6 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import { purchases, cigars, vendors } from "@cj/db";
-import type { Deps, Principal } from "./deps.js";
+import type { Deps, Principal, Queryer } from "./deps.js";
 import type { InventoryLot, InventoryHolding, InventoryResult } from "./types.js";
 
 // The caller's humidor: purchase lots grouped by cigar, with a derived stock
@@ -165,4 +165,39 @@ export async function getMyInventory(deps: Deps, principal: Principal): Promise<
 
   const totalSticksRemaining = holdings.reduce((sum, h) => sum + h.remaining, 0);
   return { holdings, totalSticksRemaining };
+}
+
+// The derived stock picture for a SINGLE cigar, using the same formula as
+// getMyInventory: totalAcquired is the sum of lot quantities; remaining is
+// max(0, totalAcquired − the caller's smokes of this cigar since the earliest
+// purchase), where null-timed smokes count. record_purchase reports this after
+// appending its row, so it runs inside the caller's transaction (pass the Tx) to
+// see the just-inserted lot.
+export async function deriveHoldingSummary(
+  q: Queryer,
+  userId: string,
+  cigarId: string,
+): Promise<{ totalAcquired: number; remaining: number }> {
+  const acquiredResult = await q.execute(sql`
+    SELECT coalesce(sum(quantity), 0)::int AS total_acquired, min(purchased_at) AS first_purchase
+    FROM purchases
+    WHERE user_id = ${userId} AND cigar_id = ${cigarId}
+  `);
+  const acquired = acquiredResult.rows[0] as { total_acquired: number; first_purchase: string | null };
+  const totalAcquired = Number(acquired.total_acquired);
+
+  const smokedResult = await q.execute(sql`
+    SELECT count(*)::int AS smoked_since
+    FROM smokes
+    WHERE user_id = ${userId}
+      AND cigar_id = ${cigarId}
+      AND (
+        ${acquired.first_purchase}::date IS NULL
+        OR smoked_at IS NULL
+        OR smoked_at >= ${acquired.first_purchase}::date
+      )
+  `);
+  const smokedSince = Number((smokedResult.rows[0] as { smoked_since: number }).smoked_since);
+
+  return { totalAcquired, remaining: Math.max(0, totalAcquired - smokedSince) };
 }

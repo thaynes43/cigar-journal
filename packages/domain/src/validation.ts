@@ -3,6 +3,7 @@ import type {
   ConstructionInput,
   ProgressionEntryInput,
   QueryMySmokesFilters,
+  RecordPurchaseInput,
   SaveSmokeInput,
   SmokedAtInput,
   UpdateSmokeInput,
@@ -155,6 +156,45 @@ export function validateUpdateInput(input: UpdateSmokeInput): void {
   if (changes.cigar && !isNonEmpty(changes.cigar.resolveTo)) {
     errors.push({ path: "changes.cigar.resolveTo", message: "Required." });
   }
+
+  if (errors.length > 0) throw new ValidationError(errors);
+}
+
+function checkDate(value: string | null | undefined, path: string, errors: FieldError[]): void {
+  if (value != null && Number.isNaN(Date.parse(value))) {
+    errors.push({ path, message: "Must be an ISO-8601 date (YYYY-MM-DD) or date-time." });
+  }
+}
+
+// Everything is a purchase row (owner, 2026-08-28): quantity is required and
+// non-zero; a negative quantity is a correction and must carry its reason in
+// notes. Dates and price are lenient leaves the domain checks so a malformed
+// value returns a structured validation_error rather than an opaque DB fault.
+export function validateRecordPurchaseInput(input: RecordPurchaseInput): void {
+  const errors: FieldError[] = [];
+
+  const hasCigar =
+    ("cigarId" in input.cigar && isNonEmpty(input.cigar.cigarId)) ||
+    ("described" in input.cigar && isNonEmpty(input.cigar.described?.canonicalName));
+  if (!hasCigar) {
+    errors.push({ path: "cigar", message: "A cigarId or described.canonicalName is required." });
+  }
+
+  if (!Number.isInteger(input.quantity)) {
+    errors.push({ path: "quantity", message: "Must be a non-zero integer." });
+  } else if (input.quantity === 0) {
+    errors.push({ path: "quantity", message: "Must not be zero — record an acquisition or a correction." });
+  } else if (input.quantity < 0 && !isNonEmpty(input.notes)) {
+    // A negative quantity corrects the count; notes carry the reason.
+    errors.push({ path: "notes", message: "A negative quantity requires notes explaining the correction." });
+  }
+
+  if (input.pricePerStick != null && (typeof input.pricePerStick !== "number" || !Number.isFinite(input.pricePerStick))) {
+    errors.push({ path: "pricePerStick", message: "Must be a number or null." });
+  }
+  checkDate(input.purchasedAt, "purchasedAt", errors);
+  checkDate(input.boxDate, "boxDate", errors);
+  checkDate(input.humidorAt, "humidorAt", errors);
 
   if (errors.length > 0) throw new ValidationError(errors);
 }
