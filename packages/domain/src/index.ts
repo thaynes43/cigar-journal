@@ -13,6 +13,7 @@ export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
 export { getSmoke, queryMySmokes, searchCigars, getCigar, browseCigars } from "./reads.js";
 export { getMyInventory } from "./inventory.js";
+export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
 
 // Review-bound smoke photos (ADR-007). Storage is passed explicitly to the
 // mutating services rather than widened into Deps.

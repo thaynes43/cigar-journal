@@ -38,6 +38,11 @@ export function monogram(name: string): string {
 
 export type BandTileSize = "thumb" | "card" | "hero";
 
+// "self": the tile owns its aspect box (the size table below). "fill": the tile
+// fills a parent-provided aspect box (a poster 2:3 or still 16:9 frame), so the
+// same ground + monogram art serves any ratio without forking the palette.
+export type BandTileShape = "self" | "fill";
+
 const BOX: Record<BandTileSize, string> = {
   thumb: "size-12 shrink-0",
   card: "aspect-[4/3] w-full",
@@ -61,20 +66,24 @@ export function BandTile({
   vitola,
   type,
   size = "card",
+  shape = "self",
 }: {
   name: string;
   vitola?: string | null;
   type?: CigarType | null;
   size?: BandTileSize;
+  shape?: BandTileShape;
 }) {
   const stop = bandStop(name);
   const footer = [vitola, type].filter(Boolean).join(" · ");
-  const showFooter = size !== "thumb" && footer.length > 0;
+  // A filled tile is pure art inside a framed parent — no footer, no own box.
+  const showFooter = shape === "self" && size !== "thumb" && footer.length > 0;
+  const box = shape === "fill" ? "h-full w-full" : `rounded-tile ${BOX[size]}`;
 
   return (
     <div
       aria-hidden
-      className={`relative overflow-hidden rounded-tile ${BOX[size]}`}
+      className={`relative overflow-hidden ${box}`}
       style={{ background: `var(--tobacco-${stop})`, color: `var(--tobacco-${stop}-ink)` }}
     >
       <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">

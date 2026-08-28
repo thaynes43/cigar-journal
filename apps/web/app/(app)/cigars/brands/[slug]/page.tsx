@@ -1,0 +1,73 @@
+import { notFound } from "next/navigation";
+import { TRPCError } from "@trpc/server";
+import type { GetBrandResult, LineGroup } from "@cj/domain";
+import { getServerCaller } from "@/lib/trpc/server";
+import { BandTile } from "../../../_components/band-tile";
+import { CigarStillTile } from "../../../_components/cigar-still-tile";
+
+// A brand page — the "series". A typographic hero (no brand art asset yet), then
+// each line as a collapsible poster section (the haynesnetwork season pattern),
+// and finally the loose cigars with no line. Unknown slug → 404.
+export default async function BrandPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const caller = await getServerCaller();
+
+  let data: GetBrandResult;
+  try {
+    data = await caller.catalog.brand({ slug });
+  } catch (error) {
+    if (error instanceof TRPCError && error.code === "NOT_FOUND") notFound();
+    throw error;
+  }
+
+  const { brand, lines, loose } = data;
+  const cigarCount = lines.reduce((sum, line) => sum + line.cigars.length, 0) + loose.length;
+
+  return (
+    <div className="flex flex-col gap-8">
+      <header className="flex flex-col gap-2">
+        <h1 className="font-display text-3xl leading-tight font-semibold text-ink">{brand}</h1>
+        <p className="label-caps">
+          {cigarCount} sticks · {lines.length} lines
+        </p>
+      </header>
+
+      {lines.map((line) => (
+        <LineSection key={line.line} line={line} />
+      ))}
+
+      {loose.length > 0 ? (
+        <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+          {loose.map((cigar) => (
+            <li key={cigar.cigarId}>
+              <CigarStillTile cigar={cigar} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function LineSection({ line }: { line: LineGroup }) {
+  return (
+    <details open className="flex flex-col gap-4">
+      <summary className="cursor-pointer py-1 select-none marker:text-muted">
+        <span className="ml-1 inline-flex items-center gap-3 align-middle">
+          <span className="block aspect-[2/3] h-14 shrink-0 overflow-hidden rounded-tile border border-line">
+            <BandTile name={line.line} shape="fill" size="thumb" />
+          </span>
+          <span className="font-display font-semibold text-ink">{line.line}</span>
+          <span className="label-caps">{line.cigars.length}</span>
+        </span>
+      </summary>
+      <ul className="grid grid-cols-2 gap-4 pt-2 sm:grid-cols-3 lg:grid-cols-4">
+        {line.cigars.map((cigar) => (
+          <li key={cigar.cigarId}>
+            <CigarStillTile cigar={cigar} />
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
