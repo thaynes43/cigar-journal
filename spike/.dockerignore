@@ -1,7 +1,0 @@
-node_modules
-dist
-*.log
-spike-state.json
-spike-state.json.auth.json
-*.auth.json
-.DS_Store
