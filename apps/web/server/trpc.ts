@@ -57,3 +57,11 @@ export const authedProcedure = baseProcedure.use(({ ctx, next }) => {
   if (!ctx.principal) throw new TRPCError({ code: "UNAUTHORIZED" });
   return next({ ctx: { ...ctx, principal: ctx.principal } });
 });
+
+// Curator-gated surface (ADR-006): authenticated AND role admin. The domain
+// services re-check the role themselves — this is the adapter-layer guard so a
+// non-admin never reaches them (defense in depth, mirrors the page-level gate).
+export const adminProcedure = authedProcedure.use(({ ctx, next }) => {
+  if (ctx.principal.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+  return next({ ctx });
+});

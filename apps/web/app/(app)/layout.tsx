@@ -32,6 +32,11 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
               <Link href="/smokes/new" className="label-caps transition-colors hover:text-accent">
                 Record a smoke
               </Link>
+              {principal.role === "admin" ? (
+                <Link href="/curation" className="label-caps transition-colors hover:text-accent">
+                  Curation
+                </Link>
+              ) : null}
             </nav>
             <div className="ml-auto">
               <SignOutButton />
