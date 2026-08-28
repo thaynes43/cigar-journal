@@ -4,7 +4,7 @@ import { formatSmokedAt } from "@/lib/format";
 import { BandTile } from "./_components/band-tile";
 import { RatingSeal } from "./_components/rating-seal";
 import { Chips } from "./_components/chips";
-import { BurnLineSpark } from "./_components/burn-line";
+import { StrengthMeter } from "./_components/strength-meter";
 
 // The journal: the signed-in user's smokes, newest first.
 export default async function JournalPage() {
@@ -49,7 +49,12 @@ export default async function JournalPage() {
                   </p>
                 ) : null}
                 <Chips items={smoke.descriptors.slice(0, 4)} />
-                <BurnLineSpark positions={smoke.progressionPositions} />
+                {smoke.strength ? (
+                  <div className="flex items-center gap-2">
+                    <span className="label-caps">Strength</span>
+                    <StrengthMeter value={smoke.strength} />
+                  </div>
+                ) : null}
               </div>
             </Link>
           </li>

@@ -3,6 +3,8 @@ import { Chips } from "./chips";
 
 // The burn line (DESIGN-001 signature): a smoke's progression rendered along a
 // stylized horizontal cigar — foot at the left, band and cap at the right.
+// Detail page only: on journal cards an unlabeled bar read as a strength
+// meter (issue #49), so cards carry the labeled StrengthMeter instead.
 // Degradation is designed, honestly:
 //   - every entry positioned  → markers at their 0–1 positions, ash-to-ember
 //     gradient through the furthest entry, ember dot at the burn line;
@@ -38,13 +40,11 @@ function labelShift(percent: number): string {
   return "translateX(-50%)";
 }
 
-function Ribbon({ layout, height }: { layout: BurnLayout; height: "full" | "spark" }) {
-  const spark = height === "spark";
-  const stick = spark ? "inset-y-[5px]" : "inset-y-2";
+function Ribbon({ layout }: { layout: BurnLayout }) {
   return (
-    <div aria-hidden className={spark ? "relative h-4 w-full" : "relative h-7 w-full"}>
+    <div aria-hidden className="relative h-7 w-full">
       {/* The stick: flat-cut foot at left, rounded cap at right, band stripe. */}
-      <div className={`absolute ${stick} right-0 left-0 overflow-hidden rounded-r-full bg-wrapper-leaf`}>
+      <div className="absolute inset-y-2 right-0 left-0 overflow-hidden rounded-r-full bg-wrapper-leaf">
         <div className="absolute inset-y-0 left-[87%] w-[2.5%] bg-accent/70" />
         {layout.burn != null ? (
           <div
@@ -56,25 +56,18 @@ function Ribbon({ layout, height }: { layout: BurnLayout; height: "full" | "spar
       {layout.markers.map((percent, i) => (
         <span
           key={i}
-          className={`absolute top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-muted bg-bg ${spark ? "size-1.5" : "size-2"}`}
+          className="absolute top-1/2 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-muted bg-bg"
           style={{ left: `${percent}%` }}
         />
       ))}
       {layout.burn != null ? (
         <span
-          className={`absolute top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-ember ${spark ? "size-2" : "size-2.5"}`}
+          className="absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-ember"
           style={{ left: `${layout.burn}%`, boxShadow: "0 0 6px var(--ember)" }}
         />
       ) : null}
     </div>
   );
-}
-
-// 16px-tall miniature for list cards: thin stick, marker dots, ember.
-export function BurnLineSpark({ positions }: { positions: Array<number | null> }) {
-  const layout = burnLayout(positions);
-  if (layout.mode === "none") return null;
-  return <Ribbon layout={layout} height="spark" />;
 }
 
 // Full burn line: the ribbon plus the entry rail. Read-only — progression is
@@ -87,7 +80,7 @@ export function BurnLine({ entries }: { entries: ProgressionEntryView[] }) {
     <div className="flex flex-col gap-4">
       {layout.mode !== "none" ? (
         <div aria-hidden>
-          <Ribbon layout={layout} height="full" />
+          <Ribbon layout={layout} />
           <div className="relative hidden h-4 sm:block">
             {entries.map((entry, i) =>
               entry.stage ? (

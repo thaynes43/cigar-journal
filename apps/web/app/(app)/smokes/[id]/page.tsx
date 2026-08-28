@@ -8,6 +8,7 @@ import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
 import { RatingSeal } from "../../_components/rating-seal";
 import { BurnLine } from "../../_components/burn-line";
+import { StrengthMeter } from "../../_components/strength-meter";
 import { VitalsBlock } from "../../_components/vitals-block";
 import { DeleteSmokeButton } from "../../_components/delete-smoke-button";
 
@@ -79,7 +80,10 @@ export default async function SmokeDetailPage({ params }: { params: Promise<{ id
 
       <VitalsBlock
         items={[
-          { label: "Strength", value: assessment.strength },
+          {
+            label: "Strength",
+            value: assessment.strength ? <StrengthMeter value={assessment.strength} showValue /> : null,
+          },
           { label: "Body", value: assessment.body },
           { label: "Draw", value: construction.draw },
           { label: "Burn", value: construction.burn },

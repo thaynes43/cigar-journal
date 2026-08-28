@@ -292,33 +292,30 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
-  it("get_my_smokes summaries stay contract-stable: no web-only progressionPositions", async () => {
+  it("get_my_smokes summaries stay contract-stable: no web-only strength field", async () => {
     await withClient(ownerFull, async (client) => {
       await call(client, "save_smoke", {
         clientRequestId: randomUUID(),
         cigar: { cigarId: primaryCigarId },
-        progression: [
-          { stage: "opening", approximatePosition: 0.1, verbatim: "start" },
-          { stage: "finish", approximatePosition: 0.9, verbatim: "Sparkline contract marker." },
-        ],
-        journal: { narrative: "Sparkline contract marker." },
+        assessment: { strength: "medium-full" },
+        journal: { narrative: "Strength contract marker." },
       });
 
-      // Text query → match provenance present; the web-only sparkline field is not.
+      // Text query → match provenance present; the web-only strength field is not.
       const byText = payloadOf(
-        await call(client, "get_my_smokes", { text: "Sparkline contract marker." }),
+        await call(client, "get_my_smokes", { text: "Strength contract marker." }),
       ) as { smokes: Record<string, unknown>[] };
       expect(byText.smokes.length).toBeGreaterThanOrEqual(1);
-      for (const s of byText.smokes) expect(s).not.toHaveProperty("progressionPositions");
+      for (const s of byText.smokes) expect(s).not.toHaveProperty("strength");
       expect(byText.smokes[0]).toHaveProperty("matchedIn");
       expect(byText.smokes[0]).toHaveProperty("descriptors");
 
-      // Non-text query stays byte-for-byte: no progressionPositions, no match keys.
+      // Non-text query stays byte-for-byte: no strength, no match keys.
       const byCigar = payloadOf(
         await call(client, "get_my_smokes", { cigarId: primaryCigarId }),
       ) as { smokes: Record<string, unknown>[] };
       for (const s of byCigar.smokes) {
-        expect(s).not.toHaveProperty("progressionPositions");
+        expect(s).not.toHaveProperty("strength");
         expect(s).not.toHaveProperty("matchedIn");
         expect(s).not.toHaveProperty("matchSnippet");
       }

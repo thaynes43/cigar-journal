@@ -217,11 +217,10 @@ export interface SmokeSummary {
   liked: boolean | null;
   descriptors: string[];
   summary: string | null;
-  // The smoke's progression positions (approximate_position), nulls filtered,
-  // ordered by ordinal; empty when none. Feeds the journal-card burn-line
-  // sparkline. Web-only: the MCP adapter maps get_my_smokes explicitly and does
+  // The smoke's assessed strength verbatim; feeds the journal-card strength
+  // meter. Web-only: the MCP adapter maps get_my_smokes explicitly and does
   // not expose this field, keeping the tool payload contract-stable.
-  progressionPositions: number[];
+  strength: string | null;
   // Match provenance — present ONLY when the `text` filter was used. `matchedIn`
   // lists the prose field(s) the search hit; `matchSnippet` is a short plain-text
   // excerpt around the hit (~160 chars). Both are omitted entirely for non-text

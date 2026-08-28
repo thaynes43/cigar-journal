@@ -132,8 +132,11 @@ leather-armchair cliché.
   for ratings and dimensions.
 - **Journal:** entries become cards on the dark ground — date rail, serif
   title, first line of the narrative, descriptor chips in tobacco tones, the
-  rating in a small circular **band seal**, and a one-line burn-line
-  sparkline (below) as the recurring identity element.
+  rating in a small circular **band seal**, and a labeled **strength meter**
+  (small-caps STRENGTH + five-step fill over mild→full). Originally a
+  burn-line sparkline; live use read the unlabeled bar as strength (issue
+  #49, 2026-08-28), so the owner's expectation won and the burn line is
+  reserved for the detail page.
 - **Smoke detail:** a reading page. Narrative set in comfortable measure
   (~65ch) at generous line-height — the prose is the soul and gets the
   center; the facts grid demotes to a labeled vitals strip; the progression
@@ -208,9 +211,10 @@ No competitor shows flavor evolution within a smoke; ours records continuous
   evenly in order — labels only, no percentage axis implied. One entry or
   overall-descriptors-only: no ribbon at all, just the descriptor chips.
   Never a fake axis.
-- **The sparkline.** A one-line miniature (thin stick, marker dots, ember)
-  on journal cards and your-smokes lists — legible at 16px tall, and the
-  recurring brand mark of the whole app.
+- **Detail page only.** A one-line sparkline miniature originally carried
+  the mark onto journal cards, but at 16px with no label it read as a
+  strength meter (issue #49). Cards now carry the labeled strength meter;
+  the ribbon appears only where its stage labels and rail give it context.
 - **The aggregate (Phase 7).** On cigar detail, overlay all smokes'
   progressions: descriptor bands showing where flavors typically enter
   ("cocoa arrives in the second third in 3 of 4 smokes"). This is the
@@ -223,8 +227,8 @@ No competitor shows flavor evolution within a smoke; ours records continuous
   hex-lint script in CI, two self-hosted fonts via `next/font`, `lib/ui.ts`
   rebuilt on tokens.
 - **New components:** `BandTile` (placeholder/art box + fallback + plate),
-  `RatingSeal`, `BurnLine` (ribbon + sparkline variants), `VitalsBlock`,
-  re-tinted `Chips`.
+  `RatingSeal`, `BurnLine` (detail-page ribbon), `StrengthMeter`,
+  `VitalsBlock`, re-tinted `Chips`.
 - **Pages restyled, structure intact:** app shell/header, journal list,
   smoke detail, catalog (becomes browse grid + filter-in-place search),
   cigar detail (hero + vitals + profile + offers slot), record/edit forms
