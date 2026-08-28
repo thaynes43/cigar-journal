@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { productPhotos } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import { browseBrands, getBrand, browseCatalog, brandSlug } from "./catalog-browse.js";
@@ -22,6 +23,20 @@ describe("catalog browse", () => {
   afterAll(async () => {
     await h?.stop();
   });
+
+  // Attach a product photo to a cigar (ADR-007, 1:1). Keys carry the cigar id so
+  // the unique constraints never collide across seeds.
+  async function addProductPhoto(cigarId: string): Promise<void> {
+    await h.deps.db.insert(productPhotos).values({
+      cigarId,
+      objectKey: `obj/${cigarId}`,
+      thumbKey: `thumb/${cigarId}`,
+      contentType: "image/webp",
+      width: 800,
+      height: 600,
+      bytes: 1234,
+    });
+  }
 
   it("brandSlug lowercases, collapses non-alphanumerics, and trims hyphens", () => {
     expect(brandSlug("Arturo Fuente")).toBe("arturo-fuente");
@@ -110,6 +125,59 @@ describe("catalog browse", () => {
     const serie = page.lines.find((l) => l.line === "1926 Serie")!.cigars[0]!;
     expect(serie.userSmokeCount).toBe(0);
     expect(serie.userRating).toBeNull();
+  });
+
+  it("browseBrands borrows the first-by-name photographed cigar as the brand cover", async () => {
+    const withPhotos = `Cover ${tag}`;
+    // Alpha sorts first but has no photo; the cover must skip to Bravo, the
+    // first-by-name cigar that does have one (Charlie also has one, sorts later).
+    await h.seedCigar({ canonicalName: `${withPhotos} Alpha`, brand: withPhotos });
+    const bravo = await h.seedCigar({ canonicalName: `${withPhotos} Bravo`, brand: withPhotos });
+    const charlie = await h.seedCigar({ canonicalName: `${withPhotos} Charlie`, brand: withPhotos });
+    await addProductPhoto(bravo);
+    await addProductPhoto(charlie);
+
+    const bare = `Bare ${tag}`;
+    await h.seedCigar({ canonicalName: `${bare} Solo`, brand: bare }); // no photo anywhere
+
+    const { brands } = await browseBrands(h.deps);
+
+    const cover = brands.find((b) => b.brand === withPhotos)!;
+    expect(cover.coverCigarId).toBe(bravo);
+    const none = brands.find((b) => b.brand === bare)!;
+    expect(none.coverCigarId).toBeNull();
+  });
+
+  it("getBrand borrows line and brand covers from the first-by-name photographed cigar", async () => {
+    const brand = `LineCover ${tag}`;
+    // Habano: Aged (no photo) sorts before Reserve (photo) → line cover = Reserve.
+    await h.seedCigar({ canonicalName: `${brand} Habano Aged`, brand, line: "Habano" });
+    const reserve = await h.seedCigar({
+      canonicalName: `${brand} Habano Reserve`,
+      brand,
+      line: "Habano",
+    });
+    await addProductPhoto(reserve);
+    // Maduro: no photos → line cover null.
+    await h.seedCigar({ canonicalName: `${brand} Maduro One`, brand, line: "Maduro" });
+
+    const page = await getBrand(h.deps, userA, { slug: brandSlug(brand) });
+
+    const habano = page.lines.find((l) => l.line === "Habano")!;
+    expect(habano.coverCigarId).toBe(reserve);
+    const maduro = page.lines.find((l) => l.line === "Maduro")!;
+    expect(maduro.coverCigarId).toBeNull();
+    // Brand hero cover: first-by-name photographed across the whole brand.
+    expect(page.coverCigarId).toBe(reserve);
+  });
+
+  it("getBrand reports a null brand cover when no cigar has a photo", async () => {
+    const brand = `NoCover ${tag}`;
+    await h.seedCigar({ canonicalName: `${brand} Uno`, brand, line: "Serie" });
+
+    const page = await getBrand(h.deps, userA, { slug: brandSlug(brand) });
+    expect(page.coverCigarId).toBeNull();
+    expect(page.lines.find((l) => l.line === "Serie")!.coverCigarId).toBeNull();
   });
 
   it("getBrand throws CigarNotFoundError for an unknown slug", async () => {

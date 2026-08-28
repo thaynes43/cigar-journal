@@ -80,21 +80,27 @@ interface BrandRow {
   cigar_count: number;
   line_count: number;
   types: string[] | null;
+  cover_cigar_id: string | null;
 }
 
 // The library root: every distinct brand (whitespace-trimmed, empty → null) with
-// its stick count, line count, and the cigar types it spans. Sorted by brand
-// name with the unbranded shelf last.
+// its stick count, line count, the cigar types it spans, and a borrowed poster
+// cover. The cover is the brand's first-by-name cigar that has a product photo,
+// picked in the same grouped LEFT JOIN (product_photos is 1:1 so it never fans
+// out the counts) — no N+1. Sorted by brand name with the unbranded shelf last.
 export async function browseBrands(deps: Deps): Promise<BrowseBrandsResult> {
   const result = await deps.db.execute(sql`
     SELECT
-      nullif(btrim(brand), '') AS brand,
+      nullif(btrim(c.brand), '') AS brand,
       count(*)::int AS cigar_count,
-      count(DISTINCT nullif(btrim(line), ''))::int AS line_count,
-      array_agg(DISTINCT type) FILTER (WHERE type IS NOT NULL) AS types
-    FROM cigars
-    GROUP BY nullif(btrim(brand), '')
-    ORDER BY nullif(btrim(brand), '') ASC NULLS LAST
+      count(DISTINCT nullif(btrim(c.line), ''))::int AS line_count,
+      array_agg(DISTINCT c.type) FILTER (WHERE c.type IS NOT NULL) AS types,
+      (array_agg(c.id ORDER BY c.canonical_name ASC, c.id ASC)
+        FILTER (WHERE pp.id IS NOT NULL))[1] AS cover_cigar_id
+    FROM cigars c
+    LEFT JOIN product_photos pp ON pp.cigar_id = c.id
+    GROUP BY nullif(btrim(c.brand), '')
+    ORDER BY nullif(btrim(c.brand), '') ASC NULLS LAST
   `);
 
   const brands: BrandShelf[] = (result.rows as unknown as BrandRow[]).map((row) => ({
@@ -103,6 +109,7 @@ export async function browseBrands(deps: Deps): Promise<BrowseBrandsResult> {
     cigarCount: Number(row.cigar_count),
     lineCount: Number(row.line_count),
     types: [...((row.types ?? []) as CigarType[])].sort(),
+    coverCigarId: row.cover_cigar_id ?? null,
   }));
 
   return { brands };
@@ -199,11 +206,20 @@ export async function getBrand(
     }
   }
 
+  // Covers borrow a product photo (ADR-007). `tiles` is already canonical-name
+  // sorted, so the first photographed cigar in a bucket is its first-by-name
+  // one; deriving from the fetched rows adds no query.
   const lines: LineGroup[] = [...byLine.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([line, cigars]) => ({ line, cigars }));
+    .map(([line, cigars]) => ({
+      line,
+      cigars,
+      coverCigarId: cigars.find((c) => c.hasProductPhoto)?.cigarId ?? null,
+    }));
 
-  return { brand, lines, loose };
+  const coverCigarId = tiles.find((tile) => tile.hasProductPhoto)?.cigarId ?? null;
+
+  return { brand, coverCigarId, lines, loose };
 }
 
 // The All-cigars browse: q/type filtered, name-sorted, keyset-paginated over

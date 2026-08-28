@@ -58,7 +58,15 @@ function LineSection({ line }: { line: LineGroup }) {
       <summary className="cursor-pointer py-1 select-none marker:text-muted">
         <span className="ml-1 inline-flex items-center gap-3 align-middle">
           <span className="block aspect-[2/3] h-14 shrink-0 overflow-hidden rounded-tile border border-line">
-            <BandTile name={line.line} shape="fill" size="thumb" />
+            {line.coverCigarId ? (
+              <img
+                src={`/api/product-photos/${line.coverCigarId}/thumb`}
+                alt=""
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <BandTile name={line.line} shape="fill" size="thumb" />
+            )}
           </span>
           <span className="font-display font-semibold text-ink">{line.line}</span>
           <span className="label-caps">{line.cigars.length}</span>

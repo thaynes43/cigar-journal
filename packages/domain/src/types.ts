@@ -385,6 +385,10 @@ export interface BrandShelf {
   cigarCount: number;
   lineCount: number;
   types: CigarType[];
+  // A representative product photo borrowed for the poster: the cigar in this
+  // brand with a product photo whose canonical name sorts first (ADR-007). Null
+  // when no cigar in the brand has one — the tile falls back to BandTile art.
+  coverCigarId: string | null;
 }
 
 export interface BrowseBrandsResult {
@@ -406,10 +410,16 @@ export interface CatalogCigarTile extends CatalogCigar {
 export interface LineGroup {
   line: string;
   cigars: CatalogCigarTile[];
+  // The line's borrowed cover — its first-by-name cigar with a product photo
+  // (ADR-007), or null when none has one (the section thumb keeps BandTile art).
+  coverCigarId: string | null;
 }
 
 export interface GetBrandResult {
   brand: string;
+  // The brand's borrowed hero cover: its first-by-name cigar with a product
+  // photo (ADR-007), or null when none has one.
+  coverCigarId: string | null;
   lines: LineGroup[]; // alphabetical by line
   loose: CatalogCigarTile[]; // cigars with no line, a trailing section
 }
