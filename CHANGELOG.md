@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.0](https://github.com/thaynes43/cigar-journal/compare/v0.13.1...v0.14.0) (2026-08-28)
+
+
+### Features
+
+* add_smoke_photo — dual-mode MCP photo intake ([#44](https://github.com/thaynes43/cigar-journal/issues/44)) ([#80](https://github.com/thaynes43/cigar-journal/issues/80)) ([99a814f](https://github.com/thaynes43/cigar-journal/commit/99a814ff15b35bd2870ca7971cd1dbabe3795092))
+* curation queue — merge duplicates, verify cigars ([#45](https://github.com/thaynes43/cigar-journal/issues/45)) ([#78](https://github.com/thaynes43/cigar-journal/issues/78)) ([053b9e8](https://github.com/thaynes43/cigar-journal/commit/053b9e803a64fb85d0c354e74730682aff0a05c3))
+
 ## [0.13.1](https://github.com/thaynes43/cigar-journal/compare/v0.13.0...v0.13.1) (2026-08-28)
 
 
