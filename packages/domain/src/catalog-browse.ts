@@ -120,6 +120,7 @@ interface CatalogTileRow {
   verification: Verification;
   user_smoke_count: number | string;
   user_rating: number | string | null;
+  has_product_photo: boolean | null;
 }
 
 function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
@@ -137,20 +138,25 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
     verification: row.verification,
     userSmokeCount: Number(row.user_smoke_count),
     userRating: row.user_rating != null ? Number(row.user_rating) : null,
+    hasProductPhoto: row.has_product_photo === true,
   };
 }
 
 // The caller-scoped overlay expression, shared by every tile read: a LEFT JOIN
 // to the caller's smokes only, aggregated per cigar. `count` is 0 and `rating`
-// is null when the caller has never smoked the cigar.
+// is null when the caller has never smoked the cigar. A second LEFT JOIN to
+// product_photos (1:1 with a cigar) folds in whether a crawler photo exists,
+// without a second query (ADR-007).
 function tileSelect(principal: Principal): SQL {
   return sql`
     SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches,
       c.ring_gauge, c.type, c.verification,
       count(s.id)::int AS user_smoke_count,
-      round(avg(s.rating))::int AS user_rating
+      round(avg(s.rating))::int AS user_rating,
+      bool_or(pp.id IS NOT NULL) AS has_product_photo
     FROM cigars c
     LEFT JOIN smokes s ON s.cigar_id = c.id AND s.user_id = ${principal.userId}
+    LEFT JOIN product_photos pp ON pp.cigar_id = c.id
   `;
 }
 

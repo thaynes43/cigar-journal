@@ -40,7 +40,10 @@ export default async function BrandPage({ params }: { params: Promise<{ slug: st
         <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
           {loose.map((cigar) => (
             <li key={cigar.cigarId}>
-              <CigarStillTile cigar={cigar} />
+              <CigarStillTile
+                cigar={cigar}
+                imageUrl={cigar.hasProductPhoto ? `/api/product-photos/${cigar.cigarId}/thumb` : undefined}
+              />
             </li>
           ))}
         </ul>
@@ -64,7 +67,10 @@ function LineSection({ line }: { line: LineGroup }) {
       <ul className="grid grid-cols-2 gap-4 pt-2 sm:grid-cols-3 lg:grid-cols-4">
         {line.cigars.map((cigar) => (
           <li key={cigar.cigarId}>
-            <CigarStillTile cigar={cigar} />
+            <CigarStillTile
+              cigar={cigar}
+              imageUrl={cigar.hasProductPhoto ? `/api/product-photos/${cigar.cigarId}/thumb` : undefined}
+            />
           </li>
         ))}
       </ul>

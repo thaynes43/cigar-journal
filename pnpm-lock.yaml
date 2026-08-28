@@ -131,6 +131,34 @@ importers:
         specifier: ^8.44.0
         version: 8.68.0(eslint@9.39.5(jiti@2.7.0)(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
 
+  packages/crawler:
+    dependencies:
+      '@cj/db':
+        specifier: workspace:*
+        version: link:../db
+      '@cj/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@cj/photos':
+        specifier: workspace:*
+        version: link:../photos
+      drizzle-orm:
+        specifier: ^0.44.0
+        version: 0.44.7(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.0)
+      pg:
+        specifier: ^8.16.0
+        version: 8.23.0
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.12
+    devDependencies:
+      '@cj/config':
+        specifier: workspace:*
+        version: link:../config
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+
   packages/db:
     dependencies:
       drizzle-orm:

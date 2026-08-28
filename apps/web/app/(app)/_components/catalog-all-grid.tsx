@@ -65,7 +65,10 @@ export function CatalogAllGrid({ q, type }: { q?: string; type?: CigarType }) {
       <ul className={`${GRID} transition-opacity ${query.isPlaceholderData ? "opacity-55" : ""}`}>
         {cigars.map((cigar) => (
           <li key={cigar.cigarId}>
-            <CigarStillTile cigar={cigar} />
+            <CigarStillTile
+              cigar={cigar}
+              imageUrl={cigar.hasProductPhoto ? `/api/product-photos/${cigar.cigarId}/thumb` : undefined}
+            />
           </li>
         ))}
       </ul>

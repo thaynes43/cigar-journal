@@ -47,21 +47,30 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
     throw error;
   }
 
-  const { cigar, personalProfile } = data;
+  const { cigar, personalProfile, hasProductPhoto } = data;
   const { smokes } = await caller.smokes.list({ cigarId: id, limit: 50 });
   const blend = cigar.tobacco ? blendLines(cigar.tobacco) : [];
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-8">
+      {hasProductPhoto ? (
+        <img
+          src={`/api/product-photos/${id}/full`}
+          alt=""
+          className="max-h-80 w-full rounded-card border border-line object-contain"
+        />
+      ) : null}
       <header className="flex flex-col gap-5 sm:flex-row sm:gap-6">
-        <div className="w-40 shrink-0 sm:w-52">
-          <BandTile
-            name={cigar.canonicalName}
-            vitola={cigar.vitola.name}
-            type={cigar.type}
-            size="hero"
-          />
-        </div>
+        {hasProductPhoto ? null : (
+          <div className="w-40 shrink-0 sm:w-52">
+            <BandTile
+              name={cigar.canonicalName}
+              vitola={cigar.vitola.name}
+              type={cigar.type}
+              size="hero"
+            />
+          </div>
+        )}
         <div className="flex min-w-0 flex-1 flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <h1 className="font-display text-2xl leading-tight font-semibold text-ink">

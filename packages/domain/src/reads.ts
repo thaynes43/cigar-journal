@@ -4,6 +4,7 @@ import {
   smokes,
   smokeProgression,
   smokePhotos,
+  productPhotos,
   type CigarRow,
   type SmokeRow,
   type SmokeProgressionRow,
@@ -529,9 +530,18 @@ export async function getCigar(
     .from(smokes)
     .where(and(eq(smokes.cigarId, args.cigarId), eq(smokes.userId, principal.userId)));
 
+  // At most one product photo per cigar (ADR-007) — its existence drives the
+  // detail hero image; the bytes are served through the authed proxy route.
+  const photoRows = await deps.db
+    .select({ id: productPhotos.id })
+    .from(productPhotos)
+    .where(eq(productPhotos.cigarId, args.cigarId))
+    .limit(1);
+
   return {
     cigar: toCigarView(cigar),
     personalProfile: smokeRows.length > 0 ? computeProfile(smokeRows) : null,
+    hasProductPhoto: photoRows.length > 0,
   };
 }
 
