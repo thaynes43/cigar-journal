@@ -511,6 +511,25 @@ export interface VerifyCigarResult {
   replayed: boolean;
 }
 
+// Record a curator verdict that a surfaced candidate pair is distinct products,
+// not duplicates (curator-only). The queue excludes dismissed pairs from then
+// on. The pair is stored id-ordered, so input order does not matter. Idempotent
+// via the mutation envelope — and naturally so, since re-dismissing an
+// already-dismissed pair is a no-op insert.
+export interface DismissDuplicateInput {
+  clientRequestId: string;
+  cigarAId: string;
+  cigarBId: string;
+  correlationId?: string;
+}
+
+export interface DismissDuplicateResult {
+  // Normalized id-ordering (cigarAId < cigarBId), matching how the pair is stored.
+  cigarAId: string;
+  cigarBId: string;
+  replayed: boolean;
+}
+
 // One catalog row in the curation queue: the identity plus the reference counts a
 // curator needs to judge a merge direction or a verification.
 export interface CurationQueueCigar {

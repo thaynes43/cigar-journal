@@ -2,6 +2,7 @@ import { asc, eq, sql } from "drizzle-orm";
 import {
   auditLog,
   cigars,
+  duplicateDismissals,
   smokes,
   purchases,
   listingMatches,
@@ -15,6 +16,8 @@ import type {
   MergeCigarsResult,
   VerifyCigarInput,
   VerifyCigarResult,
+  DismissDuplicateInput,
+  DismissDuplicateResult,
   CurationQueueResult,
   CurationQueueCigar,
 } from "./types.js";
@@ -283,6 +286,91 @@ async function verifyWithinTx(
 }
 
 // --------------------------------------------------------------------------
+// dismissDuplicate — record that a candidate pair is not a duplicate
+// (curator-only).
+// --------------------------------------------------------------------------
+
+export async function dismissDuplicate(
+  deps: Deps,
+  principal: Principal,
+  input: DismissDuplicateInput,
+): Promise<DismissDuplicateResult> {
+  assertCurator(principal);
+  if (input.cigarAId === input.cigarBId) {
+    throw new ValidationError([{ path: "cigarBId", message: "A pair needs two distinct cigars." }]);
+  }
+  const requestFingerprint = fingerprint(input);
+
+  try {
+    return await deps.db.transaction((tx) => dismissWithinTx(tx, principal, input, requestFingerprint));
+  } catch (error) {
+    // Concurrent first-writer committed the key between our check and insert.
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as DismissDuplicateResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function dismissWithinTx(
+  tx: Tx,
+  principal: Principal,
+  input: DismissDuplicateInput,
+  requestFingerprint: string,
+): Promise<DismissDuplicateResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as DismissDuplicateResult), replayed: true };
+  }
+
+  // Normalize to the queue's id-ordering (c1.id < c2.id) so a dismissal filed
+  // from either direction matches the surfaced pair. Lexicographic comparison
+  // of canonical lowercase UUID strings agrees with Postgres uuid ordering, so
+  // this also satisfies the table's CHECK (cigar_a_id < cigar_b_id).
+  const [aId, bId] =
+    input.cigarAId < input.cigarBId ? [input.cigarAId, input.cigarBId] : [input.cigarBId, input.cigarAId];
+
+  const a = await loadCigar(tx, aId);
+  const b = await loadCigar(tx, bId);
+  if (!a || !b) throw new CigarNotFoundError();
+
+  // Naturally idempotent: a pair dismissed by an earlier request (or another
+  // curator) stays dismissed; the conflict is not an error.
+  await tx
+    .insert(duplicateDismissals)
+    .values({ cigarAId: aId, cigarBId: bId, dismissedBy: principal.userId })
+    .onConflictDoNothing();
+
+  await tx.insert(auditLog).values({
+    userId: principal.userId,
+    actor: "web",
+    action: "cigar.dismiss_duplicate",
+    smokeId: null,
+    before: { a: cigarSnapshot(a), b: cigarSnapshot(b) },
+    after: { dismissed: { cigarAId: aId, cigarBId: bId } },
+    correlationId: input.correlationId ?? input.clientRequestId,
+  });
+
+  const result: DismissDuplicateResult = { cigarAId: aId, cigarBId: bId, replayed: false };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "dismiss_duplicate",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// --------------------------------------------------------------------------
 // curationQueue — the admin read: unverified backlog + duplicate candidates.
 // --------------------------------------------------------------------------
 
@@ -346,13 +434,19 @@ export async function curationQueue(deps: Deps, principal: Principal): Promise<C
 
   // Near-duplicate candidate pairs across DISTINCT rows (c1.id < c2.id dedupes
   // the mirror pair). The `%` join prefilters via the trigram GIN index; the
-  // explicit similarity filter applies the strong-match bar.
+  // explicit similarity filter applies the strong-match bar. Pairs a curator
+  // has ruled distinct (duplicate_dismissals, stored with the same id-ordering)
+  // stay out of the queue.
   const pairResult = await db.execute(sql`
     SELECT c1.id AS a_id, c2.id AS b_id,
            similarity(c1.canonical_name, c2.canonical_name) AS sim
     FROM cigars c1
     JOIN cigars c2 ON c1.id < c2.id AND c1.canonical_name % c2.canonical_name
     WHERE similarity(c1.canonical_name, c2.canonical_name) > ${DUPLICATE_THRESHOLD}
+      AND NOT EXISTS (
+        SELECT 1 FROM duplicate_dismissals d
+        WHERE d.cigar_a_id = c1.id AND d.cigar_b_id = c2.id
+      )
     ORDER BY sim DESC
     LIMIT ${DUPLICATE_PAIR_CAP}
   `);

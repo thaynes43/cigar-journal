@@ -4,6 +4,7 @@ import { getPrincipal } from "@cj/auth";
 import type { CurationQueueCigar } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
 import { ui } from "@/lib/ui";
+import { DismissButton } from "./dismiss-button";
 import { MergeButton } from "./merge-button";
 import { VerifyButton } from "./verify-button";
 
@@ -30,7 +31,10 @@ export default async function CurationPage() {
           <ul className="flex flex-col gap-3">
             {duplicates.map((pair) => (
               <li key={`${pair.a.cigarId}:${pair.b.cigarId}`} className={ui.card}>
-                <div className="label-caps mb-3">{Math.round(pair.similarity * 100)}% match</div>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <span className="label-caps">{Math.round(pair.similarity * 100)}% match</span>
+                  <DismissButton cigarAId={pair.a.cigarId} cigarBId={pair.b.cigarId} />
+                </div>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <DuplicateSide survivor={pair.a} duplicate={pair.b} />
                   <DuplicateSide survivor={pair.b} duplicate={pair.a} />
