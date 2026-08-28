@@ -1,6 +1,6 @@
 # ADR-007: Photo storage substrate — one store, two bindings
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-08-28
 
 ## Context
