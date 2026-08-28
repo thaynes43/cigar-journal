@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.1](https://github.com/thaynes43/cigar-journal/compare/v0.13.0...v0.13.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **crawler:** decode entities, exclude sets/kits by name before seeding ([#74](https://github.com/thaynes43/cigar-journal/issues/74)) ([6c85fbf](https://github.com/thaynes43/cigar-journal/commit/6c85fbff28467fb9025b546926a1c44b9f48c956))
+* **web:** burn line — name it, stagger and cull crowded stage labels ([#76](https://github.com/thaynes43/cigar-journal/issues/76)) ([6bb9e65](https://github.com/thaynes43/cigar-journal/commit/6bb9e650584b0134a811e03af545565087216ffb))
+
 ## [0.13.0](https://github.com/thaynes43/cigar-journal/compare/v0.12.0...v0.13.0) (2026-08-28)
 
 
