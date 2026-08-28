@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/thaynes43/cigar-journal/compare/v0.8.0...v0.9.0) (2026-08-28)
+
+
+### Features
+
+* **web:** labeled strength meter on journal cards ([#55](https://github.com/thaynes43/cigar-journal/issues/55)) ([7b4bf92](https://github.com/thaynes43/cigar-journal/commit/7b4bf92c1b2a052e5760d31c58cd196629b2e99c))
+
 ## [0.8.0](https://github.com/thaynes43/cigar-journal/compare/v0.7.0...v0.8.0) (2026-08-28)
 
 
