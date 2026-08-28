@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0](https://github.com/thaynes43/cigar-journal/compare/v0.10.0...v0.11.0) (2026-08-28)
+
+
+### Features
+
+* inventory MVP — holdings view, /inventory page, get_my_inventory (PRD-002 phase 1) ([#64](https://github.com/thaynes43/cigar-journal/issues/64)) ([397bc36](https://github.com/thaynes43/cigar-journal/commit/397bc36ac809363c59a44e650ff7a7dbe39409fd))
+
+
+### Bug Fixes
+
+* one-tap photo upload on the smoke page ([#63](https://github.com/thaynes43/cigar-journal/issues/63)) ([658feb6](https://github.com/thaynes43/cigar-journal/commit/658feb6ab4a337ccaa2d544a319f98e17fc7d294))
+
 ## [0.10.0](https://github.com/thaynes43/cigar-journal/compare/v0.9.0...v0.10.0) (2026-08-28)
 
 
