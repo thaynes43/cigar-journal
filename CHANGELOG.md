@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/thaynes43/cigar-journal/compare/v0.11.0...v0.12.0) (2026-08-28)
+
+
+### Features
+
+* catalog poster library — brand wall, line sections, still tiles ([#59](https://github.com/thaynes43/cigar-journal/issues/59)) ([#66](https://github.com/thaynes43/cigar-journal/issues/66)) ([2a717ae](https://github.com/thaynes43/cigar-journal/commit/2a717aeecfc0bddb76827f92c1663449da0e8e42))
+
 ## [0.11.0](https://github.com/thaynes43/cigar-journal/compare/v0.10.0...v0.11.0) (2026-08-28)
 
 
