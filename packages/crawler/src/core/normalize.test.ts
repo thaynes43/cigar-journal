@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { extractJsonLd } from "./jsonld.js";
-import { normalizeListing, isCigarCategory } from "./normalize.js";
+import { normalizeListing, isCigarCategory, isCigarListing, decodeEntities } from "./normalize.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
 import { loadFixture } from "../testing/fixtures.js";
 
@@ -51,5 +51,34 @@ describe("isCigarCategory", () => {
 
   it("rejects a sampler even though it sits under Cigars", () => {
     expect(isCigarCategory(["Home", "Shop", "Cigars", "Samplers"], foxCigar)).toBe(false);
+  });
+});
+
+describe("decodeEntities", () => {
+  it("decodes double-encoded WooCommerce names until stable", () => {
+    expect(decodeEntities("Figurado &amp;amp; House Collection")).toBe("Figurado & House Collection");
+    expect(decodeEntities("Guy Fieri&#039;s Knuckle Sandwich")).toBe("Guy Fieri's Knuckle Sandwich");
+  });
+});
+
+describe("isCigarListing", () => {
+  const listing = (name) => ({
+    name,
+    priceCents: null,
+    currency: null,
+    inStock: null,
+    imageUrl: null,
+    sku: null,
+    categoryPath: ["Home", "Shop", "Cigars"],
+  });
+
+  it("rejects sets, kits, and mixed cases living under cigar categories", () => {
+    expect(isCigarListing(listing("Fuente OpusX 25th Aniversario Humidor Set"), foxCigar)).toBe(false);
+    expect(isCigarListing(listing("Montecristo 90th Case / Duo Kit"), foxCigar)).toBe(false);
+    expect(isCigarListing(listing("Taste of Oliva Sampler"), foxCigar)).toBe(false);
+  });
+
+  it("keeps a plain cigar listing", () => {
+    expect(isCigarListing(listing("Arturo Fuente Don Carlos Double Robusto"), foxCigar)).toBe(true);
   });
 });

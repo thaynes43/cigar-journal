@@ -53,8 +53,32 @@ function imageUrl(image: JsonLdProduct["image"]): string | null {
   return null;
 }
 
+// WooCommerce JSON-LD ships names with HTML entities, sometimes double-encoded
+// ("Figurado &amp;amp; House ..."); decode until stable so catalog names are clean.
+const ENTITIES: Record<string, string> = {
+  "&amp;": "&",
+  "&quot;": '"',
+  "&#039;": "'",
+  "&#8217;": "\u2019",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&nbsp;": " ",
+};
+
+export function decodeEntities(raw: string): string {
+  let value = raw;
+  for (let i = 0; i < 3; i++) {
+    const next = value
+      .replace(/&(amp|quot|lt|gt|nbsp|#039|#8217);/g, (m) => ENTITIES[m] ?? m)
+      .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)));
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
 export function normalizeListing(product: JsonLdProduct, breadcrumbs: string[]): NormalizedListing | null {
-  const name = typeof product.name === "string" ? product.name.trim() : "";
+  const name = typeof product.name === "string" ? decodeEntities(product.name.trim()) : "";
   if (!name) return null;
 
   const offer = firstOf(product.offers);
@@ -79,4 +103,12 @@ export function isCigarCategory(categoryPath: string[], adapter: VendorAdapter):
   const joined = categoryPath.join(" / ");
   if (adapter.excludePattern.test(joined)) return false;
   return adapter.cigarCategoryPattern.test(joined);
+}
+
+// The full listing gate: cigar category AND not a set/kit/mixed case by name
+// (those live under cigar categories but are not one catalog cigar).
+export function isCigarListing(listing: NormalizedListing, adapter: VendorAdapter): boolean {
+  if (!isCigarCategory(listing.categoryPath, adapter)) return false;
+  if (adapter.excludeNamePattern?.test(listing.name)) return false;
+  return true;
 }

@@ -16,4 +16,7 @@ export interface VendorAdapter {
   cigarCategoryPattern: RegExp;
   // …unless it also matches this (accessories, samplers, humidors, etc.).
   excludePattern: RegExp;
+  // Name-level exclusion for products whose CATEGORY is cigars but which are
+  // not one catalog cigar (sets, kits, mixed cases) — dry-run finding 2026-08-28.
+  excludeNamePattern?: RegExp;
 }

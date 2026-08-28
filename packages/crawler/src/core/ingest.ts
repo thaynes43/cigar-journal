@@ -13,7 +13,7 @@ import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedP
 import type { VendorAdapter } from "../adapters/types.js";
 import { collectSitemapUrls } from "./sitemap.js";
 import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
-import { isCigarCategory, normalizeListing, type NormalizedListing } from "./normalize.js";
+import { isCigarListing, normalizeListing, type NormalizedListing } from "./normalize.js";
 import { createCigarFromListing, findCatalogMatch, upsertListingMatch } from "./match.js";
 import { parseRobots } from "./robots.js";
 import { CRAWLER_UA_TOKEN, type Fetcher } from "./fetcher.js";
@@ -297,7 +297,7 @@ async function walkListings(
       if (!listing) continue;
       stats.listingsParsed += 1;
 
-      if (!isCigarCategory(listing.categoryPath, adapter)) {
+      if (!isCigarListing(listing, adapter)) {
         stats.skippedNonCigar += 1;
         continue;
       }
@@ -399,7 +399,7 @@ async function tryEnrichCandidates(
     const listing = normalizeListing(product, breadcrumbs);
     if (!listing) continue;
     stats.listingsParsed += 1;
-    if (!isCigarCategory(listing.categoryPath, adapter)) {
+    if (!isCigarListing(listing, adapter)) {
       stats.skippedNonCigar += 1;
       continue;
     }
