@@ -37,3 +37,33 @@ export function agingLabel(iso: string | null, now: Date = new Date()): string |
     (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
   return `${Math.max(0, months)} mo`;
 }
+
+// A price with its currency, e.g. "$12.50" — the market panel's amount. Falls back
+// to a plain two-decimal number when the currency code is absent or unrecognized
+// (Intl throws on a non-ISO-4217 code).
+export function formatPrice(price: number, currency: string | null): string {
+  if (currency) {
+    try {
+      return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(price);
+    } catch {
+      // Unknown/nonstandard currency code — fall through to a bare amount.
+    }
+  }
+  return price.toFixed(2);
+}
+
+const RELATIVE = new Intl.RelativeTimeFormat("en-US", { numeric: "auto" });
+
+// How long ago a market observation was seen, e.g. "yesterday" / "3 weeks ago",
+// falling back to a short date past a year. Day-granularity, so it is timezone-
+// robust; server-rendered against a stable now, so no hydration skew.
+export function formatSeenAt(iso: string, now: Date = new Date()): string {
+  const then = new Date(iso);
+  const days = Math.round((then.getTime() - now.getTime()) / 86_400_000);
+  const abs = Math.abs(days);
+  if (abs < 1) return "today";
+  if (abs < 7) return RELATIVE.format(days, "day");
+  if (abs < 30) return RELATIVE.format(Math.round(days / 7), "week");
+  if (abs < 365) return RELATIVE.format(Math.round(days / 30), "month");
+  return DAY.format(then);
+}

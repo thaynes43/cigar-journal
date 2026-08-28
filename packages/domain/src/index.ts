@@ -13,7 +13,7 @@ export { addCigar } from "./add-cigar.js";
 export { recordPurchase } from "./record-purchase.js";
 export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
-export { getSmoke, queryMySmokes, searchCigars, getCigar, browseCigars } from "./reads.js";
+export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, browseCigars } from "./reads.js";
 
 // Catalog curation (ADR-006): merge duplicates, dismiss false-positive pairs,
 // verify entries, and the admin queue. Curator-only — each service re-checks

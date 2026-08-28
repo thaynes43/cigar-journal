@@ -25,6 +25,7 @@ import type {
   PersonalProfile,
   BrowseCigarsResult,
   CatalogCigar,
+  CigarOffer,
 } from "./types.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
 import { normalizeDescriptor } from "./descriptors.js";
@@ -655,4 +656,52 @@ export async function browseCigars(deps: Deps): Promise<BrowseCigarsResult> {
     cigars: rows.map(toCatalogCigar),
     totalCount: Number(totals[0]?.value ?? 0),
   };
+}
+
+interface CigarOfferRow {
+  vendor: string;
+  price: string | null; // numeric column — pg returns it as a string
+  currency: string | null;
+  in_stock: boolean | null;
+  listing_url: string | null;
+  seen_at: string | Date; // timestamptz
+}
+
+// The current market snapshot for a cigar: the newest offer per vendor among its
+// auto|confirmed listing matches, cheapest first (nulls last). Catalog-scoped,
+// not owner-scoped — market data is the same for every viewer, so no principal.
+// One query: DISTINCT ON collapses each vendor's append-only price series to its
+// latest row, then the outer select orders by price — no N+1 across vendors.
+export async function getCigarOffers(
+  deps: Deps,
+  args: { cigarId: string },
+): Promise<CigarOffer[]> {
+  const result = await deps.db.execute(sql`
+    SELECT vendor, price, currency, in_stock, listing_url, seen_at
+    FROM (
+      SELECT DISTINCT ON (o.vendor_id)
+        v.name AS vendor,
+        o.price AS price,
+        o.currency AS currency,
+        o.in_stock AS in_stock,
+        o.listing_url AS listing_url,
+        o.seen_at AS seen_at
+      FROM offers o
+      JOIN listing_matches lm ON lm.id = o.listing_match_id
+      JOIN vendors v ON v.id = o.vendor_id
+      WHERE lm.cigar_id = ${args.cigarId}
+        AND lm.status IN ('auto', 'confirmed')
+      ORDER BY o.vendor_id, o.seen_at DESC, o.created_at DESC, o.id DESC
+    ) latest
+    ORDER BY latest.price ASC NULLS LAST, latest.vendor ASC
+  `);
+
+  return (result.rows as unknown as CigarOfferRow[]).map((row) => ({
+    vendor: row.vendor,
+    price: row.price != null ? Number(row.price) : null,
+    currency: row.currency,
+    inStock: row.in_stock,
+    listingUrl: row.listing_url,
+    seenAt: new Date(row.seen_at).toISOString(),
+  }));
 }

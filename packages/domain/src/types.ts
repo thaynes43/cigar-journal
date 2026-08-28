@@ -357,6 +357,20 @@ export interface GetCigarResult {
   hasProductPhoto: boolean;
 }
 
+// One vendor's latest market listing for a cigar (Market context). The offers
+// table is an append-only price/stock time series (ADR-003); this is the newest
+// row per vendor among the cigar's auto|confirmed listing matches. `price` is the
+// numeric column coerced to a number, null when the crawl observed no price;
+// `seenAt` is the observation instant (ISO-8601).
+export interface CigarOffer {
+  vendor: string; // vendors.name via offers.vendor_id
+  price: number | null;
+  currency: string | null;
+  inStock: boolean | null;
+  listingUrl: string | null;
+  seenAt: string;
+}
+
 // A catalog-only cigar summary for browse listings — no per-caller personal
 // fields (browseCigars stays catalog-scoped by design).
 export interface CatalogCigar {
