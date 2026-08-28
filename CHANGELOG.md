@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/thaynes43/cigar-journal/compare/v0.14.0...v0.15.0) (2026-08-28)
+
+
+### Features
+
+* **curation:** number-token guard + "not duplicates" dismissal for the queue ([#82](https://github.com/thaynes43/cigar-journal/issues/82)) ([b334e16](https://github.com/thaynes43/cigar-journal/commit/b334e16fbc5fbb3f66a9df8f4a85a04a990caabb))
+
 ## [0.14.0](https://github.com/thaynes43/cigar-journal/compare/v0.13.1...v0.14.0) (2026-08-28)
 
 
