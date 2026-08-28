@@ -3,11 +3,13 @@ import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
 import type { SmokeView } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
+import { photosEnabled } from "@/lib/photos";
 import { formatSmokedAt } from "@/lib/format";
 import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
 import { RatingSeal } from "../../_components/rating-seal";
 import { BurnLine } from "../../_components/burn-line";
+import { SmokePhotoStrip } from "../../_components/smoke-photo-strip";
 import { StrengthMeter } from "../../_components/strength-meter";
 import { VitalsBlock } from "../../_components/vitals-block";
 import { DeleteSmokeButton } from "../../_components/delete-smoke-button";
@@ -78,26 +80,7 @@ export default async function SmokeDetailPage({ params }: { params: Promise<{ id
 
       <Chips items={smoke.overallDescriptors} />
 
-      {smoke.photos.length > 0 ? (
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-          {smoke.photos.map((photo) => (
-            <a
-              key={photo.photoId}
-              href={`/api/photos/${photo.photoId}`}
-              target="_blank"
-              rel="noreferrer"
-              title={photo.caption ?? undefined}
-              className="aspect-square overflow-hidden rounded-card border border-line"
-            >
-              <img
-                src={`/api/photos/${photo.photoId}/thumb`}
-                alt={photo.caption ?? photo.kind}
-                className="size-full object-cover"
-              />
-            </a>
-          ))}
-        </div>
-      ) : null}
+      <SmokePhotoStrip smokeId={smoke.smokeId} photos={smoke.photos} canAdd={photosEnabled} />
 
       <VitalsBlock
         items={[

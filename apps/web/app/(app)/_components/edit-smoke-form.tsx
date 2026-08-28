@@ -9,10 +9,9 @@ import { fieldMessages, domainErrorOf } from "@/lib/trpc/error";
 import { SmokeDetailsFields } from "./smoke-details-fields";
 import { ProgressionEditor, type ProgressionDraft } from "./progression-editor";
 import { BurnLine } from "./burn-line";
-import { SmokePhotos } from "./smoke-photos";
 import { detailsFromView, buildUpdateChanges, type SmokeDetailsDraft } from "./smoke-draft";
 
-export function EditSmokeForm({ smoke, photosEnabled }: { smoke: SmokeView; photosEnabled: boolean }) {
+export function EditSmokeForm({ smoke }: { smoke: SmokeView }) {
   const router = useRouter();
   // Derive the draft on the client only: the smoked-at prefill depends on the
   // viewer's timezone, so computing it during SSR would mismatch on hydration.
@@ -99,7 +98,6 @@ export function EditSmokeForm({ smoke, photosEnabled }: { smoke: SmokeView; phot
         </form>
       ) : null}
 
-      {photosEnabled ? <SmokePhotos smokeId={smoke.smokeId} photos={smoke.photos} /> : null}
     </div>
   );
 }
