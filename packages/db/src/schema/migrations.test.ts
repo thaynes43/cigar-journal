@@ -28,6 +28,7 @@ describe("migrations", () => {
         "idempotency_keys",
         "listing_matches",
         "offers",
+        "photo_upload_tokens",
         "purchases",
         "schema_migrations",
         "crawl_runs",

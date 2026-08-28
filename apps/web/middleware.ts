@@ -11,6 +11,9 @@ import { NextResponse, type NextRequest } from "next/server";
 // The OAuth AS surface (`/oauth/*`) and discovery metadata (`/.well-known/*`) are
 // excluded too: metadata is public, and /oauth/authorize + /oauth/consent run
 // their own session gate (redirecting to /signin?next=… to preserve the flow).
+// The single-use photo upload page (`/u/<token>`) and its POST endpoint
+// (`/api/photo-uploads/*`) are excluded as well: the token IS the authorization,
+// so they must be reachable without a session cookie (ADR-007, issue #44).
 export function middleware(request: NextRequest) {
   if (request.nextUrl.pathname === "/signin") return NextResponse.next();
 
@@ -24,6 +27,6 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!api/auth|api/trpc|api/photos|api/health|oauth|authorize|token|register|revoke|\\.well-known|_next/static|_next/image|favicon.ico).*)",
+    "/((?!api/auth|api/trpc|api/photos|api/photo-uploads|api/health|u/|oauth|authorize|token|register|revoke|\\.well-known|_next/static|_next/image|favicon.ico).*)",
   ],
 };

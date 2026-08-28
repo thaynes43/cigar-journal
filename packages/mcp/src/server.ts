@@ -11,8 +11,12 @@ import {
   searchCigars,
   getCigar,
   getMyInventory,
+  addSmokePhoto,
+  mintPhotoUploadToken,
   UnauthenticatedError,
   UnauthorizedError,
+  UnavailableError,
+  ValidationError,
   type Deps,
   type Principal,
   type SaveSmokeInput,
@@ -20,6 +24,7 @@ import {
   type AddCigarInput,
   type RecordPurchaseInput,
 } from "@cj/domain";
+import { processPhoto, UnsupportedImageTypeError, type PhotoStorage } from "@cj/photos";
 import {
   SERVER_INFO,
   INSTRUCTIONS,
@@ -37,20 +42,88 @@ import {
   updateSmokeSchema,
   addCigarSchema,
   recordPurchaseSchema,
+  addSmokePhotoSchema,
   type SaveSmokeArgs,
   type UpdateSmokeArgs,
   type AddCigarArgs,
   type RecordPurchaseArgs,
 } from "./schemas.js";
 import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./results.js";
-import { smokeUrl } from "./config.js";
+import { smokeUrl, uploadUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The nine-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The ten-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
 // identity, invariants, and validation all live below this layer.
+
+// ---- File intake (add_smoke_photo, ADR-007) --------------------------------
+// ChatGPT Web attaches a user image to a tool call via the OpenAI extension: the
+// request's `_meta["openai/fileParams"]` carries entries like
+// `{ download_url, file_id, mime_type?, name? }`, where download_url is a
+// SHORT-LIVED signed URL the server must fetch promptly. This is web-only —
+// mobile uploads are broken upstream and a chat file URL pasted as text (e.g.
+// chatgpt.com/...) is unreachable from outside ChatGPT — hence the mode-B upload
+// link. Handle names track the MCP file-upload drafts SEP-2356/1306.
+
+const ATTACHED_FETCH_TIMEOUT_MS = 15_000;
+const MAX_ATTACHED_BYTES = 20 * 1024 * 1024; // 20 MB
+
+interface AttachedFile {
+  downloadUrl: string;
+  mimeType?: string;
+}
+
+// Parse `_meta["openai/fileParams"]` defensively: array or single object, unknown
+// shapes treated as ABSENT (fall back to mode B — a weird shape never errors).
+// Returns the first usable entry, or null when no image was attached.
+function firstFileParam(meta: Record<string, unknown> | undefined): AttachedFile | null {
+  if (!meta || typeof meta !== "object") return null;
+  const raw = meta["openai/fileParams"];
+  if (raw == null) return null;
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  if (!first || typeof first !== "object") return null;
+  const entry = first as Record<string, unknown>;
+  const downloadUrl = entry.download_url;
+  if (typeof downloadUrl !== "string" || downloadUrl.length === 0) return null;
+  const mimeType = typeof entry.mime_type === "string" ? entry.mime_type : undefined;
+  return { downloadUrl, mimeType };
+}
+
+// Fetch the attached image server-side: 15s timeout, 20MB cap enforced by both
+// the content-length header and a streamed byte count (a lying/absent header can
+// never blow past the cap). contentType prefers the entry's mime_type, then the
+// response header. Any failure throws — mapped to the contract `unavailable` by
+// the run() wrapper.
+async function fetchAttachedImage(file: AttachedFile): Promise<{ bytes: Buffer; contentType: string }> {
+  const res = await fetch(file.downloadUrl, {
+    signal: AbortSignal.timeout(ATTACHED_FETCH_TIMEOUT_MS),
+    redirect: "follow",
+  });
+  if (!res.ok || !res.body) throw new UnavailableError();
+
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_ATTACHED_BYTES) throw new UnavailableError();
+
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_ATTACHED_BYTES) {
+      await reader.cancel();
+      throw new UnavailableError();
+    }
+    chunks.push(value);
+  }
+
+  const contentType =
+    file.mimeType ?? res.headers.get("content-type") ?? "application/octet-stream";
+  return { bytes: Buffer.concat(chunks), contentType };
+}
 
 interface AuthContext {
   principal: Principal;
@@ -169,7 +242,7 @@ function toUpdateInput(
   };
 }
 
-export function createMcpServer(deps: Deps): McpServer {
+export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpServer {
   const server = new McpServer(SERVER_INFO, { instructions: INSTRUCTIONS });
 
   server.registerTool(
@@ -431,6 +504,82 @@ export function createMcpServer(deps: Deps): McpServer {
           toUpdateInput(args, clientId, correlationId),
         );
         return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "add_smoke_photo",
+    {
+      title: "Add smoke photo",
+      description:
+        "Attach a photo to one of the user's smokes. The image is never a text argument — provide it one of two ways and the tool auto-detects which:\n" +
+        "1. ATTACH THE IMAGE TO THIS TOOL CALL. When the user has shared a photo, attach that image directly to this call so the host carries it as file data; the server fetches it, strips location metadata, and files it under the smoke. Do NOT paste an image or a chat file link (e.g. a chatgpt.com/... URL) into any field — those links are unreachable outside the chat and will fail.\n" +
+        "2. NO IMAGE? Call with just the smoke id; the tool returns a one-time upload link. Hand it to the user: open it on your phone, it goes straight to your camera roll and attaches to this smoke. This is the reliable path on mobile, where in-chat photo attachment does not work.\n" +
+        "A photo NEVER blocks save_smoke — it is a separate action with its own result, so a photo failure never affects saving the smoke. `kind` classifies the shot (cigar, band, construction, burn, other; default other); add a `caption` only if the user gave one.",
+      inputSchema: addSmokePhotoSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        title: "Add smoke photo",
+      },
+    },
+    (args, extra) =>
+      run("add_smoke_photo", extra.authInfo, async ({ principal }, correlationId) => {
+        // Photos disabled cluster-wide → the whole tool is non-functional; report
+        // `unavailable` rather than mint a link that would 503 on upload.
+        if (!storage) throw new UnavailableError();
+
+        const meta = extra._meta as Record<string, unknown> | undefined;
+        const attached = firstFileParam(meta);
+
+        if (attached) {
+          // Mode A — image attached: fetch it, run the shared pipeline, store it.
+          const { bytes, contentType } = await fetchAttachedImage(attached);
+          let processed;
+          try {
+            processed = await processPhoto(bytes, contentType);
+          } catch (error) {
+            // A present-but-undecodable image is the model's to fix by attaching a
+            // supported one — surface it as a structured validation_error.
+            if (error instanceof UnsupportedImageTypeError) {
+              throw new ValidationError([
+                { path: "image", message: "Unsupported or unreadable image." },
+              ]);
+            }
+            throw error;
+          }
+          const photo = await addSmokePhoto(deps, storage, principal, {
+            smokeId: args.smokeId,
+            kind: args.kind,
+            caption: args.caption ?? null,
+            image: {
+              full: processed.full,
+              thumb: processed.thumb,
+              contentType: processed.contentType,
+              width: processed.width,
+              height: processed.height,
+              bytes: processed.full.byteLength,
+            },
+            actor: "mcp",
+            correlationId,
+          });
+          return jsonResult({ mode: "attached", photo });
+        }
+
+        // Mode B — no image: mint a short-lived, single-use upload link bound to
+        // (user, smoke, kind?, caption?) for the user to open on their phone.
+        const minted = await mintPhotoUploadToken(deps, principal, {
+          smokeId: args.smokeId,
+          kind: args.kind,
+          caption: args.caption ?? null,
+          correlationId,
+        });
+        return jsonResult({
+          mode: "upload_url",
+          uploadUrl: uploadUrl(minted.token),
+          expiresAt: minted.expiresAt,
+        });
       }),
   );
 

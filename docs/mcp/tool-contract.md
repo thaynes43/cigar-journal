@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Nine tools over the application services, client-neutral: any MCP client
+Ten tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -30,8 +30,9 @@ ADR-005 (integration). Client capability differences live in
 
 Scopes: `catalog:read` (search_cigars, get_cigar), `journal:read`
 (get_my_smokes, get_smoke, get_my_inventory), `journal:write` (save_smoke,
-add_cigar, record_purchase, update_smoke — including lazy catalog create inside
-save/add and the enrichment queue write). **Scope-bounded responses:**
+add_cigar, record_purchase, update_smoke, add_smoke_photo — including lazy catalog
+create inside save/add and the enrichment queue write). **Scope-bounded
+responses:**
 catalog tools include personal fields (`userSmokeCount`, `personalProfile`)
 only when the token also carries `journal:read`; otherwise those fields are
 omitted entirely. Data returned never exceeds the scopes presented.
@@ -58,6 +59,10 @@ auto-creates a described cigar the same way. record_purchase is also how the
 humidor count is corrected — the ledger is append-only and holdings are derived,
 so a miscount is fixed with a negative-quantity row (say why in notes), never an
 edit. Record only what the user stated: never invent a price, date, or vendor.
+Photos attach through add_smoke_photo, never save_smoke: attach the image to that
+tool call itself and the server files it under the smoke; with no image the tool
+returns a one-time link to hand the user for a phone upload. A photo never blocks
+saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -488,6 +493,73 @@ result:
 
 Deletion is web-only. Imported Smokes accept structured-field changes; their
 original markdown is immutable.
+
+## add_smoke_photo — write, dual-mode
+
+Attach a review-bound photo to one of the user's smokes (ADR-007, issue #44).
+The image is **never** a tool argument — it arrives attached to the tool call, or
+not at all — and the tool auto-detects which. A photo failure is fully isolated
+from `save_smoke`: separate tool, separate result, its own storage transaction.
+
+```yaml
+arguments:
+  smokeId: sm_01jc8x
+  kind: band                     # cigar | band | construction | burn | other (default other)
+  caption: "The second band"     # optional; only if the user gave one
+
+# Mode A — image attached to the tool call (host carries it as file data):
+result:
+  mode: attached
+  photo:
+    photoId: ph_01ke
+    smokeId: sm_01jc8x
+    kind: band
+    caption: "The second band"
+    width: 2048
+    height: 1365
+    createdAt: "2026-08-28T20:15:00Z"
+
+# Mode B — no image attached: a one-time, short-lived upload link to hand the user
+result:
+  mode: upload_url
+  uploadUrl: https://cigars.haynesnetwork.com/u/<token>
+  expiresAt: "2026-08-28T20:30:00Z"
+```
+
+**Two modes, one tool.**
+
+- **Attached image (mode A).** ChatGPT Web attaches the user's image to the tool
+  call; the server fetches it (15s timeout, 20MB cap), runs the shared pipeline
+  (EXIF applied + all metadata/GPS stripped, normalized JPEG + thumb), and files
+  it under the smoke. The description steers the model to attach the image to the
+  **tool call itself** and never to paste a chat file URL (e.g. `chatgpt.com/...`)
+  as text — those links are unreachable outside ChatGPT and will 403.
+- **No image (mode B).** The tool mints a short-lived, single-use link bound to
+  (user, smoke, kind?, caption?) and returns it. The model hands the URL to the
+  user to open on their phone — the reliable path on mobile, where in-chat photo
+  attachment is broken upstream. The link opens a one-tile upload page; the token
+  is the authorization, consumed atomically on first successful use.
+
+Errors are the standard set: `unavailable` when photo storage is unconfigured,
+`smoke_not_found` for a non-owned/unknown smoke, `photo_limit` at the per-smoke
+cap, `validation_error` when an attached image can't be decoded. Scope
+`journal:write`. The mint/consume link is web-only from there on — its
+invalid/expired failure (`upload_token_invalid`) surfaces on the upload page (410
+"Link expired."), never through an MCP tool.
+
+### File intake (`openai/fileParams`)
+
+Mode A reads the image handle from the request metadata the OpenAI MCP extension
+supplies: `_meta["openai/fileParams"]`, an array (or single object) of entries
+shaped `{ download_url, file_id, mime_type?, name? }` where `download_url` is a
+**short-lived signed URL** the server must fetch promptly. The adapter parses it
+defensively — array or single object, any unknown shape treated as *absent* so a
+malformed `_meta` silently falls back to mode B rather than erroring. This is the
+only surface that reads `_meta`; the tool's own JSON schema never carries image
+bytes. Field/handle names (`download_url`, `mime_type`, the single-use upload
+link) deliberately track the in-progress MCP file-upload drafts **SEP-2356 /
+SEP-1306**, so swapping to the ratified standard later is a mechanical rename, not
+a redesign.
 
 ---
 

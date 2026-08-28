@@ -1,11 +1,11 @@
 // Server identity, scope map, and the verbatim server instructions the tool
-// contract mandates. These are the client-facing surface: the nine tool names,
+// contract mandates. These are the client-facing surface: the ten tool names,
 // the scopes each demands, and the instruction text every client receives at
 // initialize (docs/mcp/tool-contract.md).
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The nine tools, exactly per the contract. Reads are annotated readOnlyHint.
+// The ten tools, exactly per the contract. Reads are annotated readOnlyHint.
 export const TOOL_NAMES = [
   "search_cigars",
   "get_cigar",
@@ -16,6 +16,7 @@ export const TOOL_NAMES = [
   "add_cigar",
   "record_purchase",
   "update_smoke",
+  "add_smoke_photo",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -33,6 +34,7 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   add_cigar: ["journal:write"],
   record_purchase: ["journal:write"],
   update_smoke: ["journal:write"],
+  add_smoke_photo: ["journal:write"],
 };
 
 // Personal fields on catalog tools require this additional scope.
@@ -69,6 +71,10 @@ auto-creates a described cigar the same way. record_purchase is also how the
 humidor count is corrected — the ledger is append-only and holdings are derived,
 so a miscount is fixed with a negative-quantity row (say why in notes), never an
 edit. Record only what the user stated: never invent a price, date, or vendor.
+Photos attach through add_smoke_photo, never save_smoke: attach the image to that
+tool call itself and the server files it under the smoke; with no image the tool
+returns a one-time link to hand the user for a phone upload. A photo never blocks
+saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.

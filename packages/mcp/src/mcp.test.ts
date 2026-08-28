@@ -1,10 +1,12 @@
 import { randomBytes, createHash, randomUUID } from "node:crypto";
+import { createServer, type Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import {
   registerClient,
   getClient,
@@ -62,9 +64,17 @@ describe("@cj/mcp adapter", () => {
   let h: DomainHarness;
   let server: Server;
   let baseUrl: string;
+  let storage: PhotoStorage;
   let owner: Principal;
   let other: Principal;
   let primaryCigarId: string;
+
+  // A valid 8x8 PNG the shared pipeline decodes cleanly, served by a local fixture
+  // HTTP server to stand in for ChatGPT's short-lived signed download_url.
+  const PNG_FIXTURE = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVQImWM4oaGBFTEMLQkAgl1GAXRgBQ4AAAAASUVORK5CYII=",
+    "base64",
+  );
 
   // Tokens minted through the full OAuth grant, per scope set.
   let ownerFull: string;
@@ -165,7 +175,8 @@ describe("@cj/mcp adapter", () => {
     await h.seedCigar({ canonicalName: "Ambiguity Twin Robusto" });
     await h.seedCigar({ canonicalName: "Ambiguity Twin Robusto" });
 
-    const app = buildApp(h.deps);
+    storage = createMemoryPhotoStorage();
+    const app = buildApp(h.deps, storage);
     server = app.listen(0);
     const address = server.address() as AddressInfo;
     baseUrl = `http://127.0.0.1:${address.port}`;
@@ -217,7 +228,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the nine tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
+  it("lists exactly the ten tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -226,6 +237,7 @@ describe("@cj/mcp adapter", () => {
       expect(names).toEqual(
         [
           "add_cigar",
+          "add_smoke_photo",
           "get_cigar",
           "get_my_inventory",
           "get_my_smokes",
@@ -241,7 +253,7 @@ describe("@cj/mcp adapter", () => {
         tools.find((t) => t.name === name)?.annotations?.readOnlyHint;
       for (const r of ["search_cigars", "get_cigar", "get_my_smokes", "get_smoke", "get_my_inventory"])
         expect(readOnly(r)).toBe(true);
-      for (const w of ["save_smoke", "add_cigar", "record_purchase", "update_smoke"])
+      for (const w of ["save_smoke", "add_cigar", "record_purchase", "update_smoke", "add_smoke_photo"])
         expect(readOnly(w)).not.toBe(true);
     });
   });
@@ -845,6 +857,112 @@ describe("@cj/mcp adapter", () => {
         holdings: { cigar: { cigarId: string } }[];
       };
       expect(inv.holdings.some((hh) => hh.cigar.cigarId === cigarId)).toBe(false);
+    });
+  });
+
+  // ---- add_smoke_photo: dual-mode photo intake ------------------------------
+
+  async function saveBareSmoke(client: Client, marker: string): Promise<string> {
+    const saved = payloadOf(
+      await call(client, "save_smoke", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId: primaryCigarId },
+        overallDescriptors: [marker],
+      }),
+    ) as { smoke: { smokeId: string } };
+    return saved.smoke.smokeId;
+  }
+
+  it("add_smoke_photo mode B (no image) mints a one-time upload link bound to the smoke", async () => {
+    await withClient(ownerFull, async (client) => {
+      const smokeId = await saveBareSmoke(client, "photo-mode-b");
+      const data = payloadOf(await call(client, "add_smoke_photo", { smokeId, kind: "band" })) as {
+        mode: string;
+        uploadUrl: string;
+        expiresAt: string;
+      };
+      expect(data.mode).toBe("upload_url");
+      // Mirrors smokeUrl: the web origin + /u/<opaque base64url token>.
+      expect(data.uploadUrl).toMatch(new RegExp(`^${ORIGIN}/u/[A-Za-z0-9_-]+$`));
+      expect(Number.isNaN(Date.parse(data.expiresAt))).toBe(false);
+      // No image bytes stored — mode B only mints a link.
+      expect(data).not.toHaveProperty("photo");
+    });
+  });
+
+  it("add_smoke_photo mode A (attached image) fetches openai/fileParams, stores it, and it rides get_smoke", async () => {
+    // A local fixture server stands in for ChatGPT's short-lived signed URL.
+    const fixture: HttpServer = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "image/png", "content-length": PNG_FIXTURE.byteLength });
+      res.end(PNG_FIXTURE);
+    });
+    await new Promise<void>((resolve) => fixture.listen(0, resolve));
+    const fixtureUrl = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/img.png`;
+
+    try {
+      await withClient(ownerFull, async (client) => {
+        const smokeId = await saveBareSmoke(client, "photo-mode-a");
+
+        const result = (await client.callTool({
+          name: "add_smoke_photo",
+          arguments: { smokeId, kind: "band", caption: "The band" },
+          _meta: {
+            "openai/fileParams": [
+              { download_url: fixtureUrl, file_id: "file_1", mime_type: "image/png", name: "band.png" },
+            ],
+          },
+        })) as CallToolResult;
+
+        const data = payloadOf(result) as {
+          mode: string;
+          photo: { photoId: string; smokeId: string; kind: string; caption: string };
+        };
+        expect(data.mode).toBe("attached");
+        expect(data.photo.smokeId).toBe(smokeId);
+        expect(data.photo.kind).toBe("band");
+        expect(data.photo.caption).toBe("The band");
+
+        // Both objects landed in storage, and the photo rides get_smoke additively.
+        const full = payloadOf(await call(client, "get_smoke", { smokeId })) as {
+          smoke: { photos: { photoId: string }[] };
+        };
+        expect(full.smoke.photos.some((p) => p.photoId === data.photo.photoId)).toBe(true);
+      });
+    } finally {
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  });
+
+  it("rejects add_smoke_photo for a token without journal:write: 403", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerCatalogJournal}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "add_smoke_photo", arguments: { smokeId: randomUUID() } },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+  });
+
+  it("add_smoke_photo isolates by owner — another user cannot attach to a non-owned smoke", async () => {
+    const smokeId = await withClient(ownerFull, async (client) => {
+      const saved = payloadOf(
+        await call(client, "save_smoke", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId: primaryCigarId },
+          journal: { narrative: "Owner-only smoke for photo isolation." },
+        }),
+      ) as { smoke: { smokeId: string } };
+      return saved.smoke.smokeId;
+    });
+    // `other` mints against the owner's smoke → smoke_not_found (existence never leaks).
+    await withClient(otherFull, async (client) => {
+      const result = await call(client, "add_smoke_photo", { smokeId });
+      expect(errorOf(result).code).toBe("smoke_not_found");
     });
   });
 });

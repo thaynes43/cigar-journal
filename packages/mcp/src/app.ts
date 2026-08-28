@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Deps } from "@cj/domain";
+import { photoStorageFromEnv, type PhotoStorage } from "@cj/photos";
 import { createMcpServer } from "./server.js";
 import { bearerAuth } from "./auth.js";
 import { jsonResponseEnabled } from "./config.js";
@@ -13,7 +14,14 @@ import { mcpEvent } from "./logger.js";
 // assigns on initialize — the spike-proven shape. A fresh initialize with no
 // session id creates a session and its own McpServer over @cj/domain.
 
-export function buildApp(deps: Deps): express.Express {
+// `storage` is the photo object store (ADR-007), read once from the environment
+// and shared across sessions; null when photos are unconfigured, in which case
+// add_smoke_photo returns the contract `unavailable`. Injectable so tests can
+// pass an in-memory store.
+export function buildApp(
+  deps: Deps,
+  storage: PhotoStorage | null = photoStorageFromEnv(),
+): express.Express {
   const app = express();
   app.set("trust proxy", true);
   app.disable("x-powered-by");
@@ -51,7 +59,7 @@ export function buildApp(deps: Deps): express.Express {
           mcpEvent("session_closed", { sessionId: transport.sessionId });
         }
       };
-      const server = createMcpServer(deps);
+      const server = createMcpServer(deps, storage);
       await server.connect(transport);
     }
 
