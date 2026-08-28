@@ -28,7 +28,10 @@ function hasExtra(a: Set<string>, b: Set<string>): boolean {
   return false;
 }
 
-function numbersCompatible(query: string, candidate: string): boolean {
+// Exported for the curation queue (ADR-006), which applies the same guard to
+// near-duplicate candidate pairs: number-distinct siblings are different
+// products by definition, never merge candidates.
+export function numbersCompatible(query: string, candidate: string): boolean {
   const q = modelTokens(query);
   const c = modelTokens(candidate);
   if (q.size === 0 || c.size === 0) return true;

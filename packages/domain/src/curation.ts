@@ -22,6 +22,7 @@ import type {
   CurationQueueCigar,
 } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
+import { numbersCompatible } from "./cigar-resolution.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 
@@ -439,6 +440,7 @@ export async function curationQueue(deps: Deps, principal: Principal): Promise<C
   // stay out of the queue.
   const pairResult = await db.execute(sql`
     SELECT c1.id AS a_id, c2.id AS b_id,
+           c1.canonical_name AS a_name, c2.canonical_name AS b_name,
            similarity(c1.canonical_name, c2.canonical_name) AS sim
     FROM cigars c1
     JOIN cigars c2 ON c1.id < c2.id AND c1.canonical_name % c2.canonical_name
@@ -450,7 +452,20 @@ export async function curationQueue(deps: Deps, principal: Principal): Promise<C
     ORDER BY sim DESC
     LIMIT ${DUPLICATE_PAIR_CAP}
   `);
-  const pairRows = pairResult.rows as unknown as { a_id: string; b_id: string; sim: number }[];
+  const rawPairRows = pairResult.rows as unknown as {
+    a_id: string;
+    b_id: string;
+    a_name: string;
+    b_name: string;
+    sim: number;
+  }[];
+
+  // The resolver's number-token guard, applied to candidates: names carrying
+  // mutually distinct digit-bearing tokens ("No. 9" vs "T52", "1964" vs "1926")
+  // are different products by definition — never merge candidates, regardless
+  // of trigram score. Post-filtering after the LIMIT can under-fill a capped
+  // page, which is acceptable for an admin backlog view.
+  const pairRows = rawPairRows.filter((p) => numbersCompatible(p.a_name, p.b_name));
 
   // One metadata+counts fetch for every cigar referenced by either list.
   const allIds = new Set<string>(unverifiedIds);

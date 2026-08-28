@@ -321,6 +321,21 @@ describe("curation", () => {
       const sims = queue.duplicates.map((p) => p.similarity);
       expect([...sims]).toEqual([...sims].sort((x, y) => y - x));
     });
+
+    it("suppresses number-distinct siblings via the resolver's number-token guard", async () => {
+      // High trigram similarity, but "No. 9" vs "T52" are different products by
+      // definition — the pair must never surface as a merge candidate.
+      const no9 = await seedUnverified("Guarded Liga Privada No. 9 Toro");
+      const t52 = await seedUnverified("Guarded Liga Privada T52 Toro");
+
+      const queue = await curationQueue(h.deps, admin);
+      const pair = queue.duplicates.find(
+        (p) =>
+          (p.a.cigarId === no9 && p.b.cigarId === t52) ||
+          (p.a.cigarId === t52 && p.b.cigarId === no9),
+      );
+      expect(pair).toBeUndefined();
+    });
   });
 
   // --- dismissDuplicate -----------------------------------------------------
