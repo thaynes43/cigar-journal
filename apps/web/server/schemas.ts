@@ -99,4 +99,8 @@ export const queryMySmokesSchema = z.object({
   smokedBefore: z.string().optional(),
   minRating: z.number().nullish(),
   limit: z.number().optional(),
+  // Opaque keyset cursor for the journal's infinite scroll; tRPC's
+  // useInfiniteQuery threads the page param through this field. Web-only — the
+  // MCP get_my_smokes schema deliberately omits it (contract-stable).
+  cursor: z.string().nullish(),
 });

@@ -55,6 +55,64 @@ function clamp(value: number | undefined, fallback: number, max: number): number
   return Math.min(Math.floor(n), max);
 }
 
+// Keyset cursor for the journal list (web infinite scroll). The list orders by
+// (smokedAt DESC NULLS LAST, createdAt DESC, id DESC), so the cursor carries all
+// three keys — smokedAt is nullable, hence the null tail below. Mirrors the
+// opaque base64url cursor in catalog-browse.ts; the MCP tool never issues one.
+interface SmokeCursor {
+  smokedAt: string | null; // ISO instant, or null for the never-timestamped tail
+  createdAt: string; // ISO instant
+  id: string; // uuid, the final tie-breaker
+}
+
+function encodeSmokeCursor(c: SmokeCursor): string {
+  return Buffer.from(JSON.stringify([c.smokedAt, c.createdAt, c.id]), "utf8").toString("base64url");
+}
+
+// A malformed cursor is treated as absent (first page) rather than an error — a
+// stale link degrades gracefully, exactly as catalog-browse decodes its cursor.
+function decodeSmokeCursor(raw: string | null | undefined): SmokeCursor | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+    if (
+      Array.isArray(parsed) &&
+      (parsed[0] === null || typeof parsed[0] === "string") &&
+      typeof parsed[1] === "string" &&
+      typeof parsed[2] === "string"
+    ) {
+      return { smokedAt: parsed[0], createdAt: parsed[1], id: parsed[2] };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// The "rows strictly after the cursor" predicate for the list's compound order
+// (smokedAt DESC NULLS LAST, createdAt DESC, id DESC). NULLS LAST means a null
+// smokedAt sorts after every timestamped row, so a non-null cursor also admits
+// the null tail; a null cursor is already inside that tail and only walks it.
+function afterSmokeCursor(c: SmokeCursor): SQL {
+  const created = new Date(c.createdAt);
+  if (c.smokedAt !== null) {
+    const smoked = new Date(c.smokedAt);
+    return sql`(
+      ${smokes.smokedAt} IS NULL
+      OR ${smokes.smokedAt} < ${smoked}
+      OR (${smokes.smokedAt} = ${smoked} AND ${smokes.createdAt} < ${created})
+      OR (${smokes.smokedAt} = ${smoked} AND ${smokes.createdAt} = ${created} AND ${smokes.id} < ${c.id}::uuid)
+    )`;
+  }
+  return sql`(
+    ${smokes.smokedAt} IS NULL
+    AND (
+      ${smokes.createdAt} < ${created}
+      OR (${smokes.createdAt} = ${created} AND ${smokes.id} < ${c.id}::uuid)
+    )
+  )`;
+}
+
 function toSmokeView(
   smoke: SmokeRow,
   cigar: { id: string; canonicalName: string; verification: CigarRow["verification"] },
@@ -290,7 +348,13 @@ export async function queryMySmokes(
   const conditions = smokeConditions(principal, filters);
   const limit = clamp(filters.limit, DEFAULT_SMOKE_LIMIT, MAX_SMOKE_LIMIT);
 
-  const rows = await deps.db
+  // The cursor narrows only the page query, never the total — totalMatches stays
+  // the full count across the filters (mirrors browseCatalog's totalCount).
+  const cursor = decodeSmokeCursor(filters.cursor);
+  const pageConditions = cursor ? [...conditions, afterSmokeCursor(cursor)] : conditions;
+
+  // Fetch one extra row to decide whether a next cursor exists, then trim it off.
+  const fetched = await deps.db
     .select({
       smoke: smokes,
       cigarId: cigars.id,
@@ -300,9 +364,12 @@ export async function queryMySmokes(
     })
     .from(smokes)
     .innerJoin(cigars, eq(smokes.cigarId, cigars.id))
-    .where(and(...conditions))
-    .orderBy(sql`${smokes.smokedAt} DESC NULLS LAST`, desc(smokes.createdAt))
-    .limit(limit);
+    .where(and(...pageConditions))
+    .orderBy(sql`${smokes.smokedAt} DESC NULLS LAST`, desc(smokes.createdAt), desc(smokes.id))
+    .limit(limit + 1);
+
+  const hasMore = fetched.length > limit;
+  const rows = hasMore ? fetched.slice(0, limit) : fetched;
 
   const totals = await deps.db
     .select({ value: count() })
@@ -339,7 +406,17 @@ export async function queryMySmokes(
     return summary;
   });
 
-  return { smokes: summaries, totalMatches: Number(totals[0]?.value ?? 0) };
+  const last = rows[rows.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeSmokeCursor({
+          smokedAt: last.smoke.smokedAt ? last.smoke.smokedAt.toISOString() : null,
+          createdAt: last.smoke.createdAt.toISOString(),
+          id: last.smoke.id,
+        })
+      : null;
+
+  return { smokes: summaries, totalMatches: Number(totals[0]?.value ?? 0), nextCursor };
 }
 
 interface CigarMatchRow {

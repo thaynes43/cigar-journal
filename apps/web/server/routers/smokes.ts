@@ -6,9 +6,11 @@ import { saveSmokeSchema, updateSmokeSchema, queryMySmokesSchema } from "../sche
 // The journal aggregate's CRUD surface. Provenance is stamped server-side as
 // `manual` — the web is the manual writer (ADR-002); a client can't spoof it.
 export const smokesRouter = router({
+  // Non-optional input (every field within is optional) so the journal's
+  // useInfiniteQuery can thread its keyset `cursor` through this procedure.
   list: authedProcedure
-    .input(queryMySmokesSchema.optional())
-    .query(({ ctx, input }) => queryMySmokes(ctx.deps, ctx.principal, input ?? {})),
+    .input(queryMySmokesSchema)
+    .query(({ ctx, input }) => queryMySmokes(ctx.deps, ctx.principal, input)),
 
   get: authedProcedure
     .input(z.object({ smokeId: z.string() }))

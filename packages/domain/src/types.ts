@@ -302,11 +302,20 @@ export interface QueryMySmokesFilters {
   smokedBefore?: string;
   minRating?: number | null;
   limit?: number;
+  // Opaque keyset cursor for the web journal's infinite scroll. Web-only: the
+  // MCP get_my_smokes schema does not expose it and its adapter never passes one,
+  // so the tool always returns the first page and its payload stays contract-
+  // stable. A malformed value degrades to the first page (see decodeSmokeCursor).
+  cursor?: string | null;
 }
 
 export interface QueryMySmokesResult {
   smokes: SmokeSummary[];
   totalMatches: number;
+  // Keyset cursor for the next page, or null on the last page. Web-only, like
+  // `cursor`: the MCP get_my_smokes mapping builds its payload explicitly and
+  // never surfaces this, keeping the tool contract byte-stable.
+  nextCursor: string | null;
 }
 
 export interface SearchCigarsArgs {
