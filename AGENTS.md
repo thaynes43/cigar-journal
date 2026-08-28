@@ -4,6 +4,13 @@ Agent guide for the cigar journal — a markdown ledger being rebuilt into a web
 application (journal + cigar lookup database + OIDC/local-user login + MCP
 server, with agents as the primary journal writers). `CLAUDE.md` symlinks here.
 
+## Backlog
+
+Unimplemented work lives as GitHub issues on this repo, label `backlog`
+(area labels: market/mcp/web/inventory/ops). Each issue is written for a
+cold-start agent with pointers into `docs/`. Pick up from there; close via
+the PR that implements it.
+
 ## Ground rules
 
 - Branch per task (`agent/<slug>`), PR for every change, never push `main`.
