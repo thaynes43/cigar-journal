@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Six tools over the application services, client-neutral: any MCP client
+Seven tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -29,8 +29,9 @@ ADR-005 (integration). Client capability differences live in
    user's last look before persisting.
 
 Scopes: `catalog:read` (search_cigars, get_cigar), `journal:read`
-(get_my_smokes, get_smoke), `journal:write` (save_smoke, update_smoke —
-including lazy catalog create inside save). **Scope-bounded responses:**
+(get_my_smokes, get_smoke, get_my_inventory), `journal:write` (save_smoke,
+update_smoke — including lazy catalog create inside save). **Scope-bounded
+responses:**
 catalog tools include personal fields (`userSmokeCount`, `personalProfile`)
 only when the token also carries `journal:read`; otherwise those fields are
 omitted entirely. Data returned never exceeds the scopes presented.
@@ -261,6 +262,46 @@ result:
 ```
 
 Not for browsing — one Smoke per call, owner-only.
+
+## get_my_inventory — read
+
+The user's current humidor holdings from the purchases ledger: what they own,
+how many remain, since when it has been aging, and their own rating. Use when
+the user asks what to smoke or what they have. Takes no arguments.
+
+```yaml
+arguments: {}                  # none — scoped to the authenticated user
+
+result:
+  holdings:
+    - cigar:
+        cigarId: cg_01j9x2
+        canonicalName: Plasencia Alma del Fuego Concepcion
+        brand: Plasencia
+        line: Alma del Fuego
+        vitola: { name: Concepcion, lengthInches: 6.0, ringGauge: 52 }
+        type: NC
+      remaining: 7             # max(0, totalAcquired − smokes since first purchase)
+      totalAcquired: 10        # sum of lot quantities
+      smokedCount: 3           # the caller's smokes of this cigar, all-time
+      agingSince: "2025-06-01" # earliest humidor date, else earliest box date
+      myRating: 88             # the caller's average rating, null if unrated
+      lots:
+        - purchasedAt: "2026-01-10"
+          quantity: 10
+          packaging: box
+          vendor: Small Batch Cigar
+          pricePerStick: 12.5
+          boxDate: null
+          humidorAt: "2025-06-01"
+  totalSticksRemaining: 7
+```
+
+`remaining` is a heuristic pending explicit consumption tracking: acquired
+quantity minus the caller's smokes dated on or after the earliest purchase
+(untimed smokes count), floored at zero. `smokedCount` is the all-time count,
+kept distinct so the two are never conflated. In-stock holdings sort first, then
+empties, each alphabetical by name.
 
 ## save_smoke — write, idempotent
 

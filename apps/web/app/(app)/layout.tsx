@@ -23,6 +23,9 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
               Cigar Journal
             </Link>
             <nav className="flex items-center gap-6">
+              <Link href="/inventory" className="label-caps transition-colors hover:text-accent">
+                Inventory
+              </Link>
               <Link href="/cigars" className="label-caps transition-colors hover:text-accent">
                 Catalog
               </Link>

@@ -1,16 +1,17 @@
 // Server identity, scope map, and the verbatim server instructions the tool
-// contract mandates. These are the client-facing surface: the six tool names,
+// contract mandates. These are the client-facing surface: the seven tool names,
 // the scopes each demands, and the instruction text every client receives at
 // initialize (docs/mcp/tool-contract.md).
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The six tools, exactly per the contract. Reads are annotated readOnlyHint.
+// The seven tools, exactly per the contract. Reads are annotated readOnlyHint.
 export const TOOL_NAMES = [
   "search_cigars",
   "get_cigar",
   "get_my_smokes",
   "get_smoke",
+  "get_my_inventory",
   "save_smoke",
   "update_smoke",
 ] as const;
@@ -25,6 +26,7 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   get_cigar: ["catalog:read"],
   get_my_smokes: ["journal:read"],
   get_smoke: ["journal:read"],
+  get_my_inventory: ["journal:read"],
   save_smoke: ["journal:write"],
   update_smoke: ["journal:write"],
 };
