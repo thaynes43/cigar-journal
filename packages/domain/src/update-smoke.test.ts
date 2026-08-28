@@ -5,7 +5,7 @@ import { createHarness, newRequestId, type DomainHarness } from "./testing/harne
 import { saveSmoke } from "./save-smoke.js";
 import { updateSmoke } from "./update-smoke.js";
 import type { Principal } from "./index.js";
-import { VersionConflictError, SmokeNotFoundError } from "./errors.js";
+import { VersionConflictError, SmokeNotFoundError, ValidationError } from "./errors.js";
 
 describe("updateSmoke", () => {
   let h: DomainHarness;
@@ -98,6 +98,28 @@ describe("updateSmoke", () => {
       .where(eq(smokeProgression.smokeId, smokeId))
       .orderBy(smokeProgression.ordinal);
     expect(rows.map((r) => r.ordinal)).toEqual([0, 1]);
+  });
+
+  it("rejects an empty (no-op) correction instead of bumping the version", async () => {
+    const empty = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: {},
+    }).catch((e: unknown) => e);
+    expect(empty).toBeInstanceOf(ValidationError);
+    expect((empty as ValidationError).fields.some((f) => f.path === "changes")).toBe(true);
+
+    // A block that carries no operative keys is also a no-op and rejected.
+    const emptyAppend = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: { progression: { append: [] } },
+    }).catch((e: unknown) => e);
+    expect(emptyAppend).toBeInstanceOf(ValidationError);
+
+    // The smoke is untouched: still version 1 from beforeEach.
+    const smoke = (await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId)))[0]!;
+    expect(smoke.version).toBe(1);
   });
 
   it("errors version_conflict when expectedVersion is stale", async () => {

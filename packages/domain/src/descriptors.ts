@@ -23,3 +23,17 @@ export function normalizeDescriptors(raw: readonly string[] | undefined | null):
   }
   return out;
 }
+
+// specificDescriptors are the user's exact, unusual words — kept VERBATIM, never
+// kebab-cased (ADR-002, tool contract). We only trim surrounding whitespace and
+// drop empties/duplicates; casing, spaces, and punctuation survive byte-for-byte
+// (e.g. "wet slate", "grandpa's attic" stay exactly as the user said them).
+export function verbatimDescriptors(raw: readonly string[] | undefined | null): string[] {
+  if (!raw) return [];
+  const out: string[] = [];
+  for (const value of raw) {
+    const trimmed = value.trim();
+    if (trimmed.length > 0 && !out.includes(trimmed)) out.push(trimmed);
+  }
+  return out;
+}

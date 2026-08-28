@@ -39,7 +39,7 @@ describe("saveSmoke", () => {
           stage: "middle",
           approximatePosition: 0.5,
           descriptors: ["Cream", "Citrus"],
-          specificDescriptors: ["Tangerine"],
+          specificDescriptors: ["Tangerine peel", "grandpa's attic"],
           verbatim: "Bright fruit closer to tangerine.",
         },
       ],
@@ -71,7 +71,10 @@ describe("saveSmoke", () => {
       .where(eq(smokeProgression.smokeId, result.smoke.smokeId))
       .orderBy(smokeProgression.ordinal);
     expect(progression.map((p) => p.ordinal)).toEqual([0, 1]);
-    expect(progression[1]!.specificDescriptors).toEqual(["tangerine"]);
+    // descriptors are normalized to kebab-case, but specificDescriptors are the
+    // user's exact words and must survive VERBATIM — no casing/space folding.
+    expect(progression[1]!.descriptors).toEqual(["cream", "citrus"]);
+    expect(progression[1]!.specificDescriptors).toEqual(["Tangerine peel", "grandpa's attic"]);
 
     const keys = await h.deps.db
       .select()
@@ -111,9 +114,9 @@ describe("saveSmoke", () => {
     expect(result.smoke.cigar.cigarId).toBe(existingId);
   });
 
-  it("errors cigar_ambiguous with candidates when several strongly match", async () => {
-    await h.seedCigar({ canonicalName: "Cohiba Robusto" });
-    await h.seedCigar({ canonicalName: "Cohiba Robustos" });
+  it("errors cigar_ambiguous with differentiator-bearing candidates when several strongly match", async () => {
+    await h.seedCigar({ canonicalName: "Cohiba Robusto", brand: "Cohiba", vitolaName: "Robusto" });
+    await h.seedCigar({ canonicalName: "Cohiba Robustos", brand: "Cohiba", vitolaName: "Robustos" });
     const promise = saveSmoke(h.deps, user, {
       clientRequestId: newRequestId(),
       cigar: { described: { canonicalName: "Cohiba Robusto" } },
@@ -123,7 +126,21 @@ describe("saveSmoke", () => {
     expect(error).toBeInstanceOf(CigarAmbiguousError);
     const payload = (error as CigarAmbiguousError).toPayload();
     expect(payload.code).toBe("cigar_ambiguous");
-    expect((payload.candidates as unknown[]).length).toBeGreaterThanOrEqual(2);
+    const candidates = payload.candidates as {
+      cigarId: string;
+      canonicalName: string;
+      brand: string | null;
+      vitola: string | null;
+      verification: string;
+    }[];
+    expect(candidates.length).toBeGreaterThanOrEqual(2);
+    // Candidates carry the fields that make the ask_user answerable.
+    for (const c of candidates) {
+      expect(c).toHaveProperty("brand");
+      expect(c).toHaveProperty("vitola");
+      expect(c.verification).toBe("verified");
+    }
+    expect(candidates.map((c) => c.vitola)).toEqual(expect.arrayContaining(["Robusto", "Robustos"]));
     // No smoke was written for the ambiguous attempt.
     const all = await h.deps.db.select().from(cigars).where(eq(cigars.canonicalName, "Cohiba Robusto"));
     expect(all).toHaveLength(1);

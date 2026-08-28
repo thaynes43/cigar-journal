@@ -4,7 +4,7 @@ import type { Deps, Principal, Tx } from "./deps.js";
 import type { UpdateSmokeInput, UpdateSmokeResult, UpdateSmokeChanges } from "./types.js";
 import { validateUpdateInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
-import { normalizeDescriptors } from "./descriptors.js";
+import { normalizeDescriptors, verbatimDescriptors } from "./descriptors.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, SmokeNotFoundError, VersionConflictError } from "./errors.js";
 import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
@@ -170,7 +170,7 @@ async function buildPatch(
         stage: entry.stage ?? null,
         approximatePosition: entry.approximatePosition != null ? String(entry.approximatePosition) : null,
         descriptors: normalizeDescriptors(entry.descriptors),
-        specificDescriptors: normalizeDescriptors(entry.specificDescriptors),
+        specificDescriptors: verbatimDescriptors(entry.specificDescriptors),
         verbatim: entry.verbatim ?? null,
       })),
     );

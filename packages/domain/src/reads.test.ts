@@ -3,7 +3,7 @@ import { createHarness, newRequestId, type DomainHarness } from "./testing/harne
 import { saveSmoke } from "./save-smoke.js";
 import { getSmoke, queryMySmokes, searchCigars, getCigar, browseCigars } from "./reads.js";
 import type { Principal } from "./index.js";
-import { SmokeNotFoundError } from "./errors.js";
+import { SmokeNotFoundError, ValidationError } from "./errors.js";
 
 describe("read services", () => {
   let h: DomainHarness;
@@ -243,6 +243,29 @@ describe("read services", () => {
     expect(result.matches[0]!.canonicalName).toBe("Montecristo No. 2");
     // The other fuzzy hit is still listed, not dropped.
     expect(result.matches.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("searchCigars does NOT single_match a lone, non-exact fuzzy candidate", async () => {
+    // A brand token shared with a different product scores high on trigram
+    // similarity. A lone such candidate must ask (multiple_matches), never
+    // auto-proceed (single_match) — otherwise the smoke is silently mislinked.
+    await h.seedCigar({
+      canonicalName: "Vanguard Reserve Hemingway Short Story",
+      brand: "Vanguard Reserve",
+    });
+    const result = await searchCigars(h.deps, userA, { query: "Vanguard Reserve OpusX" });
+    expect(result.matches.length).toBeGreaterThanOrEqual(1);
+    expect(result.matches[0]!.canonicalName).toBe("Vanguard Reserve Hemingway Short Story");
+    expect(result.guidance).toBe("multiple_matches");
+    expect(result.guidance).not.toBe("single_match");
+  });
+
+  it("queryMySmokes rejects a malformed date filter as validation_error, not unavailable", async () => {
+    const error = await queryMySmokes(h.deps, userA, { smokedAfter: "not-a-date" }).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ValidationError);
+    expect((error as ValidationError).fields.some((f) => f.path === "smokedAfter")).toBe(true);
   });
 
   it("getCigar computes a personal profile over multiple smokes", async () => {
