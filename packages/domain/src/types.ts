@@ -460,3 +460,72 @@ export interface InventoryResult {
   holdings: InventoryHolding[];
   totalSticksRemaining: number;
 }
+
+// ---- Curation (ADR-006 catalog hygiene; curator-only) ----------------------
+
+// Merge a duplicate catalog Cigar into the one that survives. Re-points every
+// reference off the source, then deletes it (curator-only, ADR-006). Idempotent
+// via the mutation envelope; cigars carry no version column, so distinct-id and
+// existence checks are the safety net (see curation.ts).
+export interface MergeCigarsInput {
+  clientRequestId: string;
+  sourceCigarId: string; // the duplicate that goes away
+  targetCigarId: string; // the entry that survives and adopts the references
+  correlationId?: string;
+}
+
+export interface MergeCigarsResult {
+  sourceCigarId: string;
+  targetCigarId: string;
+  // How many rows moved off the source, per referencing table.
+  repointed: {
+    smokes: number;
+    purchases: number;
+    listingMatches: number;
+    productPhotos: number; // 0 or 1 — the target keeps its own when it has one
+    enrichmentRequests: number;
+  };
+  replayed: boolean;
+}
+
+// Flip an unverified catalog Cigar to verified (curator-only). Idempotent — a
+// second verify of the same cigar replays through the envelope.
+export interface VerifyCigarInput {
+  clientRequestId: string;
+  cigarId: string;
+  correlationId?: string;
+}
+
+export interface VerifyCigarResult {
+  cigarId: string;
+  verification: Verification;
+  replayed: boolean;
+}
+
+// One catalog row in the curation queue: the identity plus the reference counts a
+// curator needs to judge a merge direction or a verification.
+export interface CurationQueueCigar {
+  cigarId: string;
+  canonicalName: string;
+  brand: string | null;
+  createdAt: string; // ISO-8601 instant
+  smokeCount: number;
+  purchaseCount: number;
+  offerCount: number;
+}
+
+// A near-duplicate pair surfaced by trigram similarity over canonical names.
+// `a`/`b` are ordered by id (stable), not by which should survive — the curator
+// decides direction from the counts.
+export interface DuplicateCandidatePair {
+  similarity: number; // pg_trgm similarity(a.canonicalName, b.canonicalName)
+  a: CurationQueueCigar;
+  b: CurationQueueCigar;
+}
+
+export interface CurationQueueResult {
+  // Unverified catalog rows, oldest first — the verification backlog.
+  unverified: CurationQueueCigar[];
+  // Near-duplicate pairs, highest similarity first — the merge backlog.
+  duplicates: DuplicateCandidatePair[];
+}
