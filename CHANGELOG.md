@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.13.0](https://github.com/thaynes43/cigar-journal/compare/v0.12.0...v0.13.0) (2026-08-28)
+
+
+### Features
+
+* **db:** market substrate schema — product photos, crawl runs, enrichment queue ([#68](https://github.com/thaynes43/cigar-journal/issues/68)) ([57da597](https://github.com/thaynes43/cigar-journal/commit/57da59770a8098694612ef168134f6d35eac0103))
+* MCP gap-fill — add_cigar and record_purchase ([#71](https://github.com/thaynes43/cigar-journal/issues/71)) ([fbf031a](https://github.com/thaynes43/cigar-journal/commit/fbf031a2c3e14a0216b2ab00fb76c169d2228b78))
+
+
+### Bug Fixes
+
+* **web:** favicon — the burn-line stick on the Humidor ground ([#70](https://github.com/thaynes43/cigar-journal/issues/70)) ([9c77a93](https://github.com/thaynes43/cigar-journal/commit/9c77a93945d9a23144ce2a2752b44cdb6086c7e1))
+
 ## [0.12.0](https://github.com/thaynes43/cigar-journal/compare/v0.11.0...v0.12.0) (2026-08-28)
 
 
