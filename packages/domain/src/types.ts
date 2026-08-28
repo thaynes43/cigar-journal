@@ -318,6 +318,61 @@ export interface BrowseCigarsResult {
   totalCount: number; // total catalog size, so the UI can note when the cap elides some
 }
 
+// ---- Catalog browse (PRD-002 phase 2, the poster library) ------------------
+
+// One brand shelf on the library root — a poster tile's worth of facts. `slug`
+// is null exactly when `brand` is null (the unbranded shelf is not navigable to
+// a brand page); it is otherwise `brandSlug(brand)`.
+export interface BrandShelf {
+  brand: string | null;
+  slug: string | null;
+  cigarCount: number;
+  lineCount: number;
+  types: CigarType[];
+}
+
+export interface BrowseBrandsResult {
+  brands: BrandShelf[];
+}
+
+// A catalog cigar plus the caller's personal overlay (PRD R-CAT-5 / R-INV-4):
+// how many times they have smoked this exact cigar and their rounded average
+// rating for it. Both are principal-scoped, so they never leak across users.
+export interface CatalogCigarTile extends CatalogCigar {
+  userSmokeCount: number;
+  userRating: number | null;
+}
+
+// One line's cigars within a brand page — the haynesnetwork "season".
+export interface LineGroup {
+  line: string;
+  cigars: CatalogCigarTile[];
+}
+
+export interface GetBrandResult {
+  brand: string;
+  lines: LineGroup[]; // alphabetical by line
+  loose: CatalogCigarTile[]; // cigars with no line, a trailing section
+}
+
+// The All-view sort vocabulary. One entry today; the union and the runtime
+// CATALOG_SORTS registry grow together as sorts land (registry discipline).
+export type CatalogSort = "name";
+
+export interface BrowseCatalogArgs {
+  q?: string;
+  type?: CigarType;
+  sort?: CatalogSort;
+  cursor?: string | null;
+  limit?: number;
+}
+
+export interface BrowseCatalogResult {
+  cigars: CatalogCigarTile[];
+  nextCursor: string | null; // opaque keyset cursor; null when the page is the last
+  totalCount: number; // total matching the q/type filters, ignoring the cursor
+}
+
 // One acquisition record (a purchases row) in an inventory holding. Dates are ISO
 // (YYYY-MM-DD); pricePerStick is coerced to a number. `vendor` is the vendors.name
 // resolved via vendor_id.
