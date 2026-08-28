@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BandTile, bandStop, monogram } from "./band-tile";
 import { RatingSeal } from "./rating-seal";
-import { BurnLine, burnLayout } from "./burn-line";
+import { BurnLine, burnLayout, layoutStageLabels } from "./burn-line";
 import { StrengthMeter, strengthStep } from "./strength-meter";
 import { VitalsBlock } from "./vitals-block";
 import { Chips } from "./chips";
@@ -199,5 +199,30 @@ describe("Chips", () => {
     expect(html).toContain("cocoa");
     expect(html).toContain("baker&#x27;s chocolate");
     expect(html).toContain("italic");
+  });
+});
+
+describe("layoutStageLabels", () => {
+  const entry = (stage: string | null) => ({ stage });
+
+  it("staggers close neighbors onto the second row instead of overlapping", () => {
+    const placed = layoutStageLabels(
+      [entry("Opening"), entry("Early first third"), entry("Start of second third"), entry("Halfway"), entry("Final third")],
+      [5, 18, 35, 50, 83],
+    );
+    expect(placed.every((p) => p !== null)).toBe(true);
+    expect(new Set(placed.map((p) => p?.row)).size).toBe(2);
+  });
+
+  it("culls a label when neither row can fit it", () => {
+    const placed = layoutStageLabels(
+      [entry("First"), entry("Second"), entry("Third"), entry("Fourth")],
+      [10, 12, 14, 16],
+    );
+    expect(placed.filter((p) => p === null).length).toBeGreaterThan(0);
+  });
+
+  it("skips entries without a stage", () => {
+    expect(layoutStageLabels([entry(null), entry("End")], [10, 90])[0]).toBeNull();
   });
 });

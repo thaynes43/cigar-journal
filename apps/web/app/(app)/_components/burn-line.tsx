@@ -40,6 +40,31 @@ function labelShift(percent: number): string {
   return "translateX(-50%)";
 }
 
+// Stage labels crowd unreadably when entries cluster (owner, 2026-08-28), so
+// they lay out greedily across two staggered rows: a label takes the first row
+// where it clears the row's last label by a width-scaled gap, and is culled
+// when neither row fits. The rail below always carries every stage.
+const MIN_LABEL_GAP = 12; // percentage points at a typical detail width
+
+export function layoutStageLabels(
+  entries: { stage: string | null }[],
+  markers: number[],
+): Array<{ index: number; row: 0 | 1 } | null> {
+  const lastShown: [number, number] = [-Infinity, -Infinity];
+  return entries.map((entry, index) => {
+    if (!entry.stage) return null;
+    const percent = markers[index]!;
+    const gap = Math.max(MIN_LABEL_GAP, Math.min(entry.stage.length * 0.9, 22));
+    for (const row of [0, 1] as const) {
+      if (percent - lastShown[row] >= gap) {
+        lastShown[row] = percent;
+        return { index, row };
+      }
+    }
+    return null;
+  });
+}
+
 function Ribbon({ layout }: { layout: BurnLayout }) {
   return (
     <div aria-hidden className="relative h-7 w-full">
@@ -76,23 +101,33 @@ export function BurnLine({ entries }: { entries: ProgressionEntryView[] }) {
   if (entries.length === 0) return null;
   const layout = burnLayout(entries.map((entry) => entry.approximatePosition));
 
+  const labels = layoutStageLabels(entries, layout.markers).filter(
+    (placed): placed is { index: number; row: 0 | 1 } => placed !== null,
+  );
+  const labelRows = labels.some((placed) => placed.row === 1) ? 2 : 1;
+
   return (
     <div className="flex flex-col gap-4">
       {layout.mode !== "none" ? (
-        <div aria-hidden>
-          <Ribbon layout={layout} />
-          <div className="relative hidden h-4 sm:block">
-            {entries.map((entry, i) =>
-              entry.stage ? (
+        <div>
+          <span className="label-caps">Burn line</span>
+          <div aria-hidden className="mt-1">
+            <Ribbon layout={layout} />
+            <div className={`relative hidden sm:block ${labelRows === 2 ? "h-8" : "h-4"}`}>
+              {labels.map(({ index, row }) => (
                 <span
-                  key={i}
-                  className="absolute top-0 text-[0.625rem] font-semibold tracking-[0.14em] whitespace-nowrap text-muted uppercase"
-                  style={{ left: `${layout.markers[i]}%`, transform: labelShift(layout.markers[i]!) }}
+                  key={index}
+                  className="absolute text-[0.625rem] font-semibold tracking-[0.14em] whitespace-nowrap text-muted uppercase"
+                  style={{
+                    top: row === 1 ? "1rem" : 0,
+                    left: `${layout.markers[index]}%`,
+                    transform: labelShift(layout.markers[index]!),
+                  }}
                 >
-                  {entry.stage}
+                  {entries[index]!.stage}
                 </span>
-              ) : null,
-            )}
+              ))}
+            </div>
           </div>
         </div>
       ) : null}
