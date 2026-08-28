@@ -15,6 +15,7 @@ import {
 } from "@cj/oauth";
 import { createHarness, type DomainHarness } from "@cj/domain/testing";
 import type { Principal } from "@cj/domain";
+import { purchases, vendors } from "@cj/db";
 import { buildApp } from "./app.js";
 import { INSTRUCTIONS } from "./constants.js";
 
@@ -207,7 +208,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the six tools with readOnlyHint on the four reads, and sends the contract instructions", async () => {
+  it("lists exactly the seven tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -216,6 +217,7 @@ describe("@cj/mcp adapter", () => {
       expect(names).toEqual(
         [
           "get_cigar",
+          "get_my_inventory",
           "get_my_smokes",
           "get_smoke",
           "save_smoke",
@@ -226,7 +228,7 @@ describe("@cj/mcp adapter", () => {
 
       const readOnly = (name: string): boolean | undefined =>
         tools.find((t) => t.name === name)?.annotations?.readOnlyHint;
-      for (const r of ["search_cigars", "get_cigar", "get_my_smokes", "get_smoke"])
+      for (const r of ["search_cigars", "get_cigar", "get_my_smokes", "get_smoke", "get_my_inventory"])
         expect(readOnly(r)).toBe(true);
       for (const w of ["save_smoke", "update_smoke"]) expect(readOnly(w)).not.toBe(true);
     });
@@ -263,6 +265,89 @@ describe("@cj/mcp adapter", () => {
       const result = await call(client, "get_cigar", { cigarId: primaryCigarId });
       const data = payloadOf(result) as Record<string, unknown>;
       expect(data).toHaveProperty("personalProfile"); // present (may be null) with journal:read
+    });
+  });
+
+  // ---- inventory ------------------------------------------------------------
+
+  interface InventoryHoldingPayload {
+    cigar: { cigarId: string; canonicalName: string; vitola: { ringGauge: number | null } };
+    remaining: number;
+    totalAcquired: number;
+    smokedCount: number;
+    agingSince: string | null;
+    myRating: number | null;
+    lots: Record<string, unknown>[];
+  }
+
+  it("get_my_inventory returns the caller's holdings from seeded purchases", async () => {
+    // A fresh cigar the owner buys but never smokes → remaining equals acquired.
+    const invCigarId = await h.seedCigar({
+      canonicalName: "Aging Reserve Toro",
+      brand: "Aging Reserve",
+      vitolaName: "Toro",
+      lengthInches: "6.0",
+      ringGauge: 52,
+      type: "NC",
+    });
+    const [vendor] = await h.pg.db
+      .insert(vendors)
+      .values({ name: "Small Batch Cigar" })
+      .returning({ id: vendors.id });
+    await h.pg.db.insert(purchases).values({
+      userId: owner.userId,
+      cigarId: invCigarId,
+      purchasedAt: "2026-01-10",
+      quantity: 10,
+      packaging: "box",
+      humidorAt: "2025-06-01",
+      vendorId: vendor!.id,
+      pricePerStick: "12.5",
+      notes: "owner ledger",
+    });
+
+    await withClient(ownerFull, async (client) => {
+      const data = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: InventoryHoldingPayload[];
+        totalSticksRemaining: number;
+      };
+      const holding = data.holdings.find((hh) => hh.cigar.cigarId === invCigarId)!;
+      expect(holding.totalAcquired).toBe(10);
+      expect(holding.remaining).toBe(10); // never smoked
+      expect(holding.smokedCount).toBe(0);
+      expect(holding.agingSince).toBe("2025-06-01");
+      expect(holding.cigar.vitola.ringGauge).toBe(52);
+      expect(holding.lots[0]!.vendor).toBe("Small Batch Cigar");
+      expect(holding.lots[0]!.pricePerStick).toBe(12.5);
+      // Web-only lot fields stay off the contract payload.
+      expect(holding.lots[0]).not.toHaveProperty("purchaseId");
+      expect(holding.lots[0]).not.toHaveProperty("notes");
+      expect(data.totalSticksRemaining).toBeGreaterThanOrEqual(10);
+    });
+  });
+
+  it("rejects get_my_inventory for a token without journal:read: 403", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerCatalogOnly}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "get_my_inventory", arguments: {} },
+      }),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("insufficient_scope");
+  });
+
+  it("get_my_inventory is scoped to the caller — another user never sees these holdings", async () => {
+    await withClient(otherFull, async (client) => {
+      const data = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: InventoryHoldingPayload[];
+      };
+      expect(data.holdings.some((hh) => hh.cigar.canonicalName === "Aging Reserve Toro")).toBe(false);
     });
   });
 

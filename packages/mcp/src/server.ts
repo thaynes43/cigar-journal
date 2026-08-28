@@ -8,6 +8,7 @@ import {
   queryMySmokes,
   searchCigars,
   getCigar,
+  getMyInventory,
   UnauthenticatedError,
   UnauthorizedError,
   type Deps,
@@ -37,7 +38,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The six-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The seven-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -238,6 +239,41 @@ export function createMcpServer(deps: Deps): McpServer {
       run("get_smoke", extra.authInfo, async ({ principal }) => {
         const smoke = await getSmoke(deps, principal, { smokeId: args.smokeId });
         return jsonResult({ smoke });
+      }),
+  );
+
+  server.registerTool(
+    "get_my_inventory",
+    {
+      title: "Get my inventory",
+      description:
+        "The user's current humidor holdings — what they own, how many remain, since when it has been aging, their own rating. Use when the user asks what to smoke or what they have.",
+      annotations: { readOnlyHint: true, title: "Get my inventory" },
+    },
+    (extra) =>
+      run("get_my_inventory", extra.authInfo, async ({ principal }) => {
+        const result = await getMyInventory(deps, principal);
+        // Map EXPLICITLY to a contract-stable payload. Each holding carries the
+        // catalog cigar shape, the derived stock picture, and its purchase lots
+        // (lot's purchaseId/notes are web-only and deliberately excluded here).
+        const holdings = result.holdings.map((h) => ({
+          cigar: h.cigar,
+          remaining: h.remaining,
+          totalAcquired: h.totalAcquired,
+          smokedCount: h.smokedCount,
+          agingSince: h.agingSince,
+          myRating: h.myRating,
+          lots: h.lots.map((l) => ({
+            purchasedAt: l.purchasedAt,
+            quantity: l.quantity,
+            packaging: l.packaging,
+            vendor: l.vendor,
+            pricePerStick: l.pricePerStick,
+            boxDate: l.boxDate,
+            humidorAt: l.humidorAt,
+          })),
+        }));
+        return jsonResult({ holdings, totalSticksRemaining: result.totalSticksRemaining });
       }),
   );
 

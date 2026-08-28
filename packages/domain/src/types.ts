@@ -317,3 +317,41 @@ export interface BrowseCigarsResult {
   cigars: CatalogCigar[];
   totalCount: number; // total catalog size, so the UI can note when the cap elides some
 }
+
+// One acquisition record (a purchases row) in an inventory holding. Dates are ISO
+// (YYYY-MM-DD); pricePerStick is coerced to a number. `vendor` is the vendors.name
+// resolved via vendor_id.
+export interface InventoryLot {
+  purchaseId: string;
+  purchasedAt: string | null; // ISO date
+  quantity: number | null;
+  packaging: string | null;
+  boxDate: string | null;
+  humidorAt: string | null;
+  pricePerStick: number | null;
+  vendor: string | null; // vendors.name via vendor_id
+  notes: string | null;
+}
+
+// A cigar the caller owns, its purchase lots, and the derived stock picture.
+export interface InventoryHolding {
+  cigar: {
+    cigarId: string;
+    canonicalName: string;
+    brand: string | null;
+    line: string | null;
+    vitola: { name: string | null; lengthInches: number | null; ringGauge: number | null };
+    type: CigarType | null;
+  };
+  lots: InventoryLot[]; // newest purchase first
+  totalAcquired: number; // sum of lot quantities (null lots count 0)
+  smokedCount: number; // caller's smokes of this cigar, all-time
+  remaining: number; // derived — see getMyInventory
+  agingSince: string | null; // earliest humidor_at, else earliest box_date
+  myRating: number | null; // caller's average rating for this cigar (rounded), null if none
+}
+
+export interface InventoryResult {
+  holdings: InventoryHolding[];
+  totalSticksRemaining: number;
+}

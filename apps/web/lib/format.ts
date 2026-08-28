@@ -20,3 +20,19 @@ export function formatSmokedAt(smokedAt: SmokedAt): string | null {
 export function formatDay(iso: string | null): string | null {
   return iso ? DAY.format(new Date(iso)) : null;
 }
+
+const MONTH_YEAR = new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short" });
+
+// A month-and-year stamp, e.g. "Aug 2026" — the inventory tile's aging line.
+export function formatMonthYear(iso: string | null): string | null {
+  return iso ? MONTH_YEAR.format(new Date(iso)) : null;
+}
+
+// Whole months elapsed since an ISO date, e.g. "13 mo" — the ledger aging cell.
+export function agingLabel(iso: string | null, now: Date = new Date()): string | null {
+  if (!iso) return null;
+  const start = new Date(iso);
+  const months =
+    (now.getFullYear() - start.getFullYear()) * 12 + (now.getMonth() - start.getMonth());
+  return `${Math.max(0, months)} mo`;
+}
