@@ -31,6 +31,7 @@ import type {
   CatalogCigar,
   CigarOffer,
   CigarPricing,
+  CigarPricePoint,
   PriceType,
 } from "./types.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
@@ -872,4 +873,42 @@ export async function getCigarPricing(deps: Deps, cigarId: string): Promise<Ciga
     observationCount,
     refreshRecommended,
   };
+}
+
+interface PricePointRow {
+  seen_at: string | Date;
+  price_per_stick_cents: number;
+}
+
+// The cigar's per-stick price observations over time, oldest first — the source
+// for the detail page's price-history line (DESIGN-002 §Price). Reuses the offers
+// obs union (crawler rows via an auto|confirmed listing match; ad-hoc chat rows
+// direct on cigar_id), but keeps EVERY observation rather than collapsing to the
+// latest per series — history needs the whole series. Only observations with a
+// derivable per-stick are returned: the trend charts per-stick, so a point
+// without one has no honest place on the axis. Catalog-scoped, like getCigarOffers.
+export async function getCigarPriceHistory(
+  deps: Deps,
+  args: { cigarId: string },
+): Promise<CigarPricePoint[]> {
+  const result = await deps.db.execute(sql`
+    WITH obs AS (
+      SELECT o.seen_at, o.price_per_stick_cents
+      FROM offers o
+      JOIN listing_matches lm ON lm.id = o.listing_match_id
+      WHERE lm.cigar_id = ${args.cigarId} AND lm.status IN ('auto', 'confirmed')
+      UNION ALL
+      SELECT o.seen_at, o.price_per_stick_cents
+      FROM offers o
+      WHERE o.cigar_id = ${args.cigarId} AND o.listing_match_id IS NULL
+    )
+    SELECT seen_at, price_per_stick_cents
+    FROM obs
+    WHERE price_per_stick_cents IS NOT NULL
+    ORDER BY seen_at ASC
+  `);
+  return (result.rows as unknown as PricePointRow[]).map((row) => ({
+    seenAt: new Date(row.seen_at).toISOString(),
+    pricePerStick: row.price_per_stick_cents / 100,
+  }));
 }
