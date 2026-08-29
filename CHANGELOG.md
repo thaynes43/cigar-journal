@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/thaynes43/cigar-journal/compare/v0.20.0...v0.21.0) (2026-08-29)
+
+
+### Features
+
+* catalog repair + price observations ([#101](https://github.com/thaynes43/cigar-journal/issues/101), ADR-009) ([#113](https://github.com/thaynes43/cigar-journal/issues/113)) ([09ecad9](https://github.com/thaynes43/cigar-journal/commit/09ecad96806755be7f10c247e6aee35c45b69892))
+
 ## [0.20.0](https://github.com/thaynes43/cigar-journal/compare/v0.19.0...v0.20.0) (2026-08-29)
 
 
