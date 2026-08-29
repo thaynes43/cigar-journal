@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, sql, type SQL } from "drizzle-orm";
 import {
   auditLog,
   cigars,
@@ -14,6 +14,8 @@ import {
   type CigarRow,
   type ListingMatchRow,
   type ProductPhotoRow,
+  type NewCigarRow,
+  type Database,
 } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
 import type {
@@ -31,6 +33,14 @@ import type {
   SetCatalogStatusResult,
   SetProductPhotoRightsInput,
   SetProductPhotoRightsResult,
+  SetCigarFactsInput,
+  SetCigarFactsResult,
+  CurationAttribution,
+  CurationWorklistInput,
+  CurationWorklistResult,
+  WorklistCigar,
+  WorklistMatch,
+  DuplicateCandidatePair,
 } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { strongLinkCompatible } from "./cigar-resolution.js";
@@ -61,6 +71,21 @@ function assertCurator(principal: Principal): void {
   if (principal.role !== "admin") {
     throw new UnauthorizedError("Curation is restricted to catalog curators.");
   }
+}
+
+// Resolve the audit attribution for a curation write. Absent (the web console) →
+// actor `web`, runId/confidence null: the historical behaviour, unchanged. The
+// admin MCP curation surface (the ops agent) passes actor `agent` + the batch
+// runId + confidence, so "Recent agent runs" can group and score the write. Actor
+// is always server-derived from the calling surface — never a tool argument.
+function auditAttribution(
+  attribution: CurationAttribution | undefined,
+): { actor: "web" | "agent"; runId: string | null; confidence: number | null } {
+  return {
+    actor: attribution?.actor ?? "web",
+    runId: attribution?.runId ?? null,
+    confidence: attribution?.confidence ?? null,
+  };
 }
 
 // JSON-safe audit snapshot of a catalog row — dates as ISO strings. Carries the
@@ -378,7 +403,7 @@ async function verifyWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: "web",
+    ...auditAttribution(input.attribution),
     action: "cigar.verify",
     smokeId: null,
     before,
@@ -571,7 +596,7 @@ async function setListingMatchStatusWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: "web",
+    ...auditAttribution(input.attribution),
     action: "listing_match.set_status",
     smokeId: null,
     before,
@@ -661,7 +686,7 @@ async function excludeWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: "web",
+    ...auditAttribution(input.attribution),
     action: "cigar.exclude",
     smokeId: null,
     before,
@@ -748,7 +773,7 @@ async function restoreWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: "web",
+    ...auditAttribution(input.attribution),
     action: "cigar.restore",
     smokeId: null,
     before,
@@ -826,7 +851,7 @@ async function setProductPhotoRightsWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: "web",
+    ...auditAttribution(input.attribution),
     action: "product_photo.set_rights",
     smokeId: null,
     before,
@@ -844,6 +869,124 @@ async function setProductPhotoRightsWithinTx(
     userId: principal.userId,
     clientRequestId: input.clientRequestId,
     tool: "set_product_photo_rights",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// --------------------------------------------------------------------------
+// setCigarFacts — curator write of a cigar's identity facts (curator-only,
+// DESIGN-003 wave 4a). The authoritative counterpart to the conversational
+// update_cigar: it OVERWRITES a wrong value and may touch a verified row.
+// --------------------------------------------------------------------------
+
+// Only these four identity facts are writable through the curator path. Each maps
+// a request key → the cigar column it sets; `type` is enum-constrained upstream
+// (schema), the rest are free text. A key present in `fields` is written (a string
+// sets it, `null` clears a wrong value); an omitted key is untouched. Unlike
+// update_cigar this is NOT fill-nulls-only and NOT unverified-only — the curator's
+// verdict is trusted over whatever the crawler/chat guessed (ADR-006 trust order).
+const CIGAR_FACT_COLUMNS: { key: "brand" | "line" | "type" | "manufacturer"; column: keyof NewCigarRow }[] = [
+  { key: "brand", column: "brand" },
+  { key: "line", column: "line" },
+  { key: "type", column: "type" },
+  { key: "manufacturer", column: "manufacturer" },
+];
+
+export async function setCigarFacts(
+  deps: Deps,
+  principal: Principal,
+  input: SetCigarFactsInput,
+): Promise<SetCigarFactsResult> {
+  assertCurator(principal);
+  const requestFingerprint = fingerprint(input);
+
+  try {
+    return await deps.db.transaction((tx) => setCigarFactsWithinTx(tx, deps, principal, input, requestFingerprint));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as SetCigarFactsResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function setCigarFactsWithinTx(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  input: SetCigarFactsInput,
+  requestFingerprint: string,
+): Promise<SetCigarFactsResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as SetCigarFactsResult), replayed: true };
+  }
+
+  const current = await loadCigar(tx, input.cigarId);
+  if (!current) throw new CigarNotFoundError();
+
+  const set: Partial<NewCigarRow> = {};
+  const before: Record<string, unknown> = {};
+  const after: Record<string, unknown> = {};
+  const changedFields: string[] = [];
+  const unchanged: string[] = [];
+
+  // A field is a candidate only when its key is present (undefined = untouched);
+  // `null` is a deliberate clear. A candidate that already equals the stored value
+  // is a no-op — recorded as `unchanged`, never audited.
+  for (const { key, column } of CIGAR_FACT_COLUMNS) {
+    const requested = input.fields[key];
+    if (requested === undefined) continue;
+    const currentValue = (current as unknown as Record<string, unknown>)[column as string] ?? null;
+    const nextValue = requested ?? null;
+    if (currentValue === nextValue) {
+      unchanged.push(key);
+      continue;
+    }
+    (set as Record<string, unknown>)[column as string] = nextValue;
+    before[key] = currentValue;
+    after[key] = nextValue;
+    changedFields.push(key);
+  }
+
+  if (changedFields.length > 0) {
+    await tx
+      .update(cigars)
+      .set({ ...set, updatedAt: deps.now() })
+      .where(eq(cigars.id, current.id));
+
+    await tx.insert(auditLog).values({
+      userId: principal.userId,
+      ...auditAttribution(input.attribution),
+      action: "cigar.set_facts",
+      smokeId: null,
+      before,
+      after,
+      correlationId: input.correlationId ?? input.clientRequestId,
+    });
+  }
+
+  const result: SetCigarFactsResult = {
+    cigarId: current.id,
+    changedFields,
+    unchanged,
+    verification: current.verification,
+    replayed: false,
+  };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "set_cigar_facts",
     requestFingerprint,
     smokeId: null,
     result,
@@ -971,4 +1114,276 @@ export async function curationQueue(deps: Deps, principal: Principal): Promise<C
     .filter((p): p is { similarity: number; a: CurationQueueCigar; b: CurationQueueCigar } => p != null);
 
   return { unverified, duplicates };
+}
+
+// --------------------------------------------------------------------------
+// curationWorklist — the paged admin drain queue (curator-only, DESIGN-003
+// wave 4a). One tool, six kinds: the reads the ops agent works through.
+// --------------------------------------------------------------------------
+
+// Page defaults: a bounded read the agent drains cursor by cursor. Same caps as
+// the legacy curationQueue's UNVERIFIED_CAP ceiling.
+const WORKLIST_DEFAULT_LIMIT = 50;
+const WORKLIST_MAX_LIMIT = 200;
+
+// Opaque keyset cursor: [createdAt-ISO, id] for the row-ordered kinds, [aId, bId]
+// for duplicates. Base64url JSON; a malformed value decodes to the first page
+// rather than an error — a stale cursor degrades, mirroring the catalog/smoke
+// cursors.
+function encodeWorklistCursor(parts: [string, string]): string {
+  return Buffer.from(JSON.stringify(parts), "utf8").toString("base64url");
+}
+
+function decodeWorklistCursor(raw: string | null | undefined): [string, string] | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+    if (Array.isArray(parsed) && typeof parsed[0] === "string" && typeof parsed[1] === "string") {
+      return [parsed[0], parsed[1]];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+interface CigarFactsRow {
+  id: string;
+  canonicalName: string;
+  brand: string | null;
+  line: string | null;
+  type: "NC" | "CC" | null;
+  manufacturer: string | null;
+  verification: "verified" | "unverified";
+  createdAt: Date;
+}
+
+function toWorklistCigar(row: CigarFactsRow): WorklistCigar {
+  return {
+    cigarId: row.id,
+    canonicalName: row.canonicalName,
+    brand: row.brand,
+    line: row.line,
+    type: row.type,
+    manufacturer: row.manufacturer,
+    verification: row.verification,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+// A page of active cigars matching a kind-specific predicate, keyset-ordered by
+// (createdAt, id) so the agent walks the whole backlog deterministically. Shared
+// by unverified / unbranded / untyped / missing_photos — only the predicate differs.
+async function cigarWorklistPage(
+  db: Database,
+  predicate: SQL,
+  cursor: [string, string] | null,
+  limit: number,
+): Promise<{ cigars: WorklistCigar[]; nextCursor: string | null }> {
+  // The cursor carries the boundary row's created_at as its FULL-precision Postgres
+  // text (::text), not a JS ISO string — a Date is only millisecond-precise, but
+  // the column is microsecond-precise, so an ISO cursor would truncate and re-admit
+  // the boundary row on the next page. The text round-trips through ::timestamptz
+  // exactly, so the keyset is gap-free and overlap-free.
+  const keyset = cursor
+    ? sql`(${cigars.createdAt}, ${cigars.id}) > (${cursor[0]}::timestamptz, ${cursor[1]}::uuid)`
+    : sql`true`;
+  const rows = await db
+    .select({
+      id: cigars.id,
+      canonicalName: cigars.canonicalName,
+      brand: cigars.brand,
+      line: cigars.line,
+      type: cigars.type,
+      manufacturer: cigars.manufacturer,
+      verification: cigars.verification,
+      createdAt: cigars.createdAt,
+      createdAtText: sql<string>`${cigars.createdAt}::text`,
+    })
+    .from(cigars)
+    .where(and(eq(cigars.catalogStatus, "active"), predicate, keyset))
+    .orderBy(asc(cigars.createdAt), asc(cigars.id))
+    .limit(limit + 1);
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  const nextCursor = hasMore && last ? encodeWorklistCursor([last.createdAtText, last.id]) : null;
+  return { cigars: page.map(toWorklistCigar), nextCursor };
+}
+
+// A page of vendor listing→cigar auto-matches awaiting triage. The listing side
+// (vendor name, key, latest offer URL) and the resolver's guessed cigar facts sit
+// side by side so a confirm/unmatch verdict is judgeable without another read.
+// Keyset-ordered by the match's (createdAt, id).
+async function matchTriagePage(
+  db: Database,
+  cursor: [string, string] | null,
+  limit: number,
+): Promise<{ matches: WorklistMatch[]; nextCursor: string | null }> {
+  const keyset = cursor
+    ? sql`AND (lm.created_at, lm.id) > (${cursor[0]}::timestamptz, ${cursor[1]}::uuid)`
+    : sql``;
+  // match_created_at_text is the boundary cursor at full Postgres precision (see the
+  // cigarWorklistPage note on the ms-truncation trap).
+  const result = await db.execute(sql`
+    SELECT lm.id AS match_id, lm.listing_key, lm.created_at::text AS match_created_at_text,
+           v.name AS vendor_name,
+           (SELECT o.listing_url FROM offers o
+              WHERE o.listing_match_id = lm.id
+              ORDER BY o.seen_at DESC LIMIT 1) AS listing_url,
+           c.id AS cigar_id, c.canonical_name, c.brand, c.line, c.type,
+           c.manufacturer, c.verification, c.created_at AS cigar_created_at
+    FROM listing_matches lm
+    JOIN vendors v ON v.id = lm.vendor_id
+    LEFT JOIN cigars c ON c.id = lm.cigar_id
+    WHERE lm.status = 'auto' ${keyset}
+    ORDER BY lm.created_at ASC, lm.id ASC
+    LIMIT ${limit + 1}
+  `);
+  const rows = result.rows as unknown as {
+    match_id: string;
+    listing_key: string;
+    match_created_at_text: string;
+    vendor_name: string;
+    listing_url: string | null;
+    cigar_id: string | null;
+    canonical_name: string | null;
+    brand: string | null;
+    line: string | null;
+    type: "NC" | "CC" | null;
+    manufacturer: string | null;
+    verification: "verified" | "unverified" | null;
+    cigar_created_at: Date | null;
+  }[];
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  const nextCursor = hasMore && last ? encodeWorklistCursor([last.match_created_at_text, last.match_id]) : null;
+
+  const matches: WorklistMatch[] = page.map((r) => ({
+    matchId: r.match_id,
+    vendorName: r.vendor_name,
+    listingKey: r.listing_key,
+    listingUrl: r.listing_url,
+    cigar:
+      r.cigar_id != null
+        ? {
+            cigarId: r.cigar_id,
+            canonicalName: r.canonical_name ?? "",
+            brand: r.brand,
+            line: r.line,
+            type: r.type,
+            manufacturer: r.manufacturer,
+            verification: r.verification ?? "unverified",
+            createdAt: r.cigar_created_at ? new Date(r.cigar_created_at).toISOString() : "",
+          }
+        : null,
+  }));
+  return { matches, nextCursor };
+}
+
+// A page of near-duplicate name pairs (human-merge candidates). Unlike the legacy
+// curationQueue (which orders by similarity DESC, unpaged), this is keyset-ordered
+// by (a.id, b.id) so the whole set is pageable. The resolver's strong-link guard
+// post-filters within the raw page window; nextCursor advances off the last RAW
+// candidate examined, so the post-filter can under-fill a page without ever
+// skipping or repeating a pair.
+async function duplicatesPage(
+  db: Database,
+  cursor: [string, string] | null,
+  limit: number,
+): Promise<{ duplicates: DuplicateCandidatePair[]; nextCursor: string | null }> {
+  const keyset = cursor ? sql`AND (c1.id, c2.id) > (${cursor[0]}::uuid, ${cursor[1]}::uuid)` : sql``;
+  const pairResult = await db.execute(sql`
+    SELECT c1.id AS a_id, c2.id AS b_id,
+           c1.canonical_name AS a_name, c2.canonical_name AS b_name,
+           similarity(c1.canonical_name, c2.canonical_name) AS sim
+    FROM cigars c1
+    JOIN cigars c2 ON c1.id < c2.id AND c1.canonical_name % c2.canonical_name
+    WHERE c1.catalog_status = 'active' AND c2.catalog_status = 'active'
+      AND similarity(c1.canonical_name, c2.canonical_name) > ${DUPLICATE_THRESHOLD}
+      AND NOT EXISTS (
+        SELECT 1 FROM duplicate_dismissals d
+        WHERE d.cigar_a_id = c1.id AND d.cigar_b_id = c2.id
+      )
+      ${keyset}
+    ORDER BY c1.id ASC, c2.id ASC
+    LIMIT ${limit + 1}
+  `);
+  const rawRows = pairResult.rows as unknown as {
+    a_id: string;
+    b_id: string;
+    a_name: string;
+    b_name: string;
+    sim: number;
+  }[];
+
+  const hasMore = rawRows.length > limit;
+  const windowRows = hasMore ? rawRows.slice(0, limit) : rawRows;
+  const last = windowRows[windowRows.length - 1];
+  const nextCursor = hasMore && last ? encodeWorklistCursor([last.a_id, last.b_id]) : null;
+
+  const pairRows = windowRows.filter((p) => strongLinkCompatible(p.a_name, p.b_name));
+  const ids = new Set<string>();
+  for (const p of pairRows) {
+    ids.add(p.a_id);
+    ids.add(p.b_id);
+  }
+  const meta = await queueCigarsByIds(db, [...ids]);
+  const duplicates = pairRows
+    .map((p) => {
+      const a = meta.get(p.a_id);
+      const b = meta.get(p.b_id);
+      return a && b ? { similarity: Number(p.sim), a, b } : null;
+    })
+    .filter((p): p is DuplicateCandidatePair => p != null);
+  return { duplicates, nextCursor };
+}
+
+// The paged worklist read. Exactly one payload array is populated per kind. Gated
+// to curators like every curation service — a non-admin principal is rejected
+// before any query runs.
+export async function curationWorklist(
+  deps: Deps,
+  principal: Principal,
+  input: CurationWorklistInput,
+): Promise<CurationWorklistResult> {
+  assertCurator(principal);
+  const db = deps.db;
+  const limit = Math.min(Math.max(input.limit ?? WORKLIST_DEFAULT_LIMIT, 1), WORKLIST_MAX_LIMIT);
+  const cursor = decodeWorklistCursor(input.cursor);
+
+  switch (input.kind) {
+    case "unverified": {
+      const page = await cigarWorklistPage(db, eq(cigars.verification, "unverified"), cursor, limit);
+      return { kind: input.kind, cigars: page.cigars, nextCursor: page.nextCursor };
+    }
+    case "unbranded": {
+      const page = await cigarWorklistPage(db, isNull(cigars.brand), cursor, limit);
+      return { kind: input.kind, cigars: page.cigars, nextCursor: page.nextCursor };
+    }
+    case "untyped": {
+      const page = await cigarWorklistPage(db, isNull(cigars.type), cursor, limit);
+      return { kind: input.kind, cigars: page.cigars, nextCursor: page.nextCursor };
+    }
+    case "missing_photos": {
+      const page = await cigarWorklistPage(
+        db,
+        sql`NOT EXISTS (SELECT 1 FROM product_photos pp WHERE pp.cigar_id = ${cigars.id})`,
+        cursor,
+        limit,
+      );
+      return { kind: input.kind, cigars: page.cigars, nextCursor: page.nextCursor };
+    }
+    case "match_triage": {
+      const page = await matchTriagePage(db, cursor, limit);
+      return { kind: input.kind, matches: page.matches, nextCursor: page.nextCursor };
+    }
+    case "duplicates": {
+      const page = await duplicatesPage(db, cursor, limit);
+      return { kind: input.kind, duplicates: page.duplicates, nextCursor: page.nextCursor };
+    }
+  }
 }

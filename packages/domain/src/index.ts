@@ -54,6 +54,11 @@ export {
   excludeCigar,
   restoreCigar,
   setProductPhotoRights,
+  // DESIGN-003 wave 4a (issue #126): the admin MCP curation surface. setCigarFacts
+  // is the authoritative (overwrite, verified-touching) counterpart to update_cigar;
+  // curationWorklist is the paged drain queue the ops agent works through.
+  setCigarFacts,
+  curationWorklist,
 } from "./curation.js";
 export { getMyInventory, deriveHoldingSummary, getHoldingForCigar } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";

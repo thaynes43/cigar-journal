@@ -23,12 +23,14 @@ import {
   excludeCigar,
   restoreCigar,
   setProductPhotoRights,
+  setCigarFacts,
+  curationWorklist,
 } from "./curation.js";
 import { getProductPhoto } from "./product-photos.js";
 import { getCigar, searchCigars, getCigarOffers } from "./reads.js";
 import { setWant } from "./wants.js";
 import { setFavorite } from "./favorites.js";
-import type { Principal } from "./index.js";
+import type { Principal, WorklistCigar, WorklistMatch } from "./index.js";
 import { UnauthorizedError, CigarNotFoundError, PhotoNotFoundError, ValidationError } from "./errors.js";
 
 describe("curation", () => {
@@ -792,6 +794,252 @@ describe("curation", () => {
       const second = await setProductPhotoRights(h.deps, admin, input);
       expect(first.replayed).toBe(false);
       expect(second.replayed).toBe(true);
+    });
+  });
+
+  // --- setCigarFacts (DESIGN-003 wave 4a) -----------------------------------
+
+  describe("setCigarFacts", () => {
+    it("rejects a non-admin principal", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Facts Reject" });
+      const error = await setCigarFacts(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "X" },
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("OVERWRITES a wrong value on a verified cigar and audits before→after (unlike update_cigar)", async () => {
+      const cigarId = await h.seedCigar({
+        canonicalName: "Overwrite Me",
+        brand: "Wrong",
+        type: "NC",
+        verification: "verified",
+      });
+      const runId = newRequestId();
+      const result = await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "Padron", line: "1926", type: "CC" },
+        attribution: { actor: "agent", runId, confidence: 0.87 },
+      });
+      expect([...result.changedFields].sort()).toEqual(["brand", "line", "type"]);
+      expect(result.verification).toBe("verified");
+
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.brand).toBe("Padron");
+      expect(row!.line).toBe("1926");
+      expect(row!.type).toBe("CC");
+
+      const [audit] = await h.deps.db.select().from(auditLog).where(eq(auditLog.runId, runId));
+      expect(audit!.action).toBe("cigar.set_facts");
+      expect(audit!.actor).toBe("agent");
+      expect(audit!.confidence).toBeCloseTo(0.87, 5);
+      expect((audit!.before as Record<string, unknown>).brand).toBe("Wrong");
+      expect((audit!.after as Record<string, unknown>).brand).toBe("Padron");
+    });
+
+    it("leaves omitted fields untouched, clears with null, and reports unchanged no-ops", async () => {
+      const cigarId = await h.seedCigar({
+        canonicalName: "Selective Facts",
+        brand: "Keep",
+        line: "DropMe",
+        manufacturer: "Same",
+        verification: "unverified",
+      });
+      const result = await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        // brand omitted (untouched); line null (clear); manufacturer identical (no-op); type set.
+        fields: { line: null, manufacturer: "Same", type: "NC" },
+      });
+      expect([...result.changedFields].sort()).toEqual(["line", "type"]);
+      expect(result.unchanged).toEqual(["manufacturer"]);
+
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.brand).toBe("Keep");
+      expect(row!.line).toBeNull();
+      expect(row!.manufacturer).toBe("Same");
+      expect(row!.type).toBe("NC");
+    });
+
+    it("defaults actor to web with null run fields when no attribution is passed (web-console parity)", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Web Facts", brand: "Old" });
+      const correlationId = newRequestId();
+      await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "New" },
+        correlationId,
+      });
+      const rows = await h.deps.db.select().from(auditLog).where(eq(auditLog.correlationId, correlationId));
+      const audit = rows.find((r) => r.action === "cigar.set_facts");
+      expect(audit!.actor).toBe("web");
+      expect(audit!.runId).toBeNull();
+      expect(audit!.confidence).toBeNull();
+    });
+
+    it("writes nothing when every supplied field already matches", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "No-op Facts", brand: "Same", type: "CC" });
+      const result = await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "Same", type: "CC" },
+      });
+      expect(result.changedFields).toEqual([]);
+      expect([...result.unchanged].sort()).toEqual(["brand", "type"]);
+    });
+
+    it("throws CigarNotFoundError for an unknown cigar", async () => {
+      const error = await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: newRequestId(),
+        fields: { brand: "X" },
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CigarNotFoundError);
+    });
+
+    it("replays an identical retry", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Facts Replay", brand: "A" });
+      const input = { clientRequestId: newRequestId(), cigarId, fields: { brand: "B" } };
+      const first = await setCigarFacts(h.deps, admin, input);
+      const second = await setCigarFacts(h.deps, admin, input);
+      expect(first.replayed).toBe(false);
+      expect(second.replayed).toBe(true);
+    });
+  });
+
+  // --- curationWorklist (the paged drain queue) -----------------------------
+
+  describe("curationWorklist", () => {
+    // Drain a cigar-shaped kind to exhaustion — robust to the accumulated catalog
+    // (other tests seed rows at 2020/2026 dates), so assertions never assume a
+    // page-1 position.
+    async function drainCigars(
+      kind: "unverified" | "unbranded" | "untyped" | "missing_photos",
+    ): Promise<WorklistCigar[]> {
+      const out: WorklistCigar[] = [];
+      let cursor: string | null = null;
+      for (let i = 0; i < 500; i++) {
+        const page = await curationWorklist(h.deps, admin, { kind, limit: 200, cursor });
+        out.push(...(page.cigars ?? []));
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      return out;
+    }
+
+    it("rejects a non-admin principal", async () => {
+      const error = await curationWorklist(h.deps, user, { kind: "unverified" }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("unverified surfaces active unverified cigars with their facts and excludes excluded rows", async () => {
+      const active = await seedUnverified("Worklist Active Entry");
+      const excluded = await seedUnverified("Worklist Excluded Entry");
+      await excludeCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId: excluded });
+
+      const all = await drainCigars("unverified");
+      const byId = new Map(all.map((c) => [c.cigarId, c]));
+      expect(byId.has(active)).toBe(true);
+      expect(byId.has(excluded)).toBe(false);
+      const row = byId.get(active)!;
+      expect(row.canonicalName).toBe("Worklist Active Entry");
+      expect(row.verification).toBe("unverified");
+    });
+
+    it("pages by keyset with no overlap and in createdAt order", async () => {
+      const t0 = new Date("2026-01-01T00:00:00Z").getTime();
+      const mine: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const [row] = await h.deps.db
+          .insert(cigars)
+          .values({
+            canonicalName: `WL Page ${i} ${newRequestId().slice(0, 6)}`,
+            verification: "unverified",
+            createdAt: new Date(t0 + i * 1000),
+          })
+          .returning({ id: cigars.id });
+        mine.push(row!.id);
+      }
+      // Walk the whole backlog in pages of two.
+      const collected: string[] = [];
+      let cursor: string | null = null;
+      for (let i = 0; i < 500; i++) {
+        const page = await curationWorklist(h.deps, admin, { kind: "unverified", limit: 2, cursor });
+        expect(page.cigars!.length).toBeLessThanOrEqual(2);
+        collected.push(...page.cigars!.map((c) => c.cigarId));
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      // No id repeated across pages.
+      expect(new Set(collected).size).toBe(collected.length);
+      // Our three are present and in the order we created them.
+      const pos = mine.map((id) => collected.indexOf(id));
+      for (const p of pos) expect(p).toBeGreaterThanOrEqual(0);
+      expect(pos[0]!).toBeLessThan(pos[1]!);
+      expect(pos[1]!).toBeLessThan(pos[2]!);
+    });
+
+    it("unbranded / untyped / missing_photos filter to the right rows", async () => {
+      const unbranded = await h.seedCigar({ canonicalName: "WL No Brand", type: "NC" }); // brand null
+      const untyped = await h.seedCigar({ canonicalName: "WL No Type", brand: "Brandy" }); // type null
+      const withPhoto = await h.seedCigar({ canonicalName: "WL Has Photo", brand: "B", type: "NC" });
+      await addProductPhoto(withPhoto, "wl-has-photo");
+      const noPhoto = await h.seedCigar({ canonicalName: "WL No Photo", brand: "B", type: "NC" });
+
+      const ub = await drainCigars("unbranded");
+      expect(ub.some((c) => c.cigarId === unbranded)).toBe(true);
+      expect(ub.every((c) => c.brand === null)).toBe(true);
+
+      const ut = await drainCigars("untyped");
+      expect(ut.some((c) => c.cigarId === untyped)).toBe(true);
+      expect(ut.every((c) => c.type === null)).toBe(true);
+
+      const mp = await drainCigars("missing_photos");
+      const mpIds = new Set(mp.map((c) => c.cigarId));
+      expect(mpIds.has(noPhoto)).toBe(true);
+      expect(mpIds.has(withPhoto)).toBe(false);
+    });
+
+    it("match_triage surfaces auto matches with the listing url and matched cigar facts", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "WL Match Cigar", brand: "MatchBrand", type: "NC" });
+      const [match] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `wl-${newRequestId().slice(0, 8)}`, cigarId, status: "auto" })
+        .returning({ id: listingMatches.id });
+      await h.deps.db.insert(offers).values({ vendorId, listingMatchId: match!.id, listingUrl: "https://shop.example/wl" });
+
+      let found: WorklistMatch | undefined;
+      let cursor: string | null = null;
+      for (let i = 0; i < 500 && !found; i++) {
+        const page = await curationWorklist(h.deps, admin, { kind: "match_triage", limit: 200, cursor });
+        found = page.matches!.find((m) => m.matchId === match!.id);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(found).toBeTruthy();
+      expect(found!.listingUrl).toBe("https://shop.example/wl");
+      expect(found!.cigar?.cigarId).toBe(cigarId);
+      expect(found!.cigar?.brand).toBe("MatchBrand");
+    });
+
+    it("duplicates returns near-duplicate pairs (reachable by paging)", async () => {
+      await h.seedCigar({ canonicalName: "Zzyzx Dup Alpha Robusto" });
+      await h.seedCigar({ canonicalName: "Zzyzx Dup Alpha Robustoo" });
+
+      let found = false;
+      let cursor: string | null = null;
+      for (let i = 0; i < 500 && !found; i++) {
+        const page = await curationWorklist(h.deps, admin, { kind: "duplicates", limit: 200, cursor });
+        found = page.duplicates!.some(
+          (p) => p.a.canonicalName.startsWith("Zzyzx Dup Alpha") && p.b.canonicalName.startsWith("Zzyzx Dup Alpha"),
+        );
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(found).toBe(true);
     });
   });
 });

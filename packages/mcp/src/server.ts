@@ -21,6 +21,13 @@ import {
   requestCigarEnrichment,
   updateCigar,
   recordPrice,
+  curationWorklist,
+  setListingMatchStatus,
+  setCigarFacts,
+  verifyCigar,
+  excludeCigar,
+  restoreCigar,
+  setProductPhotoRights,
   UnauthenticatedError,
   UnauthorizedError,
   UnavailableError,
@@ -33,6 +40,7 @@ import {
   type RecordPurchaseInput,
   type UpdateCigarInput,
   type RecordPriceInput,
+  type CurationAttribution,
 } from "@cj/domain";
 import { processPhoto, UnsupportedImageTypeError, type PhotoStorage } from "@cj/photos";
 import {
@@ -68,6 +76,19 @@ import {
   updateCigarOutput,
   recordPriceSchema,
   recordPriceOutput,
+  getCurationQueueSchema,
+  getCurationQueueOutput,
+  setListingMatchStatusSchema,
+  setListingMatchStatusOutput,
+  setCigarFactsSchema,
+  setCigarFactsOutput,
+  verifyCigarSchema,
+  verifyCigarOutput,
+  excludeCigarSchema,
+  restoreCigarSchema,
+  setCatalogStatusOutput,
+  setProductPhotoRightsSchema,
+  setProductPhotoRightsOutput,
   searchCigarsOutput,
   getCigarOutput,
   getMySmokesOutput,
@@ -204,6 +225,28 @@ function assertToolScope(tool: ToolName, scopes: string[]): void {
   for (const required of TOOL_SCOPES[tool]) {
     if (!scopes.includes(required)) throw new UnauthorizedError();
   }
+}
+
+// The admin gate for the curation surface (DESIGN-003 wave 4a). Scope is necessary
+// but not sufficient: a curation-scoped token minted for a non-admin user is
+// rejected here — the same UnauthorizedError the domain curation services throw,
+// and the same the web adminProcedure raises — so the surface is closed before any
+// work runs. The role is server-derived from the token (auth.ts → validateAccessToken
+// → users.role), never from a tool argument.
+function assertAdmin(principal: Principal): void {
+  if (principal.role !== "admin") throw new UnauthorizedError();
+}
+
+// Attribution stamped onto every curation write: actor `agent` (this surface IS
+// the ops agent), plus the batch runId and confidence from the call. Actor is set
+// here server-side — never from arguments. Nullish runId/confidence collapse to
+// absent so the audit row's columns stay null when not supplied.
+function curationAttribution(args: { runId?: string | null; confidence?: number | null }): CurationAttribution {
+  return {
+    actor: "agent",
+    ...(args.runId != null ? { runId: args.runId } : {}),
+    ...(args.confidence != null ? { confidence: args.confidence } : {}),
+  };
 }
 
 // Run a tool body with uniform auth, scope enforcement, logging, and contract
@@ -922,6 +965,174 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     (args, extra) =>
       run("record_price", extra.authInfo, async ({ principal, clientId }, correlationId) => {
         const result = await recordPrice(deps, principal, toRecordPriceInput(args, clientId, correlationId));
+        return jsonResult(result);
+      }),
+  );
+
+  // ---- curation surface (admin only; DESIGN-003 wave 4a, issue #126) --------
+  // The ops-agent tools. Each requires its curation scope (assertToolScope) AND an
+  // admin principal (assertAdmin) — a curation-scoped non-admin token is rejected.
+  // Every write threads the run's attribution and stamps audit actor `agent`.
+
+  server.registerTool(
+    "get_curation_queue",
+    {
+      title: "Get curation queue",
+      description:
+        "Page the catalog curation backlog by kind: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only, no tool here), match_triage (vendor listing→cigar auto-matches, each with the listing and the matched cigar's facts so a confirm/unmatch is judgeable in one read), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo). Drain a kind with the returned nextCursor. Admin only.",
+      inputSchema: getCurationQueueSchema,
+      outputSchema: getCurationQueueOutput,
+      annotations: { readOnlyHint: true, title: "Get curation queue" },
+    },
+    (args, extra) =>
+      run("get_curation_queue", extra.authInfo, async ({ principal }) => {
+        assertAdmin(principal);
+        const result = await curationWorklist(deps, principal, {
+          kind: args.kind,
+          cursor: args.cursor,
+          limit: args.limit,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "set_listing_match_status",
+    {
+      title: "Set listing match status",
+      description:
+        "Rule on a vendor listing→cigar auto-match from get_curation_queue match_triage: confirmed keeps the matched cigar, unmatched clears the link (the listing matched no catalog cigar). Admin only. Pass runId/confidence for the run audit.",
+      inputSchema: setListingMatchStatusSchema,
+      outputSchema: setListingMatchStatusOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Set listing match status" },
+    },
+    (args, extra) =>
+      run("set_listing_match_status", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await setListingMatchStatus(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          matchId: args.matchId,
+          status: args.status,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "set_cigar_facts",
+    {
+      title: "Set cigar facts",
+      description:
+        "Curator write of a cigar's identity facts (brand, line, type, manufacturer). Unlike update_cigar this OVERWRITES a wrong value and may touch a verified row — the curator's authority. A field present is written (a value sets it, null clears a wrong one); an omitted field is untouched. Never guess brand or type — leave an uncertain field out. Admin only. Pass runId/confidence for the run audit.",
+      inputSchema: setCigarFactsSchema,
+      outputSchema: setCigarFactsOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Set cigar facts" },
+    },
+    (args, extra) =>
+      run("set_cigar_facts", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await setCigarFacts(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          cigarId: args.cigarId,
+          fields: args.fields,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "verify_cigar",
+    {
+      title: "Verify cigar",
+      description:
+        "Mark an unverified catalog cigar as verified (curator-trusted). Admin only. Idempotent; pass runId/confidence for the run audit.",
+      inputSchema: verifyCigarSchema,
+      outputSchema: verifyCigarOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Verify cigar" },
+    },
+    (args, extra) =>
+      run("verify_cigar", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await verifyCigar(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          cigarId: args.cigarId,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "exclude_cigar",
+    {
+      title: "Exclude cigar",
+      description:
+        "Hide a catalog cigar from browse/search/queue without deleting it (non-cigar pollution, or an entry that should not surface) — reversible via restore_cigar; its detail page and any owner history stay reachable. Admin only. Pass runId/confidence for the run audit.",
+      inputSchema: excludeCigarSchema,
+      outputSchema: setCatalogStatusOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Exclude cigar" },
+    },
+    (args, extra) =>
+      run("exclude_cigar", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await excludeCigar(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          cigarId: args.cigarId,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "restore_cigar",
+    {
+      title: "Restore cigar",
+      description:
+        "Restore an excluded catalog cigar to active — the undo of exclude_cigar (the audit self-links the exclude it reverses). Admin only. Pass runId/confidence for the run audit.",
+      inputSchema: restoreCigarSchema,
+      outputSchema: setCatalogStatusOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Restore cigar" },
+    },
+    (args, extra) =>
+      run("restore_cigar", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await restoreCigar(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          cigarId: args.cigarId,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "set_product_photo_rights",
+    {
+      title: "Set product photo rights",
+      description:
+        "Set a catalog cigar's product-photo rights: approved clears it for display, suppressed is a takedown (stops serving it and drops it from every cover read), pending is the crawl default. Use suppressed for an obvious mismatch or a rights problem. Admin only. Pass runId/confidence for the run audit.",
+      inputSchema: setProductPhotoRightsSchema,
+      outputSchema: setProductPhotoRightsOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Set product photo rights" },
+    },
+    (args, extra) =>
+      run("set_product_photo_rights", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await setProductPhotoRights(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          cigarId: args.cigarId,
+          rights: args.rights,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
         return jsonResult(result);
       }),
   );

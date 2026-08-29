@@ -14,10 +14,17 @@ export const AUTHORIZATION_TTL_SECONDS = 10 * 60;
 export const CODE_TTL_SECONDS = 60;
 
 // The scopes this AS issues. `offline_access` gates refresh-token issuance.
+// `curation:read`/`curation:write` gate the admin catalog-curation MCP surface
+// (DESIGN-003 wave 4a, issue #126): they only take effect for an admin-role
+// principal — the curation tools re-check the role, so a non-admin token that
+// somehow carries the scope is still rejected. Reads and writes split the same
+// way catalog/journal do (read-only triage vs. mutating verdicts).
 export const SUPPORTED_SCOPES = [
   "catalog:read",
   "journal:read",
   "journal:write",
+  "curation:read",
+  "curation:write",
   "offline_access",
 ] as const;
 
@@ -29,6 +36,8 @@ export const SCOPE_DESCRIPTIONS: Record<string, string> = {
   "catalog:read": "Search the cigar catalog",
   "journal:read": "Read your journal",
   "journal:write": "Add and update entries in your journal",
+  "curation:read": "Review the catalog curation queue (admins only)",
+  "curation:write": "Curate the catalog (admins only)",
   offline_access: "Stay connected without signing in again",
 };
 
