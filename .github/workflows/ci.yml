@@ -59,3 +59,41 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+
+  # Real-browser click-through suite (issue #48): embedded Postgres + a production
+  # `next start`, driven by Playwright. Kept a SEPARATE job so `pnpm test` (vitest)
+  # stays fast and the three required checks above are untouched. Non-blocking of
+  # the vitest contract by design — add it to branch protection when it has proven
+  # stable.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsc -p apps/web/e2e/tsconfig.json
+      # Cache the Playwright browser bundle across runs; the install step is a
+      # no-op download on a hit but still wires up the OS deps.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: playwright-${{ runner.os }}-
+      - run: pnpm exec playwright install --with-deps chromium
+      # Production build first — the harness runs `next start`, never `next dev`.
+      - run: pnpm build
+      - run: pnpm test:e2e
+      # Traces are the only readable failure signal from the ops pod (Actions logs
+      # are unreachable there); publish them on failure.
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: apps/web/e2e/.artifacts/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
