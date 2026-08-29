@@ -33,6 +33,7 @@ export {
   getClient,
   authenticateClient,
   resolveAuthorizationClient,
+  redirectUriMatches,
   validateAuthorizationParams,
   createAuthorizationTransaction,
   getConsentView,

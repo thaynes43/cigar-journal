@@ -89,6 +89,44 @@ function isValidRedirectUri(uri: string): boolean {
   }
 }
 
+// The three interchangeable loopback host forms. A native OAuth client that
+// listens on an ephemeral loopback port cannot control which literal the OS or
+// user-agent ends up using (127.0.0.1 vs. the IPv6 [::1] vs. the "localhost"
+// name), nor which port it will be handed — so RFC 8252 §7.3 tells the AS to
+// match a registered loopback redirect URI regardless of the exact host literal
+// and port. `hostname` yields the bracketed "[::1]" for IPv6; strip the brackets.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+function isLoopbackHost(hostname: string): boolean {
+  return LOOPBACK_HOSTS.has(hostname.replace(/^\[|\]$/g, ""));
+}
+
+/**
+ * Does an incoming redirect_uri match a registered one?
+ *
+ * Non-loopback URIs are compared exactly (byte-for-byte) — the flow-003
+ * invariant, and what keeps an https callback pinned. For loopback callbacks the
+ * comparison follows RFC 8252 §7.3: both sides must be loopback, share a scheme,
+ * and agree on path + query + fragment, but the specific host literal (127.0.0.1
+ * / [::1] / localhost) and the port are ignored. A registered loopback URI never
+ * loosens matching for a non-loopback request (the other side must be loopback
+ * too), so this cannot widen to an attacker-controlled host.
+ */
+export function redirectUriMatches(registered: string, incoming: string): boolean {
+  if (registered === incoming) return true;
+  let a: URL;
+  let b: URL;
+  try {
+    a = new URL(registered);
+    b = new URL(incoming);
+  } catch {
+    return false;
+  }
+  if (a.protocol === b.protocol && isLoopbackHost(a.hostname) && isLoopbackHost(b.hostname)) {
+    return a.pathname === b.pathname && a.search === b.search && a.hash === b.hash;
+  }
+  return false;
+}
+
 export async function registerClient(
   db: Db,
   req: ClientRegistrationRequest,
@@ -202,8 +240,10 @@ export async function resolveAuthorizationClient(
   const client = await getClient(db, clientId);
   if (!client) throw invalidClient("Unknown client");
   if (!redirectUri) throw invalidRedirectUri("redirect_uri is required");
-  // Exact-match against a registered URI (flow 003 invariant).
-  if (!client.redirectUris.includes(redirectUri)) {
+  // Exact-match against a registered URI (flow 003 invariant), with the RFC 8252
+  // §7.3 loopback exemption: a native client's 127.0.0.1 / [::1] / localhost host
+  // and ephemeral port may differ from what it registered.
+  if (!client.redirectUris.some((uri) => redirectUriMatches(uri, redirectUri))) {
     throw invalidRedirectUri("redirect_uri does not match a registered value");
   }
   return client;
@@ -467,7 +507,11 @@ export async function exchangeAuthorizationCode(
   }
   if (rec.clientId !== client.clientId) throw invalidGrant("Authorization code was issued to another client");
   if (rec.expiresAt.getTime() <= Date.now()) throw invalidGrant("Authorization code expired");
-  if (rec.redirectUri !== (redirectUri ?? rec.redirectUri)) {
+  // RFC 6749 §4.1.3: the token request's redirect_uri must match the one from the
+  // authorization request. If provided, compare with the same loopback exemption
+  // used at /authorize — a native client may hand a different loopback literal or
+  // port here than the browser leg carried.
+  if (redirectUri !== undefined && !redirectUriMatches(rec.redirectUri, redirectUri)) {
     throw invalidGrant("redirect_uri does not match the authorization request");
   }
   if (!codeVerifier) throw invalidGrant("PKCE code_verifier is required");
