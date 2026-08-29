@@ -1,7 +1,21 @@
 import { z } from "zod";
-import { saveSmoke, updateSmoke, deleteSmoke, getSmoke, queryMySmokes } from "@cj/domain";
-import { router, authedProcedure } from "../trpc";
-import { saveSmokeSchema, updateSmokeSchema, queryMySmokesSchema } from "../schemas";
+import {
+  saveSmoke,
+  updateSmoke,
+  deleteSmoke,
+  getSmoke,
+  queryMySmokes,
+  getPublicSmoke,
+  queryPublicSmokes,
+  publicJournalExists,
+} from "@cj/domain";
+import { router, authedProcedure, publicProcedure } from "../trpc";
+import {
+  saveSmokeSchema,
+  updateSmokeSchema,
+  queryMySmokesSchema,
+  queryPublicSmokesSchema,
+} from "../schemas";
 
 // The journal aggregate's CRUD surface. Provenance is stamped server-side as
 // `manual` — the web is the manual writer (ADR-002); a client can't spoof it.
@@ -15,6 +29,19 @@ export const smokesRouter = router({
   get: authedProcedure
     .input(z.object({ smokeId: z.string() }))
     .query(({ ctx, input }) => getSmoke(ctx.deps, ctx.principal, input)),
+
+  // Anonymous public-journal reads (PRD-001 R7, ADR-004; issue #96). Public
+  // procedures — the visibility filter in the domain read is the authorization,
+  // so a private or nonexistent smoke both surface as NOT_FOUND (no leak).
+  getPublic: publicProcedure
+    .input(z.object({ smokeId: z.string() }))
+    .query(({ ctx, input }) => getPublicSmoke(ctx.deps, input)),
+
+  listPublic: publicProcedure
+    .input(queryPublicSmokesSchema)
+    .query(({ ctx, input }) => queryPublicSmokes(ctx.deps, input)),
+
+  publicJournalExists: publicProcedure.query(({ ctx }) => publicJournalExists(ctx.deps)),
 
   save: authedProcedure
     .input(saveSmokeSchema)

@@ -497,6 +497,65 @@ export interface QueryMySmokesResult {
   nextCursor: string | null;
 }
 
+// The anonymous read models for public journals (PRD-001 R7, ADR-004 visibility;
+// issue #96). These are DISTINCT from SmokeView/SmokeSummary by design: the
+// personal-inventory surface (the humidor/consumption link, holding data,
+// price-paid) and the private-context fields (location, occasion, provenance)
+// are never SELECTed for anonymous viewers, so they cannot leak through a
+// serialized prop. Strength, body, and impression ARE public journal content —
+// the legacy archive published them in every review (and they already ride in
+// originalMarkdown). The public read filters on visibility server-side (never
+// fetch-then-hide); the shape enforces the strip a second time.
+export interface PublicSmokeView {
+  smokeId: string;
+  cigar: { canonicalName: string };
+  smokedAt: SmokedAt;
+  journal: { title: string | null; narrative: string | null };
+  overallDescriptors: string[];
+  progression: ProgressionEntryView[];
+  construction: {
+    draw: DrawBurn | null;
+    burn: DrawBurn | null;
+    smokeOutput: SmokeOutput | null;
+    notes: string | null;
+  };
+  assessment: {
+    strength: string | null;
+    body: string | null;
+    liked: boolean | null;
+    rating: number | null;
+    impression: string | null;
+  };
+  // Pairing is journal content; location and occasion are not carried publicly.
+  pairing: string[];
+  originalMarkdown: string | null;
+  photos: SmokePhotoView[];
+}
+
+export interface PublicSmokeSummary {
+  smokeId: string;
+  cigar: { canonicalName: string };
+  smokedAt: SmokedAt;
+  rating: number | null;
+  liked: boolean | null;
+  descriptors: string[];
+  // Narrative-derived only — the impression is a private assessment field and is
+  // never used to seed a public summary (kept consistent with PublicSmokeView).
+  summary: string | null;
+}
+
+export interface QueryPublicSmokesFilters {
+  limit?: number;
+  // Opaque keyset cursor for the public journal's infinite scroll — the same
+  // idiom as QueryMySmokesFilters.cursor. A malformed value degrades to page one.
+  cursor?: string | null;
+}
+
+export interface QueryPublicSmokesResult {
+  smokes: PublicSmokeSummary[];
+  nextCursor: string | null;
+}
+
 export interface SearchCigarsArgs {
   query: string;
   limit?: number;

@@ -14,8 +14,15 @@ import { NextResponse, type NextRequest } from "next/server";
 // The single-use photo upload page (`/u/<token>`) and its POST endpoint
 // (`/api/photo-uploads/*`) are excluded as well: the token IS the authorization,
 // so they must be reachable without a session cookie (ADR-007, issue #44).
+// Public journal surfaces (issue #96) — `/journal` and `/smokes/*` — pass the
+// edge gate anonymously: each page authorizes itself (visibility-filtered reads
+// with 404 parity for public detail; requireAuth on the record/edit forms), and
+// an edge redirect here would break shared smoke links.
 export function middleware(request: NextRequest) {
-  if (request.nextUrl.pathname === "/signin") return NextResponse.next();
+  const { pathname } = request.nextUrl;
+  if (pathname === "/signin" || pathname === "/journal" || pathname.startsWith("/smokes/")) {
+    return NextResponse.next();
+  }
 
   const hasSession = request.cookies.getAll().some((c) => c.name.includes("session_token") && c.value);
   if (hasSession) return NextResponse.next();

@@ -1,5 +1,6 @@
 import type { CatalogSort, CigarType, OwnershipFacet } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
+import { requireAuth } from "@/lib/require-auth";
 import { CatalogToolbar } from "../_components/catalog-toolbar";
 import { CatalogAllGrid } from "../_components/catalog-all-grid";
 import { CatalogShelves } from "../_components/catalog-shelves";
@@ -23,6 +24,7 @@ export default async function CatalogPage({
     sort?: string;
   }>;
 }) {
+  await requireAuth();
   const params = await searchParams;
   const view: CatalogView =
     params.view === "all" ? "all" : params.view === "ledger" ? "ledger" : "brands";

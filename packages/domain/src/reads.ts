@@ -40,6 +40,7 @@ import { normalizeDescriptor } from "./descriptors.js";
 import { toSmokePhotoView } from "./mapping.js";
 import { assessEnrichmentFields } from "./enrichment.js";
 import { validateQueryFilters } from "./validation.js";
+import { decodeSmokeCursor, encodeSmokeCursor, afterSmokeCursor } from "./smoke-cursor.js";
 
 const DEFAULT_SMOKE_LIMIT = 10;
 const MAX_SMOKE_LIMIT = 25;
@@ -63,64 +64,6 @@ function clamp(value: number | undefined, fallback: number, max: number): number
   const n = value ?? fallback;
   if (!Number.isFinite(n) || n < 1) return fallback;
   return Math.min(Math.floor(n), max);
-}
-
-// Keyset cursor for the journal list (web infinite scroll). The list orders by
-// (smokedAt DESC NULLS LAST, createdAt DESC, id DESC), so the cursor carries all
-// three keys — smokedAt is nullable, hence the null tail below. Mirrors the
-// opaque base64url cursor in catalog-browse.ts; the MCP tool never issues one.
-interface SmokeCursor {
-  smokedAt: string | null; // ISO instant, or null for the never-timestamped tail
-  createdAt: string; // ISO instant
-  id: string; // uuid, the final tie-breaker
-}
-
-function encodeSmokeCursor(c: SmokeCursor): string {
-  return Buffer.from(JSON.stringify([c.smokedAt, c.createdAt, c.id]), "utf8").toString("base64url");
-}
-
-// A malformed cursor is treated as absent (first page) rather than an error — a
-// stale link degrades gracefully, exactly as catalog-browse decodes its cursor.
-function decodeSmokeCursor(raw: string | null | undefined): SmokeCursor | null {
-  if (!raw) return null;
-  try {
-    const parsed: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
-    if (
-      Array.isArray(parsed) &&
-      (parsed[0] === null || typeof parsed[0] === "string") &&
-      typeof parsed[1] === "string" &&
-      typeof parsed[2] === "string"
-    ) {
-      return { smokedAt: parsed[0], createdAt: parsed[1], id: parsed[2] };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// The "rows strictly after the cursor" predicate for the list's compound order
-// (smokedAt DESC NULLS LAST, createdAt DESC, id DESC). NULLS LAST means a null
-// smokedAt sorts after every timestamped row, so a non-null cursor also admits
-// the null tail; a null cursor is already inside that tail and only walks it.
-function afterSmokeCursor(c: SmokeCursor): SQL {
-  const created = new Date(c.createdAt);
-  if (c.smokedAt !== null) {
-    const smoked = new Date(c.smokedAt);
-    return sql`(
-      ${smokes.smokedAt} IS NULL
-      OR ${smokes.smokedAt} < ${smoked}
-      OR (${smokes.smokedAt} = ${smoked} AND ${smokes.createdAt} < ${created})
-      OR (${smokes.smokedAt} = ${smoked} AND ${smokes.createdAt} = ${created} AND ${smokes.id} < ${c.id}::uuid)
-    )`;
-  }
-  return sql`(
-    ${smokes.smokedAt} IS NULL
-    AND (
-      ${smokes.createdAt} < ${created}
-      OR (${smokes.createdAt} = ${created} AND ${smokes.id} < ${c.id}::uuid)
-    )
-  )`;
 }
 
 function toSmokeView(
