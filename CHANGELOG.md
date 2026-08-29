@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/thaynes43/cigar-journal/compare/v0.18.0...v0.19.0) (2026-08-29)
+
+
+### Features
+
+* the unified catalog — one surface, ownership facets, ledger view ([#90](https://github.com/thaynes43/cigar-journal/issues/90)) ([#109](https://github.com/thaynes43/cigar-journal/issues/109)) ([5cff7e0](https://github.com/thaynes43/cigar-journal/commit/5cff7e0bdee366be171b292c0660e5c2e3a72889))
+
 ## [0.18.0](https://github.com/thaynes43/cigar-journal/compare/v0.17.0...v0.18.0) (2026-08-29)
 
 
