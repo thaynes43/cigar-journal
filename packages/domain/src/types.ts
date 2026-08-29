@@ -618,6 +618,19 @@ export interface CigarPricePoint {
   pricePerStick: number; // dollars
 }
 
+// The compact price history behind get_offers (PRD-003 R-MCP-2, ADR-009): the
+// span and range of the cigar's whole observation series, so the model can quote
+// "seen between $14.20 and $18.90/stick since June" without pulling every row.
+// per-stick bounds are in dollars, over observations where a per-stick figure is
+// derivable; null when the cigar has no such observation. Catalog/market-scoped.
+export interface OfferHistory {
+  firstSeenAt: string | null; // ISO — earliest observation
+  lastSeenAt: string | null; // ISO — latest observation
+  minPricePerStick: number | null; // dollars — cheapest per-stick ever observed
+  maxPricePerStick: number | null; // dollars — dearest per-stick ever observed
+  observationCount: number; // total observations recorded for the cigar
+}
+
 // A catalog-only cigar summary for browse listings — no per-caller personal
 // fields (browseCigars stays catalog-scoped by design).
 export interface CatalogCigar {
@@ -656,12 +669,30 @@ export interface BrowseBrandsResult {
   brands: BrandShelf[];
 }
 
+// Price-at-a-glance on a catalog tile (PRD-003 R-PRICE-2, ADR-009). The best
+// current offer for the cigar: a per-stick figure when derivable, else the
+// package price — either way ALWAYS carrying its packaging, so a bare per-stick
+// figure can never travel (the display rule is enforced by shape, like
+// CigarPricingLowest). Catalog/market-scoped: the same for every viewer.
+export interface CatalogTilePrice {
+  // true → `amount` is per-stick; false → the package price (per-stick not derivable).
+  perStick: boolean;
+  amount: number; // dollars
+  packaging: string | null;
+  sticksPerPackage: number | null;
+  currency: string | null;
+  seenAt: string; // ISO — when this figure was observed
+}
+
 // A catalog cigar plus the caller's personal overlay (PRD R-CAT-5 / R-INV-4):
 // how many times they have smoked this exact cigar and their rounded average
 // rating for it. Both are principal-scoped, so they never leak across users.
 export interface CatalogCigarTile extends CatalogCigar {
   userSmokeCount: number;
   userRating: number | null;
+  // The caller's derived stock for this cigar (acquired − explicit consumptions,
+  // ADR-008), floored at zero. Principal-scoped; drives the "in humidor" overlay.
+  remaining: number;
   // Whether a crawler-captured product photo exists (ADR-007). The tile links to
   // the authed thumb proxy when true; the BandTile art shows otherwise.
   hasProductPhoto: boolean;
@@ -672,6 +703,9 @@ export interface CatalogCigarTile extends CatalogCigar {
   // drives the tile's static favorite heart. Principal-scoped, never leaks across
   // users.
   favorited: boolean;
+  // Price-at-a-glance: the best current offer for the cigar, or null when none
+  // is recorded (PRD-003 R-PRICE-2, ADR-009). Catalog/market-scoped, not personal.
+  price: CatalogTilePrice | null;
 }
 
 // One line's cigars within a brand page — the haynesnetwork "season".
@@ -692,11 +726,12 @@ export interface GetBrandResult {
   loose: CatalogCigarTile[]; // cigars with no line, a trailing section
 }
 
-// The All-view sort vocabulary (PRD-003 R-UNI-3). `price` WAITS for ADR-009's
-// per-stick offer column — it is deliberately absent here rather than faked from
-// raw offer price. The union and the runtime CATALOG_SORTS registry grow together
-// as sorts land (registry discipline).
-export type CatalogSort = "name" | "my-rating" | "recently-added";
+// The All-view sort vocabulary (PRD-003 R-UNI-3). `price` sorts by the best
+// current per-stick offer (ADR-009's stored `price_per_stick_cents`); unpriced
+// cigars group after priced ones (nulls last), never interleaved as zero. The
+// union and the runtime CATALOG_SORTS registry grow together as sorts land
+// (registry discipline).
+export type CatalogSort = "name" | "my-rating" | "recently-added" | "price";
 
 // The ownership facet (PRD-003 R-UNI-2, DESIGN-002 §IA). Exclusive segments over
 // the caller's personal overlay: `have` = explicit remaining > 0, `want` =
@@ -708,10 +743,23 @@ export type OwnershipFacet = "all" | "have" | "want" | "dont";
 
 export interface BrowseCatalogArgs {
   q?: string;
+  // Exact brand match, case-insensitive (MCP browse_catalog); distinct from the
+  // free-text `q`, which also matches name/line. Omitted applies no brand filter.
+  brand?: string;
   type?: CigarType;
   sort?: CatalogSort;
-  // The caller's ownership overlay filter; omitted or `all` applies no filter.
+  // The caller's exclusive ownership overlay filter (web toolbar); omitted or
+  // `all` applies no filter. The web uses this ONE segmented control.
   own?: OwnershipFacet;
+  // The MCP surface's independent, composable overlay filters (DESIGN-002): each
+  // is tri-state — undefined = no filter, true = has the property, false = lacks
+  // it — and they AND together (and with `own`), unlike the exclusive web facet.
+  // `inHumidor`/`wanted`/`smoked` are the caller's personal state (principal-
+  // scoped); `inStock` is catalog/market state (a current in-stock offer exists).
+  inHumidor?: boolean;
+  wanted?: boolean;
+  smoked?: boolean;
+  inStock?: boolean;
   cursor?: string | null;
   limit?: number;
 }

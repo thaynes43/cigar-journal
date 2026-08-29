@@ -17,7 +17,7 @@ import {
 } from "@cj/oauth";
 import { createHarness, type DomainHarness } from "@cj/domain/testing";
 import type { Principal } from "@cj/domain";
-import { purchases, vendors, enrichmentRequests } from "@cj/db";
+import { purchases, vendors, enrichmentRequests, offers } from "@cj/db";
 import { buildApp } from "./app.js";
 import { INSTRUCTIONS } from "./constants.js";
 
@@ -155,6 +155,34 @@ describe("@cj/mcp adapter", () => {
     return all.filter((r) => r.cigarId === cigarId);
   }
 
+  // A chat/ad-hoc offer linked directly to a cigar (no listing match) — enough to
+  // exercise browse_catalog's price/inStock surface and get_offers. The named
+  // source satisfies the vendor-or-source CHECK; pricePerStickCents is the price
+  // sort/tile key.
+  async function seedAdhocOffer(
+    cigarId: string,
+    over: {
+      pricePerStickCents?: number | null;
+      price?: number | null;
+      inStock?: boolean | null;
+      seenAt?: Date;
+      packaging?: string | null;
+      sticksPerPackage?: number | null;
+    } = {},
+  ): Promise<void> {
+    await h.pg.db.insert(offers).values({
+      cigarId,
+      sourceName: "Test Source",
+      currency: "USD",
+      inStock: over.inStock ?? true,
+      seenAt: over.seenAt ?? new Date("2026-08-20T00:00:00Z"),
+      packaging: over.packaging ?? "single",
+      sticksPerPackage: over.sticksPerPackage ?? 1,
+      price: over.price != null ? String(over.price) : null,
+      pricePerStickCents: over.pricePerStickCents ?? null,
+    });
+  }
+
   beforeAll(async () => {
     process.env.BETTER_AUTH_URL = ORIGIN;
     process.env.MCP_JSON_RESPONSE = "true";
@@ -228,7 +256,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the fifteen tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
+  it("lists exactly the seventeen tools with readOnlyHint on the seven reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -238,9 +266,11 @@ describe("@cj/mcp adapter", () => {
         [
           "add_cigar",
           "add_smoke_photo",
+          "browse_catalog",
           "get_cigar",
           "get_my_inventory",
           "get_my_smokes",
+          "get_offers",
           "get_smoke",
           "record_price",
           "record_purchase",
@@ -256,7 +286,15 @@ describe("@cj/mcp adapter", () => {
 
       const readOnly = (name: string): boolean | undefined =>
         tools.find((t) => t.name === name)?.annotations?.readOnlyHint;
-      for (const r of ["search_cigars", "get_cigar", "get_my_smokes", "get_smoke", "get_my_inventory"])
+      for (const r of [
+        "search_cigars",
+        "get_cigar",
+        "browse_catalog",
+        "get_offers",
+        "get_my_smokes",
+        "get_smoke",
+        "get_my_inventory",
+      ])
         expect(readOnly(r)).toBe(true);
       for (const w of [
         "save_smoke",
@@ -347,6 +385,214 @@ describe("@cj/mcp adapter", () => {
       expect(data).toHaveProperty("personalProfile"); // present (may be null) with journal:read
       expect(data).toHaveProperty("wanted"); // want overlay present with journal:read
       expect(data).toHaveProperty("favorited"); // favorite overlay present with journal:read
+    });
+  });
+
+  // ---- browse_catalog (PRD-003 R-MCP-1) -------------------------------------
+
+  interface BrowseTilePayload {
+    cigarId: string;
+    canonicalName: string;
+    price: {
+      perStick: boolean;
+      amount: number;
+      packaging: string | null;
+      currency: string | null;
+      seenAt: string;
+    } | null;
+    smokeCount?: number;
+    myRating?: number | null;
+    remaining?: number;
+    wanted?: boolean;
+    favorited?: boolean;
+  }
+  interface BrowsePayload {
+    cigars: BrowseTilePayload[];
+    nextCursor: string | null;
+    totalCount: number;
+  }
+
+  it("browse_catalog: price-at-a-glance is catalog-scoped; personal overlay is journal:read-bounded", async () => {
+    const brand = `MBrowseScope-${randomUUID().slice(0, 8)}`;
+    const cigarId = await h.seedCigar({ canonicalName: `${brand} Toro`, brand, type: "NC" });
+    await seedAdhocOffer(cigarId, { pricePerStickCents: 1670, packaging: "box", sticksPerPackage: 20 });
+
+    // catalog:read only — price-at-a-glance present, NO personal overlay fields.
+    await withClient(ownerCatalogOnly, async (client) => {
+      const data = payloadOf(await call(client, "browse_catalog", { q: brand })) as BrowsePayload;
+      const tile = data.cigars.find((c) => c.cigarId === cigarId)!;
+      expect(tile.price).toEqual({
+        perStick: true,
+        amount: 16.7,
+        packaging: "box",
+        sticksPerPackage: 20,
+        currency: "USD",
+        seenAt: "2026-08-20T00:00:00.000Z",
+      });
+      expect(tile).not.toHaveProperty("smokeCount");
+      expect(tile).not.toHaveProperty("myRating");
+      expect(tile).not.toHaveProperty("remaining");
+      expect(tile).not.toHaveProperty("wanted");
+      expect(tile).not.toHaveProperty("favorited");
+    });
+
+    // With journal:read — the personal overlay appears; price stays.
+    await withClient(ownerCatalogJournal, async (client) => {
+      const result = await call(client, "browse_catalog", { q: brand });
+      expect(result.structuredContent).toEqual(payloadOf(result)); // SDK-validated structured output
+      const tile = (payloadOf(result) as BrowsePayload).cigars.find((c) => c.cigarId === cigarId)!;
+      expect(tile).toHaveProperty("smokeCount");
+      expect(tile).toHaveProperty("myRating");
+      expect(tile).toHaveProperty("remaining");
+      expect(tile).toHaveProperty("wanted");
+      expect(tile).toHaveProperty("favorited");
+      expect(tile.price?.perStick).toBe(true);
+    });
+  });
+
+  it("browse_catalog composes independent overlay filters in one call (wanted AND NOT inHumidor AND inStock)", async () => {
+    const brand = `MCombo-${randomUUID().slice(0, 8)}`;
+    const match = await h.seedCigar({ canonicalName: `${brand} Match`, brand });
+    const ownedToo = await h.seedCigar({ canonicalName: `${brand} Owned`, brand });
+    const noStock = await h.seedCigar({ canonicalName: `${brand} NoStock`, brand });
+    const notWanted = await h.seedCigar({ canonicalName: `${brand} NotWanted`, brand });
+
+    await seedAdhocOffer(match, { pricePerStickCents: 1400, inStock: true });
+    await seedAdhocOffer(ownedToo, { pricePerStickCents: 1400, inStock: true });
+    await seedAdhocOffer(noStock, { pricePerStickCents: 1400, inStock: false });
+    await seedAdhocOffer(notWanted, { pricePerStickCents: 1400, inStock: true });
+
+    await withClient(ownerFull, async (client) => {
+      // Wanted marks via the tool; ownedToo also acquired (in humidor).
+      for (const id of [match, ownedToo, noStock]) await call(client, "set_want", { cigarId: id, wanted: true });
+      await call(client, "record_purchase", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId: ownedToo },
+        quantity: 1,
+      });
+
+      const data = payloadOf(
+        await call(client, "browse_catalog", {
+          q: brand,
+          wanted: true,
+          inHumidor: false,
+          inStock: true,
+        }),
+      ) as BrowsePayload;
+      expect(data.cigars.map((c) => c.cigarId)).toEqual([match]);
+      expect(data.totalCount).toBe(1);
+    });
+
+    // A catalog-only token cannot filter by personal state: the personal filters
+    // are dropped, so the wanted/inHumidor filters do not narrow the result.
+    await withClient(ownerCatalogOnly, async (client) => {
+      const data = payloadOf(
+        await call(client, "browse_catalog", { q: brand, wanted: true, inHumidor: false }),
+      ) as BrowsePayload;
+      expect(data.cigars.map((c) => c.cigarId).sort()).toEqual(
+        [match, ownedToo, noStock, notWanted].sort(),
+      );
+    });
+  });
+
+  it("browse_catalog price sort keyset round-trips, unpriced cigars last", async () => {
+    const brand = `MPriceSort-${randomUUID().slice(0, 8)}`;
+    const cheap = await h.seedCigar({ canonicalName: `${brand} Cheap`, brand });
+    const mid = await h.seedCigar({ canonicalName: `${brand} Mid`, brand });
+    const noPrice = await h.seedCigar({ canonicalName: `${brand} NoPrice`, brand });
+    await seedAdhocOffer(cheap, { pricePerStickCents: 1000 });
+    await seedAdhocOffer(mid, { pricePerStickCents: 1500 });
+
+    await withClient(ownerFull, async (client) => {
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      let pages = 0;
+      do {
+        const data = payloadOf(
+          await call(client, "browse_catalog", { q: brand, sort: "price", limit: 1, cursor }),
+        ) as BrowsePayload;
+        for (const c of data.cigars) seen.push(c.cigarId);
+        cursor = data.nextCursor;
+        pages++;
+      } while (cursor && pages < 10);
+      // Cheapest per-stick first, the unpriced cigar walked last via the null-key
+      // cursor, with no dupes or gaps.
+      expect(seen).toEqual([cheap, mid, noPrice]);
+      expect(new Set(seen).size).toBe(3);
+    });
+  });
+
+  it("browse_catalog: bad enum errors; a negative limit and a garbage cursor degrade gracefully", async () => {
+    await withClient(ownerFull, async (client) => {
+      // Strict enums reject an invalid value (schema-shape violation → isError).
+      expect((await call(client, "browse_catalog", { type: "XX" })).isError).toBe(true);
+      expect((await call(client, "browse_catalog", { sort: "cheapest" })).isError).toBe(true);
+
+      // A negative limit is domain-clamped, not an error (lenient, like the other
+      // reads) — a valid page comes back.
+      const clamped = await call(client, "browse_catalog", { limit: -5 });
+      expect(clamped.isError).toBeFalsy();
+      expect(Array.isArray((payloadOf(clamped) as BrowsePayload).cigars)).toBe(true);
+
+      // A garbage cursor decodes as absent → the first page, never an error.
+      const garbage = await call(client, "browse_catalog", { sort: "name", cursor: "@@@not-base64@@@" });
+      expect(garbage.isError).toBeFalsy();
+      expect(Array.isArray((payloadOf(garbage) as BrowsePayload).cigars)).toBe(true);
+    });
+  });
+
+  // ---- get_offers (PRD-003 R-MCP-2) -----------------------------------------
+
+  interface OffersPayload {
+    offers: {
+      vendor: string;
+      isRegistryVendor: boolean;
+      pricePerStick: number | null;
+      packaging: string | null;
+      inStock: boolean | null;
+      seenAt: string;
+    }[];
+    history: {
+      firstSeenAt: string | null;
+      lastSeenAt: string | null;
+      minPricePerStick: number | null;
+      maxPricePerStick: number | null;
+      observationCount: number;
+    };
+  }
+
+  it("get_offers returns current offers + a compact history block under catalog:read", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: `MOffers-${randomUUID().slice(0, 8)}`, brand: "Chronicle" });
+    await seedAdhocOffer(cigarId, { pricePerStickCents: 1420, price: 142, packaging: "box", sticksPerPackage: 20, seenAt: new Date("2026-06-01T00:00:00Z") });
+    await seedAdhocOffer(cigarId, { pricePerStickCents: 1650, price: 165, packaging: "box", sticksPerPackage: 20, seenAt: new Date("2026-08-15T00:00:00Z") });
+
+    // catalog:read alone is enough — offers are market data, not personal.
+    await withClient(ownerCatalogOnly, async (client) => {
+      const result = await call(client, "get_offers", { cigarId });
+      expect(result.structuredContent).toEqual(payloadOf(result));
+      const data = payloadOf(result) as OffersPayload;
+      // Latest per (source, packaging) series — one current offer here.
+      expect(data.offers).toHaveLength(1);
+      expect(data.offers[0]!.pricePerStick).toBe(16.5);
+      expect(data.offers[0]!.packaging).toBe("box"); // per-stick always with packaging
+      expect(data.history.observationCount).toBe(2);
+      expect(data.history.minPricePerStick).toBe(14.2);
+      expect(data.history.maxPricePerStick).toBe(16.5);
+      expect(data.history.firstSeenAt).toBe("2026-06-01T00:00:00.000Z");
+    });
+  });
+
+  it("get_offers returns empty offers and a zeroed history for a cigar with none; malformed args error", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: `MNoOffers-${randomUUID().slice(0, 8)}`, brand: "Nobody" });
+    await withClient(ownerCatalogOnly, async (client) => {
+      const data = payloadOf(await call(client, "get_offers", { cigarId })) as OffersPayload;
+      expect(data.offers).toEqual([]);
+      expect(data.history.observationCount).toBe(0);
+      expect(data.history.minPricePerStick).toBeNull();
+
+      // Missing cigarId and an unknown top-level key both fail the strict schema.
+      expect((await call(client, "get_offers", {})).isError).toBe(true);
+      expect((await call(client, "get_offers", { cigarId, extra: "x" })).isError).toBe(true);
     });
   });
 

@@ -287,6 +287,75 @@ export const getSmokeSchema = z
   })
   .strict();
 
+// browse_catalog: paged catalog browse with composable filters (PRD-003 R-MCP-1,
+// DESIGN-002). The boolean overlay filters are INDEPENDENT and all combinable in
+// one call (unlike a single exclusive control); each is present-or-absent, and
+// the personal ones (inHumidor/wanted/smoked) plus the overlay fields require
+// journal:read (the adapter drops them and omits the fields otherwise).
+export const browseCatalogSchema = z
+  .object({
+    q: z
+      .string()
+      .optional()
+      .describe("Free-text search over cigar name, brand, and line (case-insensitive substring)."),
+    brand: z
+      .string()
+      .optional()
+      .describe("Limit to one brand, matched case-insensitively and exactly (distinct from q)."),
+    type: cigarType.optional().describe("Limit to NC (non-Cuban) or CC (Cuban)."),
+    inHumidor: z
+      .boolean()
+      .optional()
+      .describe(
+        "true: only cigars the user still has in the humidor (remaining > 0); false: only those they do not. Personal — needs journal:read. Combinable with the others.",
+      ),
+    wanted: z
+      .boolean()
+      .optional()
+      .describe(
+        "true: only cigars on the user's want list; false: only those not wanted. Personal — needs journal:read. Combinable with the others.",
+      ),
+    smoked: z
+      .boolean()
+      .optional()
+      .describe(
+        "true: only cigars the user has smoked at least once; false: only those never smoked. Personal — needs journal:read. Combinable with the others.",
+      ),
+    inStock: z
+      .boolean()
+      .optional()
+      .describe(
+        "true: only cigars with a current in-stock offer; false: only those without one. Market data (not personal). Combinable with the others.",
+      ),
+    sort: z
+      .enum(["name", "my-rating", "recently-added", "price"])
+      .optional()
+      .describe(
+        "Order: name (A-Z, default), my-rating (the user's average, best first), recently-added (newest catalog entries first), price (cheapest current per-stick first; unpriced cigars come last).",
+      ),
+    cursor: z
+      .string()
+      .nullish()
+      .describe("Keyset cursor from a prior result's nextCursor. Omit for the first page."),
+    limit: z.number().int().optional().describe("Max tiles, default 48, max 96."),
+  })
+  .strict();
+
+export type BrowseCatalogArgs = z.infer<typeof browseCatalogSchema>;
+
+// get_offers: current vendor offers + compact price history for one cigar
+// (PRD-003 R-MCP-2, ADR-009). Kept separate from get_cigar to protect its token
+// budget — reach for it only when the user asks about price or where to buy.
+export const getOffersSchema = z
+  .object({
+    cigarId: z
+      .string()
+      .describe("Catalog id from a prior search_cigars/get_cigar/browse_catalog result. Never invented."),
+  })
+  .strict();
+
+export type GetOffersArgs = z.infer<typeof getOffersSchema>;
+
 // ---- write tools -----------------------------------------------------------
 
 export const saveSmokeSchema = z
@@ -693,6 +762,69 @@ export const getCigarOutput = z
     enrichment: looseObject.optional(),
     pricing: looseObject.nullish(),
   })
+  .passthrough();
+
+// browse_catalog tile: the catalog fields + catalog-scoped price-at-a-glance,
+// with the personal overlay (smokeCount/myRating/remaining/wanted/favorited)
+// present only under journal:read — mirrored loosely, so a scope-bounded payload
+// (overlay absent) validates just as a full one does.
+const tilePriceOutput = z
+  .object({
+    perStick: z.boolean(),
+    amount: z.number(),
+    packaging: z.string().nullish(),
+    sticksPerPackage: z.number().nullish(),
+    currency: z.string().nullish(),
+    seenAt: z.string(),
+  })
+  .passthrough();
+
+const catalogTileOutput = z
+  .object({
+    cigarId: z.string(),
+    canonicalName: z.string(),
+    brand: z.string().nullish(),
+    line: z.string().nullish(),
+    vitola: looseObject.nullish(),
+    type: z.string().nullish(),
+    verification: z.string(),
+    price: tilePriceOutput.nullish(),
+    smokeCount: z.number().optional(),
+    myRating: z.number().nullish(),
+    remaining: z.number().optional(),
+    wanted: z.boolean().optional(),
+    favorited: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const browseCatalogOutput = z
+  .object({
+    cigars: z.array(catalogTileOutput),
+    nextCursor: z.string().nullable(),
+    totalCount: z.number(),
+  })
+  .passthrough();
+
+// get_offers: current offers (one per vendor/source series) + the compact history
+// block. Permissive, like the rest of the market payload.
+const cigarOfferOutput = z
+  .object({
+    vendor: z.string(),
+    isRegistryVendor: z.boolean(),
+    price: z.number().nullish(),
+    currency: z.string().nullish(),
+    inStock: z.boolean().nullish(),
+    listingUrl: z.string().nullish(),
+    seenAt: z.string(),
+    packaging: z.string().nullish(),
+    sticksPerPackage: z.number().nullish(),
+    pricePerStick: z.number().nullish(),
+    priceType: z.string(),
+  })
+  .passthrough();
+
+export const getOffersOutput = z
+  .object({ offers: z.array(cigarOfferOutput), history: looseObject })
   .passthrough();
 
 const smokeSummaryOutput = z

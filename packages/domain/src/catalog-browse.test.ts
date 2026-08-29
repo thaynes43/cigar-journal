@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { productPhotos } from "@cj/db";
+import { productPhotos, offers } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import { recordPurchase } from "./record-purchase.js";
@@ -447,5 +447,177 @@ describe("catalog browse", () => {
     });
     expect(switched.cigars).toHaveLength(1);
     expect(switched.totalCount).toBe(2);
+  });
+
+  // --- price sort, inStock filter, price-at-a-glance (PRD-003 R-PRICE-2 / -----
+  //     R-UNI-3, ADR-009) --------------------------------------------------
+
+  // A chat/ad-hoc offer linked directly to the cigar (no listing match) — enough
+  // to exercise OFFER_JOIN's direct branch. A named source satisfies the
+  // vendor-or-source CHECK; pricePerStickCents is the sort/price key.
+  async function addAdhocOffer(
+    cigarId: string,
+    over: {
+      pricePerStickCents?: number | null;
+      price?: number | null;
+      inStock?: boolean | null;
+      seenAt?: Date;
+      packaging?: string | null;
+      sticksPerPackage?: number | null;
+    },
+  ): Promise<void> {
+    await h.deps.db.insert(offers).values({
+      cigarId,
+      sourceName: "Ad-hoc Source",
+      currency: "USD",
+      inStock: over.inStock ?? true,
+      seenAt: over.seenAt ?? new Date("2026-08-20T00:00:00Z"),
+      packaging: over.packaging ?? "single",
+      sticksPerPackage: over.sticksPerPackage ?? 1,
+      price: over.price != null ? String(over.price) : null,
+      pricePerStickCents: over.pricePerStickCents ?? null,
+    });
+  }
+
+  it("browseCatalog sorts by price (cheapest per-stick first, unpriced last) with keyset paging", async () => {
+    const brand = `PriceSort ${tag}`;
+    const cheap = await h.seedCigar({ canonicalName: `${brand} Cheap`, brand });
+    const mid = await h.seedCigar({ canonicalName: `${brand} Mid`, brand });
+    const exp = await h.seedCigar({ canonicalName: `${brand} Exp`, brand });
+    const noPrice = await h.seedCigar({ canonicalName: `${brand} NoPrice`, brand }); // no offer
+    await addAdhocOffer(cheap, { pricePerStickCents: 1000 });
+    await addAdhocOffer(mid, { pricePerStickCents: 1500 });
+    await addAdhocOffer(exp, { pricePerStickCents: 2000 });
+
+    const res = await browseCatalog(h.deps, userA, { q: brand, sort: "price" });
+    // Priced ascending, then the unpriced cigar last (nulls last, never as zero).
+    expect(res.cigars.map((c) => c.cigarId)).toEqual([cheap, mid, exp, noPrice]);
+
+    // Keyset over the price sort, page size 1 — covers all four in order, walking
+    // the null tail via the sentinel cursor with no dupes or gaps.
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const p: Awaited<ReturnType<typeof browseCatalog>> = await browseCatalog(h.deps, userA, {
+        q: brand,
+        sort: "price",
+        limit: 1,
+        cursor,
+      });
+      for (const c of p.cigars) seen.push(c.cigarId);
+      cursor = p.nextCursor;
+      pages++;
+    } while (cursor && pages < 10);
+    expect(seen).toEqual([cheap, mid, exp, noPrice]);
+    expect(new Set(seen).size).toBe(4);
+  });
+
+  it("browseCatalog inStock filter keeps only cigars with a current in-stock offer", async () => {
+    const brand = `Stock ${tag}`;
+    const inStock = await h.seedCigar({ canonicalName: `${brand} In`, brand });
+    const oos = await h.seedCigar({ canonicalName: `${brand} Out`, brand });
+    const noOffer = await h.seedCigar({ canonicalName: `${brand} None`, brand });
+    await addAdhocOffer(inStock, { pricePerStickCents: 1200, inStock: true });
+    await addAdhocOffer(oos, { pricePerStickCents: 900, inStock: false });
+
+    const ids = async (v: boolean): Promise<string[]> =>
+      (await browseCatalog(h.deps, userA, { q: brand, inStock: v })).cigars.map((c) => c.cigarId).sort();
+
+    expect(await ids(true)).toEqual([inStock]);
+    // inStock:false = no current in-stock offer — the out-of-stock and the
+    // never-offered cigar both qualify.
+    expect(await ids(false)).toEqual([oos, noOffer].sort());
+    expect((await browseCatalog(h.deps, userA, { q: brand, inStock: true })).totalCount).toBe(1);
+  });
+
+  it("browseCatalog tiles carry price-at-a-glance; per-stick never travels without packaging", async () => {
+    const brand = `Glance ${tag}`;
+    const perStick = await h.seedCigar({ canonicalName: `${brand} PerStick`, brand });
+    const pkgOnly = await h.seedCigar({ canonicalName: `${brand} PkgOnly`, brand });
+    const noPrice = await h.seedCigar({ canonicalName: `${brand} NoPrice`, brand });
+    await addAdhocOffer(perStick, { pricePerStickCents: 1670, price: 334, packaging: "box", sticksPerPackage: 20 });
+    // Package price with no derivable per-stick figure.
+    await addAdhocOffer(pkgOnly, { pricePerStickCents: null, price: 120, packaging: "box", sticksPerPackage: null });
+
+    const byId = new Map(
+      (await browseCatalog(h.deps, userA, { q: brand })).cigars.map((c) => [c.cigarId, c]),
+    );
+
+    const ps = byId.get(perStick)!.price!;
+    expect(ps.perStick).toBe(true);
+    expect(ps.amount).toBe(16.7);
+    expect(ps.packaging).toBe("box"); // the per-stick figure ALWAYS carries packaging
+    expect(ps.sticksPerPackage).toBe(20);
+    expect(ps.currency).toBe("USD");
+
+    const pkg = byId.get(pkgOnly)!.price!;
+    expect(pkg.perStick).toBe(false);
+    expect(pkg.amount).toBe(120);
+    expect(pkg.packaging).toBe("box");
+
+    expect(byId.get(noPrice)!.price).toBeNull();
+  });
+
+  // --- independent, composable overlay filters (MCP browse_catalog) ---------
+
+  it("browseCatalog composes independent overlay booleans in one call (wanted AND NOT inHumidor AND inStock)", async () => {
+    const brand = `Combo ${tag}`;
+    // The one match: wanted, not owned, and an in-stock offer.
+    const match = await h.seedCigar({ canonicalName: `${brand} Match`, brand });
+    // Decoys, each failing exactly one of the three conditions.
+    const ownedToo = await h.seedCigar({ canonicalName: `${brand} Owned`, brand }); // in humidor
+    const noStock = await h.seedCigar({ canonicalName: `${brand} NoStock`, brand }); // out of stock
+    const notWanted = await h.seedCigar({ canonicalName: `${brand} NotWanted`, brand }); // not wanted
+
+    await setWant(h.deps, userA, { cigarId: match, wanted: true });
+    await addAdhocOffer(match, { pricePerStickCents: 1400, inStock: true });
+
+    await setWant(h.deps, userA, { cigarId: ownedToo, wanted: true });
+    await addAdhocOffer(ownedToo, { pricePerStickCents: 1400, inStock: true });
+    await recordPurchase(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: ownedToo },
+      quantity: 1,
+    });
+
+    await setWant(h.deps, userA, { cigarId: noStock, wanted: true });
+    await addAdhocOffer(noStock, { pricePerStickCents: 1400, inStock: false });
+
+    await addAdhocOffer(notWanted, { pricePerStickCents: 1400, inStock: true });
+
+    const res = await browseCatalog(h.deps, userA, {
+      q: brand,
+      wanted: true,
+      inHumidor: false,
+      inStock: true,
+    });
+    expect(res.cigars.map((c) => c.cigarId)).toEqual([match]);
+    expect(res.totalCount).toBe(1);
+
+    // Principal-scoped: userB shares none of userA's want/holding state, so the
+    // personal filters match nothing for them.
+    const asB = await browseCatalog(h.deps, userB, { q: brand, wanted: true, inStock: true });
+    expect(asB.cigars).toHaveLength(0);
+  });
+
+  it("browseCatalog smoked filter partitions the caller's smoked cigars, principal-scoped", async () => {
+    const brand = `Smoked ${tag}`;
+    const smoked = await h.seedCigar({ canonicalName: `${brand} Smoked`, brand });
+    const unsmoked = await h.seedCigar({ canonicalName: `${brand} Fresh`, brand });
+    await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: smoked },
+      overallDescriptors: ["m"],
+    });
+
+    const idsA = async (v: boolean): Promise<string[]> =>
+      (await browseCatalog(h.deps, userA, { q: brand, smoked: v })).cigars.map((c) => c.cigarId).sort();
+    expect(await idsA(true)).toEqual([smoked]);
+    expect(await idsA(false)).toEqual([unsmoked]);
+
+    // userB never smoked either — smoked:true is empty, smoked:false is both.
+    expect((await browseCatalog(h.deps, userB, { q: brand, smoked: true })).cigars).toHaveLength(0);
+    expect((await browseCatalog(h.deps, userB, { q: brand, smoked: false })).cigars).toHaveLength(2);
   });
 });

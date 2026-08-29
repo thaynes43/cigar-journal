@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Fifteen tools over the application services, client-neutral: any MCP client
+Seventeen tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -30,78 +30,95 @@ ADR-005 (integration). Client capability differences live in
    `readOnlyHint: true`; a host's confirmation prompt on `save_smoke` is the
    user's last look before persisting.
 
-Scopes: `catalog:read` (search_cigars, get_cigar), `journal:read`
-(get_my_smokes, get_smoke, get_my_inventory), `journal:write` (save_smoke,
-add_cigar, record_purchase, update_smoke, add_smoke_photo, set_want,
+Scopes: `catalog:read` (search_cigars, get_cigar, browse_catalog, get_offers),
+`journal:read` (get_my_smokes, get_smoke, get_my_inventory), `journal:write`
+(save_smoke, add_cigar, record_purchase, update_smoke, add_smoke_photo, set_want,
 set_favorite, request_cigar_enrichment, update_cigar, record_price — including
 lazy catalog create inside save/add, the enrichment queue write, conversational
 catalog repair, and chat-submitted price observations). There is no
 `catalog:write` scope: catalog mutation rides `journal:write` by house precedent
 (the same scope already gates add_cigar's lazy create and the enrichment write).
 **Scope-bounded responses:** catalog tools include personal fields
-(`userSmokeCount`, `personalProfile`, the `wanted` and `favorited` overlays) only
-when the token also carries `journal:read`; otherwise those fields are omitted
-entirely. The additive `get_cigar` `enrichment` and `pricing` blocks are
-catalog-scoped (market/catalog data, identical for every viewer) and ride
-`catalog:read`. Data returned never exceeds the scopes presented.
+(`userSmokeCount`, `personalProfile`, the `wanted` and `favorited` overlays, and
+browse_catalog's tile overlay `smokeCount`/`myRating`/`remaining`/`wanted`/
+`favorited`) only when the token also carries `journal:read`; otherwise those
+fields are omitted entirely. **browse_catalog's personal *filters*
+(`inHumidor`/`wanted`/`smoked`) are journal:read-bounded too** — without that
+scope they are dropped rather than applied, so the result set never leaks the
+caller's own state; the catalog/market filters and sorts (`q`/`brand`/`type`/
+`inStock`/`price`) and the catalog-scoped price-at-a-glance always apply. The
+additive `get_cigar` `enrichment` and `pricing` blocks, browse_catalog's tile
+`price`, and get_offers' whole payload are catalog-scoped (market/catalog data,
+identical for every viewer) and ride `catalog:read`. Data returned never exceeds
+the scopes presented.
 
 ## Server instructions (sent to every client at initialize)
 
 ```text
-This server manages the authenticated user's personal cigar journal.
-During an active smoking conversation, converse naturally; do not save
-observations as they happen. Use search_cigars/get_cigar when identification
-or factual cigar information helps; use get_my_smokes/get_smoke when prior
-experiences would improve comparison. When the user clearly indicates the
-cigar is finished, synthesize the conversation into one save_smoke call.
-Preserve uncertainty: omit ratings, vitolas, times, pairings, blend details,
-or tasting stages that were never established — sparse is correct. Reuse the
-same clientRequestId when retrying a mutation. The server identifies the
-user from the authorization context; never supply or infer a user id.
+This server manages the authenticated user's personal cigar journal. The server
+identifies the user from the authorization context; never supply or infer a user
+id. During an active smoke, converse naturally — do not save as observations
+happen. When the user signals the cigar is finished, synthesize the whole
+conversation into one save_smoke call. Preserve uncertainty: omit any rating,
+vitola, time, pairing, blend detail, or tasting stage never established — sparse
+is correct, invented is a defect. Reuse the same clientRequestId when retrying a
+mutation.
 
-When the user smokes or acquires something search_cigars does not match, fill
-the gap first: add_cigar creates an unverified catalog entry from their words
-and queues background enrichment (specs + a product photo), so the later
-save_smoke links to a real cigar; record_purchase logs an acquisition and
-auto-creates a described cigar the same way. record_purchase is also how the
-humidor count is corrected — the ledger is append-only and holdings are derived,
-so a miscount is fixed with a negative-quantity row (say why in notes), never an
-edit. Record only what the user stated: never invent a price, date, or vendor.
+Resolving vs browsing. search_cigars resolves one named cigar ("I'm smoking an
+Alma Fuego") — act on its guidance: single_match (an exact catalog-name hit —
+proceed), multiple_matches (candidates but no exact hit — confirm the exact one
+before saving), brand_match (only a brand was named — ask for the line/vitola),
+no_match (nothing matched — a described save_smoke creates it; if the mention was
+partial, ask for the fuller name first to avoid a duplicate). browse_catalog
+answers browsing, filtering, and shopping questions ("what do I want that's in
+stock", "my top-rated maduros", "cheapest per stick") — it pages the catalog with
+composable filters (q, brand, type, inHumidor, wanted, smoked, inStock) and sorts
+(name, my-rating, recently-added, price), returning tiles with the personal
+overlay and price-at-a-glance. get_cigar is full detail on one cigar; get_offers
+is its current vendor offers and price history (kept out of get_cigar to protect
+its budget) — reach for it when the user asks about price or where to buy.
+
+Gap-fill. When the user smokes or acquires something search_cigars does not match,
+fill the gap first: add_cigar creates an unverified entry from their words and
+queues enrichment (specs + a product photo) so the later save_smoke links to a
+real cigar; record_purchase logs an acquisition and auto-creates the described
+cigar the same way. record_purchase is also how the humidor count is corrected —
+the ledger is append-only and holdings are derived, so a miscount is fixed with a
+negative-quantity row (say why in notes), never an edit. Record only what the user
+stated: never invent a price, date, or vendor.
+
+Humidor deduction. A saved smoke deducts one stick from the humidor only when the
+user says so. When the resolved cigar shows holdings, ask once at finish, "From
+your humidor?"; skip the question when there are no holdings or the user already
+said where the stick came from. Pass consumption { fromHumidor: true } when it
+came from their humidor (add purchaseId only if they named a specific lot),
+{ fromHumidor: false } when it did not (lounge, gift, sample); omit consumption
+when unknown — an omitted block deducts nothing, and never invent the provenance.
+
+Want and favorite. set_want flags (or clears) a catalog cigar the user wants;
+wanting is independent of owning or smoking, and smoking never clears a want —
+clear one only on an explicit request (set_want wanted false). When
+record_purchase returns wanted:true the user just acquired something they had
+wanted — offer to clear it, never silently. set_favorite flags (or clears) a cigar
+the user loves, a mark distinct from want; it is never inferred (never from a
+smoke's liked field) — mark one only when the user asks.
+
+Catalog repair. When an existing catalog cigar is sparse (get_cigar carries an
+enrichment hint with the missing fields and a pricing summary), repair it as you
+go. request_cigar_enrichment queues a background lookup for its specs and a
+product photo (status queued | already_queued | recently_enriched | not_needed).
+update_cigar fills specific empty fields from what the user knows: it ONLY fills
+blanks, never overwriting an existing value or a verified entry, and never touches
+the journal. record_price logs a price you found or the user reported — give the
+packaging it was priced at (single, 5-pack, box of 20) so per-stick is computed,
+and never state a per-stick figure without its packaging; name the vendor when it
+is a known shop, otherwise give a source name (and URL). An identical price re-seen
+within a day is skipped; a changed price is always kept.
+
 Photos attach through add_smoke_photo, never save_smoke: attach the image to that
 tool call itself and the server files it under the smoke; with no image the tool
 returns a one-time link to hand the user for a phone upload. A photo never blocks
 saving the smoke.
-
-set_want flags (or clears) a catalog cigar the user wants; wanting is independent
-of owning or smoking — smoking never clears a want. Clear one only on an explicit
-request: call set_want with wanted false. When record_purchase returns wanted:true
-the user just acquired something they had marked as wanted — offer to clear it
-(never clear it silently).
-
-set_favorite flags (or clears) a catalog cigar the user loves — their favorites,
-a mark distinct from want. "Add the Padron to my favorites" is set_favorite with
-favorited true; "take it off my favorites" is favorited false. A favorite is
-independent of want, owning, and smoking, and is never inferred — mark one only
-when the user asks to, never from a smoke's liked field.
-
-When an EXISTING catalog cigar is sparse, repair it as you go (get_cigar carries an
-enrichment hint with the missing fields and a pricing summary). request_cigar_enrichment
-queues a background lookup to fill its specs and a product photo — status
-queued | already_queued | recently_enriched | not_needed. update_cigar fills specific
-empty fields from what the user knows: it ONLY fills blanks, never overwriting an
-existing value or a verified entry, and never touches the journal. record_price logs a
-price you found or the user reported — give the packaging it was priced at (single,
-5-pack, box of 20) so per-stick is computed, and never state a per-stick figure without
-its packaging. Name the vendor when it is a known shop, otherwise give a source name (and
-URL). An identical price re-seen within a day is skipped; a changed price is always kept.
-
-A saved smoke can deduct one stick from the user's humidor — but only when they
-say so. When the resolved cigar shows holdings, ask once at finish, "From your
-humidor?"; skip the question when there are no holdings or the user already said
-where the stick came from. Pass consumption { fromHumidor: true } when it came
-from their humidor (add purchaseId only if they named a specific lot),
-{ fromHumidor: false } when it did not (lounge, gift, sample). Omit consumption
-when unknown — an omitted block deducts nothing; never invent the provenance.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -110,7 +127,6 @@ Field conventions:
 - smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time.
 - get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
-- search_cigars guidance: single_match (an exact catalog-name hit — proceed), multiple_matches (candidates without an exact hit — confirm the exact one with the user before saving), brand_match (only a brand was named — ask for the line/vitola), no_match (nothing matched — a described save creates the cigar; if the mention was partial, ask for the fuller name first to avoid a duplicate).
 - Combine related corrections into one update_smoke call rather than several.
 ```
 
@@ -172,9 +188,9 @@ the same object, so they can never diverge. Error results (`isError: true`) carr
 only the text payload and are exempt. The schemas are additive metadata and
 deliberately **permissive** — rich nested objects (cigar/smoke detail, lots) and
 conditional fields (`userSmokeCount`, `personalProfile`, `matchedIn`/`matchSnippet`,
-mode-A photo vs mode-B link) are mirrored loosely so a valid payload is never
-rejected as a protocol error. The payload shapes below are normative; the schemas
-mirror them.
+browse_catalog's tile overlay, mode-A photo vs mode-B link) are mirrored loosely
+so a valid payload is never rejected as a protocol error. The payload shapes below
+are normative; the schemas mirror them.
 
 ---
 
@@ -283,6 +299,107 @@ summary: `lowest` is the best current per-stick when derivable (else the lowest
 package price), **always carrying its packaging** — a bare per-stick figure is
 banned (owner ruling). `pricing` is `null` when the cigar has no observations;
 `refreshRecommended` trips when the newest observation is older than 30 days.
+
+## browse_catalog — read
+
+Page the catalog with composable filters and sorts (PRD-003 R-MCP-1). The tool
+for browsing, filtering, and shopping questions ("what do I want that's in stock,"
+"my top-rated maduros," "cheapest per stick"); use `search_cigars` instead to
+resolve one named cigar. Reuses the domain `browseCatalog` that backs the web's
+unified catalog — one browse path for web and MCP.
+
+```yaml
+arguments:                       # all optional; combine freely
+  q: alma                        # free-text over name/brand/line (substring, case-insensitive)
+  brand: Plasencia               # one brand, matched case-insensitively and exactly
+  type: NC                       # NC | CC
+  inHumidor: true                # personal (journal:read): remaining > 0 (false = not owned)
+  wanted: true                   # personal (journal:read): on the want list (false = not)
+  smoked: false                  # personal (journal:read): smoked ≥ once (false = never)
+  inStock: true                  # market: has a current in-stock offer (false = none)
+  sort: price                    # name (default) | my-rating | recently-added | price
+  cursor: null                   # keyset cursor from a prior nextCursor; omit for page 1
+  limit: 48                      # default 48, max 96
+
+result:
+  cigars:
+    - cigarId: cg_01j9x2
+      canonicalName: Plasencia Alma del Fuego Concepcion
+      brand: Plasencia
+      line: Alma del Fuego
+      vitola: { name: Concepcion, lengthInches: 6.0, ringGauge: 52 }
+      type: NC
+      verification: verified
+      price:                     # catalog/market-scoped — always present (null if no offer)
+        perStick: true           #   true → amount is per-stick; false → package price
+        amount: 16.70
+        packaging: box           #   a per-stick figure NEVER travels without its packaging
+        sticksPerPackage: 20
+        currency: USD
+        seenAt: "2026-08-20T00:00:00Z"
+      smokeCount: 3              # personal overlay — present only with journal:read
+      myRating: 88               #   the caller's rounded average, null if unrated
+      remaining: 5               #   derived stock (acquired − consumed), floored at zero
+      wanted: false
+      favorited: true
+  nextCursor: "eyJ…"             # opaque keyset cursor; null on the last page
+  totalCount: 42                 # total matching the filters, ignoring the cursor
+```
+
+**Composable filters.** `q`/`brand`/`type`/`inStock` are catalog/market state;
+`inHumidor`/`wanted`/`smoked` are the caller's personal state. Each boolean is
+independent and tri-state — omitted applies no filter, `true` requires the
+property, `false` requires its absence — and they **AND together in one call**
+(unlike the web's single exclusive `own` toolbar). `sort: price` orders by the
+best current per-stick offer; unpriced cigars group **after** priced ones (nulls
+last), never interleaved as zero.
+
+**Scope-bounding.** The tile `price` (price-at-a-glance) is catalog/market data,
+present for every caller. The personal overlay (`smokeCount`, `myRating`,
+`remaining`, `wanted`, `favorited`) is present only under `journal:read`; without
+it those fields are omitted **and** the personal filters (`inHumidor`/`wanted`/
+`smoked`) are dropped rather than applied, so the result set never leaks the
+caller's state. `hasProductPhoto` is a web-only tile field and stays off this
+payload. A malformed `cursor` decodes as absent (first page); a bad `limit` is
+clamped; a bad `type`/`sort` enum is a schema-shape protocol error.
+
+## get_offers — read
+
+Current market offers plus a compact price history for one cigar (PRD-003
+R-MCP-2). Kept **out** of `get_cigar` to protect its token budget — reach for it
+only when the user asks about price or where to buy. Wraps the domain
+`getCigarOffers` (the newest observation per vendor/source × packaging series)
+and `getCigarOfferHistory`.
+
+```yaml
+arguments:
+  cigarId: cg_01j9x2             # from a prior search_cigars/get_cigar/browse_catalog result
+
+result:
+  offers:                        # current offer per (source, packaging) series, cheapest per-stick first
+    - vendor: Small Batch Cigar
+      isRegistryVendor: true     #   false for an ad-hoc/chat source (ADR-006 unapproved-source labels apply)
+      price: 334.00              #   the packaging unit's price, null if none observed
+      currency: USD
+      inStock: true
+      listingUrl: https://smallbatchcigar.com/…
+      seenAt: "2026-08-20T00:00:00Z"
+      packaging: box             #   per-stick ALWAYS travels with its packaging
+      sticksPerPackage: 20
+      pricePerStick: 16.70       #   dollars, null when not derivable
+      priceType: retail          #   retail | msrp | sale
+  history:                       # compact — span + per-stick range over the whole series
+    firstSeenAt: "2026-06-01T00:00:00Z"
+    lastSeenAt: "2026-08-20T00:00:00Z"
+    minPricePerStick: 14.20      #   dollars; null when no per-stick figure was ever observed
+    maxPricePerStick: 18.90
+    observationCount: 9          #   total observations recorded for the cigar
+```
+
+Catalog/market-scoped (offers are identical for every viewer), so `get_offers`
+takes no personal bounding and needs only `catalog:read`. A cigar with no offers
+returns `offers: []` and a zeroed `history` (all null, count 0) rather than an
+error — an id from a prior tool result always exists.
 
 ## get_my_smokes — read
 
