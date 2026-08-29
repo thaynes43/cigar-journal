@@ -26,17 +26,25 @@ export interface McpAuthExtra extends Record<string, unknown> {
 
 type AuthedRequest = Request & { auth?: AuthInfo };
 
-/** Scopes the request demands: a tools/call needs the named tool's scope; every
- *  other method (initialize, tools/list, ping, GET/DELETE) just needs a valid
- *  token. Inspecting the parsed JSON-RPC body lets scope failures surface as a
- *  true 403 at the HTTP layer with the tool's exact scope requirement. */
+/** Scopes the request demands at the HTTP layer: a tools/call needs the named
+ *  tool's scope; every other method (initialize, tools/list, ping, GET/DELETE) just
+ *  needs a valid token. validateAccessToken enforces these ALL-of, so this returns
+ *  only the scope EVERY acceptable caller must hold: a single-scope tool returns
+ *  that scope; a tool that accepts ALTERNATIVES (get_cigar: catalog:read OR
+ *  curation:read — TOOL_SCOPES lists both) has no universally-required scope, so it
+ *  returns [] and defers to assertToolScope's any-of check inside the handler. That
+ *  in-handler backstop runs on every call, so authorization is unchanged — a
+ *  scope-short get_cigar is still rejected, as the contract's `unauthorized`. */
 export function requiredScopesForBody(body: unknown): string[] {
   if (!body || typeof body !== "object") return [];
   const message = body as { method?: unknown; params?: unknown };
   if (message.method !== "tools/call") return [];
   const params = message.params as { name?: unknown } | undefined;
   const name = params?.name;
-  if (typeof name === "string" && isToolName(name)) return TOOL_SCOPES[name];
+  if (typeof name === "string" && isToolName(name)) {
+    const accepted = TOOL_SCOPES[name];
+    return accepted.length === 1 ? accepted : [];
+  }
   return [];
 }
 

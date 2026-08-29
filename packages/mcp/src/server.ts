@@ -28,6 +28,7 @@ import {
   excludeCigar,
   restoreCigar,
   setProductPhotoRights,
+  renameCigar,
   UnauthenticatedError,
   UnauthorizedError,
   UnavailableError,
@@ -89,6 +90,8 @@ import {
   setCatalogStatusOutput,
   setProductPhotoRightsSchema,
   setProductPhotoRightsOutput,
+  renameCigarSchema,
+  renameCigarOutput,
   searchCigarsOutput,
   getCigarOutput,
   getMySmokesOutput,
@@ -217,13 +220,17 @@ function authContext(authInfo: AuthInfo | undefined): AuthContext {
   return { principal, scopes: authInfo.scopes, clientId: authInfo.clientId };
 }
 
-// Authoritative, per-tool scope enforcement. The bearer middleware already 403s
-// a scope-short single request at the HTTP layer; this backstop re-checks inside
-// the handler so no request shape (e.g. a JSON-RPC batch) can reach a tool
-// without its scope. Reported as the contract's `unauthorized` (not retryable).
+// Authoritative, per-tool scope enforcement (ANY-of: holding at least one of the
+// tool's listed scopes authorizes it — TOOL_SCOPES). Every tool lists exactly one
+// scope except get_cigar (catalog:read OR curation:read), so this is "require that
+// scope" for all but that one. The bearer middleware already 403s a scope-short
+// single request at the HTTP layer; this backstop re-checks inside the handler so
+// no request shape (e.g. a JSON-RPC batch) can reach a tool without a qualifying
+// scope. Reported as the contract's `unauthorized` (not retryable).
 function assertToolScope(tool: ToolName, scopes: string[]): void {
-  for (const required of TOOL_SCOPES[tool]) {
-    if (!scopes.includes(required)) throw new UnauthorizedError();
+  const accepted = TOOL_SCOPES[tool];
+  if (accepted.length > 0 && !accepted.some((required) => scopes.includes(required))) {
+    throw new UnauthorizedError();
   }
 }
 
@@ -1130,6 +1137,30 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           clientRequestId: args.clientRequestId,
           cigarId: args.cigarId,
           rights: args.rights,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "rename_cigar",
+    {
+      title: "Rename cigar",
+      description:
+        "Set a catalog cigar's canonical name (identity) — the one authorized path, since update_cigar and set_cigar_facts never touch the name. Use to fix a wrong or malformed canonical name; the value is trimmed and must be non-empty. Admin only. Idempotent (a no-op when the name already matches); pass runId/confidence for the run audit.",
+      inputSchema: renameCigarSchema,
+      outputSchema: renameCigarOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Rename cigar" },
+    },
+    (args, extra) =>
+      run("rename_cigar", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await renameCigar(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          cigarId: args.cigarId,
+          canonicalName: args.canonicalName,
           attribution: curationAttribution(args),
           correlationId,
         });

@@ -766,6 +766,9 @@ export interface BrandShelf {
   // brand with a product photo whose canonical name sorts first (ADR-007). Null
   // when no cigar in the brand has one — the tile falls back to BandTile art.
   coverCigarId: string | null;
+  // That cover cigar's photo row id, for fingerprinting the poster thumb (#127) —
+  // null exactly when coverCigarId is null.
+  coverProductPhotoId: string | null;
 }
 
 export interface BrowseBrandsResult {
@@ -799,6 +802,11 @@ export interface CatalogCigarTile extends CatalogCigar {
   // Whether a crawler-captured product photo exists (ADR-007). The tile links to
   // the authed thumb proxy when true; the BandTile art shows otherwise.
   hasProductPhoto: boolean;
+  // The servable photo row's id (null when none) — a fresh uuid on every
+  // capture/upload/replace. The tile fingerprints the immutable thumb URL with it
+  // (`?v=<id>`) so a Replace is seen at once instead of the cached prior image,
+  // mirroring the detail hero's fix (#127).
+  productPhotoId: string | null;
   // Whether the caller has marked this cigar as wanted (PRD-003 R-WANT-3); drives
   // the tile's static want badge. Principal-scoped, never leaks across users.
   wanted: boolean;
@@ -818,6 +826,8 @@ export interface LineGroup {
   // The line's borrowed cover — its first-by-name cigar with a product photo
   // (ADR-007), or null when none has one (the section thumb keeps BandTile art).
   coverCigarId: string | null;
+  // That cover cigar's photo row id, for fingerprinting the section thumb (#127).
+  coverProductPhotoId: string | null;
 }
 
 export interface GetBrandResult {
@@ -825,6 +835,8 @@ export interface GetBrandResult {
   // The brand's borrowed hero cover: its first-by-name cigar with a product
   // photo (ADR-007), or null when none has one.
   coverCigarId: string | null;
+  // That cover cigar's photo row id, for fingerprinting the hero thumb (#127).
+  coverProductPhotoId: string | null;
   lines: LineGroup[]; // alphabetical by line
   loose: CatalogCigarTile[]; // cigars with no line, a trailing section
 }
@@ -1177,6 +1189,100 @@ export interface SetCigarFactsResult {
   unchanged: string[];
   verification: Verification;
   replayed: boolean;
+}
+
+// Rename a catalog Cigar's canonical name (#45; curator-only, DESIGN-003 wave 4b).
+// canonicalName is identity, so update_cigar/setCigarFacts never touch it — this is
+// the one authorized path. Uniqueness is trigram-fuzzy (no constraint), so a rename
+// never collides at write time; a genuine duplicate is reconciled by merge. Audited
+// before→after; idempotent via the mutation envelope, and a no-op when the trimmed
+// name already matches (changed:false, no audit row).
+export interface RenameCigarInput {
+  clientRequestId: string;
+  cigarId: string;
+  canonicalName: string;
+  attribution?: CurationAttribution;
+  correlationId?: string;
+}
+
+export interface RenameCigarResult {
+  cigarId: string;
+  canonicalName: string; // the resulting (trimmed) name
+  changed: boolean; // false on an idempotent no-op (name already matched)
+  replayed: boolean;
+}
+
+// ---- Recent agent runs + Undo (DESIGN-003 §Curation review console, #126) ----
+//
+// An Undo of a `cigar.verify` is delivered inline by undoCurationAction (it writes a
+// reverts-linked `cigar.unverify` audit and flips verification back). A standalone
+// unverifyCigar service is intentionally NOT added — nothing else would call it
+// (no MCP tool, no standalone UI button), so it would be dead code.
+
+// Undo one agent audit action by writing its inverse, linked back through the
+// audit `reverts` self-link (migration 0012). Only actions with a true inverse are
+// undoable — exclude→restore, listing_match/photo-rights/set_facts→prior value,
+// verify→unverify; merge is intentionally NOT undoable (a per-merge bookkeeping
+// gap, documented). Curator-only; the whole check-and-reverse runs in one
+// transaction so a double-click can never double-undo. Idempotent via the envelope.
+export interface UndoCurationActionInput {
+  clientRequestId: string;
+  auditId: string; // the audit row to reverse
+  correlationId?: string;
+}
+
+export interface UndoCurationActionResult {
+  auditId: string; // the row that was reversed
+  action: string; // its original action
+  undoAuditId: string; // the new inverse audit row (carries reverts = auditId)
+  replayed: boolean;
+}
+
+// One grouped agent run in the review console's "Recent agent runs" list: the run
+// key, its action tally, span, and total. Grouped from audit_log by run_id where
+// actor='agent'; newest first (by lastAt).
+export interface AgentRunActionCount {
+  action: string;
+  count: number;
+}
+
+export interface AgentRunSummary {
+  runId: string;
+  total: number;
+  actions: AgentRunActionCount[]; // per-action counts, most-frequent first
+  firstAt: string; // ISO — earliest action in the run
+  lastAt: string; // ISO — latest action in the run
+}
+
+export interface AgentRunsResult {
+  runs: AgentRunSummary[];
+}
+
+// One expandable row under a run: the action, its target (a cigar canonical name
+// or a listing key), the agent's confidence, a compact before→after summary, and
+// whether it can still be undone (a true inverse exists AND it has not already been
+// reverted). `reverted` rows show state, not a button.
+export interface AgentRunRow {
+  auditId: string;
+  action: string;
+  createdAt: string; // ISO
+  confidence: number | null;
+  targetName: string | null; // cigar canonical name, else listing key, else null
+  summary: string | null; // e.g. "unverified → verified", "brand: Wrong → Padron"
+  reversible: boolean; // a true inverse exists for this action (and the data to run it)
+  reverted: boolean; // an undo row already links back to this one
+}
+
+export interface AgentRunRowsInput {
+  runId: string;
+  cursor?: string | null;
+  limit?: number;
+}
+
+export interface AgentRunRowsResult {
+  runId: string;
+  rows: AgentRunRow[];
+  nextCursor: string | null;
 }
 
 // ---- Curation worklist (the admin drain queue; DESIGN-003 wave 4a) ----------

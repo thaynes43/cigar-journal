@@ -6,8 +6,8 @@
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
 // The tool surface. The first seventeen are the conversational journal contract
-// (reads annotated readOnlyHint). The final seven are the admin catalog-curation
-// surface (DESIGN-003 wave 4a, issue #126): the ops-agent tools, gated on
+// (reads annotated readOnlyHint). The final eight are the admin catalog-curation
+// surface (DESIGN-003 wave 4a/4b, issue #126): the ops-agent tools, gated on
 // `curation:*` scope AND an admin-role principal — additive, existing tools and
 // scopes untouched (R-MCP-4).
 export const TOOL_NAMES = [
@@ -28,7 +28,7 @@ export const TOOL_NAMES = [
   "request_cigar_enrichment",
   "update_cigar",
   "record_price",
-  // Curation surface (admin-only) — one paged read + six curator writes.
+  // Curation surface (admin-only) — one paged read + seven curator writes.
   "get_curation_queue",
   "set_listing_match_status",
   "set_cigar_facts",
@@ -36,19 +36,26 @@ export const TOOL_NAMES = [
   "exclude_cigar",
   "restore_cigar",
   "set_product_photo_rights",
+  "rename_cigar",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-// Scope required to INVOKE each tool (tool-contract "Scopes" section). Response
-// scope-bounding (personal fields on catalog tools) is a separate, additive
-// check against journal:read inside the read handlers. The ADR-009 catalog-repair
-// tools fold into journal:write, matching how add_cigar's lazy catalog create and
-// the enrichment-queue write are already journal:write-scoped (there is no
-// catalog:write scope; catalog mutation rides journal:write by house precedent).
+// Scope(s) that AUTHORIZE each tool (tool-contract "Scopes" section) — holding ANY
+// one listed scope suffices (assertToolScope, the in-handler backstop, enforces the
+// any-of rule). Every tool lists exactly ONE scope EXCEPT get_cigar, so for all the
+// others "any-of" collapses to "require that scope"; get_cigar accepts catalog:read
+// OR curation:read (the curate agent reads a cigar's full detail while triaging,
+// under a curation-only token — #126). Response scope-bounding (personal fields on
+// catalog tools) is a separate, additive check against journal:read inside the read
+// handlers. The ADR-009 catalog-repair tools fold into journal:write, matching how
+// add_cigar's lazy catalog create and the enrichment-queue write are already
+// journal:write-scoped (there is no catalog:write scope; catalog mutation rides
+// journal:write by house precedent).
 export const TOOL_SCOPES: Record<ToolName, string[]> = {
   search_cigars: ["catalog:read"],
-  get_cigar: ["catalog:read"],
+  // catalog:read OR curation:read — the one any-of tool (see the block comment).
+  get_cigar: ["catalog:read", "curation:read"],
   // browse_catalog + get_offers invoke under catalog:read; the personal overlay
   // (and browse's personal filters) are additionally journal:read-bounded inside
   // the handler, exactly like search_cigars/get_cigar's personal fields.
@@ -81,6 +88,7 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   exclude_cigar: ["curation:write"],
   restore_cigar: ["curation:write"],
   set_product_photo_rights: ["curation:write"],
+  rename_cigar: ["curation:write"],
 };
 
 // Personal fields on catalog tools require this additional scope.
@@ -182,15 +190,16 @@ Field conventions:
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - Combine related corrections into one update_smoke call rather than several.
 
-Catalog curation (admin only). The get_curation_queue read and the six curation
+Catalog curation (admin only). The get_curation_queue read and the seven curation
 write tools are for an operations agent maintaining the catalog — not for
 conversational journaling; a normal chat session never uses them. get_curation_queue
 pages the work by kind (unverified, duplicates, match_triage, unbranded, untyped,
 missing_photos); drain a kind with its nextCursor. Apply only what the evidence
 supports: high-confidence corrections apply directly (set_cigar_facts overwrites a
-wrong brand/line/type/manufacturer; verify_cigar; set_listing_match_status
-confirmed/unmatched; exclude_cigar for non-cigar pollution, restore_cigar to undo;
-set_product_photo_rights approved/suppressed); low-confidence cases are skipped and
+wrong brand/line/type/manufacturer; rename_cigar corrects a wrong canonical name;
+verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
+non-cigar pollution, restore_cigar to undo; set_product_photo_rights
+approved/suppressed); low-confidence cases are skipped and
 reported, never guessed — leave an uncertain brand or type null rather than invent
 one. Pass runId (the batch id) and confidence (0-1) on every write so the run is
 auditable and reversible. Merges stay human-only in the web console — there is no

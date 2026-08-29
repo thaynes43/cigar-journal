@@ -10,3 +10,6 @@ dist/
 coverage/
 *.tsbuildinfo
 *.log
+
+# Lane-local visual verification (not committed)
+lane-screenshots/

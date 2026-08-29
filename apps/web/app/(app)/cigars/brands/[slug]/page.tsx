@@ -63,7 +63,9 @@ function LineSection({ line }: { line: LineGroup }) {
           <span className="block aspect-[2/3] h-14 shrink-0 overflow-hidden rounded-tile border border-line">
             {line.coverCigarId ? (
               <img
-                src={`/api/product-photos/${line.coverCigarId}/thumb`}
+                // Fingerprinted with the cover photo id so a Replace busts the
+                // cached thumb (issue 127).
+                src={`/api/product-photos/${line.coverCigarId}/thumb?v=${line.coverProductPhotoId}`}
                 alt=""
                 className="h-full w-full object-cover"
               />

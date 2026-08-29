@@ -35,6 +35,20 @@ import type {
   SetProductPhotoRightsResult,
   SetCigarFactsInput,
   SetCigarFactsResult,
+  RenameCigarInput,
+  RenameCigarResult,
+  UndoCurationActionInput,
+  UndoCurationActionResult,
+  AgentRunsResult,
+  AgentRunSummary,
+  AgentRunActionCount,
+  AgentRunRowsInput,
+  AgentRunRowsResult,
+  AgentRunRow,
+  CatalogStatus,
+  ProductPhotoRights,
+  ListingMatchStatus,
+  Verification,
   CurationAttribution,
   CurationWorklistInput,
   CurationWorklistResult,
@@ -694,13 +708,31 @@ async function excludeWithinTx(
     .set({ catalogStatus: "excluded", updatedAt: deps.now() })
     .where(eq(cigars.id, current.id));
 
+  // Cascade: an excluded cigar must not keep resurfacing in match_triage. Its
+  // 'auto' listing links are unmatched IN THE SAME TRANSACTION (status→'unmatched',
+  // cigar cleared — the setListingMatchStatus 'unmatched' contract), so the 20
+  // gift-card listings that point at excluded cigars in prod (#126) leave the
+  // triage queue for good. The unmatched ids ride the exclude audit's `after` so
+  // the action is transparent and auditable as one write.
+  //
+  // ASYMMETRY (documented): restoreCigar / an Undo of this exclude reactivates the
+  // cigar only — it does NOT re-match these listings. A legitimate listing is
+  // re-proposed as 'auto' by the crawler's next run; a bad gift-card match stays
+  // gone. The match_triage read ALSO filters non-active cigars, so even a
+  // re-proposed 'auto' against a still-excluded cigar never resurfaces.
+  const unmatched = await tx
+    .update(listingMatches)
+    .set({ status: "unmatched", cigarId: null, updatedAt: deps.now() })
+    .where(and(eq(listingMatches.cigarId, current.id), eq(listingMatches.status, "auto")))
+    .returning({ id: listingMatches.id });
+
   await tx.insert(auditLog).values({
     userId: principal.userId,
     ...auditAttribution(input.attribution),
     action: "cigar.exclude",
     smokeId: null,
     before,
-    after: { ...before, catalogStatus: "excluded" },
+    after: { ...before, catalogStatus: "excluded", cascadeUnmatched: unmatched.map((r) => r.id) },
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 
@@ -974,13 +1006,17 @@ async function setCigarFactsWithinTx(
       .set({ ...set, updatedAt: deps.now() })
       .where(eq(cigars.id, current.id));
 
+    // The cigar id rides both snapshots (like cigarSnapshot's `id`) so the review
+    // console can name the target and an Undo knows which row to write the
+    // before-values back to (undoCurationAction, DESIGN-003 wave 4b). Additive —
+    // the changed-field keys are unchanged.
     await tx.insert(auditLog).values({
       userId: principal.userId,
       ...auditAttribution(input.attribution),
       action: "cigar.set_facts",
       smokeId: null,
-      before,
-      after,
+      before: { id: current.id, ...before },
+      after: { id: current.id, ...after },
       correlationId: input.correlationId ?? input.clientRequestId,
     });
   }
@@ -997,6 +1033,85 @@ async function setCigarFactsWithinTx(
     userId: principal.userId,
     clientRequestId: input.clientRequestId,
     tool: "set_cigar_facts",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// --------------------------------------------------------------------------
+// renameCigar — set a Cigar's canonical name (#45; curator-only, wave 4b).
+// canonicalName is identity — update_cigar/setCigarFacts never touch it, so this
+// is the one authorized path. Uniqueness is trigram-fuzzy (no constraint), so a
+// rename never collides at write time. Audited before→after; idempotent via the
+// envelope; a no-op (no audit) when the trimmed name already matches.
+// --------------------------------------------------------------------------
+
+export async function renameCigar(
+  deps: Deps,
+  principal: Principal,
+  input: RenameCigarInput,
+): Promise<RenameCigarResult> {
+  assertCurator(principal);
+  const name = input.canonicalName.trim();
+  if (name.length === 0) {
+    throw new ValidationError([{ path: "canonicalName", message: "A cigar needs a name." }]);
+  }
+  const requestFingerprint = fingerprint(input);
+
+  try {
+    return await deps.db.transaction((tx) => renameWithinTx(tx, deps, principal, input, name, requestFingerprint));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as RenameCigarResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function renameWithinTx(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  input: RenameCigarInput,
+  name: string,
+  requestFingerprint: string,
+): Promise<RenameCigarResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as RenameCigarResult), replayed: true };
+  }
+
+  const current = await loadCigar(tx, input.cigarId);
+  if (!current) throw new CigarNotFoundError();
+
+  const changed = current.canonicalName !== name;
+  if (changed) {
+    await tx.update(cigars).set({ canonicalName: name, updatedAt: deps.now() }).where(eq(cigars.id, current.id));
+    await tx.insert(auditLog).values({
+      userId: principal.userId,
+      ...auditAttribution(input.attribution),
+      action: "cigar.rename",
+      smokeId: null,
+      before: { id: current.id, canonicalName: current.canonicalName },
+      after: { id: current.id, canonicalName: name },
+      correlationId: input.correlationId ?? input.clientRequestId,
+    });
+  }
+
+  const result: RenameCigarResult = { cigarId: current.id, canonicalName: name, changed, replayed: false };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "rename_cigar",
     requestFingerprint,
     smokeId: null,
     result,
@@ -1247,7 +1362,10 @@ async function matchTriagePage(
     FROM listing_matches lm
     JOIN vendors v ON v.id = lm.vendor_id
     LEFT JOIN cigars c ON c.id = lm.cigar_id
-    WHERE lm.status = 'auto' ${keyset}
+    -- Only auto matches whose cigar is still active surface for triage: a match
+    -- pointing at an excluded/merged cigar must not resurface (DESIGN-003 §Curation,
+    -- #126). A null-cigar 'auto' row (defensive — the resolver links one) still shows.
+    WHERE lm.status = 'auto' AND (c.id IS NULL OR c.catalog_status = 'active') ${keyset}
     ORDER BY lm.created_at ASC, lm.id ASC
     LIMIT ${limit + 1}
   `);
@@ -1446,4 +1564,369 @@ export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Pro
     brand: r.brand,
     remaining: Number(r.remaining),
   }));
+}
+
+// --------------------------------------------------------------------------
+// Recent agent runs + Undo (DESIGN-003 §Curation review console, #126). Two
+// reads (grouped runs, a run's rows) and one write (undo an action by its inverse).
+// --------------------------------------------------------------------------
+
+// The agent actions with a TRUE inverse — the only ones the review offers an Undo
+// for. Merge and dismiss have none (a per-merge bookkeeping gap, documented on
+// mergeCigars). set_facts is reversible only when its audit carries the cigar id
+// (recorded from wave 4b on); a legacy set_facts row has no cigar to land the
+// before-values on, so it reports non-reversible (state, not a button).
+const REVERSIBLE_ACTIONS = new Set([
+  "cigar.exclude",
+  "cigar.verify",
+  "listing_match.set_status",
+  "product_photo.set_rights",
+  "cigar.set_facts",
+]);
+
+function isReversibleAudit(action: string, before: Record<string, unknown>): boolean {
+  if (!REVERSIBLE_ACTIONS.has(action)) return false;
+  if (action === "cigar.set_facts") return typeof before.id === "string";
+  return true;
+}
+
+// A compact "before → after" line for one audit row, per action. Data-derived (not
+// chrome), so the review row reads at a glance without opening the raw JSONB.
+function fmtValue(v: unknown): string {
+  return v == null ? "—" : String(v);
+}
+
+function summarizeAudit(action: string, before: Record<string, unknown>, after: Record<string, unknown>): string | null {
+  switch (action) {
+    case "cigar.exclude":
+      return `${fmtValue(before.catalogStatus ?? "active")} → ${fmtValue(after.catalogStatus ?? "excluded")}`;
+    case "cigar.restore":
+      return `${fmtValue(before.catalogStatus ?? "excluded")} → ${fmtValue(after.catalogStatus ?? "active")}`;
+    case "cigar.verify":
+      return `${fmtValue(before.verification ?? "unverified")} → verified`;
+    case "cigar.unverify":
+      return `${fmtValue(before.verification ?? "verified")} → unverified`;
+    case "listing_match.set_status":
+      return `${fmtValue(before.status ?? "auto")} → ${fmtValue(after.status)}`;
+    case "product_photo.set_rights":
+      return `${fmtValue(before.rights)} → ${fmtValue(after.rights)}`;
+    case "cigar.rename":
+      return `${fmtValue(before.canonicalName)} → ${fmtValue(after.canonicalName)}`;
+    case "cigar.set_facts": {
+      const parts = Object.keys(after)
+        .filter((k) => k !== "id")
+        .map((k) => `${k}: ${fmtValue(before[k])} → ${fmtValue(after[k])}`);
+      return parts.length > 0 ? parts.join("; ") : null;
+    }
+    default:
+      return null;
+  }
+}
+
+// Recent agent runs, newest first (by last action): the run key, its action tally,
+// span, and total. Grouped from audit_log by run_id where actor='agent'. Two bounded
+// reads — the top runs by recency, then per-action counts for exactly those runs.
+const AGENT_RUNS_CAP = 50;
+
+export async function agentRuns(deps: Deps, principal: Principal): Promise<AgentRunsResult> {
+  assertCurator(principal);
+
+  const runResult = await deps.db.execute(sql`
+    SELECT run_id,
+           count(*)::int AS total,
+           min(created_at)::text AS first_at,
+           max(created_at)::text AS last_at
+    FROM audit_log
+    WHERE actor = 'agent' AND run_id IS NOT NULL
+    GROUP BY run_id
+    ORDER BY max(created_at) DESC
+    LIMIT ${AGENT_RUNS_CAP}
+  `);
+  const runRows = runResult.rows as unknown as {
+    run_id: string;
+    total: number;
+    first_at: string;
+    last_at: string;
+  }[];
+  if (runRows.length === 0) return { runs: [] };
+
+  const ids = runRows.map((r) => r.run_id);
+  const countResult = await deps.db.execute(sql`
+    SELECT run_id, action, count(*)::int AS n
+    FROM audit_log
+    WHERE actor = 'agent' AND run_id IN (${sql.join(ids, sql`, `)})
+    GROUP BY run_id, action
+  `);
+  const countRows = countResult.rows as unknown as { run_id: string; action: string; n: number }[];
+  const byRun = new Map<string, AgentRunActionCount[]>();
+  for (const c of countRows) {
+    const arr = byRun.get(c.run_id) ?? [];
+    arr.push({ action: c.action, count: Number(c.n) });
+    byRun.set(c.run_id, arr);
+  }
+
+  const runs: AgentRunSummary[] = runRows.map((r) => ({
+    runId: r.run_id,
+    total: Number(r.total),
+    actions: (byRun.get(r.run_id) ?? []).sort(
+      (a, b) => b.count - a.count || a.action.localeCompare(b.action),
+    ),
+    firstAt: new Date(r.first_at).toISOString(),
+    lastAt: new Date(r.last_at).toISOString(),
+  }));
+  return { runs };
+}
+
+// One run's rows, newest first, keyset-paged by (created_at, id). Each row carries
+// its target (a cigar canonical name, resolved by direct id even for an excluded
+// cigar; else a listing key), a compact before→after summary, and whether it can
+// still be undone (a true inverse exists AND no undo already links back). Only
+// actor='agent' rows of the run — a human Undo (actor 'web', no run_id) never appears.
+const RUN_ROWS_DEFAULT_LIMIT = 100;
+const RUN_ROWS_MAX_LIMIT = 500;
+
+export async function agentRunRows(
+  deps: Deps,
+  principal: Principal,
+  input: AgentRunRowsInput,
+): Promise<AgentRunRowsResult> {
+  assertCurator(principal);
+  const limit = Math.min(Math.max(input.limit ?? RUN_ROWS_DEFAULT_LIMIT, 1), RUN_ROWS_MAX_LIMIT);
+  const cursor = decodeWorklistCursor(input.cursor);
+  const keyset = cursor
+    ? sql`AND (a.created_at, a.id) < (${cursor[0]}::timestamptz, ${cursor[1]}::uuid)`
+    : sql``;
+
+  const result = await deps.db.execute(sql`
+    SELECT a.id, a.action, a.created_at::text AS created_at_text, a.confidence,
+           a.before, a.after,
+           EXISTS (SELECT 1 FROM audit_log r WHERE r.reverts = a.id) AS reverted,
+           tc.canonical_name AS target_cigar_name
+    FROM audit_log a
+    LEFT JOIN cigars tc ON tc.id = (
+      CASE
+        WHEN a.action IN ('cigar.exclude', 'cigar.verify', 'cigar.set_facts', 'cigar.rename')
+          THEN nullif(a.before->>'id', '')
+        WHEN a.action IN ('product_photo.set_rights', 'listing_match.set_status')
+          THEN nullif(a.before->>'cigarId', '')
+      END
+    )::uuid
+    WHERE a.actor = 'agent' AND a.run_id = ${input.runId} ${keyset}
+    ORDER BY a.created_at DESC, a.id DESC
+    LIMIT ${limit + 1}
+  `);
+  const rows = result.rows as unknown as {
+    id: string;
+    action: string;
+    created_at_text: string;
+    confidence: number | null;
+    before: unknown;
+    after: unknown;
+    reverted: boolean;
+    target_cigar_name: string | null;
+  }[];
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  const nextCursor = hasMore && last ? encodeWorklistCursor([last.created_at_text, last.id]) : null;
+
+  const out: AgentRunRow[] = page.map((r) => {
+    const before = (r.before ?? {}) as Record<string, unknown>;
+    const after = (r.after ?? {}) as Record<string, unknown>;
+    const reverted = r.reverted === true;
+    return {
+      auditId: r.id,
+      action: r.action,
+      createdAt: new Date(r.created_at_text).toISOString(),
+      confidence: r.confidence != null ? Number(r.confidence) : null,
+      targetName: r.target_cigar_name ?? (before.listingKey as string | undefined) ?? null,
+      summary: summarizeAudit(r.action, before, after),
+      reversible: isReversibleAudit(r.action, before) && !reverted,
+      reverted,
+    };
+  });
+  return { runId: input.runId, rows: out, nextCursor };
+}
+
+// Undo one agent action by writing its inverse, linked through `reverts` (migration
+// 0012). The whole check-and-reverse is one transaction, so a double request can
+// never double-undo (the already-reverted guard sees the first undo's row). The
+// inverse audit is actor 'web' (a human curator drove it) with no run_id, so it
+// never re-enters a "Recent agent runs" list. Idempotent via the envelope.
+export async function undoCurationAction(
+  deps: Deps,
+  principal: Principal,
+  input: UndoCurationActionInput,
+): Promise<UndoCurationActionResult> {
+  assertCurator(principal);
+  const requestFingerprint = fingerprint(input);
+
+  try {
+    return await deps.db.transaction((tx) => undoWithinTx(tx, deps, principal, input, requestFingerprint));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as UndoCurationActionResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function undoWithinTx(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  input: UndoCurationActionInput,
+  requestFingerprint: string,
+): Promise<UndoCurationActionResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as UndoCurationActionResult), replayed: true };
+  }
+
+  const target = (await tx.select().from(auditLog).where(eq(auditLog.id, input.auditId)).limit(1))[0];
+  if (!target) {
+    throw new ValidationError([{ path: "auditId", message: "No audit action matches the given id." }]);
+  }
+  const before = (target.before ?? {}) as Record<string, unknown>;
+  if (!isReversibleAudit(target.action, before)) {
+    throw new ValidationError([{ path: "auditId", message: "This action cannot be undone." }]);
+  }
+  // Already undone? An audit row whose `reverts` points here means the inverse
+  // already ran — the review shows state, not a button, and a second distinct
+  // request must not double-undo. (A replay of the SAME request short-circuited above.)
+  const already = (
+    await tx.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.reverts, target.id)).limit(1)
+  )[0];
+  if (already) {
+    throw new ValidationError([{ path: "auditId", message: "This action was already undone." }]);
+  }
+
+  const undoAuditId = await applyInverse(tx, deps, principal, target.id, target.action, before, input);
+
+  const result: UndoCurationActionResult = {
+    auditId: target.id,
+    action: target.action,
+    undoAuditId,
+    replayed: false,
+  };
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "undo_curation_action",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+  return result;
+}
+
+// Apply the inverse of one audit row and write a single audit row for it, linked
+// `reverts` = the undone row's id. Returns the new audit id. Each case reverses the
+// exact column the forward action set, reading the target from the `before` snapshot.
+async function applyInverse(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  targetId: string,
+  action: string,
+  before: Record<string, unknown>,
+  input: UndoCurationActionInput,
+): Promise<string> {
+  // A human curator drove the undo: actor 'web', no runId/confidence — so it never
+  // re-enters a "Recent agent runs" list.
+  const attribution = auditAttribution(undefined);
+  const correlationId = input.correlationId ?? input.clientRequestId;
+
+  async function writeUndo(values: {
+    action: string;
+    before: Record<string, unknown>;
+    after: Record<string, unknown>;
+  }): Promise<string> {
+    const inserted = await tx
+      .insert(auditLog)
+      .values({
+        userId: principal.userId,
+        ...attribution,
+        action: values.action,
+        smokeId: null,
+        before: values.before,
+        after: values.after,
+        reverts: targetId,
+        correlationId,
+      })
+      .returning({ id: auditLog.id });
+    return inserted[0]!.id;
+  }
+
+  switch (action) {
+    case "cigar.exclude": {
+      const cigarId = String(before.id);
+      const current = await loadCigar(tx, cigarId);
+      if (!current) throw new CigarNotFoundError();
+      const prior = (before.catalogStatus as CatalogStatus | undefined) ?? "active";
+      const snap = cigarSnapshot(current);
+      await tx.update(cigars).set({ catalogStatus: prior, updatedAt: deps.now() }).where(eq(cigars.id, cigarId));
+      return writeUndo({ action: "cigar.restore", before: snap, after: { ...snap, catalogStatus: prior } });
+    }
+    case "cigar.verify": {
+      const cigarId = String(before.id);
+      const current = await loadCigar(tx, cigarId);
+      if (!current) throw new CigarNotFoundError();
+      const prior = (before.verification as Verification | undefined) ?? "unverified";
+      const snap = cigarSnapshot(current);
+      await tx.update(cigars).set({ verification: prior, updatedAt: deps.now() }).where(eq(cigars.id, cigarId));
+      return writeUndo({ action: "cigar.unverify", before: snap, after: { ...snap, verification: prior } });
+    }
+    case "listing_match.set_status": {
+      const matchId = String(before.id);
+      const match = await loadListingMatch(tx, matchId);
+      if (!match) throw new ValidationError([{ path: "auditId", message: "The listing match no longer exists." }]);
+      const priorStatus = (before.status as ListingMatchStatus | undefined) ?? "auto";
+      const priorCigarId = (before.cigarId as string | null | undefined) ?? null;
+      const snap = listingMatchSnapshot(match);
+      await tx
+        .update(listingMatches)
+        .set({ status: priorStatus, cigarId: priorCigarId, updatedAt: deps.now() })
+        .where(eq(listingMatches.id, matchId));
+      return writeUndo({
+        action: "listing_match.set_status",
+        before: snap,
+        after: { ...snap, status: priorStatus, cigarId: priorCigarId },
+      });
+    }
+    case "product_photo.set_rights": {
+      const photoId = String(before.id);
+      const photo = (await tx.select().from(productPhotos).where(eq(productPhotos.id, photoId)).limit(1))[0];
+      if (!photo) throw new PhotoNotFoundError();
+      const prior = (before.rights as ProductPhotoRights | undefined) ?? "pending";
+      const snap = productPhotoSnapshot(photo);
+      await tx.update(productPhotos).set({ rights: prior }).where(eq(productPhotos.id, photoId));
+      return writeUndo({ action: "product_photo.set_rights", before: snap, after: { ...snap, rights: prior } });
+    }
+    case "cigar.set_facts": {
+      const cigarId = String(before.id);
+      const current = await loadCigar(tx, cigarId);
+      if (!current) throw new CigarNotFoundError();
+      const set: Partial<NewCigarRow> = {};
+      const undoBefore: Record<string, unknown> = { id: cigarId };
+      const undoAfter: Record<string, unknown> = { id: cigarId };
+      for (const { key, column } of CIGAR_FACT_COLUMNS) {
+        if (!(key in before)) continue;
+        const restore = (before[key] as string | null | undefined) ?? null;
+        (set as Record<string, unknown>)[column as string] = restore;
+        undoBefore[key] = (current as unknown as Record<string, unknown>)[column as string] ?? null;
+        undoAfter[key] = restore;
+      }
+      await tx.update(cigars).set({ ...set, updatedAt: deps.now() }).where(eq(cigars.id, cigarId));
+      return writeUndo({ action: "cigar.set_facts", before: undoBefore, after: undoAfter });
+    }
+    default:
+      throw new ValidationError([{ path: "auditId", message: "This action cannot be undone." }]);
+  }
 }
