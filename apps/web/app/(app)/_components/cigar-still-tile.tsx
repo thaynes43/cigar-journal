@@ -6,14 +6,16 @@ import { RatingSeal } from "./rating-seal";
 import { WantBadge } from "./want-badge";
 import { FavoriteBadge } from "./favorite-badge";
 
-// The "episode" still: a 16:9 tile for one cigar at its vitola. Below the art,
-// a one-line name, a `vitola · type` subtitle, and a badge row capped at three
-// (DESIGN-002): the remaining count, the want mark, and the rating seal lead in
-// that priority; dimensions fill a free slot and yield first, and the smoked-count
-// folds into the detail page. The favorite mark does NOT enter that capped row —
-// it rides the art corner as a heart (FavoriteBadge), so it never evicts a
-// dims/remaining/rating badge. Art is the BandTile fallback until an ADR-007
-// ProductPhoto lands via `imageUrl`.
+// The "episode" still: a 3:4 portrait tile for one cigar at its vitola (DESIGN-003
+// §Tile — the whole photo stock is 600×800, so 16:9 cropped every shot). Below the
+// art, a one-line name, a `vitola · type` subtitle, a muted per-stick price when a
+// current offer carries one (tabular numerals, never a badge — the badge cap
+// holds), and a badge row capped at three (DESIGN-002): the remaining count, the
+// want mark, and the rating seal lead in that priority; dimensions fill a free slot
+// and yield first, and the smoked-count folds into the detail page. The favorite
+// mark does NOT enter that capped row — it rides the art corner as a heart
+// (FavoriteBadge), so it never evicts a dims/remaining/rating badge. Art is the
+// BandTile fallback until an ADR-007 ProductPhoto lands via `imageUrl`.
 export function CigarStillTile({
   cigar,
   imageUrl,
@@ -22,6 +24,11 @@ export function CigarStillTile({
   imageUrl?: string | null;
 }) {
   const subtitle = [cigar.vitola.name, cigar.type].filter(Boolean).join(" · ");
+  // Per-stick price-at-a-glance (DESIGN-003 §Tile, R-PRICE-2): shown only when the
+  // best offer derives a per-stick figure; a package-only offer carries none, so
+  // the tile shows nothing rather than a misleading number (DESIGN-002 honesty).
+  const perStickPrice =
+    cigar.price && cigar.price.perStick ? `$${cigar.price.amount.toFixed(2)} /stick` : null;
   const dims =
     cigar.vitola.lengthInches != null && cigar.vitola.ringGauge != null
       ? `${cigar.vitola.lengthInches}" × ${cigar.vitola.ringGauge}`
@@ -56,7 +63,7 @@ export function CigarStillTile({
 
   return (
     <Link href={`/cigars/${cigar.cigarId}`} className="group flex h-full flex-col gap-2">
-      <div className="relative aspect-video overflow-hidden rounded-card border border-line transition-colors group-hover:border-accent/60">
+      <div className="relative aspect-[3/4] overflow-hidden rounded-card border border-line transition-colors group-hover:border-accent/60">
         {imageUrl ? (
           <img src={imageUrl} alt="" className="h-full w-full object-cover" />
         ) : (
@@ -67,6 +74,9 @@ export function CigarStillTile({
       <div className="flex min-w-0 flex-col gap-1">
         <span className="truncate font-display font-semibold text-ink">{cigar.canonicalName}</span>
         {subtitle ? <span className="label-caps truncate">{subtitle}</span> : null}
+        {perStickPrice ? (
+          <span className="text-xs tabular-nums text-muted">{perStickPrice}</span>
+        ) : null}
         {badges.length > 0 ? (
           <div className="flex flex-wrap items-center gap-1.5">{badges}</div>
         ) : null}
