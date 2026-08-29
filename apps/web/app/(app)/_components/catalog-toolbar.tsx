@@ -3,10 +3,11 @@
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import type { CatalogSort, OwnershipFacet } from "@cj/domain";
-import { ui } from "@/lib/ui";
+import { filterChip, ui } from "@/lib/ui";
 import { useDebounced } from "@/lib/use-debounced";
 import {
   CATALOG_ALL_SORTS,
+  CATALOG_CHIPS,
   CATALOG_OWNERSHIP_FACETS,
   CATALOG_TYPE_FACETS,
   CATALOG_VIEWS,
@@ -17,6 +18,7 @@ import {
   type CatalogTypeFacet,
   type CatalogView,
 } from "./catalog-registry";
+import { BrandChip } from "./catalog-brand-chip";
 
 // The catalog toolbar owns all browse state (view, q, type, own, sort), and those
 // are the only URL params, so it rebuilds the target URL from its props (via the
@@ -25,14 +27,17 @@ import {
 // back-button quiet; the view switch `push`es (PRD-002 conventions). Rails carry
 // leading `label-caps` labels so adjacent segmented groups never read as competing
 // filters (DESIGN-003 §IA labeled-rails). It stays one row that pans on mobile.
+// After the rails, the grid-only filter chips (Brand popover + In stock / Smoked /
+// Favorites toggles) compose with q/own/type/sort and apply the same way — each
+// `router.replace`s a URL the registry builds, keeping the URL the state store.
 
-export function CatalogToolbar({ view, q, type, own, sort }: CatalogState) {
+export function CatalogToolbar({ view, q, type, own, sort, brand, inStock, smoked, favorites }: CatalogState) {
   const router = useRouter();
   const pathname = usePathname();
 
   const urlFor = (next: CatalogState): string => catalogUrl(pathname, next);
 
-  const state: CatalogState = { view, q, type, own, sort };
+  const state: CatalogState = { view, q, type, own, sort, brand, inStock, smoked, favorites };
   const [text, setText] = useState(q);
   const debounced = useDebounced(text, 250);
 
@@ -64,9 +69,36 @@ export function CatalogToolbar({ view, q, type, own, sort }: CatalogState) {
     router.replace(urlFor({ ...state, q: text, sort: next }));
   }
 
+  // The filter chips (grid-only). Each edits its own param and `router.replace`s,
+  // composing with the rest of the slice state. Brand carries a value; the rest
+  // are presence toggles. `Clear all` drops every chip at once.
+  function selectBrand(next?: string): void {
+    router.replace(urlFor({ ...state, q: text, brand: next }));
+  }
+
+  function toggleInStock(): void {
+    router.replace(urlFor({ ...state, q: text, inStock: !inStock }));
+  }
+
+  function toggleSmoked(): void {
+    router.replace(urlFor({ ...state, q: text, smoked: !smoked }));
+  }
+
+  function toggleFavorites(): void {
+    router.replace(urlFor({ ...state, q: text, favorites: !favorites }));
+  }
+
+  function clearAllChips(): void {
+    router.replace(
+      urlFor({ ...state, q: text, brand: undefined, inStock: false, smoked: false, favorites: false }),
+    );
+  }
+
   const activeType: CatalogTypeFacet = type ?? "all";
   const showFacets = OWNERSHIP_FACET_VIEWS.includes(view);
   const showTypeFacet = TYPE_FACET_VIEWS.includes(view);
+  const activeChipCount =
+    (brand ? 1 : 0) + (inStock ? 1 : 0) + (smoked ? 1 : 0) + (favorites ? 1 : 0);
 
   return (
     <div className="flex snap-x flex-nowrap items-center gap-3 overflow-x-auto sm:flex-wrap sm:overflow-visible">
@@ -118,7 +150,54 @@ export function CatalogToolbar({ view, q, type, own, sort }: CatalogState) {
           />
         </Rail>
       ) : null}
+
+      {view === "all" ? (
+        <div className="flex shrink-0 items-center gap-2">
+          <BrandChip value={brand} onSelect={selectBrand} />
+          <ToggleChip label={CATALOG_CHIPS.inStock} active={inStock} onToggle={toggleInStock} />
+          <ToggleChip label={CATALOG_CHIPS.smoked} active={smoked} onToggle={toggleSmoked} />
+          <ToggleChip label={CATALOG_CHIPS.favorites} active={favorites} onToggle={toggleFavorites} />
+          {activeChipCount >= 2 ? (
+            <button
+              type="button"
+              onClick={clearAllChips}
+              className="label-caps whitespace-nowrap text-muted transition-colors hover:text-ink"
+            >
+              {CATALOG_CHIPS.clearAll}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+// A boolean filter chip (In stock / Smoked / Favorites): a ghost pill when off,
+// an accent-tinted pill with a ✕ when on. Clicking toggles it; there is no value,
+// so the ✕ is a decorative "clear" signal, not a separate control.
+function ToggleChip({
+  label,
+  active,
+  onToggle,
+}: {
+  label: string;
+  active: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onToggle}
+      className={`${filterChip.base} ${active ? filterChip.active : filterChip.inactive}`}
+    >
+      <span>{label}</span>
+      {active ? (
+        <span aria-hidden className="ml-0.5 text-sm leading-none opacity-70">
+          ×
+        </span>
+      ) : null}
+    </button>
   );
 }
 

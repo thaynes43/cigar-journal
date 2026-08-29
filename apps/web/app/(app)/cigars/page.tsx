@@ -6,7 +6,7 @@ import { CatalogAllGrid } from "../_components/catalog-all-grid";
 import { CatalogShelves } from "../_components/catalog-shelves";
 import { BrandPosterTile } from "../_components/brand-poster-tile";
 import { LedgerTable } from "../_components/ledger-table";
-import { CATALOG_GRID, parseView } from "../_components/catalog-registry";
+import { CATALOG_GRID, hasActiveChip, parseView } from "../_components/catalog-registry";
 
 // The unified Catalog surface (DESIGN-003 §IA): `/cigars` IS the cigar grid.
 // Landing = root shelves (lenses) above the full, filterable grid of every catalog
@@ -23,6 +23,10 @@ export default async function CatalogPage({
     type?: string;
     own?: string;
     sort?: string;
+    brand?: string;
+    instock?: string;
+    smoked?: string;
+    favorites?: string;
   }>;
 }) {
   await requireAuth();
@@ -38,15 +42,40 @@ export default async function CatalogPage({
       ? params.sort
       : "name";
 
+  // The grid filter chips (DESIGN-003 wave 6). `brand` carries an exact value; the
+  // rest are presence flags (present=on, absent=off). Parsed here and threaded to
+  // both the toolbar (chip UI) and the grid (browse args).
+  const brand =
+    typeof params.brand === "string" && params.brand.trim() ? params.brand.trim() : undefined;
+  const inStock = params.instock !== undefined;
+  const smoked = params.smoked !== undefined;
+  const favorites = params.favorites !== undefined;
+
   // Root shelves render only at the true grid root: default view, no active facet
-  // (ownership or type), no search. The grid is always present at root, so any
-  // narrowing collapses the shelves but never empties the page (DESIGN-003 §IA).
-  const atRoot = view === "all" && own === "all" && type === undefined && q === "";
+  // (ownership or type), no search, and no active filter chip. The grid is always
+  // present at root, so any narrowing collapses the shelves but never empties the
+  // page (DESIGN-003 §IA — chips follow the same rule as the rails).
+  const atRoot =
+    view === "all" &&
+    own === "all" &&
+    type === undefined &&
+    q === "" &&
+    !hasActiveChip({ brand, inStock, smoked, favorites });
 
   return (
     <div className="flex flex-col gap-6">
       <h1 className="font-display text-2xl font-semibold text-ink">Catalog</h1>
-      <CatalogToolbar view={view} q={q} type={type} own={own} sort={sort} />
+      <CatalogToolbar
+        view={view}
+        q={q}
+        type={type}
+        own={own}
+        sort={sort}
+        brand={brand}
+        inStock={inStock}
+        smoked={smoked}
+        favorites={favorites}
+      />
       {view === "ledger" ? (
         <LedgerView />
       ) : view === "brands" ? (
@@ -54,7 +83,16 @@ export default async function CatalogPage({
       ) : (
         <>
           {atRoot ? <CatalogShelves /> : null}
-          <CatalogAllGrid q={q || undefined} type={type} own={own} sort={sort} />
+          <CatalogAllGrid
+            q={q || undefined}
+            type={type}
+            own={own}
+            sort={sort}
+            brand={brand}
+            inStock={inStock}
+            smoked={smoked}
+            favorites={favorites}
+          />
         </>
       )}
     </div>

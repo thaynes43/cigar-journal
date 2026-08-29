@@ -30,6 +30,18 @@ export const wantChip = {
   unset: "border border-line text-muted",
 } as const;
 
+// The catalog filter chip (DESIGN-003 §IA), grid-only. A ghost outline pill when
+// inactive; an accent-tinted pill when its filter is on (carrying `Label · value`
+// for Brand, or just the label + a ✕ clear for the toggle chips). One shape for
+// the Brand popover trigger and the three toggle chips, so the row reads as one
+// family. The accent tint spends the reserved amber on "this filter is engaged",
+// never a full fill (that stays the segmented control's active-segment signal).
+export const filterChip = {
+  base: "inline-flex shrink-0 items-center gap-1 rounded-chip border px-3 py-1 text-xs font-medium whitespace-nowrap transition-colors focus-visible:ring-2 focus-visible:ring-accent/25 focus-visible:outline-none",
+  inactive: "border-line text-muted hover:border-accent hover:text-ink",
+  active: "border-accent/50 bg-accent/10 text-ink",
+} as const;
+
 // The favorite mark's control shape (DESIGN-002) — the second cigar-level mark.
 // Chip-shaped like the WantToggle, but the state signal is the HEART's fill
 // (♥ set / ♡ unset) in the warm `ember` reserved for hearts; the single amber

@@ -21,22 +21,42 @@ const hasPerStick = (c: CatalogCigarTile): boolean => c.price != null && c.price
 // ahead, with a manual Load more button as the fallback. Filter changes keep the
 // prior page visible and dimmed while the new one loads (keepPreviousData); the
 // first load shows a skeleton grid holding the exact geometry. State
-// (q/type/own/sort) is owned by the URL and passed in as props. `own: "all"` is
-// normalized to undefined so it carries no filter. The result count and, under
-// price sort, the unpriced break render from the same payload.
+// (q/type/own/sort + the filter chips) is owned by the URL and passed in as props.
+// `own: "all"` is normalized to undefined so it carries no filter; the chip
+// booleans send only their true (present=on) side, so an off chip carries nothing.
+// The result count and, under price sort, the unpriced break render from the same
+// payload. Every filter is part of the query key, so a chip edit refetches with
+// keepPreviousData — the prior grid dims in place while the new page loads.
 export function CatalogAllGrid({
   q,
   type,
   own,
   sort,
+  brand,
+  inStock,
+  smoked,
+  favorites,
 }: {
   q?: string;
   type?: CigarType;
   own?: OwnershipFacet;
   sort?: CatalogSort;
+  brand?: string;
+  inStock?: boolean;
+  smoked?: boolean;
+  favorites?: boolean;
 }) {
   const query = api.catalog.browse.useInfiniteQuery(
-    { q, type, own: own === "all" ? undefined : own, sort },
+    {
+      q,
+      type,
+      own: own === "all" ? undefined : own,
+      sort,
+      brand,
+      inStock: inStock ? true : undefined,
+      smoked: smoked ? true : undefined,
+      favorited: favorites ? true : undefined,
+    },
     {
       getNextPageParam: (last) => last.nextCursor,
       placeholderData: keepPreviousData,

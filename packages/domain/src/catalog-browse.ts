@@ -219,9 +219,10 @@ function ownershipCondition(own: OwnershipFacet | undefined): SQL | null {
 // false requires its absence — and they AND together (and with the web's `own`
 // facet), unlike that one exclusive control. `inHumidor`/`wanted` reference the
 // pre-aggregated ownershipJoins columns; `inStock` the OFFER_JOIN's has_in_stock;
-// `smoked` a principal-scoped EXISTS. All pre-group, so they belong in WHERE, and
-// none leak another user's state. Callers must ensure the referenced joins are
-// present (tileSelect always carries them; the count query adds them per filter).
+// `smoked`/`favorited` a principal-scoped EXISTS. All pre-group, so they belong
+// in WHERE, and none leak another user's state. Callers must ensure the
+// referenced joins are present (tileSelect always carries them; the count query
+// adds them per filter — the EXISTS-form filters are self-contained, needing none).
 function overlayFilters(principal: Principal, args: BrowseCatalogArgs): SQL[] {
   const conds: SQL[] = [];
   if (args.inHumidor === true) conds.push(sql`${REMAINING} > 0`);
@@ -236,6 +237,14 @@ function overlayFilters(principal: Principal, args: BrowseCatalogArgs): SQL[] {
     conds.push(
       sql`NOT EXISTS (SELECT 1 FROM smokes sx WHERE sx.cigar_id = c.id AND sx.user_id = ${principal.userId})`,
     );
+  if (args.favorited === true)
+    conds.push(
+      sql`EXISTS (SELECT 1 FROM favorites fx WHERE fx.cigar_id = c.id AND fx.user_id = ${principal.userId})`,
+    );
+  if (args.favorited === false)
+    conds.push(
+      sql`NOT EXISTS (SELECT 1 FROM favorites fx WHERE fx.cigar_id = c.id AND fx.user_id = ${principal.userId})`,
+    );
   if (args.inStock === true) conds.push(sql`co.has_in_stock IS TRUE`);
   if (args.inStock === false) conds.push(sql`co.has_in_stock IS NOT TRUE`);
   return conds;
@@ -243,8 +252,8 @@ function overlayFilters(principal: Principal, args: BrowseCatalogArgs): SQL[] {
 
 // Which joins the COUNT query needs for the active filters (the page query's
 // tileSelect always carries all of them). `own`/inHumidor/wanted need the
-// ownershipJoins; inStock needs the OFFER_JOIN; brand/type/q/smoked need neither
-// (plain columns or a self-contained EXISTS).
+// ownershipJoins; inStock needs the OFFER_JOIN; brand/type/q/smoked/favorited
+// need neither (plain columns or a self-contained EXISTS).
 function countJoinsFor(principal: Principal, args: BrowseCatalogArgs, facet: SQL | null): SQL {
   const needsOwnership =
     facet != null || args.inHumidor !== undefined || args.wanted !== undefined;
@@ -555,7 +564,7 @@ export async function getBrand(
 }
 
 // The All-cigars browse: q/brand/type/ownership filtered (the web's exclusive
-// `own` facet or the MCP surface's independent inHumidor/wanted/smoked/inStock
+// `own` facet or the independent inHumidor/wanted/smoked/favorited/inStock
 // booleans), sorted (name | my-rating | recently-added | price), keyset-paginated
 // per sort so pages never dup or gap. Fetches one extra row to decide whether a
 // next cursor exists. The filters and cursor thread through WHERE for plain-column

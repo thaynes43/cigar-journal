@@ -24,9 +24,19 @@ export const catalogRouter = router({
     .input(
       z.object({
         q: z.string().optional(),
+        // Exact brand match, case-insensitive (DESIGN-003 §IA `Brand` chip);
+        // the domain lower/trim-compares it against `c.brand`.
+        brand: z.string().optional(),
         type: z.enum(["NC", "CC"]).optional(),
         sort: z.enum(CATALOG_SORTS).optional(),
         own: ownEnum.optional(),
+        // The independent, composable overlay booleans behind the grid's filter
+        // chips (DESIGN-003 §IA): each ANDs with `own` and the others. The web
+        // chips only ever assert the true side (present=on); the domain also
+        // honours false for the MCP surface.
+        inStock: z.boolean().optional(),
+        smoked: z.boolean().optional(),
+        favorited: z.boolean().optional(),
         cursor: z.string().nullish(),
         limit: z.number().optional(),
       }),
