@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.0](https://github.com/thaynes43/cigar-journal/compare/v0.21.0...v0.22.0) (2026-08-29)
+
+
+### Features
+
+* **mcp:** browse_catalog + get_offers tools; consolidate instructions & contract ([#94](https://github.com/thaynes43/cigar-journal/issues/94)) ([#117](https://github.com/thaynes43/cigar-journal/issues/117)) ([2637032](https://github.com/thaynes43/cigar-journal/commit/2637032a2262f1a59949cecf7019db43b268b125))
+* **web:** complete cigar detail rebuild ([#92](https://github.com/thaynes43/cigar-journal/issues/92)) ([#115](https://github.com/thaynes43/cigar-journal/issues/115)) ([6b0fba6](https://github.com/thaynes43/cigar-journal/commit/6b0fba66d47c7abbfbf7f941ee6cc45467bad07a))
+
 ## [0.21.0](https://github.com/thaynes43/cigar-journal/compare/v0.20.0...v0.21.0) (2026-08-29)
 
 
