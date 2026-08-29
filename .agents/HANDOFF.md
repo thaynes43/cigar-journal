@@ -1,4 +1,4 @@
-# Session handoff — 2026-08-29 (DESIGN-003 catalog rework shipped)
+# Session handoff — 2026-08-29 EOD (catalog rework + curation agent operational)
 
 For a cold-start agent. The durable backlog is GitHub issues (label `backlog`);
 this file is the bridge: where the last session left prod, and what to pick up.
@@ -6,7 +6,23 @@ Overwrite it at the next major handoff.
 
 ## Where prod stands
 
-- **v0.24.0** live and verified (web + mcp pods on the new image, health OK,
+- **v0.25.1** live and verified. On top of 0.24.0 (below): filter chips
+  (#136 — Brand/In stock/Smoked/Favorites, wave 6 done, #124 closed), the
+  curator product-photo upload path (#139 — direct + phone upload-link +
+  "Missing photos" worklist of the owner's 63 photoless holds), the MCP
+  curation tool surface (#138 — curation scopes, 7 tools, actor='agent'
+  attribution), and run_id→text (#141, migration 0016).
+- **The curation agent is OPERATIONAL** (dev-env-ops wo-* lane, daily 10:15
+  ET; cigar-journal #126 + haynes-ops #2659/#2662). First run 2026-08-29:
+  300/300 writes, 0 errors — 291 wrong listing matches cleared, 9 non-cigar
+  rows excluded; queue after: triage 1487, untyped 828, unbranded 532.
+  OPERATING MANUAL: memory `curation-lane-ops` (rotating token on the ops
+  PVC, requeue = kill post-mortem window + ops-SA Job, epoch CM stamps).
+  Surface gaps queued on #126 (exclude→triage cascade, get_cigar scope).
+- **OAuth loopback bug #140**: authorize normalizes incoming loopback
+  redirect_uris to localhost but matches stored literals — register clients
+  with BOTH forms until fixed.
+- **v0.24.0** shipped earlier today (web + mcp pods on the new image, health OK,
   anonymous `/cigars` → signin, `/curation` → `/admin/catalog` 307). Ships:
   - **DESIGN-003 waves 1–3** (docs/design/003-library-catalog.md — the
     corrective spec after the owner rejected the v0.23 catalog IA): `/cigars`
@@ -25,7 +41,7 @@ Overwrite it at the next major handoff.
     the same guard). Additive schema change → the ChatGPT connector needs a
     **refresh + NEW chat** before retesting (docs/mcp/client-compatibility.md).
 - **Crawler CronJobs still SUSPENDED** (owner-gated, #97). Both now pinned to
-  v0.24.0.
+  v0.25.1.
 - Owner's journal still `private`; public pages dark until the #97 flip
   (which can now be done from /settings instead of raw SQL).
 
@@ -36,17 +52,16 @@ archive cutover (53 reviews) · owner's Micallef photo.
 
 ## Open backlog (rescoped 2026-08-29 — read the issues, bodies were rewritten)
 
-- **#124 library catalog build** — wave 1 DONE; remainder = wave 6 filter
-  chips (router overlay booleans + brand, chip popovers, counts).
-- **#125 chrome** — DONE via #133 (left open only if follow-ups surface;
-  close after verifying on prod).
-- **#126 agent enrichment** — wave 3 primitives DONE; remainder = the
-  `curate` batch role (Sonnet 5) + review/undo queue. Read the issue comment:
-  two carry-forwards (crawler overwrites curator `unmatched` — needs
-  `decided_by`; unmerge needs per-merge bookkeeping).
-- **#127 product images** — untouched. Root cause quantified: all 853 photos
-  from the one Fox seed; owner humidor 63/82 photoless (all 46 CC); 834
-  type-NULL, 538 unbranded. Sequence in the issue.
+- **#124/#125 CLOSED** (chips #136, chrome #133 — verified on prod).
+- **#126 agent enrichment** — agent RUNNING (see above). Remainder: the
+  review/undo web UI on /admin/catalog; exclude→triage cascade; get_cigar
+  scope for curation tokens; crawler `decided_by` guard (curator `unmatched`
+  survives re-crawls); unmerge bookkeeping.
+- **#127 product images** — step 1 (upload path + worklist) SHIPPED #139;
+  remainder: agent photo-attach, 2 Guys/Small Batch adapters (live robots/ToS
+  read first; CI dropped), CC sources per ADR-006, Wikidata fallback, tile
+  thumb-URL fingerprinting (Replace cache staleness, noted on the issue).
+- **#140 OAuth loopback redirect bug** — new, evidence matrix on the issue.
 - **#128 public journal markdown fidelity** — should land before the #97 flip.
 - **#129 dev-env-cli OAuth token expires ~2026-09-26** — only hard-dated item.
 - **#45** destructive-op curation surface (renameCigar still unbuilt) ·
