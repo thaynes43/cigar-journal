@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
-import { smokes, smokeProgression, cigars, idempotencyKeys, auditLog } from "@cj/db";
+import { smokes, smokeProgression, smokeConsumptions, purchases, cigars, idempotencyKeys, auditLog } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import type { Principal, SaveSmokeInput } from "./index.js";
@@ -237,5 +237,104 @@ describe("saveSmoke", () => {
       overallDescriptors: ["leather", "coffee"],
     }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(IdempotencyConflictError);
+  });
+
+  // ---- explicit consumption (ADR-008) --------------------------------------
+
+  it("captures a from-humidor consumption at save (source user) and folds it into the audit", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Consume Corona", brand: "Csm" });
+    const result = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["marker"],
+      consumption: { fromHumidor: true },
+    });
+    const rows = await h.deps.db
+      .select()
+      .from(smokeConsumptions)
+      .where(eq(smokeConsumptions.smokeId, result.smoke.smokeId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.source).toBe("user");
+    expect(rows[0]!.purchaseId).toBeNull();
+
+    const audit = (
+      await h.deps.db.select().from(auditLog).where(eq(auditLog.smokeId, result.smoke.smokeId))
+    )[0]!;
+    expect((audit.after as { consumption?: { source: string } }).consumption?.source).toBe("user");
+  });
+
+  it("writes NO consumption when the block is omitted or fromHumidor is false", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Unknown Provenance Robusto", brand: "Unk" });
+    const omitted = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["marker"],
+    });
+    const explicitFalse = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["lounge"],
+      consumption: { fromHumidor: false },
+    });
+    for (const id of [omitted.smoke.smokeId, explicitFalse.smoke.smokeId]) {
+      const rows = await h.deps.db
+        .select()
+        .from(smokeConsumptions)
+        .where(eq(smokeConsumptions.smokeId, id));
+      expect(rows).toHaveLength(0);
+    }
+  });
+
+  it("attributes a consumption to an owned lot and rejects a foreign lot", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Lot Attribution Lonsdale", brand: "Lot" });
+    const otherCigarId = await h.seedCigar({ canonicalName: "Other Cigar", brand: "Oth" });
+    const [lot] = await h.deps.db
+      .insert(purchases)
+      .values({ userId: user.userId, cigarId, quantity: 5, purchasedAt: "2026-01-01" })
+      .returning({ id: purchases.id });
+    const [foreignLot] = await h.deps.db
+      .insert(purchases)
+      .values({ userId: user.userId, cigarId: otherCigarId, quantity: 5 })
+      .returning({ id: purchases.id });
+
+    const ok = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["marker"],
+      consumption: { fromHumidor: true, purchaseId: lot!.id },
+    });
+    const rows = await h.deps.db
+      .select()
+      .from(smokeConsumptions)
+      .where(eq(smokeConsumptions.smokeId, ok.smoke.smokeId));
+    expect(rows[0]!.purchaseId).toBe(lot!.id);
+
+    // A lot of a DIFFERENT cigar is foreign → validation_error, no smoke written.
+    const error = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["marker"],
+      consumption: { fromHumidor: true, purchaseId: foreignLot!.id },
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ValidationError);
+    expect((error as ValidationError).fields.some((f) => f.path === "consumption.purchaseId")).toBe(true);
+  });
+
+  it("does not double-deduct on a replayed save with consumption", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Replay Consume Toro", brand: "RepC" });
+    const input: SaveSmokeInput = {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["marker"],
+      consumption: { fromHumidor: true },
+    };
+    const first = await saveSmoke(h.deps, user, input);
+    const second = await saveSmoke(h.deps, user, input);
+    expect(second.replayed).toBe(true);
+    const rows = await h.deps.db
+      .select()
+      .from(smokeConsumptions)
+      .where(eq(smokeConsumptions.smokeId, first.smoke.smokeId));
+    expect(rows).toHaveLength(1); // linked once, not twice
   });
 });

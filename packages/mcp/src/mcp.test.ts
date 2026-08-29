@@ -428,6 +428,7 @@ describe("@cj/mcp adapter", () => {
       for (const s of byText.smokes) {
         expect(s).not.toHaveProperty("strength");
         expect(s).not.toHaveProperty("photoCount");
+        expect(s).not.toHaveProperty("fromHumidor");
       }
       expect(byText.smokes[0]).toHaveProperty("matchedIn");
       expect(byText.smokes[0]).toHaveProperty("descriptors");
@@ -952,6 +953,108 @@ describe("@cj/mcp adapter", () => {
     await withClient(ownerFull, async (client) => {
       const result = await call(client, "set_want", { cigarId: randomUUID(), wanted: true });
       expect(errorOf(result).code).toBe("cigar_not_found");
+    });
+  });
+
+  // ---- explicit consumption (ADR-008) ---------------------------------------
+
+  async function remainingFor(client: Client, cigarId: string): Promise<number> {
+    const inv = payloadOf(await call(client, "get_my_inventory", {})) as {
+      holdings: { cigar: { cigarId: string }; remaining: number }[];
+    };
+    return inv.holdings.find((hh) => hh.cigar.cigarId === cigarId)?.remaining ?? 0;
+  }
+
+  it("save_smoke consumption: omitted/false deducts nothing, fromHumidor deducts, replay does not double-deduct", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "MCP Consume Toro", brand: "MCPConsume" });
+    await withClient(ownerFull, async (client) => {
+      await call(client, "record_purchase", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId },
+        quantity: 3,
+      });
+      expect(await remainingFor(client, cigarId)).toBe(3);
+
+      // Omitted consumption = unknown = no deduction.
+      await call(client, "save_smoke", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId },
+        overallDescriptors: ["omitted"],
+      });
+      expect(await remainingFor(client, cigarId)).toBe(3);
+
+      // Explicit false (off-humidor) = no deduction.
+      await call(client, "save_smoke", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId },
+        overallDescriptors: ["lounge"],
+        consumption: { fromHumidor: false },
+      });
+      expect(await remainingFor(client, cigarId)).toBe(3);
+
+      // fromHumidor: true deducts exactly one.
+      const args = {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId },
+        overallDescriptors: ["humidor"],
+        consumption: { fromHumidor: true },
+      };
+      await call(client, "save_smoke", args);
+      expect(await remainingFor(client, cigarId)).toBe(2);
+
+      // Replaying the identical save is idempotent — no second deduction.
+      const replay = payloadOf(await call(client, "save_smoke", args)) as { replayed: boolean };
+      expect(replay.replayed).toBe(true);
+      expect(await remainingFor(client, cigarId)).toBe(2);
+    });
+  });
+
+  it("update_smoke consumption set/clear moves the remaining count; over-consumption is surfaced", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "MCP Update Consume Robusto", brand: "MCPUpd" });
+    await withClient(ownerFull, async (client) => {
+      await call(client, "record_purchase", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId },
+        quantity: 1,
+      });
+      const saved = payloadOf(
+        await call(client, "save_smoke", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId },
+          overallDescriptors: ["marker"],
+        }),
+      ) as { smoke: { smokeId: string } };
+      expect(await remainingFor(client, cigarId)).toBe(1); // no link yet
+
+      // Set the link → deducts.
+      await call(client, "update_smoke", {
+        clientRequestId: randomUUID(),
+        smokeId: saved.smoke.smokeId,
+        changes: { consumption: { fromHumidor: true } },
+      });
+      expect(await remainingFor(client, cigarId)).toBe(0);
+
+      // A second linked smoke over-consumes: remaining floors at 0, overConsumed surfaces it.
+      await call(client, "save_smoke", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId },
+        overallDescriptors: ["second"],
+        consumption: { fromHumidor: true },
+      });
+      const inv = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: { cigar: { cigarId: string }; remaining: number; overConsumed: number }[];
+      };
+      const holding = inv.holdings.find((hh) => hh.cigar.cigarId === cigarId)!;
+      expect(holding.remaining).toBe(0);
+      expect(holding.overConsumed).toBe(1);
+
+      // Clear the first link → back to one remaining.
+      await call(client, "update_smoke", {
+        clientRequestId: randomUUID(),
+        smokeId: saved.smoke.smokeId,
+        changes: { consumption: { fromHumidor: false } },
+      });
+      expect(await remainingFor(client, cigarId)).toBe(0); // still one consumption stands
     });
   });
 

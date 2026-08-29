@@ -8,6 +8,7 @@ import { ui } from "@/lib/ui";
 import { fieldMessages, domainErrorOf } from "@/lib/trpc/error";
 import { SmokeDetailsFields } from "./smoke-details-fields";
 import { ProgressionEditor, type ProgressionDraft } from "./progression-editor";
+import { ConsumptionControl, type ConsumptionDraft } from "./consumption-control";
 import { BurnLine } from "./burn-line";
 import { detailsFromView, buildUpdateChanges, type SmokeDetailsDraft } from "./smoke-draft";
 
@@ -19,6 +20,16 @@ export function EditSmokeForm({ smoke }: { smoke: SmokeView }) {
   const [details, setDetails] = useState<SmokeDetailsDraft | null>(null);
   const [appended, setAppended] = useState<ProgressionDraft[]>([]);
   const requestId = useRef(crypto.randomUUID());
+
+  // Consumption prefill (ADR-008): the smoke's current humidor link. Its holding
+  // gates the control and offers lots; the diff yields a set/clear op on save.
+  const initialConsumption = useRef<ConsumptionDraft>({
+    fromHumidor: smoke.consumption != null,
+    purchaseId: smoke.consumption?.purchaseId ?? null,
+  });
+  const [consumption, setConsumption] = useState<ConsumptionDraft>(initialConsumption.current);
+  const holdingQuery = api.inventory.forCigar.useQuery({ cigarId: smoke.cigar.cigarId });
+  const holding = holdingQuery.data;
 
   useEffect(() => {
     const draft = detailsFromView(smoke);
@@ -33,7 +44,12 @@ export function EditSmokeForm({ smoke }: { smoke: SmokeView }) {
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!details || !initial.current) return;
-    const changes = buildUpdateChanges(details, initial.current, appended);
+    const changes = buildUpdateChanges(
+      details,
+      initial.current,
+      appended,
+      holding?.hasHolding ? { draft: consumption, initial: initialConsumption.current } : null,
+    );
     update.mutate({
       clientRequestId: requestId.current,
       smokeId: smoke.smokeId,
@@ -57,6 +73,8 @@ export function EditSmokeForm({ smoke }: { smoke: SmokeView }) {
           <section className={ui.card}>
             <SmokeDetailsFields value={details} onChange={setDetails} />
           </section>
+
+          <ConsumptionControl holding={holding} value={consumption} onChange={setConsumption} />
 
           {smoke.progression.length > 0 ? (
             <section className={`${ui.card} flex flex-col gap-3`}>

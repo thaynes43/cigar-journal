@@ -1,6 +1,7 @@
 import type { CigarRef, DrawBurn, SmokeOutput, SmokeView } from "@cj/domain";
 import type { RouterInputs } from "@/lib/trpc/types";
 import { toProgressionInput, type ProgressionDraft } from "./progression-editor";
+import type { ConsumptionDraft } from "./consumption-control";
 
 // Option lists are UI vocabulary, not domain enums: strength/body are free text
 // in @cj/domain, so these are sensible presets the select offers.
@@ -84,6 +85,9 @@ export function buildSaveInput(
   cigar: CigarRef,
   details: SmokeDetailsDraft,
   progression: ProgressionDraft[],
+  // Present only when the "From my humidor" control was shown (the cigar has
+  // holdings); omitted otherwise so an unknowable provenance deducts nothing.
+  consumption?: ConsumptionDraft | null,
 ): SaveInput {
   return {
     clientRequestId,
@@ -108,6 +112,9 @@ export function buildSaveInput(
       title: details.journalTitle.trim() || null,
       narrative: details.journalNarrative.trim() || null,
     },
+    ...(consumption
+      ? { consumption: { fromHumidor: consumption.fromHumidor, purchaseId: consumption.purchaseId } }
+      : {}),
   };
 }
 
@@ -118,6 +125,9 @@ export function buildUpdateChanges(
   details: SmokeDetailsDraft,
   initial: SmokeDetailsDraft,
   appended: ProgressionDraft[],
+  // The consumption control's current draft and its loaded initial; present only
+  // when the cigar has holdings. A diff produces a set/clear op (ADR-008).
+  consumption?: { draft: ConsumptionDraft; initial: ConsumptionDraft } | null,
 ): UpdateChanges {
   const changes: UpdateChanges = {};
 
@@ -151,6 +161,13 @@ export function buildUpdateChanges(
 
   const append = toProgressionInput(appended);
   if (append.length > 0) changes.progression = { append };
+
+  if (consumption) {
+    const { draft, initial: init } = consumption;
+    if (draft.fromHumidor !== init.fromHumidor || draft.purchaseId !== init.purchaseId) {
+      changes.consumption = { fromHumidor: draft.fromHumidor, purchaseId: draft.purchaseId };
+    }
+  }
 
   return changes;
 }

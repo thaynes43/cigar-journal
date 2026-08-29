@@ -63,6 +63,12 @@ const journalInput = z.object({
   narrative: z.string().nullish(),
 });
 
+// Explicit humidor deduction (ADR-008). Omitting it is unknown — no deduction.
+const consumptionInput = z.object({
+  fromHumidor: z.boolean(),
+  purchaseId: z.string().nullish(),
+});
+
 export const saveSmokeSchema = z.object({
   clientRequestId: z.string(),
   cigar: cigarRef,
@@ -72,6 +78,7 @@ export const saveSmokeSchema = z.object({
   construction: constructionInput.optional(),
   assessment: assessmentInput.optional(),
   journal: journalInput.nullish(),
+  consumption: consumptionInput.optional(),
 });
 
 export const updateSmokeSchema = z.object({
@@ -87,6 +94,7 @@ export const updateSmokeSchema = z.object({
     journal: journalInput.optional(),
     overallDescriptors: z.object({ add: z.array(z.string()).optional(), remove: z.array(z.string()).optional() }).optional(),
     progression: z.object({ append: z.array(progressionEntry) }).optional(),
+    consumption: consumptionInput.optional(),
   }),
 });
 

@@ -36,6 +36,7 @@ describe("migrations", () => {
         "crawl_runs",
         "enrichment_requests",
         "product_photos",
+        "smoke_consumptions",
         "smoke_photos",
         "smoke_progression",
         "smokes",

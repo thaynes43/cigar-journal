@@ -125,6 +125,7 @@ function hasAnyChange(changes: UpdateSmokeInput["changes"]): boolean {
     return true;
   }
   if ((changes.progression?.append?.length ?? 0) > 0) return true;
+  if (changes.consumption) return true;
   return false;
 }
 

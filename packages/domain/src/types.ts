@@ -71,6 +71,23 @@ export interface JournalInput {
   narrative?: string | null;
 }
 
+// Explicit consumption (ADR-008): a smoke deducts one stick from the caller's
+// humidor only via this link. `fromHumidor: true` records the deduction (with a
+// lot `purchaseId` when the user picked one); `false` records that it did not
+// come from the humidor. Omitting the whole block is UNKNOWN — it deducts
+// nothing and is never defaulted (contract principle 2).
+export interface ConsumptionInput {
+  fromHumidor: boolean;
+  purchaseId?: string | null; // lot attribution when stated or picked
+}
+
+// The consumption change op on update_smoke: set/clear/re-attribute. Omitting the
+// block leaves consumption untouched; `fromHumidor: false` clears the link.
+export interface ConsumptionChange {
+  fromHumidor: boolean;
+  purchaseId?: string | null;
+}
+
 export interface SmokedAtInput {
   value: string;
   source?: SmokedAtSource;
@@ -92,6 +109,9 @@ export interface SaveSmokeInput {
   construction?: ConstructionInput;
   assessment?: AssessmentInput;
   journal?: JournalInput | null;
+  // Explicit humidor deduction (ADR-008). Omit when unknown — omitted deducts
+  // nothing; the server never invents provenance.
+  consumption?: ConsumptionInput;
   provenance?: ProvenanceInput;
   originalMarkdown?: string | null;
   correlationId?: string;
@@ -199,6 +219,8 @@ export interface UpdateSmokeChanges {
   journal?: JournalInput; // per-key: explicit null clears, omitted keeps
   overallDescriptors?: { add?: string[]; remove?: string[] };
   progression?: { append: ProgressionEntryInput[] };
+  // Set/clear/re-attribute the humidor link (ADR-008), audited in-transaction.
+  consumption?: ConsumptionChange;
 }
 
 export interface UpdateSmokeInput {
@@ -263,11 +285,22 @@ export interface SmokePhotoView {
   createdAt: string;
 }
 
+// The humidor link behind a smoke (ADR-008). Present on a smoke that consumed a
+// stick from the caller's holdings; null when the stick came from elsewhere or
+// predates the model. `source` distinguishes an explicit user capture from a
+// heuristic-backfilled row (flagged for curation).
+export interface SmokeConsumptionView {
+  purchaseId: string | null; // lot attribution, when known
+  source: "user" | "heuristic-backfill";
+}
+
 export interface SmokeView {
   smokeId: string;
   version: number;
   cigar: { cigarId: string; canonicalName: string; verification: Verification };
   smokedAt: SmokedAt;
+  // Explicit humidor deduction (ADR-008): null = not from the humidor / unknown.
+  consumption: SmokeConsumptionView | null;
   context: SmokeContext | null;
   overallDescriptors: string[];
   progression: ProgressionEntryView[];
@@ -318,6 +351,10 @@ export interface SmokeSummary {
   // Web-only, like `strength`: the MCP get_my_smokes mapping omits it to keep
   // the tool payload contract-stable.
   photoCount: number;
+  // Whether this smoke carries a humidor consumption link (ADR-008); drives the
+  // journal-card "humidor" provenance tag. Web-only, like `strength`/`photoCount`
+  // — the MCP get_my_smokes mapping omits it to keep the payload contract-stable.
+  fromHumidor: boolean;
   // Match provenance — present ONLY when the `text` filter was used. `matchedIn`
   // lists the prose field(s) the search hit; `matchSnippet` is a short plain-text
   // excerpt around the hit (~160 chars). Both are omitted entirely for non-text
@@ -526,7 +563,9 @@ export interface InventoryHolding {
   lots: InventoryLot[]; // newest purchase first
   totalAcquired: number; // sum of lot quantities (null lots count 0)
   smokedCount: number; // caller's smokes of this cigar, all-time
-  remaining: number; // derived — see getMyInventory
+  consumedCount: number; // caller's explicit consumption links for this cigar (ADR-008)
+  remaining: number; // max(0, totalAcquired − consumedCount) — display floors here
+  overConsumed: number; // max(0, consumedCount − totalAcquired) — the surfaced discrepancy
   agingSince: string | null; // earliest humidor_at, else earliest box_date
   myRating: number | null; // caller's average rating for this cigar (rounded), null if none
 }
@@ -534,6 +573,28 @@ export interface InventoryHolding {
 export interface InventoryResult {
   holdings: InventoryHolding[];
   totalSticksRemaining: number;
+}
+
+// The caller's holding for ONE resolved cigar — the record form reads it to
+// decide whether to show the "From my humidor" control (holdings exist) and
+// whether to default it on (remaining > 0), plus the lots for optional lot
+// attribution. Lot-level fields only; no smoke history.
+export interface CigarHoldingLot {
+  purchaseId: string;
+  purchasedAt: string | null;
+  boxDate: string | null;
+  quantity: number | null;
+  packaging: string | null;
+  vendor: string | null;
+}
+
+export interface CigarHolding {
+  cigarId: string;
+  hasHolding: boolean; // at least one purchase lot exists
+  totalAcquired: number;
+  remaining: number; // floored at zero
+  overConsumed: number;
+  lots: CigarHoldingLot[]; // newest purchase first
 }
 
 // ---- Curation (ADR-006 catalog hygiene; curator-only) ----------------------

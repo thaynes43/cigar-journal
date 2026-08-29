@@ -378,6 +378,8 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           remaining: h.remaining,
           totalAcquired: h.totalAcquired,
           smokedCount: h.smokedCount,
+          consumedCount: h.consumedCount,
+          overConsumed: h.overConsumed,
           agingSince: h.agingSince,
           myRating: h.myRating,
           lots: h.lots.map((l) => ({

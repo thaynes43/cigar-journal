@@ -72,6 +72,14 @@ request: call set_want with wanted false. When record_purchase returns wanted:tr
 the user just acquired something they had marked as wanted — offer to clear it
 (never clear it silently).
 
+A saved smoke can deduct one stick from the user's humidor — but only when they
+say so. When the resolved cigar shows holdings, ask once at finish, "From your
+humidor?"; skip the question when there are no holdings or the user already said
+where the stick came from. Pass consumption { fromHumidor: true } when it came
+from their humidor (add purchaseId only if they named a specific lot),
+{ fromHumidor: false } when it did not (lounge, gift, sample). Omit consumption
+when unknown — an omitted block deducts nothing; never invent the provenance.
+
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
 - approximatePosition and any position is a 0-1 fraction through the smoke (0 = light, 1 = nub).
@@ -273,6 +281,7 @@ result:
     smokeId: sm_01jab4
     version: 3
     cigar: { cigarId: cg_01j9x2, canonicalName: Plasencia Alma del Fuego Concepcion }
+    consumption: { purchaseId: pu_01kd, source: user }   # null when not from the humidor (ADR-008)
     smokedAt: { value: "2026-07-30T21:05:00-04:00", source: system-finalized, precision: approximate }
     context: { location: patio, pairing: [sparkling-water] }
     overallDescriptors: [citrus, cream, cedar]
@@ -307,9 +316,11 @@ result:
         line: Alma del Fuego
         vitola: { name: Concepcion, lengthInches: 6.0, ringGauge: 52 }
         type: NC
-      remaining: 7             # max(0, totalAcquired − smokes since first purchase)
+      remaining: 7             # max(0, totalAcquired − count(consumptions))
       totalAcquired: 10        # sum of lot quantities
       smokedCount: 3           # the caller's smokes of this cigar, all-time
+      consumedCount: 3         # explicit humidor-consumption links (ADR-008)
+      overConsumed: 0          # count(consumptions) − totalAcquired, when positive
       agingSince: "2025-06-01" # earliest humidor date, else earliest box date
       myRating: 88             # the caller's average rating, null if unrated
       lots:
@@ -323,11 +334,14 @@ result:
   totalSticksRemaining: 7
 ```
 
-`remaining` is a heuristic pending explicit consumption tracking: acquired
-quantity minus the caller's smokes dated on or after the earliest purchase
-(untimed smokes count), floored at zero. `smokedCount` is the all-time count,
-kept distinct so the two are never conflated. In-stock holdings sort first, then
-empties, each alphabetical by name.
+`remaining` is `max(0, totalAcquired − consumedCount)`, where `consumedCount` is
+the number of the caller's smokes of this cigar carrying an explicit consumption
+link (ADR-008 — this **supersedes** the earlier smokes-since-first-purchase
+heuristic). The display floors at zero; `overConsumed` (`consumedCount −
+totalAcquired`, when positive) surfaces a discrepancy instead of hiding it — a
+missing acquisition row, fixed with a correcting `record_purchase`, never an
+edit. `smokedCount` is the all-time smoke count, kept distinct from consumption.
+In-stock holdings sort first, then empties, each alphabetical by name.
 
 ## save_smoke — write, idempotent
 
@@ -381,6 +395,9 @@ arguments:
     title: Alma del Fuego Concepcion — patio evening
     narrative: |
       Full prose entry in the user's voice...
+  consumption:                   # OPTIONAL — omit when unknown (deducts nothing)
+    fromHumidor: true            #   true deducts one stick; false = not from humidor
+    purchaseId: pu_01kd          #   optional lot attribution when the user named a lot
 
 result:
   smoke:
@@ -391,6 +408,14 @@ result:
   cigarCreated: false            # true when `described` created an unverified entry
   replayed: false
 ```
+
+**Explicit consumption (ADR-008).** `consumption` is the ONLY way a smoke deducts
+from the humidor. `fromHumidor: true` links the smoke to the caller's holdings
+(with an optional lot `purchaseId`); `fromHumidor: false` records that the stick
+came from elsewhere. **Omitting the block is unknown — it deducts nothing, and
+the schema never forces the model to invent provenance.** The server instructions
+carry the ask-once "From your humidor?" beat; a replayed save (same envelope) does
+not double-deduct.
 
 **Minimum validity:** a cigar reference plus at least one substantive field
 (non-empty progression, overallDescriptors, journal.narrative, or
@@ -462,7 +487,7 @@ result:
   cigar: { cigarId: cg_01j9x2, canonicalName: Plasencia Alma del Fuego Concepcion, verification: verified }
   holdingAfter:
     totalAcquired: 10            # sum of the caller's lot quantities for this cigar
-    remaining: 7                 # max(0, totalAcquired − smokes since first purchase)
+    remaining: 7                 # max(0, totalAcquired − count(consumptions)) (ADR-008)
   wanted: true                 # the caller still has an active want mark on this cigar
   replayed: false
 ```
@@ -494,6 +519,7 @@ arguments:
     construction: { draw: good }
     journal: { title: null, narrative: null }   # explicit null clears; omitted keeps
     overallDescriptors: { add: [leather], remove: [] }
+    consumption: { fromHumidor: true, purchaseId: pu_01kd }  # set/clear/re-attribute
     progression:
       append:                    # append-only; history is never rewritten
         - stage: final inch
@@ -502,12 +528,15 @@ arguments:
 
 result:
   smoke: { smokeId: sm_01jc8x, version: 3 }
-  changedFields: [assessment.rating, cigar, progression]
+  changedFields: [assessment.rating, cigar, progression, consumption]
   replayed: false
 ```
 
 Deletion is web-only. Imported Smokes accept structured-field changes; their
-original markdown is immutable.
+original markdown is immutable. The `consumption` op sets, clears
+(`fromHumidor: false`), or re-attributes the humidor link (ADR-008); re-pointing
+the smoke's `cigar` clears a now-foreign lot automatically. The movement is
+audited in the same transaction as the smoke change.
 
 ## add_smoke_photo — write, dual-mode
 

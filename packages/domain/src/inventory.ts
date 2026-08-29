@@ -1,16 +1,24 @@
 import { eq, sql } from "drizzle-orm";
 import { purchases, cigars, vendors } from "@cj/db";
 import type { Deps, Principal, Queryer } from "./deps.js";
-import type { InventoryLot, InventoryHolding, InventoryResult } from "./types.js";
+import type {
+  InventoryLot,
+  InventoryHolding,
+  InventoryResult,
+  CigarHolding,
+  CigarHoldingLot,
+} from "./types.js";
 
 // The caller's humidor: purchase lots grouped by cigar, with a derived stock
 // picture. Read-only, no audit. Two batched queries — one for purchases+cigars+
-// vendors, one grouped smoke-count set — so there is no N+1 across holdings.
+// vendors, one grouped smoke/consumption set — so there is no N+1 across holdings.
+// Consumption is explicit (ADR-008): remaining = totalAcquired − count of the
+// caller's consumption links for the cigar; there is no derivation heuristic.
 
 interface SmokeStatsRow {
   cigar_id: string;
   smoked_all: number;
-  smoked_since: number;
+  consumed_count: number;
   avg_rating: number | null;
 }
 
@@ -91,31 +99,23 @@ export async function getMyInventory(deps: Deps, principal: Principal): Promise<
   }
 
   const cigarIds = [...groups.keys()];
-  const firstPurchase = new Map<string, string | null>();
-  for (const [cigarId, group] of groups) {
-    firstPurchase.set(cigarId, minDate(group.lots.map((l) => l.purchasedAt)));
-  }
 
-  // One grouped query for both smoke counts and the caller's average rating,
-  // keyed by a per-cigar first-purchase cutoff passed in via a VALUES join. The
-  // cutoff drives the since-first-purchase count; the all-time count and average
-  // rating come from the same scan — no N+1 across holdings.
-  const cutoffs = sql.join(
-    cigarIds.map((id) => sql`(${id}::uuid, ${firstPurchase.get(id) ?? null}::date)`),
+  // One grouped query over the caller's smokes of these cigars: the all-time
+  // smoke count, the caller's average rating, and — the stock driver — how many
+  // of those smokes carry an explicit consumption link (ADR-008). A LEFT JOIN to
+  // smoke_consumptions counts links without dropping unconsumed smokes.
+  const cigarIdList = sql.join(
+    cigarIds.map((id) => sql`${id}::uuid`),
     sql`, `,
   );
   const statsResult = await deps.db.execute(sql`
     SELECT s.cigar_id AS cigar_id,
       count(*)::int AS smoked_all,
-      (count(*) FILTER (
-        WHERE cut.first_purchase IS NULL
-           OR s.smoked_at IS NULL
-           OR s.smoked_at >= cut.first_purchase
-      ))::int AS smoked_since,
+      count(sc.smoke_id)::int AS consumed_count,
       round(avg(s.rating))::int AS avg_rating
     FROM smokes s
-    JOIN (VALUES ${cutoffs}) AS cut(cigar_id, first_purchase) ON cut.cigar_id = s.cigar_id
-    WHERE s.user_id = ${principal.userId}
+    LEFT JOIN smoke_consumptions sc ON sc.smoke_id = s.id
+    WHERE s.user_id = ${principal.userId} AND s.cigar_id IN (${cigarIdList})
     GROUP BY s.cigar_id
   `);
   const stats = new Map<string, SmokeStatsRow>();
@@ -135,13 +135,12 @@ export async function getMyInventory(deps: Deps, principal: Principal): Promise<
     const totalAcquired = lots.reduce((sum, l) => sum + (l.quantity ?? 0), 0);
     const stat = stats.get(cigarId);
     const smokedCount = stat?.smoked_all ?? 0;
-    // remaining = max(0, totalAcquired − smokedCountSinceFirstPurchase), where
-    // smokedCountSinceFirstPurchase counts the caller's smokes of this cigar with
-    // smoked_at >= min(lot.purchasedAt) — smokes with null smoked_at count too
-    // (they were recorded post-import). This is a heuristic pending explicit
-    // consumption tracking; smokedCount (all-time) is reported separately so the
-    // UI never has to guess which count it is holding.
-    const remaining = Math.max(0, totalAcquired - (stat?.smoked_since ?? 0));
+    const consumedCount = stat?.consumed_count ?? 0;
+    // remaining = totalAcquired − count(consumptions). The display floors at
+    // zero; over-consumption is surfaced (not hidden) as `overConsumed`, a
+    // discrepancy fixed with a correcting purchase row, never an edit (ADR-008).
+    const remaining = Math.max(0, totalAcquired - consumedCount);
+    const overConsumed = Math.max(0, consumedCount - totalAcquired);
     const agingSince =
       minDate(lots.map((l) => l.humidorAt)) ?? minDate(lots.map((l) => l.boxDate));
     return {
@@ -149,7 +148,9 @@ export async function getMyInventory(deps: Deps, principal: Principal): Promise<
       lots,
       totalAcquired,
       smokedCount,
+      consumedCount,
       remaining,
+      overConsumed,
       agingSince,
       myRating: stat?.avg_rating ?? null,
     };
@@ -167,37 +168,87 @@ export async function getMyInventory(deps: Deps, principal: Principal): Promise<
   return { holdings, totalSticksRemaining };
 }
 
-// The derived stock picture for a SINGLE cigar, using the same formula as
+// The derived stock picture for a SINGLE cigar, using the same rule as
 // getMyInventory: totalAcquired is the sum of lot quantities; remaining is
-// max(0, totalAcquired − the caller's smokes of this cigar since the earliest
-// purchase), where null-timed smokes count. record_purchase reports this after
-// appending its row, so it runs inside the caller's transaction (pass the Tx) to
-// see the just-inserted lot.
+// max(0, totalAcquired − the caller's explicit consumption links for the cigar).
+// record_purchase reports this after appending its row, so it runs inside the
+// caller's transaction (pass the Tx) to see the just-inserted lot.
 export async function deriveHoldingSummary(
   q: Queryer,
   userId: string,
   cigarId: string,
 ): Promise<{ totalAcquired: number; remaining: number }> {
   const acquiredResult = await q.execute(sql`
-    SELECT coalesce(sum(quantity), 0)::int AS total_acquired, min(purchased_at) AS first_purchase
+    SELECT coalesce(sum(quantity), 0)::int AS total_acquired
     FROM purchases
     WHERE user_id = ${userId} AND cigar_id = ${cigarId}
   `);
-  const acquired = acquiredResult.rows[0] as { total_acquired: number; first_purchase: string | null };
-  const totalAcquired = Number(acquired.total_acquired);
+  const totalAcquired = Number((acquiredResult.rows[0] as { total_acquired: number }).total_acquired);
 
-  const smokedResult = await q.execute(sql`
-    SELECT count(*)::int AS smoked_since
-    FROM smokes
-    WHERE user_id = ${userId}
-      AND cigar_id = ${cigarId}
-      AND (
-        ${acquired.first_purchase}::date IS NULL
-        OR smoked_at IS NULL
-        OR smoked_at >= ${acquired.first_purchase}::date
-      )
+  const consumedResult = await q.execute(sql`
+    SELECT count(*)::int AS consumed
+    FROM smoke_consumptions sc
+    JOIN smokes s ON s.id = sc.smoke_id
+    WHERE s.user_id = ${userId} AND s.cigar_id = ${cigarId}
   `);
-  const smokedSince = Number((smokedResult.rows[0] as { smoked_since: number }).smoked_since);
+  const consumed = Number((consumedResult.rows[0] as { consumed: number }).consumed);
 
-  return { totalAcquired, remaining: Math.max(0, totalAcquired - smokedSince) };
+  return { totalAcquired, remaining: Math.max(0, totalAcquired - consumed) };
+}
+
+// The caller's holding for ONE resolved cigar: the record/edit forms read it to
+// decide whether to show the "From my humidor" control (holdings exist) and
+// default it on (remaining > 0), plus the lots for optional lot attribution.
+export async function getHoldingForCigar(
+  deps: Deps,
+  principal: Principal,
+  cigarId: string,
+): Promise<CigarHolding> {
+  const lotRows = await deps.db
+    .select({
+      purchaseId: purchases.id,
+      purchasedAt: purchases.purchasedAt,
+      boxDate: purchases.boxDate,
+      quantity: purchases.quantity,
+      packaging: purchases.packaging,
+      vendorName: vendors.name,
+    })
+    .from(purchases)
+    .leftJoin(vendors, eq(purchases.vendorId, vendors.id))
+    .where(sql`${purchases.userId} = ${principal.userId} AND ${purchases.cigarId} = ${cigarId}`);
+
+  const lots: CigarHoldingLot[] = lotRows
+    .map((r) => ({
+      purchaseId: r.purchaseId,
+      purchasedAt: r.purchasedAt,
+      boxDate: r.boxDate,
+      quantity: r.quantity,
+      packaging: r.packaging,
+      vendor: r.vendorName,
+    }))
+    // Newest purchase first, nulls last (ISO date strings sort lexically).
+    .sort((a, b) => {
+      if (a.purchasedAt === b.purchasedAt) return 0;
+      if (a.purchasedAt == null) return 1;
+      if (b.purchasedAt == null) return -1;
+      return a.purchasedAt < b.purchasedAt ? 1 : -1;
+    });
+
+  const totalAcquired = lots.reduce((sum, l) => sum + (l.quantity ?? 0), 0);
+  const consumedResult = await deps.db.execute(sql`
+    SELECT count(*)::int AS consumed
+    FROM smoke_consumptions sc
+    JOIN smokes s ON s.id = sc.smoke_id
+    WHERE s.user_id = ${principal.userId} AND s.cigar_id = ${cigarId}
+  `);
+  const consumed = Number((consumedResult.rows[0] as { consumed: number }).consumed);
+
+  return {
+    cigarId,
+    hasHolding: lots.length > 0,
+    totalAcquired,
+    remaining: Math.max(0, totalAcquired - consumed),
+    overConsumed: Math.max(0, consumed - totalAcquired),
+    lots,
+  };
 }

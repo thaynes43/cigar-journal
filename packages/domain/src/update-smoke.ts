@@ -8,6 +8,7 @@ import { normalizeDescriptors, verbatimDescriptors } from "./descriptors.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, SmokeNotFoundError, VersionConflictError } from "./errors.js";
 import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
+import { applyConsumptionChange } from "./consumption.js";
 
 // Correct an existing Smoke via explicit, field-scoped change ops — never a
 // generic patch (ADR-002). Append-only progression; original_markdown is never
@@ -65,20 +66,39 @@ async function updateWithinTx(
   patch.updatedAt = deps.now();
   await tx.update(smokes).set(patch).where(eq(smokes.id, current.id));
 
+  // Explicit consumption (ADR-008): set/clear/re-attribute the humidor link, and
+  // clear a now-foreign lot when the smoke was re-pointed to another cigar. In
+  // the same transaction; its movement rides the single update audit row.
+  const newCigarId = (patch.cigarId as string | undefined) ?? current.cigarId;
+  const consumption = await applyConsumptionChange(
+    tx,
+    {
+      smokeId: current.id,
+      newCigarId,
+      userId: principal.userId,
+      cigarRepointed: Boolean(input.changes.cigar),
+    },
+    input.changes.consumption,
+  );
+  const changedWithConsumption = [...changedFields, ...consumption.changedFields];
+  const auditedConsumption = consumption.changedFields.length > 0;
+
   const provenanceSource = input.provenance?.source ?? "manual";
   await tx.insert(auditLog).values({
     userId: principal.userId,
     actor: provenanceToActor(provenanceSource),
     action: "smoke.updated",
     smokeId: current.id,
-    before,
-    after: smokeSnapshot({ ...current, ...patch } as SmokeRow),
+    before: auditedConsumption ? { ...before, consumption: consumption.before } : before,
+    after: auditedConsumption
+      ? { ...smokeSnapshot({ ...current, ...patch } as SmokeRow), consumption: consumption.after }
+      : smokeSnapshot({ ...current, ...patch } as SmokeRow),
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 
   const result: UpdateSmokeResult = {
     smoke: { smokeId: current.id, version: current.version + 1 },
-    changedFields,
+    changedFields: changedWithConsumption,
     replayed: false,
   };
 
