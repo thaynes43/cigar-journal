@@ -22,6 +22,10 @@ export { mergeCigars, verifyCigar, dismissDuplicate, curationQueue } from "./cur
 export { getMyInventory, deriveHoldingSummary } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
 
+// The single want mark (PRD-003 R-WANT). setWant sets/clears (idempotent,
+// audited); isWanted is the scalar overlay reused by record_purchase and reads.
+export { setWant, isWanted } from "./wants.js";
+
 // Review-bound smoke photos (ADR-007). Storage is passed explicitly to the
 // mutating services rather than widened into Deps.
 export {

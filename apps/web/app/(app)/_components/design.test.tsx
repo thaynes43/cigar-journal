@@ -6,6 +6,7 @@ import { BurnLine, burnLayout, layoutStageLabels } from "./burn-line";
 import { StrengthMeter, strengthStep } from "./strength-meter";
 import { VitalsBlock } from "./vitals-block";
 import { Chips } from "./chips";
+import { WantBadge } from "./want-badge";
 
 describe("BandTile", () => {
   it("keeps a house on one ground color across its lines", () => {
@@ -199,6 +200,22 @@ describe("Chips", () => {
     expect(html).toContain("cocoa");
     expect(html).toContain("baker&#x27;s chocolate");
     expect(html).toContain("italic");
+  });
+});
+
+describe("WantBadge", () => {
+  it("labels the mark 'Want' and spends the accent when filled (the set state)", () => {
+    const html = renderToStaticMarkup(<WantBadge />);
+    expect(html).toContain("Want");
+    expect(html).toContain("bg-accent");
+    expect(html).toContain("text-accent-ink");
+  });
+
+  it("uses the outlined form when unfilled, never a second color", () => {
+    const html = renderToStaticMarkup(<WantBadge filled={false} />);
+    expect(html).toContain("Want");
+    expect(html).toContain("border-line");
+    expect(html).not.toContain("bg-accent");
   });
 });
 

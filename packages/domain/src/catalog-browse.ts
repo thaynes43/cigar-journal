@@ -128,6 +128,7 @@ interface CatalogTileRow {
   user_smoke_count: number | string;
   user_rating: number | string | null;
   has_product_photo: boolean | null;
+  wanted: boolean | null;
 }
 
 function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
@@ -146,6 +147,7 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
     userSmokeCount: Number(row.user_smoke_count),
     userRating: row.user_rating != null ? Number(row.user_rating) : null,
     hasProductPhoto: row.has_product_photo === true,
+    wanted: row.wanted === true,
   };
 }
 
@@ -153,17 +155,22 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
 // to the caller's smokes only, aggregated per cigar. `count` is 0 and `rating`
 // is null when the caller has never smoked the cigar. A second LEFT JOIN to
 // product_photos (1:1 with a cigar) folds in whether a crawler photo exists,
-// without a second query (ADR-007).
+// without a second query (ADR-007). A third LEFT JOIN to the caller's wants
+// (1:1 by the UNIQUE (user_id, cigar_id) pair) folds in the want mark, so the
+// tile badge needs no extra query and one user's marks never leak into another's
+// tiles (PRD-003 R-WANT-3).
 function tileSelect(principal: Principal): SQL {
   return sql`
     SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches,
       c.ring_gauge, c.type, c.verification,
       count(s.id)::int AS user_smoke_count,
       round(avg(s.rating))::int AS user_rating,
-      bool_or(pp.id IS NOT NULL) AS has_product_photo
+      bool_or(pp.id IS NOT NULL) AS has_product_photo,
+      bool_or(w.id IS NOT NULL) AS wanted
     FROM cigars c
     LEFT JOIN smokes s ON s.cigar_id = c.id AND s.user_id = ${principal.userId}
     LEFT JOIN product_photos pp ON pp.cigar_id = c.id
+    LEFT JOIN wants w ON w.cigar_id = c.id AND w.user_id = ${principal.userId}
   `;
 }
 
