@@ -10,7 +10,7 @@ import { ui } from "@/lib/ui";
 export function TokenUploader({ token }: { token: string }) {
   const [state, setState] = useState<"idle" | "pending" | "done" | "error">("idle");
   const [preview, setPreview] = useState<string | null>(null);
-  const [smokeId, setSmokeId] = useState<string | null>(null);
+  const [target, setTarget] = useState<{ href: string; label: string } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -27,8 +27,19 @@ export function TokenUploader({ token }: { token: string }) {
         setState("error");
         return;
       }
-      const view = (await res.json().catch(() => null)) as { smokeId?: string } | null;
-      setSmokeId(view?.smokeId ?? null);
+      // The response is discriminated by what the token attached to: a smoke view
+      // carries `smokeId`; a product attach carries `cigarId`.
+      const view = (await res.json().catch(() => null)) as {
+        smokeId?: string;
+        cigarId?: string;
+      } | null;
+      setTarget(
+        view?.smokeId
+          ? { href: `/smokes/${view.smokeId}`, label: "Open the smoke" }
+          : view?.cigarId
+            ? { href: `/cigars/${view.cigarId}`, label: "Open the cigar" }
+            : null,
+      );
       setPreview(URL.createObjectURL(file));
       setState("done");
     } catch {
@@ -46,9 +57,9 @@ export function TokenUploader({ token }: { token: string }) {
           <img src={preview} alt="" className="aspect-square w-44 rounded-card object-cover" />
         ) : null}
         <p className="text-sm text-ink">Added.</p>
-        {smokeId ? (
-          <a href={`/smokes/${smokeId}`} className={ui.button}>
-            Open the smoke
+        {target ? (
+          <a href={target.href} className={ui.button}>
+            {target.label}
           </a>
         ) : null}
       </div>

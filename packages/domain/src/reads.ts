@@ -1,4 +1,4 @@
-import { and, eq, gte, lte, ilike, sql, desc, count, asc, type SQL } from "drizzle-orm";
+import { and, eq, ne, gte, lte, ilike, sql, desc, count, asc, type SQL } from "drizzle-orm";
 import {
   cigars,
   smokes,
@@ -580,12 +580,20 @@ export async function getCigar(
     .where(and(eq(smokes.cigarId, args.cigarId), eq(smokes.userId, principal.userId)));
 
   // At most one product photo per cigar (ADR-007) — its existence drives the
-  // detail hero image; the bytes are served through the authed proxy route.
+  // detail hero image; the bytes are served through the authed proxy route. A
+  // `suppressed` photo (rights takedown, DESIGN-003 §Curation) counts as absent,
+  // matching getProductPhoto's serving gate and the catalog-browse tile join — so
+  // a suppressed hero falls back to the monogram instead of a broken proxy image.
   const photoRows = await deps.db
     .select({ id: productPhotos.id })
     .from(productPhotos)
-    .where(eq(productPhotos.cigarId, args.cigarId))
+    .where(and(eq(productPhotos.cigarId, args.cigarId), ne(productPhotos.rights, "suppressed")))
     .limit(1);
+  // The photo's row id — a fresh uuid on every crawl/upload/replace (attach
+  // deletes+re-inserts), so the detail hero can fingerprint its immutable image
+  // URL and a Replace is seen immediately instead of the browser serving the
+  // cached prior photo under the stable per-cigar path.
+  const productPhotoId = photoRows[0]?.id ?? null;
 
   // The caller's want overlay (PRD-003 R-WANT-3): whether they marked this cigar
   // and the optional MCP-authored note. Principal-scoped — never another user's.
@@ -606,7 +614,7 @@ export async function getCigar(
   // Additive catalog-repair + market hints (ADR-009), both catalog-scoped (same
   // for every viewer). `enrichment` reuses the shared completeness gate; `pricing`
   // is the compact summary over the cigar's observations (null when none).
-  const hasProductPhoto = photoRows.length > 0;
+  const hasProductPhoto = productPhotoId != null;
   const enrichmentFields = assessEnrichmentFields(cigar, hasProductPhoto);
   const pricing = await getCigarPricing(deps, args.cigarId);
 
@@ -620,6 +628,7 @@ export async function getCigar(
     },
     pricing,
     hasProductPhoto,
+    productPhotoId,
     wanted: wantRows.length > 0,
     wantNote: wantRows[0]?.note ?? null,
     favorited: favoriteRows.length > 0,

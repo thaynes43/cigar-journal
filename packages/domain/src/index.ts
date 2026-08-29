@@ -50,6 +50,7 @@ export {
   verifyCigar,
   dismissDuplicate,
   curationQueue,
+  cigarsMissingPhotos,
   setListingMatchStatus,
   excludeCigar,
   restoreCigar,
@@ -98,10 +99,14 @@ export {
 // consumes it. UploadTokenInvalidError rides the shared errors export.
 export {
   mintPhotoUploadToken,
+  mintProductPhotoUploadToken,
   consumePhotoUploadToken,
   type MintPhotoUploadTokenInput,
+  type MintProductPhotoUploadTokenInput,
   type MintedPhotoUploadToken,
   type ConsumedPhotoUploadToken,
+  type ConsumedSmokeUploadToken,
+  type ConsumedProductUploadToken,
 } from "./photo-upload-tokens.js";
 
 // Catalog-invariant cigar resolution (ADR-002). Exported so the legacy importer
@@ -113,5 +118,16 @@ export { resolveCigar, type ResolvedCigar } from "./cigar-resolution.js";
 // and record_purchase share this so the described-cigar path never forks.
 export { resolveAndEnrich, maybeQueueEnrichment, type ResolveAndEnrichResult } from "./enrichment.js";
 // Product photos (ADR-007). Catalog-scoped (not owner-scoped); the serving route
-// authorizes any signed-in user. Written by the crawler, read here for the proxy.
-export { getProductPhoto, type ProductPhotoObject } from "./product-photos.js";
+// authorizes any signed-in user. Written by the crawler or a curator upload
+// (attachProductPhoto, DESIGN-003 §Images — rights 'approved', source_url null),
+// read here for the proxy. getProductPhotoState backs the detail-page admin
+// control's initial state.
+export {
+  getProductPhoto,
+  getProductPhotoState,
+  attachProductPhoto,
+  type ProductPhotoObject,
+  type AttachProductPhotoInput,
+  type AttachProductPhotoResult,
+  type ProcessProductPhoto,
+} from "./product-photos.js";
