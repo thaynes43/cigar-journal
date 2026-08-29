@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/thaynes43/cigar-journal/compare/v0.22.0...v0.23.0) (2026-08-29)
+
+
+### Features
+
+* **web:** public journal pages — anonymous read for public journals ([#96](https://github.com/thaynes43/cigar-journal/issues/96)) ([#118](https://github.com/thaynes43/cigar-journal/issues/118)) ([88822b1](https://github.com/thaynes43/cigar-journal/commit/88822b13b63ff3ad890e4e315e11642a6cca9bd0))
+
 ## [0.22.0](https://github.com/thaynes43/cigar-journal/compare/v0.21.0...v0.22.0) (2026-08-29)
 
 
