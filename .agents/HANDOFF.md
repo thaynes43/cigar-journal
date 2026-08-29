@@ -64,6 +64,30 @@ Overwrite it at the next major handoff.
 - Owner's journal still `private`; public pages dark until the #97 flip
   (which can now be done from /settings instead of raw SQL).
 
+## Tomorrow morning (cold start): verify the overnight automations FIRST
+
+1. **Enrich crawl** (daily 09:00 UTC, ns frontend): `SELECT kind,status,stats
+   FROM crawl_runs ORDER BY started_at DESC` via memory `prod-db-read-access`.
+   Fox + Cuban Lou's are crawl_enabled; expect photos/offers movement.
+2. **Curation run** (daily 10:15 ET on dev-env-ops): order
+   `wo-cigar-curate-<yyyymmdd>` in CM `upgrade-work-orders` (ns
+   upgrade-agent). Ops manual: memory `curation-lane-ops` — includes the
+   requeue procedure (kill post-mortem tmux window + ops-SA Job) and the
+   rotating-token model. It now has ~1,569 triage rows incl. 82 fresh
+   Cuban Lou's matches; expect confirms to start attaching CC context.
+3. Report counts + queue depths + humidor photoless delta (was 55) to the
+   owner; surface the **duplicates queue** count — it now holds
+   owner-row↔crawler-row CC pairs and MERGES ARE HUMAN-ONLY (web console),
+   so the owner clears those on Catalog review.
+4. Then work the backlog (priorities: #127 remainder — 2 Guys
+   sitemap-variance, Small Batch negative-prefix gate, probe multi-sample,
+   Wikidata fallback; #45 unmerge bookkeeping + rename undo; #48 remainder;
+   #129 token expiry ~Sep 26 is the only dated item).
+
+Session worktrees under ~/work/ are disposable; canonical clones are
+fetch-only. The 2026-08-29 sessions' scratch (probe dossiers etc.) is fully
+captured in issue comments + memory — nothing lives only in /tmp.
+
 ## Owner-gated cutover (#97) — unchanged, do not do unprompted
 
 ChatGPT connector verification · unsuspend crawl CronJobs · journal flip +
