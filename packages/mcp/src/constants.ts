@@ -42,6 +42,13 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
 // Personal fields on catalog tools require this additional scope.
 export const PERSONAL_SCOPE = "journal:read";
 
+// OpenAI Apps SDK file-input declaration for add_smoke_photo. A tool must DECLARE
+// which top-level input properties carry files, as a string[] in the tool-level
+// `_meta["openai/fileParams"]` published in tools/list, or ChatGPT never forwards
+// the user's attached image (developers.openai.com/apps-sdk). We list the `image`
+// property (schemas.ts) here and pass this on the registration (server.ts).
+export const ADD_SMOKE_PHOTO_META = { "openai/fileParams": ["image"] } as const;
+
 export function isToolName(name: string): name is ToolName {
   return (TOOL_NAMES as readonly string[]).includes(name);
 }

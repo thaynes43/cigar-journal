@@ -31,6 +31,7 @@ import {
   INSTRUCTIONS,
   PERSONAL_SCOPE,
   TOOL_SCOPES,
+  ADD_SMOKE_PHOTO_META,
   type ToolName,
 } from "./constants.js";
 import type { McpAuthExtra } from "./auth.js";
@@ -45,6 +46,17 @@ import {
   recordPurchaseSchema,
   addSmokePhotoSchema,
   setWantSchema,
+  setWantOutput,
+  searchCigarsOutput,
+  getCigarOutput,
+  getMySmokesOutput,
+  getSmokeOutput,
+  getMyInventoryOutput,
+  saveSmokeOutput,
+  updateSmokeOutput,
+  addCigarOutput,
+  recordPurchaseOutput,
+  addSmokePhotoOutput,
   type SaveSmokeArgs,
   type UpdateSmokeArgs,
   type AddCigarArgs,
@@ -61,13 +73,19 @@ import { mcpEvent } from "./logger.js";
 // identity, invariants, and validation all live below this layer.
 
 // ---- File intake (add_smoke_photo, ADR-007) --------------------------------
-// ChatGPT Web attaches a user image to a tool call via the OpenAI extension: the
-// request's `_meta["openai/fileParams"]` carries entries like
-// `{ download_url, file_id, mime_type?, name? }`, where download_url is a
-// SHORT-LIVED signed URL the server must fetch promptly. This is web-only —
-// mobile uploads are broken upstream and a chat file URL pasted as text (e.g.
-// chatgpt.com/...) is unreachable from outside ChatGPT — hence the mode-B upload
-// link. Handle names track the MCP file-upload drafts SEP-2356/1306.
+// ChatGPT attaches the user's image to the tool call. Per OpenAI's Apps SDK this
+// requires DECLARING the file input: the `image` property (schemas.ts) listed in
+// the tool-level `_meta["openai/fileParams"]` published in tools/list
+// (ADD_SMOKE_PHOTO_META) — without the declaration ChatGPT forwards nothing.
+// Two delivery shapes are accepted and normalized into one fetch path:
+//   1. `image` ARGUMENT value — `{ download_url, file_id, mime_type?, file_name? }`
+//      the client fills in for the declared file param (the standard Apps SDK path).
+//   2. Request-level `_meta["openai/fileParams"]` — the same entry shape carried in
+//      request metadata (the earlier, production-proven delivery). Kept working.
+// In both, download_url is a SHORT-LIVED signed URL the server must fetch promptly.
+// This is web-only — mobile uploads are broken upstream and a chat file URL pasted
+// as text (e.g. chatgpt.com/...) is unreachable from outside ChatGPT — hence the
+// mode-B upload link. Handle names track the MCP file-upload drafts SEP-2356/1306.
 
 const ATTACHED_FETCH_TIMEOUT_MS = 15_000;
 const MAX_ATTACHED_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -87,6 +105,20 @@ function firstFileParam(meta: Record<string, unknown> | undefined): AttachedFile
   const first = Array.isArray(raw) ? raw[0] : raw;
   if (!first || typeof first !== "object") return null;
   const entry = first as Record<string, unknown>;
+  const downloadUrl = entry.download_url;
+  if (typeof downloadUrl !== "string" || downloadUrl.length === 0) return null;
+  const mimeType = typeof entry.mime_type === "string" ? entry.mime_type : undefined;
+  return { downloadUrl, mimeType };
+}
+
+// Parse the declared `image` ARGUMENT (the Apps SDK file-param path) with the same
+// defensiveness as firstFileParam: any shape without a usable download_url is
+// treated as ABSENT so a partial/odd object falls back to mode B, never errors.
+// The file object may name its type as `mime_type`; other handle fields
+// (file_id/file_name/name) are unused server-side — only the URL is fetched.
+function fileFromArgument(image: unknown): AttachedFile | null {
+  if (!image || typeof image !== "object") return null;
+  const entry = image as Record<string, unknown>;
   const downloadUrl = entry.download_url;
   if (typeof downloadUrl !== "string" || downloadUrl.length === 0) return null;
   const mimeType = typeof entry.mime_type === "string" ? entry.mime_type : undefined;
@@ -254,6 +286,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       description:
         "Resolve a conversational cigar mention to catalog entries by fuzzy (trigram) name match. Use when a cigar is named or asked about, not for the user's own history. Prefer the fullest name the user gave — a bare word or a single product token may not match. Read `guidance`: single_match (an exact catalog-name hit — proceed with it), brand_match (only a brand was named — ask for the line/vitola), multiple_matches (candidates but no exact hit — confirm the exact one with the user before saving), no_match (nothing matched — a described save_smoke creates the cigar; if the mention was partial/abbreviated, ask for the fuller name first so you don't create a duplicate).",
       inputSchema: searchCigarsSchema,
+      outputSchema: searchCigarsOutput,
       annotations: { readOnlyHint: true, title: "Search cigars" },
     },
     (args, extra) =>
@@ -285,6 +318,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       description:
         "Fetch full catalog detail (blend, vitola, origin) for one resolved cigar id. Use after search_cigars when factual specifics help the conversation.",
       inputSchema: getCigarSchema,
+      outputSchema: getCigarOutput,
       annotations: { readOnlyHint: true, title: "Get cigar" },
     },
     (args, extra) =>
@@ -309,6 +343,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       description:
         "Search the authenticated user's own smoke history, newest first, as compact summaries. Use for comparisons like what they thought last time or what they have called bready. The `text` filter is full-text over journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim. When `text` is used, each result carries `matchedIn` (which prose field(s) hit) and `matchSnippet` (a short excerpt around the hit) so you can see why it matched without a follow-up get_smoke.",
       inputSchema: getMySmokesSchema,
+      outputSchema: getMySmokesOutput,
       annotations: { readOnlyHint: true, title: "Get my smokes" },
     },
     (args, extra) =>
@@ -350,6 +385,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       description:
         "Fetch the complete record of one of the user's smokes by id, with full progression and verbatim notes. Use for exact comparison or before a guarded correction.",
       inputSchema: getSmokeSchema,
+      outputSchema: getSmokeOutput,
       annotations: { readOnlyHint: true, title: "Get smoke" },
     },
     (args, extra) =>
@@ -365,6 +401,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       title: "Get my inventory",
       description:
         "The user's current humidor holdings — what they own, how many remain, since when it has been aging, their own rating. Use when the user asks what to smoke or what they have.",
+      outputSchema: getMyInventoryOutput,
       annotations: { readOnlyHint: true, title: "Get my inventory" },
     },
     (extra) =>
@@ -403,6 +440,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       description:
         "Persist one finished smoke, called once when the user signals the cigar is over — never per observation. Omit anything the user did not establish; sparse is correct.",
       inputSchema: saveSmokeSchema,
+      outputSchema: saveSmokeOutput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -437,6 +475,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       description:
         "The user names a cigar missing from the catalog. Confirm the fullest name first (search_cigars guidance applies); the entry is created unverified from their words and a background enrichment request is queued to fill specs and a product photo. Use before save_smoke or record_purchase when nothing matches. `guidance` is 'created' for a new entry or 'already_existed' when the name linked to an existing one.",
       inputSchema: addCigarSchema,
+      outputSchema: addCigarOutput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -464,6 +503,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       description:
         "Append an acquisition to the humidor ledger, or correct the count. quantity is a positive integer for a purchase; it may be NEGATIVE to correct an over-count — say why in notes. Record only stated facts (never invent a price, date, or vendor); a described cigar with no catalog match is auto-created and its enrichment queued. Corrections are rows too — holdings stay derived. Output: purchaseId, cigar, holdingAfter { totalAcquired, remaining }, and wanted — when wanted is true the user just bought something on their want list, so offer to clear it with set_want (never clear it silently).",
       inputSchema: recordPurchaseSchema,
+      outputSchema: recordPurchaseOutput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -497,6 +537,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       description:
         "Apply explicit, field-scoped corrections to an existing smoke (rating, cigar, appended stages). Batch related corrections from the same exchange into ONE call rather than issuing several — one clientRequestId per correction intent. Reuse the clientRequestId on retries; unlisted fields are never touched.",
       inputSchema: updateSmokeSchema,
+      outputSchema: updateSmokeOutput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -525,6 +566,9 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
         "2. NO IMAGE? Call with just the smoke id; the tool returns a one-time upload link. Hand it to the user: open it on your phone, it goes straight to your camera roll and attaches to this smoke. This is the reliable path on mobile, where in-chat photo attachment does not work.\n" +
         "A photo NEVER blocks save_smoke — it is a separate action with its own result, so a photo failure never affects saving the smoke. `kind` classifies the shot (cigar, band, construction, burn, other; default other); add a `caption` only if the user gave one.",
       inputSchema: addSmokePhotoSchema,
+      outputSchema: addSmokePhotoOutput,
+      // Declare `image` as a file input so ChatGPT forwards the attached photo.
+      _meta: ADD_SMOKE_PHOTO_META,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -538,8 +582,12 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
         // `unavailable` rather than mint a link that would 503 on upload.
         if (!storage) throw new UnavailableError();
 
+        // Two accepted deliveries → one fetch path: the declared `image` argument
+        // (Apps SDK file param) and the production-proven request-level
+        // `_meta["openai/fileParams"]`. Either yields an AttachedFile or null
+        // (→ mode B); a malformed shape in either is treated as absent, never errors.
         const meta = extra._meta as Record<string, unknown> | undefined;
-        const attached = firstFileParam(meta);
+        const attached = firstFileParam(meta) ?? fileFromArgument(args.image);
 
         if (attached) {
           // Mode A — image attached: fetch it, run the shared pipeline, store it.
@@ -598,6 +646,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       description:
         "Mark a catalog cigar as wanted, or clear the mark. Wanting is independent of owning or smoking it — smoking never clears a want, and it is cleared only on request. Set `wanted` true to mark, false to clear; add a `note` only if the user gave a reason. Idempotent: repeating a call is a safe no-op (no clientRequestId needed). Output: cigarId, wanted, note, changed.",
       inputSchema: setWantSchema,
+      outputSchema: setWantOutput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,

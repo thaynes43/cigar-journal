@@ -266,6 +266,44 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  it("tools/list declares the add_smoke_photo file input and an outputSchema on every tool", async () => {
+    await withClient(ownerFull, async (client) => {
+      const { tools } = await client.listTools();
+
+      // Every tool advertises a structured outputSchema (ChatGPT flags "Output
+      // schema recommended" per tool). The SDK publishes it as a JSON object schema.
+      for (const t of tools) {
+        expect(t.outputSchema, `${t.name} is missing an outputSchema`).toBeDefined();
+        expect((t.outputSchema as { type?: string }).type).toBe("object");
+      }
+
+      // add_smoke_photo DECLARES its file input: the tool-level _meta lists `image`,
+      // and `image` is a real top-level input property — without both, ChatGPT never
+      // forwards the attached photo (the owner-blocking bug).
+      const photo = tools.find((t) => t.name === "add_smoke_photo")!;
+      expect((photo._meta as Record<string, unknown> | undefined)?.["openai/fileParams"]).toEqual([
+        "image",
+      ]);
+      const inputSchema = photo.inputSchema as {
+        properties?: Record<string, unknown>;
+        required?: string[];
+      };
+      expect(inputSchema.properties ?? {}).toHaveProperty("image");
+      // `image` stays OUT of required — a missing/partial file must never block the call.
+      expect(inputSchema.required ?? []).not.toContain("image");
+    });
+  });
+
+  it("tool results carry structuredContent identical to the text payload", async () => {
+    // The SDK validates structuredContent against each outputSchema on every
+    // successful call, so this asserts the additive structured output is present
+    // and byte-for-byte the same object the text block already carries.
+    await withClient(ownerCatalogOnly, async (client) => {
+      const result = await call(client, "search_cigars", { query: "Plasencia" });
+      expect(result.structuredContent).toEqual(payloadOf(result));
+    });
+  });
+
   // ---- read happy paths + scope-bounding ------------------------------------
 
   it("search_cigars resolves a seeded cigar; personal userSmokeCount is journal:read-bounded", async () => {
@@ -1129,6 +1167,64 @@ describe("@cj/mcp adapter", () => {
     } finally {
       await new Promise<void>((resolve) => fixture.close(() => resolve()));
     }
+  });
+
+  it("add_smoke_photo mode A via the declared `image` argument fetches, stores, and rides get_smoke", async () => {
+    // The Apps SDK file-param path: ChatGPT fills the declared `image` property with
+    // { download_url, file_id, mime_type?, file_name? }. A local fixture stands in
+    // for the short-lived signed URL — no live fetches.
+    const fixture: HttpServer = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "image/png", "content-length": PNG_FIXTURE.byteLength });
+      res.end(PNG_FIXTURE);
+    });
+    await new Promise<void>((resolve) => fixture.listen(0, resolve));
+    const fixtureUrl = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/img.png`;
+
+    try {
+      await withClient(ownerFull, async (client) => {
+        const smokeId = await saveBareSmoke(client, "photo-arg-mode-a");
+
+        const data = payloadOf(
+          await call(client, "add_smoke_photo", {
+            smokeId,
+            kind: "cigar",
+            caption: "As an argument",
+            image: {
+              download_url: fixtureUrl,
+              file_id: "file_2",
+              mime_type: "image/png",
+              file_name: "stick.png",
+            },
+          }),
+        ) as { mode: string; photo: { photoId: string; smokeId: string; kind: string } };
+        expect(data.mode).toBe("attached");
+        expect(data.photo.smokeId).toBe(smokeId);
+        expect(data.photo.kind).toBe("cigar");
+
+        const full = payloadOf(await call(client, "get_smoke", { smokeId })) as {
+          smoke: { photos: { photoId: string }[] };
+        };
+        expect(full.smoke.photos.some((p) => p.photoId === data.photo.photoId)).toBe(true);
+      });
+    } finally {
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  });
+
+  it("add_smoke_photo with a malformed `image` argument falls back to mode B, never errors", async () => {
+    await withClient(ownerFull, async (client) => {
+      const smokeId = await saveBareSmoke(client, "photo-malformed-arg");
+      // No usable download_url → the file object is treated as ABSENT → mode-B upload
+      // link, not an error (contract: unknown/malformed shapes fall back, never fail).
+      const result = await call(client, "add_smoke_photo", {
+        smokeId,
+        image: { file_id: "file_x", mime_type: "image/png" },
+      });
+      expect(result.isError).not.toBe(true);
+      const data = payloadOf(result) as { mode: string; uploadUrl: string };
+      expect(data.mode).toBe("upload_url");
+      expect(data.uploadUrl).toMatch(new RegExp(`^${ORIGIN}/u/[A-Za-z0-9_-]+$`));
+    });
   });
 
   it("rejects add_smoke_photo for a token without journal:write: 403", async () => {
