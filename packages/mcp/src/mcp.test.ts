@@ -1060,6 +1060,33 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  it("add_cigar with confirmedDistinct overrides a near-match deadlock and creates a distinct entry", async () => {
+    // Two same-number, non-packaging siblings the guard cannot separate: without
+    // the flag add_cigar deadlocks (cigar_ambiguous); with confirmedDistinct —
+    // set only after the user confirmed none of the candidates is theirs — it
+    // creates the distinct product through the tool surface.
+    await h.seedCigar({ canonicalName: "Zephyr Nova 2001 Alpha", brand: "Zephyr" });
+    await h.seedCigar({ canonicalName: "Zephyr Nova 2001 Beta", brand: "Zephyr" });
+    await withClient(ownerFull, async (client) => {
+      const deadlock = await call(client, "add_cigar", {
+        clientRequestId: randomUUID(),
+        cigar: { canonicalName: "Zephyr Nova 2001", brand: "Zephyr" },
+      });
+      expect(errorOf(deadlock).code).toBe("cigar_ambiguous");
+
+      const created = payloadOf(
+        await call(client, "add_cigar", {
+          clientRequestId: randomUUID(),
+          cigar: { canonicalName: "Zephyr Nova 2001", brand: "Zephyr" },
+          confirmedDistinct: true,
+        }),
+      ) as { created: boolean; guidance: string; cigar: { cigarId: string; canonicalName: string } };
+      expect(created.created).toBe(true);
+      expect(created.guidance).toBe("created");
+      expect(created.cigar.canonicalName).toBe("Zephyr Nova 2001");
+    });
+  });
+
   it("rejects add_cigar for a token without journal:write: 403", async () => {
     const res = await fetch(`${baseUrl}/mcp`, {
       method: "POST",

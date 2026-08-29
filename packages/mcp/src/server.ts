@@ -255,6 +255,7 @@ function toAddCigarInput(args: AddCigarArgs, clientId: string, correlationId: st
     // The described-cigar shape matches DescribedCigarInput; the domain re-checks it.
     cigar: args.cigar as unknown as AddCigarInput["cigar"],
     requestEnrichment: args.requestEnrichment,
+    confirmedDistinct: args.confirmedDistinct,
     provenance: { source: "llm-conversation", client: clientId },
     correlationId,
   };
@@ -633,7 +634,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Add cigar",
       description:
-        "The user names a cigar missing from the catalog. Confirm the fullest name first (search_cigars guidance applies); the entry is created unverified from their words and a background enrichment request is queued to fill specs and a product photo. Use before save_smoke or record_purchase when nothing matches. `guidance` is 'created' for a new entry or 'already_existed' when the name linked to an existing one.",
+        "The user names a cigar missing from the catalog. Confirm the fullest name first (search_cigars guidance applies); the entry is created unverified from their words and a background enrichment request is queued to fill specs and a product photo. Use before save_smoke or record_purchase when nothing matches. If it errors cigar_ambiguous or you fear a silent link to a near-match (a number/packaging variant), show the user search_cigars candidates; when they confirm none is theirs, retry with confirmedDistinct:true. `guidance` is 'created' for a new entry or 'already_existed' when the name linked to an existing one.",
       inputSchema: addCigarSchema,
       outputSchema: addCigarOutput,
       annotations: {

@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
-import { enrichmentRequests, productPhotos, auditLog } from "@cj/db";
+import { enrichmentRequests, productPhotos, auditLog, cigars } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { addCigar } from "./add-cigar.js";
+import { saveSmoke } from "./save-smoke.js";
 import type { Principal } from "./index.js";
 import { CigarAmbiguousError, ValidationError } from "./errors.js";
 
@@ -158,5 +159,93 @@ describe("addCigar", () => {
     // The other user's enrichment request records them as requester, but the
     // cigar already had a pending request, so none is added.
     expect(await enrichmentFor(mine.cigar.cigarId)).toHaveLength(1);
+  });
+
+  // ---- packaging / one-sided-number guard + confirmedDistinct escape hatch ---
+
+  it("the reported repro: 'Davidoff Signature 2000' creates distinct of both Signature and its Tubos Pack, and a smoke saves against it", async () => {
+    const sigId = await h.seedCigar({
+      canonicalName: "Davidoff Signature",
+      brand: "Davidoff",
+      line: "Signature",
+      vitolaName: "Grand Toro",
+    });
+    const tubosId = await h.seedCigar({
+      canonicalName: "Davidoff Signature 2000 Tubos Pack",
+      brand: "Davidoff",
+      line: "Signature",
+    });
+
+    // WITHOUT the flag: the naked "Signature" is disqualified by the one-sided
+    // digit rule, the Tubos Pack by the packaging rule — so neither strong-links
+    // and neither triggers ambiguity; a fresh distinct row is created.
+    const result = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Davidoff Signature 2000", brand: "Davidoff", line: "Signature" },
+    });
+    expect(result.created).toBe(true);
+    expect(result.cigar.canonicalName).toBe("Davidoff Signature 2000");
+    expect(result.cigar.cigarId).not.toBe(sigId);
+    expect(result.cigar.cigarId).not.toBe(tubosId);
+
+    // The returned catalog id is real and usable — a smoke links straight to it.
+    const smoke = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: result.cigar.cigarId },
+      overallDescriptors: ["cream"],
+    });
+    expect(smoke.smoke.cigar.cigarId).toBe(result.cigar.cigarId);
+    expect(smoke.cigarCreated).toBe(false);
+  });
+
+  it("confirmedDistinct overrides a genuine (non-packaging) ambiguity and creates", async () => {
+    // Two same-number, non-packaging siblings that both strong-match — the
+    // guard cannot separate them, so the naked query is ambiguous by design.
+    await h.seedCigar({ canonicalName: "Astra Comet 1998 Alpha", brand: "Astra" });
+    await h.seedCigar({ canonicalName: "Astra Comet 1998 Beta", brand: "Astra" });
+
+    const ambiguous = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Astra Comet 1998", brand: "Astra" },
+    }).catch((e: unknown) => e);
+    expect(ambiguous).toBeInstanceOf(CigarAmbiguousError);
+
+    const created = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Astra Comet 1998", brand: "Astra" },
+      confirmedDistinct: true,
+    });
+    expect(created.created).toBe(true);
+    expect(created.cigar.canonicalName).toBe("Astra Comet 1998");
+  });
+
+  it("confirmedDistinct still links a case-insensitive EXACT name (never a literal duplicate)", async () => {
+    const existingId = await h.seedCigar({ canonicalName: "Zenith Prime 2020", brand: "Zenith" });
+    const result = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "zenith prime 2020", brand: "Zenith" },
+      confirmedDistinct: true,
+    });
+    expect(result.created).toBe(false);
+    expect(result.cigar.cigarId).toBe(existingId);
+  });
+
+  it("confirmedDistinct replays on the same clientRequestId — a single row, no double create", async () => {
+    const input = {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Vela Distinct 3000", brand: "Vela" },
+      confirmedDistinct: true,
+    };
+    const first = await addCigar(h.deps, user, input);
+    const second = await addCigar(h.deps, user, input);
+    expect(first.created).toBe(true);
+    expect(second.replayed).toBe(true);
+    expect(second.cigar.cigarId).toBe(first.cigar.cigarId);
+
+    const rows = await h.deps.db
+      .select({ id: cigars.id })
+      .from(cigars)
+      .where(eq(cigars.canonicalName, "Vela Distinct 3000"));
+    expect(rows).toHaveLength(1);
   });
 });

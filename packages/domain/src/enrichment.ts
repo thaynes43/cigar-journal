@@ -91,13 +91,16 @@ export async function maybeQueueEnrichment(
 // Resolve (or lazily create) the cigar, then optionally queue enrichment. The
 // enrichment gate is evaluated on both create AND resolve, so a described name
 // that links to an existing but under-documented catalog row still gets filled.
+// `confirmedDistinct` is add_cigar's escape hatch, forwarded to the resolver (the
+// record_purchase path never sets it — its resolve keeps default behavior).
 export async function resolveAndEnrich(
   tx: Tx,
   ref: CigarRef,
   requestedBy: string,
   requestEnrichment: boolean,
+  options?: { confirmedDistinct?: boolean },
 ): Promise<ResolveAndEnrichResult> {
-  const cigar = await resolveCigar(tx, ref);
+  const cigar = await resolveCigar(tx, ref, options);
   const enrichmentQueued = requestEnrichment
     ? await maybeQueueEnrichment(tx, cigar.cigarId, requestedBy)
     : false;

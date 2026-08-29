@@ -55,6 +55,7 @@ async function addWithinTx(
     { described: input.cigar },
     principal.userId,
     input.requestEnrichment ?? true,
+    { confirmedDistinct: input.confirmedDistinct ?? false },
   );
 
   await tx.insert(auditLog).values({
