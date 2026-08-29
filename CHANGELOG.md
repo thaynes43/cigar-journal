@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.0](https://github.com/thaynes43/cigar-journal/compare/v0.23.1...v0.24.0) (2026-08-29)
+
+
+### Features
+
+* **domain:** curation primitives — rights enforcement, match status, catalog_status, tombstone merge (DESIGN-003 wave 3) ([#131](https://github.com/thaynes43/cigar-journal/issues/131)) ([68589e2](https://github.com/thaynes43/cigar-journal/commit/68589e2b0e68d8d8d239d4767fc721b35e34c533))
+* **web:** chrome — user menu, settings, catalog review move (DESIGN-003 wave 2) ([#125](https://github.com/thaynes43/cigar-journal/issues/125)) ([#133](https://github.com/thaynes43/cigar-journal/issues/133)) ([91f95ca](https://github.com/thaynes43/cigar-journal/commit/91f95ca52cd0ae1e474471be91b394d59847b45f))
+* **web:** library catalog frame — full-bleed unified grid, shelves, rails (DESIGN-003 wave 1) ([#124](https://github.com/thaynes43/cigar-journal/issues/124)) ([#130](https://github.com/thaynes43/cigar-journal/issues/130)) ([37f3fb4](https://github.com/thaynes43/cigar-journal/commit/37f3fb418becde4138c5c168d792e48b5c7a43bf))
+
+
+### Bug Fixes
+
+* **mcp:** add_cigar escape hatch + strong-link guard for packaging/one-sided-number variants ([#134](https://github.com/thaynes43/cigar-journal/issues/134)) ([0ad744b](https://github.com/thaynes43/cigar-journal/commit/0ad744b20f378d24b47297bd6a9b7eadd8f115df))
+
 ## [0.23.1](https://github.com/thaynes43/cigar-journal/compare/v0.23.0...v0.23.1) (2026-08-29)
 
 
