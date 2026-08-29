@@ -1,4 +1,4 @@
-# Session handoff — 2026-08-29 (post go-live code queue)
+# Session handoff — 2026-08-29 (DESIGN-003 catalog rework shipped)
 
 For a cold-start agent. The durable backlog is GitHub issues (label `backlog`);
 this file is the bridge: where the last session left prod, and what to pick up.
@@ -6,73 +6,78 @@ Overwrite it at the next major handoff.
 
 ## Where prod stands
 
-- **v0.23.1** live and verified (web + mcp pods, health OK). The entire go-live
-  code sequence #88–#97 is merged and deployed: detail-page rebuild, unified
-  catalog + want/favorites, explicit consumption, price surfaces, 17-tool MCP
-  (`browse_catalog`/`get_offers` verified live), public journal pages,
-  curation pass done (35 clean brand shelves), cutover sweep applied.
-- **Crawler CronJobs exist and are SUSPENDED** (`cigar-journal-crawl-offers`
-  weekly Sun 08:00 UTC, `cigar-journal-crawl-enrich` daily 09:00 UTC, ns
-  `frontend`). Unsuspend is a deliberate owner call:
-  `kubectl patch cronjob -n frontend <name> -p '{"spec":{"suspend":false}}'`.
-- **Owner's journal is still `private`.** Anonymous `/journal` 404s by design.
-  Public pages are shipped but dark until the cutover flip.
-- Prod DB got a one-off fix: Vega Fina `type` CC→NC.
+- **v0.24.0** live and verified (web + mcp pods on the new image, health OK,
+  anonymous `/cigars` → signin, `/curation` → `/admin/catalog` 307). Ships:
+  - **DESIGN-003 waves 1–3** (docs/design/003-library-catalog.md — the
+    corrective spec after the owner rejected the v0.23 catalog IA): `/cigars`
+    is the full-bleed unified cigar grid (auto-fill minmax, labeled Own/Type/
+    Sort rails, price sort, result count, $n /stick tiles, 3:4 art, shelf
+    strips with fade + hover paddles + See all); avatar user menu (Settings ·
+    Ledger · Catalog review · Sign out); `/settings` v1 (display name,
+    journal visibility — the #97 flip now has a UI — timezone, wired into
+    LocalDate); `/admin/catalog` (renamed Catalog review); curation/rights
+    primitives (rights-honored photo reads, setListingMatchStatus,
+    catalog_status + exclude/restore, tombstone merge, audit
+    run_id/confidence/reverts + actor 'agent'; migrations 0012–0014).
+  - **add_cigar disambiguation fix** (owner-reported live MCP bug): optional
+    `confirmedDistinct` + strong-link guard tightened (one-sided model
+    numbers and packaging tokens never silently link; curation dup queue uses
+    the same guard). Additive schema change → the ChatGPT connector needs a
+    **refresh + NEW chat** before retesting (docs/mcp/client-compatibility.md).
+- **Crawler CronJobs still SUSPENDED** (owner-gated, #97). Both now pinned to
+  v0.24.0.
+- Owner's journal still `private`; public pages dark until the #97 flip
+  (which can now be done from /settings instead of raw SQL).
 
-## Owner-gated cutover (issue #97 — the only go-live issue still open)
+## Owner-gated cutover (#97) — unchanged, do not do unprompted
 
-Everything here needs Tom's go-ahead; do not do it unprompted.
+ChatGPT connector verification · unsuspend crawl CronJobs · journal flip +
+archive cutover (53 reviews) · owner's Micallef photo.
 
-1. **ChatGPT verification**: refresh the connector, start a NEW chat (schema
-   cache is per-conversation — docs/mcp/client-compatibility.md), run the
-   DESIGN-002 conversation set, date the compatibility matrix.
-2. **Unsuspend the crawl CronJobs** (commands above).
-3. **Journal flip + archive cutover**: `UPDATE users SET
-   journal_visibility='public'` for the owner; verify all 53 archived reviews
-   render on `/journal` (count vs `archive/` — the #96 PR body and issue #97
-   carry the plan); then point MkDocs readers at `/journal`. Keep the archive
-   publishable until Tom retires it (AGENTS.md).
-4. Owner still intends to attach his real Micallef photo (upload-link path works).
+## Open backlog (rescoped 2026-08-29 — read the issues, bodies were rewritten)
 
-## Open backlog (GitHub issues)
+- **#124 library catalog build** — wave 1 DONE; remainder = wave 6 filter
+  chips (router overlay booleans + brand, chip popovers, counts).
+- **#125 chrome** — DONE via #133 (left open only if follow-ups surface;
+  close after verifying on prod).
+- **#126 agent enrichment** — wave 3 primitives DONE; remainder = the
+  `curate` batch role (Sonnet 5) + review/undo queue. Read the issue comment:
+  two carry-forwards (crawler overwrites curator `unmatched` — needs
+  `decided_by`; unmerge needs per-merge bookkeeping).
+- **#127 product images** — untouched. Root cause quantified: all 853 photos
+  from the one Fox seed; owner humidor 63/82 photoless (all 46 CC); 834
+  type-NULL, 538 unbranded. Sequence in the issue.
+- **#128 public journal markdown fidelity** — should land before the #97 flip.
+- **#129 dev-env-cli OAuth token expires ~2026-09-26** — only hard-dated item.
+- **#45** destructive-op curation surface (renameCigar still unbuilt) ·
+  **#46** SSO + invites (UI slots into /settings) · **#48** e2e suite etc. ·
+  **#49** cosmetic nits · **#50** parking lot.
 
-- **#45 curation tooling** — post-#95 comment lists the real gaps: listing-match
-  confirm/unmatch curator functions (1778 auto matches untriaged), product-photo
-  suppress/replace + `rights` honored (ADR-007 partial), non-cigar exclude
-  (gift cards/samplers pollute shelves), crawler brand/line backfill (538
-  unbranded rows), canonical-name rename tooling. Plus flagged data judgment
-  calls (Cuba Divinos, doubled names, reversed CC names, La Nox cross-line
-  matches).
-- **#46 identity** — Authentik SSO, invite system, OG share cards. Public-pages
-  slice already shipped; the rest is post-launch.
-- **#48 ops hygiene** — spike/ removal, Playwright e2e suite, dev-env-cli OAuth
-  token expires ~2026-09-26, RELEASE_PLEASE_TOKEN expiry, publish-image event
-  reliability note. (The MCP Gatus probe already exists on haynes-ops main —
-  a stale-clone read said otherwise; always `git fetch` the canonical clone.)
-- **#49 UX follow-ups** — remainder only; load-more >25 and per-user dates were
-  done in the #97 sweep.
-- **#50 later-phase** — R11/R12, analytics, Deep Research.
-- Deferred by design: web `price` sort on the All view (domain supports it;
-  catalog-registry defers the UI), favorites facet/shelf, `get_cigar_prices`.
+## How this repo is worked (verify before trusting)
 
-## How this repo is worked (hard-won, verify before trusting)
-
-- Coordinator mode: the session agent dispatches Opus worktree lanes and owns
-  design/text/review/ship. Fetch the canonical clone (`git -C
-  ~/repos/cigar-journal fetch origin`) BEFORE dispatching — worktree isolation
-  snapshots its last-fetched origin/main.
-- Landing: cherry-pick the lane's commit onto a fresh `origin/main` branch in
-  your own worktree, run the full suite (`pnpm lint/typecheck/test/build`),
-  push, PR, squash-merge. The squash commit message comes from the branch
-  commit, not the PR title — it drives release-please's version bump.
-- Ship chain: release-please PR → tag → publish-image → haynes-ops HR bump PR
-  (bump `helmrelease.yaml` AND `crawler-cronjobs.yaml` together) → flux
-  reconcile (`kustomization cigar-journal` lives in ns `frontend`) → pod verify.
-  `kubectl kustomize`/flux-local do NOT catch server-side typed-apply errors on
-  raw manifests (raw CronJobs need list-form `env:`).
-- UI features get a real anonymous/authed click-through on the local preview
-  rig before ship — edge `middleware.ts` is invisible to unit tests and once
-  bounced all anonymous traffic to /signin on a green branch.
-- CI flakes: empty-commit retriggers (max 3); release-branch retrigger via
-  `git commit-tree` + force-with-lease. Actions logs are egress-blocked from
-  the pod; use the job-summary tail.
+- Coordinator mode: session agent designs/reviews/ships; Opus worktree lanes
+  build. Fetch the canonical clone BEFORE dispatching (isolation snapshots its
+  last-fetched origin/main). Landing: cherry-pick onto fresh origin/main,
+  full suite, PR, squash-merge (branch commit message drives release-please).
+- **Concurrent-lane trap (hit 2026-08-29):** two lanes minted the same
+  migration number (0012) — renumber at landing; lanes based pre-merge also
+  both edit consumption-backfill.test.ts. Check migration numbering on every
+  db-touching lane.
+- **gh token trap:** the shell's `GH_TOKEN` env goes stale between refreshes
+  and 401s; `/creds/gh_token` (mounted, 40-min refresh) is authoritative —
+  prefix gh calls with `GH_TOKEN=$(cat /creds/gh_token)`. Note: `gh api user`
+  is always 403 for the app token; test with a repo call instead.
+- **CI/local flake:** `migrations.test.ts` (embedded-PG startup under
+  parallel load) fails ~1 in 3 full runs — different file each time, always
+  green on re-run/retrigger (max 3 empty-commit retriggers per house rule).
+- Ship chain: release-please PR (regular merge) → tag fires publish-image →
+  haynes-ops bump PR (helmrelease.yaml &mainImage ~line 44 AND both image
+  pins in crawler-cronjobs.yaml) → `flux reconcile source git haynes-ops -n
+  flux-system` (the source is named haynes-ops, NOT flux-system) → kustomization
+  cigar-journal + helmrelease (ns frontend) → pod verify. Declare the rollout
+  with declare-activity (scope frontend,cigar-journal).
+- UI lanes must run the local preview rig + screenshots (memory:
+  local-preview-rig); the wave-2 lane caught a real popover-clipping bug only
+  via screenshots — keep requiring them.
+- Prod DB read access for audits: memory `prod-db-read-access`
+  (kubectl -n database exec postgres16-1, db cigar_journal, SELECT only).
