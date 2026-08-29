@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.1](https://github.com/thaynes43/cigar-journal/compare/v0.26.0...v0.26.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **crawler:** probe-informed adapter corrections — 2 Guys /store/, Cuban Lou's product-only sitemap ([#150](https://github.com/thaynes43/cigar-journal/issues/150)) ([0c0a321](https://github.com/thaynes43/cigar-journal/commit/0c0a3216ab0ae88c892365e9ede7974282272c58))
+
 ## [0.26.0](https://github.com/thaynes43/cigar-journal/compare/v0.25.1...v0.26.0) (2026-08-29)
 
 
