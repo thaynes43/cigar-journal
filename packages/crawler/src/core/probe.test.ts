@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { runProbe } from "./probe.js";
 import { cubanLous } from "../adapters/cuban-lous.js";
+import { twoGuysCigars } from "../adapters/two-guys-cigars.js";
 import { createMockFetcher, urlsetXml } from "../testing/fixtures.js";
 import type { VendorAdapter } from "../adapters/types.js";
 
@@ -8,8 +9,8 @@ import type { VendorAdapter } from "../adapters/types.js";
 // guardrail (NEVER live sites) and assert the verdict it prints.
 
 const ROBOTS = "https://www.cubanlous.com/robots.txt";
-const SITEMAP = "https://www.cubanlous.com/sitemap_index.xml";
-const PRODUCT = "https://www.cubanlous.com/product/montecristo-no-4/";
+const SITEMAP = "https://www.cubanlous.com/product-sitemap.xml";
+const PRODUCT = "https://www.cubanlous.com/montecristo-cigars/montecristo-no-4/";
 const NON_PRODUCT = "https://www.cubanlous.com/about/";
 
 function productHtml(name: string, price: string, category = "Cigars"): string {
@@ -37,7 +38,7 @@ describe("runProbe", () => {
     expect(result.verdict).toBe("ok");
     expect(result.robots.productPathAllowed).toBe(true);
     expect(result.sitemap.kind).toBe("urlset");
-    expect(result.sitemap.productLocs).toBe(1); // only /product/ matches, /about/ excluded
+    expect(result.sitemap.productLocs).toBe(2); // "/" prefix admits every loc; JSON-LD is the product gate
     expect(result.product?.hasProduct).toBe(true);
     expect(result.product?.name).toBe("Montecristo No. 4");
     expect(result.product?.priceCents).toBe(1800);
@@ -61,13 +62,14 @@ describe("runProbe", () => {
   });
 
   it("flags needs-attention when the productPathPrefix matches nothing", async () => {
+    // Uses 2 Guys (real "/store/" prefix) — cubanLous now carries "/" which
+    // matches every loc by design (its sitemap is product-only).
     const fetcher = createMockFetcher({
-      [ROBOTS]: { body: "User-agent: *\nAllow: /\n" },
-      // A sitemap whose URLs never start with /product/ — the prefix is wrong.
-      [SITEMAP]: { body: urlsetXml(["https://www.cubanlous.com/shop/monte-4/"]) },
+      ["https://www.2guyscigars.com/robots.txt"]: { body: "User-agent: *\nAllow: /\n" },
+      ["https://www.2guyscigars.com/sitemap.xml"]: { body: urlsetXml(["https://www.2guyscigars.com/blog/monte-4/"]) },
     });
 
-    const result = await runProbe(fetcher, cubanLous);
+    const result = await runProbe(fetcher, twoGuysCigars);
     expect(result.verdict).toBe("needs-attention");
     expect(result.sitemap.productLocs).toBe(0);
     expect(result.notes.join(" ")).toMatch(/productPathPrefix/);

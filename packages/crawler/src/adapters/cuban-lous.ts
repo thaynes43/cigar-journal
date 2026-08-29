@@ -25,7 +25,7 @@ export const cubanLous: VendorAdapter = {
   slug: "cuban-lous",
   name: "Cuban Lou's",
   url: "https://www.cubanlous.com",
-  sitemapUrl: "https://www.cubanlous.com/sitemap_index.xml",
+  sitemapUrl: "https://www.cubanlous.com/product-sitemap.xml",  // live-probed: Yoast product-only child (985 locs)
   focus: "CC",
   crawlEnabled: false,
   approvalStatus: "unapproved",
@@ -33,7 +33,7 @@ export const cubanLous: VendorAdapter = {
   displayEnabled: true,
   // …but never as a purchase destination (owner ruling 2026-08-29).
   purchaseLinkout: false,
-  productPathPrefix: "/product/",
+  productPathPrefix: "/",  // permalinks are /<category>/<slug>/ with no shared prefix; the sitemap above is already product-only
   cigarCategoryPattern: /cigar|habano/i,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?/i,
   excludeNamePattern: /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b/i,

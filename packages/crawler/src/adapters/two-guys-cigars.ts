@@ -28,7 +28,7 @@ export const twoGuysCigars: VendorAdapter = {
   approvalStatus: "owner-added",
   displayEnabled: true,
   purchaseLinkout: true,
-  productPathPrefix: "/product/",
+  productPathPrefix: "/store/",  // live-probed 2026-08-29: 1,462 product locs under /store/
   cigarCategoryPattern: /cigar/i,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?/i,
   excludeNamePattern: /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b/i,
