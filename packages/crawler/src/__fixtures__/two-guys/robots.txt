@@ -1,0 +1,9 @@
+# www.2guyscigars.com robots.txt — HAND-WRITTEN representative fixture.
+# NOT a live capture: the dev pod cannot reach this domain (ADR-006). The probe
+# must confirm the real robots.txt before crawling is enabled.
+User-agent: *
+Allow: /
+Disallow: /cart/
+Disallow: /checkout/
+
+Sitemap: https://www.2guyscigars.com/sitemap.xml

@@ -684,6 +684,7 @@ const PRICING_STALE_MS = 30 * 24 * 60 * 60 * 1000;
 interface SeriesRow {
   source: string;
   is_registry: boolean;
+  purchase_linkout: boolean;
   price: string | null; // numeric column — pg returns it as a string
   currency: string | null;
   in_stock: boolean | null;
@@ -704,7 +705,7 @@ interface SeriesRow {
 async function latestSeries(deps: Deps, cigarId: string): Promise<SeriesRow[]> {
   const result = await deps.db.execute(sql`
     WITH obs AS (
-      SELECT v.name AS source, TRUE AS is_registry,
+      SELECT v.name AS source, TRUE AS is_registry, v.purchase_linkout,
              o.price, o.currency, o.in_stock,
              COALESCE(o.listing_url, o.source_url) AS listing_url,
              o.seen_at, o.created_at, o.id,
@@ -714,7 +715,10 @@ async function latestSeries(deps: Deps, cigarId: string): Promise<SeriesRow[]> {
       JOIN vendors v ON v.id = o.vendor_id
       WHERE lm.cigar_id = ${cigarId} AND lm.status IN ('auto', 'confirmed')
       UNION ALL
+      -- Ad-hoc/chat sources have no vendor row: purchase_linkout defaults TRUE
+      -- (nothing to gate; a registry vendor supplies the real flag above).
       SELECT COALESCE(v.name, o.source_name) AS source, (o.vendor_id IS NOT NULL) AS is_registry,
+             COALESCE(v.purchase_linkout, TRUE) AS purchase_linkout,
              o.price, o.currency, o.in_stock,
              COALESCE(o.listing_url, o.source_url) AS listing_url,
              o.seen_at, o.created_at, o.id,
@@ -723,7 +727,7 @@ async function latestSeries(deps: Deps, cigarId: string): Promise<SeriesRow[]> {
       LEFT JOIN vendors v ON v.id = o.vendor_id
       WHERE o.cigar_id = ${cigarId} AND o.listing_match_id IS NULL
     )
-    SELECT source, is_registry, price, currency, in_stock, listing_url, seen_at,
+    SELECT source, is_registry, purchase_linkout, price, currency, in_stock, listing_url, seen_at,
            packaging, sticks_per_package, price_per_stick_cents, price_type
     FROM (
       SELECT DISTINCT ON (source, packaging) *
@@ -746,6 +750,7 @@ export async function getCigarOffers(
   return rows.map((row) => ({
     vendor: row.source,
     isRegistryVendor: Boolean(row.is_registry),
+    purchaseLinkout: Boolean(row.purchase_linkout),
     price: row.price != null ? Number(row.price) : null,
     currency: row.currency,
     inStock: row.in_stock,

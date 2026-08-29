@@ -77,3 +77,20 @@ LLM-created cigars accumulate until curated.
   tail, still needs lazy-create; rejected by owner in favor of vendor crawl.
 - Manual curation only — breaks the frictionless mid-smoke flow.
 - Verbatim review aggregation — IP risk without matching product value.
+
+## Amendments
+
+- **2026-08-29 (owner) — vendor expansion + Cuban Lou's posture.** More NC
+  vendors join the initial set (2 Guys Cigars, Small Batch Cigar built as
+  adapters alongside Fox). **Cuban Lou's: photos + price seeds YES, purchase
+  destination NO** — its offers feed price-at-a-glance/history and its images
+  feed product photos, but it is never presented as a place to buy. A new
+  `vendors.purchase_linkout` flag (migration 0018, default true) carries this:
+  `false` drops the listing link-out and renders the row as plain,
+  unapproved-labeled text (Cuban Lou's stays `approval_status='unapproved'`).
+  The r/cubancigars online-stores wiki remains the approved-list source via an
+  admin-reviewed diff of a locally-supplied snapshot (no Reddit API in this
+  lane; never the anonymous scrape path), attributed to the wiki. Provenance
+  guard hardened: `listing_matches.decided_by` (migration 0017,
+  crawler|curator|agent) makes the crawler preserve ANY non-crawler decision on
+  re-crawl, not just `confirmed`.

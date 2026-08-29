@@ -163,8 +163,13 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
           <h2 className="label-caps">Price</h2>
           <ul className="flex flex-col gap-2">
             {offers.map((offer) => {
+              // A registry vendor crawled for depth but not a purchase destination
+              // (ADR-006, e.g. Cuban Lou's) is shown as plain, labeled text — no
+              // link-out (below) and an "unapproved source" tag here.
+              const noLinkout = offer.isRegistryVendor && !offer.purchaseLinkout;
               const meta = [
                 offer.isRegistryVendor ? null : "community source",
+                noLinkout ? "unapproved source" : null,
                 formatSeenAt(offer.seenAt),
                 offer.inStock === false ? "out of stock" : null,
               ]
@@ -205,7 +210,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
               );
               return (
                 <li key={`${offer.vendor}·${offer.packaging ?? ""}`}>
-                  {offer.listingUrl ? (
+                  {offer.listingUrl && !noLinkout ? (
                     <a
                       href={offer.listingUrl}
                       target="_blank"

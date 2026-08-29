@@ -190,6 +190,68 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(relinkAttempt.cigarId).toBe(cigarA);
   });
 
+  // --- decided_by guard (migration 0017) ------------------------------------
+  it("upsertListingMatch upgrades a crawler-set unmatched to auto (the enrich path)", async () => {
+    const cigar = await seedCigar("Decided Enrich Path");
+    const listingKey = "/shop/decided-enrich/";
+
+    // The crawler first saw the listing with no catalog hit → unmatched, decided_by crawler.
+    const unmatched = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: null,
+      status: "unmatched",
+      now: now(),
+    });
+    expect(unmatched.status).toBe("unmatched");
+    expect(unmatched.decidedBy).toBe("crawler");
+
+    // A later crawl matches it → auto. A crawler-owned unmatched is freely upgradeable.
+    const upgraded = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: cigar,
+      status: "auto",
+      now: now(),
+    });
+    expect(upgraded.status).toBe("auto");
+    expect(upgraded.cigarId).toBe(cigar);
+    expect(upgraded.decidedBy).toBe("crawler");
+  });
+
+  it("upsertListingMatch preserves a curator-set unmatched (no silent re-auto)", async () => {
+    const cigar = await seedCigar("Decided Curator Unmatch");
+    const listingKey = "/shop/decided-curator/";
+
+    const auto = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+    // A curator unmatches it (status unmatched, decided_by curator) — as setListingMatchStatus stamps it.
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "unmatched", cigarId: null, decidedBy: "curator" })
+      .where(eq(listingMatches.id, auto.id));
+
+    // A re-crawl re-matching the same listing must NOT flip it back to auto.
+    const recrawl = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+    expect(recrawl.status).toBe("unmatched");
+    expect(recrawl.cigarId).toBeNull();
+    expect(recrawl.decidedBy).toBe("curator");
+  });
+
+  it("upsertListingMatch preserves an agent decision", async () => {
+    const cigar = await seedCigar("Decided Agent Verdict");
+    const listingKey = "/shop/decided-agent/";
+
+    const auto = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "unmatched", cigarId: null, decidedBy: "agent" })
+      .where(eq(listingMatches.id, auto.id));
+
+    const recrawl = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+    expect(recrawl.status).toBe("unmatched");
+    expect(recrawl.decidedBy).toBe("agent");
+  });
+
   it("enrich fulfills a pending request on a name hit and exhausts after repeated misses", async () => {
     const storage = createMemoryPhotoStorage();
 

@@ -7,8 +7,11 @@ import type { Fetcher } from "../core/fetcher.js";
 // injected in-memory fetcher (no network — guardrail), and a photo-pipeline stub
 // so the harness needs neither sharp nor real image bytes.
 
-export function loadFixture(name: string): string {
-  return readFileSync(fileURLToPath(new URL(`../__fixtures__/fox/${name}`, import.meta.url)), "utf8");
+// Load a recorded fixture. Defaults to the Fox set (the original ingest harness);
+// pass a directory for a per-adapter fixture set (two-guys, small-batch,
+// cuban-lous — hand-written since the dev pod cannot fetch the live sites).
+export function loadFixture(name: string, dir = "fox"): string {
+  return readFileSync(fileURLToPath(new URL(`../__fixtures__/${dir}/${name}`, import.meta.url)), "utf8");
 }
 
 export interface MockRoute {

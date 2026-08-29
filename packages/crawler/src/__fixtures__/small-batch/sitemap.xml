@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- HAND-WRITTEN representative fixture (ADR-006): a sitemapINDEX, as a ~20k-URL
+     catalog is likely to ship. The probe/collector descends one level into the
+     child. The real root path + shape must be confirmed live. -->
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://www.smallbatchcigar.com/products-sitemap-1.xml</loc></sitemap>
+</sitemapindex>

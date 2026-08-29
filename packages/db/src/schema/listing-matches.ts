@@ -15,6 +15,10 @@ export const listingMatches = pgTable(
     listingKey: text("listing_key").notNull(),
     cigarId: uuid("cigar_id").references(() => cigars.id),
     status: text("status").$type<"auto" | "confirmed" | "unmatched">().notNull().default("unmatched"),
+    // Who last decided this link (ADR-006, migration 0017): `crawler` guesses are
+    // freely re-writable; a `curator`/`agent` verdict (setListingMatchStatus) is
+    // preserved by the crawler on re-crawl. Backfilled 'crawler'.
+    decidedBy: text("decided_by").$type<"crawler" | "curator" | "agent">().notNull().default("crawler"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

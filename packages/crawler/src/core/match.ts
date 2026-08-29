@@ -49,9 +49,15 @@ export interface UpsertMatchInput {
   now: Date;
 }
 
-// Upsert the (vendorId, listingKey) match. A curator-`confirmed` row is returned
-// untouched — the crawler never overwrites a human decision (ADR-006). Otherwise
-// the status/cigarId are (re)written and updatedAt bumped.
+// Upsert the (vendorId, listingKey) match. The crawler NEVER overwrites a
+// non-crawler decision (ADR-006, migration 0017): a row a curator/agent decided
+// (decided_by 'curator'|'agent') is returned untouched, whatever its status —
+// so a curator's `unmatched` is no longer silently flipped back to the crawler's
+// `auto` on the next run. status='confirmed' is also honored explicitly so a
+// legacy confirm (backfilled decided_by='crawler') stays protected. A
+// crawler-owned row (decided_by='crawler', not confirmed) is freely re-written —
+// including the legitimate `unmatched`→`auto` upgrade the enrich path relies on —
+// and stays decided_by='crawler' (the update leaves the column alone).
 export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): Promise<ListingMatchRow> {
   const existing = await db
     .select()
@@ -61,7 +67,7 @@ export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): 
 
   const row = existing[0];
   if (row) {
-    if (row.status === "confirmed") return row;
+    if (row.decidedBy !== "crawler" || row.status === "confirmed") return row;
     const updated = await db
       .update(listingMatches)
       .set({ cigarId: input.cigarId, status: input.status, updatedAt: input.now })

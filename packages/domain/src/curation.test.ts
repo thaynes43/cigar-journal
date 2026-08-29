@@ -649,6 +649,35 @@ describe("curation", () => {
       expect(first.replayed).toBe(false);
       expect(second.replayed).toBe(true);
     });
+
+    it("stamps decided_by='curator' for a web verdict (default attribution)", async () => {
+      const cigarId = await seedUnverified("LM Curator Stamp");
+      const matchId = await addMatch(cigarId); // crawler-created row
+      await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "unmatched",
+      });
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(row!.decidedBy).toBe("curator");
+      // The provenance also rides the audit after-snapshot.
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "listing_match.set_status"));
+      const audit = audits.find((a) => (a.after as { id?: string }).id === matchId);
+      expect((audit!.after as { decidedBy?: string }).decidedBy).toBe("curator");
+    });
+
+    it("stamps decided_by='agent' when the agent surface passes actor='agent'", async () => {
+      const cigarId = await seedUnverified("LM Agent Stamp");
+      const matchId = await addMatch(cigarId);
+      await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "confirmed",
+        attribution: { actor: "agent", runId: "wo-cigar-curate-20260829", confidence: 0.9 },
+      });
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(row!.decidedBy).toBe("agent");
+    });
   });
 
   // --- excludeCigar / restoreCigar (DESIGN-003 §Curation) -------------------

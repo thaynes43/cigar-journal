@@ -1,0 +1,7 @@
+# www.smallbatchcigar.com robots.txt — HAND-WRITTEN representative fixture.
+# NOT a live capture (ADR-006): the dev pod cannot reach this domain. The probe
+# must confirm the real robots.txt (and any Crawl-delay) before enabling crawling.
+User-agent: *
+Allow: /
+
+Sitemap: https://www.smallbatchcigar.com/sitemap.xml

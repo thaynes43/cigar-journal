@@ -4,7 +4,15 @@
 // the CLI entry is src/cli.ts.
 
 export type { VendorAdapter } from "./adapters/types.js";
-export { adapters, getAdapter, adapterSlugs, foxCigar } from "./adapters/index.js";
+export {
+  adapters,
+  getAdapter,
+  adapterSlugs,
+  foxCigar,
+  twoGuysCigars,
+  smallBatchCigar,
+  cubanLous,
+} from "./adapters/index.js";
 
 export { parseRobots, type Robots } from "./core/robots.js";
 export {

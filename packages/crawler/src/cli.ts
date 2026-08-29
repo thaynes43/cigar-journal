@@ -1,21 +1,34 @@
+import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import { createDatabase, vendors, type Database } from "@cj/db";
 import { photoStorageFromEnv } from "@cj/photos";
 import { getAdapter, adapterSlugs } from "./adapters/index.js";
 import { createFetcher } from "./core/fetcher.js";
 import { runIngest, type CrawlMode, type IngestResult } from "./core/ingest.js";
+import { runProbe, formatProbe } from "./core/probe.js";
+import {
+  parseApprovedWiki,
+  diffApproved,
+  applyApproved,
+  formatApprovalDiff,
+} from "./core/approved-import.js";
 import type { VendorAdapter } from "./adapters/types.js";
 
 // One-shot CLI entry (run via tsx, mirroring the migrate/mcp roles). Selects a
 // vendor adapter and a mode, resolves/creates the vendor registry row, wires the
-// polite fetcher + (optional) photo storage, and drives one crawl. Reads
-// DATABASE_URL and PHOTOS_S3_* from env. See the ROLE DISPATCH marker in the
-// Dockerfile for the exact k8s command array (`crawl` role).
+// polite fetcher + (optional) photo storage, and drives one crawl. Two read-only
+// utility modes ride the same entry: `--probe` (live-verify an adapter before
+// enabling it, writes nothing) and `--import-approved` (the admin-reviewed
+// r/cubancigars approved-list diff). Reads DATABASE_URL and PHOTOS_S3_* from env.
+// See the ROLE DISPATCH marker in the Dockerfile for the exact k8s command array.
 
 interface CrawlArgs {
   vendor: string | null;
   mode: CrawlMode | null;
   dryRun: boolean;
+  probe: boolean;
+  importApproved: string | null;
+  yes: boolean;
   limit: number | null;
   databaseUrl: string | null;
   help: boolean;
@@ -27,16 +40,25 @@ const USAGE = `vendor crawler (ADR-006)
 
 usage:
   crawl --vendor <slug> --mode <seed|offers|enrich> [--dry-run] [--limit N] [--database-url <url>]
+  crawl --vendor <slug> --probe [--database-url <url>]
+  crawl --import-approved <file> [--yes] [--database-url <url>]
 
-  --vendor        adapter slug (${adapterSlugs().join(", ") || "none registered"})
-  --mode          seed (create catalog + offers + photos), offers (offers only,
-                  no catalog creation), or enrich (drain the gap-fill queue)
-  --dry-run       fetch (bounded) and print the would-write report; no DB/storage writes
-  --limit N       cap listings walked (seed/offers) or requests drained (enrich)
-  --database-url  Postgres URL (default: env DATABASE_URL)
+  --vendor           adapter slug (${adapterSlugs().join(", ") || "none registered"})
+  --mode             seed (create catalog + offers + photos), offers (offers only,
+                     no catalog creation), or enrich (drain the gap-fill queue)
+  --dry-run          fetch (bounded) and print the would-write report; no DB/storage writes
+  --probe            live-verify an adapter: fetch robots.txt + sitemap root + ONE
+                     product page, parse, print a verdict; WRITES NOTHING, no DB.
+                     Run this before enabling a new vendor (ADR-006 live-read rule).
+  --import-approved  a LOCAL r/cubancigars online-stores wiki snapshot (markdown);
+                     diff store entries against vendors.approval_status and print it.
+                     No Reddit API calls. Read-only unless --yes.
+  --yes              apply the --import-approved diff (audited). Default: print only.
+  --limit N          cap listings walked (seed/offers) or requests drained (enrich)
+  --database-url     Postgres URL (default: env DATABASE_URL)
 
 env:
-  DATABASE_URL    required
+  DATABASE_URL    required (except --probe)
   PHOTOS_S3_*     optional — photos are skipped when the object store is unconfigured`;
 
 function parseArgs(argv: string[]): CrawlArgs {
@@ -44,6 +66,9 @@ function parseArgs(argv: string[]): CrawlArgs {
     vendor: null,
     mode: null,
     dryRun: false,
+    probe: false,
+    importApproved: null,
+    yes: false,
     limit: null,
     databaseUrl: null,
     help: false,
@@ -62,6 +87,15 @@ function parseArgs(argv: string[]): CrawlArgs {
       }
       case "--dry-run":
         args.dryRun = true;
+        break;
+      case "--probe":
+        args.probe = true;
+        break;
+      case "--import-approved":
+        args.importApproved = argv[++i] ?? null;
+        break;
+      case "--yes":
+        args.yes = true;
         break;
       case "--limit": {
         const value = Number(argv[++i]);
@@ -83,9 +117,12 @@ function parseArgs(argv: string[]): CrawlArgs {
   return args;
 }
 
-// Resolve the vendor registry row by adapter name, creating it if absent. The
-// registry is admin data (ADR-006) and the admin UI lands later; a fresh row is
-// owner-added, crawl-enabled, focus NC.
+// Resolve the vendor registry row by adapter name, seeding it from the adapter's
+// posture if absent (ADR-006: the registry is admin data, the admin UI lands
+// later, so the seed posture rides the adapter). INSERT-IF-ABSENT — an existing
+// admin-owned row is returned untouched, never overwritten by a crawl. A fresh
+// row for an unprobed vendor is crawl_enabled=false; the coordinator enables it
+// after the in-cluster probe passes.
 async function resolveVendor(db: Database, adapter: VendorAdapter): Promise<string> {
   const existing = await db
     .select({ id: vendors.id })
@@ -99,9 +136,11 @@ async function resolveVendor(db: Database, adapter: VendorAdapter): Promise<stri
     .values({
       name: adapter.name,
       url: adapter.url,
-      focus: "NC",
-      crawlEnabled: true,
-      approvalStatus: "owner-added",
+      focus: adapter.focus,
+      crawlEnabled: adapter.crawlEnabled,
+      displayEnabled: adapter.displayEnabled,
+      approvalStatus: adapter.approvalStatus,
+      purchaseLinkout: adapter.purchaseLinkout,
     })
     .returning({ id: vendors.id });
   return inserted[0]!.id;
@@ -123,23 +162,78 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
   return lines.join("\n");
 }
 
+// --probe: a read-only live check, no DB. Fetcher uses the adapter's rate but a
+// tiny page cap (probe touches at most three pages regardless).
+async function runProbeMode(adapter: VendorAdapter): Promise<number> {
+  const fetcher = createFetcher({ minIntervalMs: adapter.minIntervalMs, maxPages: 8 });
+  const result = await runProbe(fetcher, adapter);
+  console.log(formatProbe(result));
+  return result.verdict === "ok" ? 0 : 1;
+}
+
+// --import-approved: diff a local wiki snapshot against the registry; apply behind
+// --yes. No Reddit API calls in this lane.
+async function runImportApprovedMode(filePath: string, apply: boolean, databaseUrl: string): Promise<number> {
+  let content: string;
+  try {
+    content = readFileSync(filePath, "utf8");
+  } catch {
+    console.error(`error: cannot read --import-approved file "${filePath}"`);
+    return 2;
+  }
+  const stores = parseApprovedWiki(content);
+  const { db, pool } = createDatabase(databaseUrl);
+  try {
+    const diff = await diffApproved(db, stores);
+    console.log(`parsed ${stores.length} store(s) from the wiki snapshot.`);
+    console.log(formatApprovalDiff(diff));
+    if (!apply) {
+      if (diff.changes.length > 0) console.log("\n(dry run — re-run with --yes to apply)");
+      return 0;
+    }
+    const applied = await applyApproved(db, diff);
+    console.log(`\napplied ${applied.appliedCount} change(s)  runId=${applied.runId}`);
+    return 0;
+  } finally {
+    await pool.end();
+  }
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(USAGE);
     return 0;
   }
+
+  // --- --import-approved (vendor-independent) ------------------------------
+  if (args.importApproved) {
+    const databaseUrl = args.databaseUrl ?? process.env.DATABASE_URL ?? null;
+    if (!databaseUrl) {
+      console.error("error: DATABASE_URL is not set (pass --database-url or export DATABASE_URL)");
+      return 2;
+    }
+    return runImportApprovedMode(args.importApproved, args.yes, databaseUrl);
+  }
+
   if (!args.vendor) {
     console.error("error: --vendor is required\n\n" + USAGE);
-    return 2;
-  }
-  if (!args.mode) {
-    console.error("error: --mode is required\n\n" + USAGE);
     return 2;
   }
   const adapter = getAdapter(args.vendor);
   if (!adapter) {
     console.error(`error: unknown vendor "${args.vendor}" (known: ${adapterSlugs().join(", ") || "none"})`);
+    return 2;
+  }
+
+  // --- --probe (read-only, no DB) ------------------------------------------
+  if (args.probe) {
+    return runProbeMode(adapter);
+  }
+
+  // --- crawl ---------------------------------------------------------------
+  if (!args.mode) {
+    console.error("error: --mode is required (or pass --probe)\n\n" + USAGE);
     return 2;
   }
   const databaseUrl = args.databaseUrl ?? process.env.DATABASE_URL ?? null;
@@ -152,7 +246,7 @@ async function main(): Promise<number> {
   const { db, pool } = createDatabase(databaseUrl);
   try {
     const vendorId = await resolveVendor(db, adapter);
-    const fetcher = createFetcher();
+    const fetcher = createFetcher({ minIntervalMs: adapter.minIntervalMs, maxPages: adapter.maxPages });
     const result = await runIngest(
       { db, fetcher, storage, now: () => new Date() },
       { adapter, vendorId, mode: args.mode, limit: args.limit, dryRun: args.dryRun },
