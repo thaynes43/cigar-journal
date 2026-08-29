@@ -16,16 +16,20 @@ import { users, cigars, purchases, smokes, smokeConsumptions } from "./index.js"
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../migrations/", import.meta.url));
 
-// Copy the numbered migrations into two temp dirs: everything before 0008, and
-// 0008 by itself — so the runner applies the pre-0008 schema, we seed, then apply
-// only the consumption migration and observe its backfill in isolation.
+// Copy the numbered migrations into two temp dirs: everything EXCEPT 0008, and
+// 0008 by itself — so the runner applies the rest of the schema, we seed, then
+// apply only the consumption migration and observe its backfill in isolation.
+// Post-0008 migrations join `pre` (none touch smokes/purchases or the tables 0008
+// creates, so ordering is safe) — this keeps the drizzle schema the seeding uses
+// in sync with the applied columns as later migrations add them (e.g. 0013's
+// cigars.catalog_status).
 function splitMigrations(): { pre: string; only0008: string } {
   const pre = mkdtempSync(join(tmpdir(), "cj-mig-pre-"));
   const only0008 = mkdtempSync(join(tmpdir(), "cj-mig-0008-"));
   for (const name of readdirSync(MIGRATIONS_DIR)) {
     if (!name.endsWith(".sql")) continue;
-    const dest = name.startsWith("0008") ? only0008 : name < "0008" ? pre : null;
-    if (dest) copyFileSync(join(MIGRATIONS_DIR, name), join(dest, name));
+    const dest = name.startsWith("0008") ? only0008 : pre;
+    copyFileSync(join(MIGRATIONS_DIR, name), join(dest, name));
   }
   return { pre, only0008 };
 }

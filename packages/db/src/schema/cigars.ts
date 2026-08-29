@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, numeric, jsonb, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, numeric, jsonb, timestamp, type AnyPgColumn } from "drizzle-orm/pg-core";
 
 // Shapeless per domain-model-examples.md — no query filters on it, so it stays
 // JSONB (ADR-003). wrapper/binder/filler origins, all optional.
@@ -29,6 +29,13 @@ export const cigars = pgTable("cigars", {
   blendNotes: text("blend_notes"),
   releaseYear: integer("release_year"),
   verification: text("verification").$type<"verified" | "unverified">().notNull().default("unverified"),
+  // Catalog lifecycle gate (DESIGN-003 §Curation, migration 0013). `active` shows
+  // everywhere; `excluded` hides from browse/search/queue but stays reachable by
+  // direct id; `merged` is a tombstone folded into `mergedInto` by mergeCigars.
+  // Every catalog-facing read filters to `active`.
+  catalogStatus: text("catalog_status").$type<"active" | "excluded" | "merged">().notNull().default("active"),
+  // The survivor a `merged` tombstone was folded into (self-FK; null otherwise).
+  mergedInto: uuid("merged_into").references((): AnyPgColumn => cigars.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

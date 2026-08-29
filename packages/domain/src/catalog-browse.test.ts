@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { productPhotos, offers } from "@cj/db";
+import { eq } from "drizzle-orm";
+import { cigars, productPhotos, offers } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import { recordPurchase } from "./record-purchase.js";
@@ -28,7 +29,10 @@ describe("catalog browse", () => {
 
   // Attach a product photo to a cigar (ADR-007, 1:1). Keys carry the cigar id so
   // the unique constraints never collide across seeds.
-  async function addProductPhoto(cigarId: string): Promise<void> {
+  async function addProductPhoto(
+    cigarId: string,
+    rights: "pending" | "approved" | "suppressed" = "pending",
+  ): Promise<void> {
     await h.deps.db.insert(productPhotos).values({
       cigarId,
       objectKey: `obj/${cigarId}`,
@@ -37,7 +41,15 @@ describe("catalog browse", () => {
       width: 800,
       height: 600,
       bytes: 1234,
+      rights,
     });
+  }
+
+  // Flip a cigar's browse-visibility gate directly (DESIGN-003 §Curation). The
+  // excludeCigar/restoreCigar services are covered in curation.test.ts; here we
+  // only assert that the reads honor the column.
+  async function setCatalogStatus(cigarId: string, status: "active" | "excluded" | "merged"): Promise<void> {
+    await h.deps.db.update(cigars).set({ catalogStatus: status }).where(eq(cigars.id, cigarId));
   }
 
   it("brandSlug lowercases, collapses non-alphanumerics, and trims hyphens", () => {
@@ -619,5 +631,71 @@ describe("catalog browse", () => {
     // userB never smoked either — smoked:true is empty, smoked:false is both.
     expect((await browseCatalog(h.deps, userB, { q: brand, smoked: true })).cigars).toHaveLength(0);
     expect((await browseCatalog(h.deps, userB, { q: brand, smoked: false })).cigars).toHaveLength(2);
+  });
+
+  // --- rights-filtered reads (DESIGN-003 §Curation) -------------------------
+
+  it("browseCatalog treats a suppressed photo as absent (has_product_photo=false)", async () => {
+    const brand = `Rights ${tag}`;
+    const suppressed = await h.seedCigar({ canonicalName: `${brand} Suppressed`, brand });
+    const shown = await h.seedCigar({ canonicalName: `${brand} Shown`, brand });
+    await addProductPhoto(suppressed, "suppressed");
+    await addProductPhoto(shown, "approved");
+
+    const byId = new Map(
+      (await browseCatalog(h.deps, userA, { q: brand })).cigars.map((c) => [c.cigarId, c]),
+    );
+    expect(byId.get(suppressed)!.hasProductPhoto).toBe(false);
+    expect(byId.get(shown)!.hasProductPhoto).toBe(true);
+  });
+
+  it("browseBrands and getBrand skip a suppressed photo as a cover", async () => {
+    const brand = `SuppressCover ${tag}`;
+    // Alpha sorts first but its only photo is suppressed → the cover must skip to
+    // Bravo, whose photo is approved.
+    const alpha = await h.seedCigar({ canonicalName: `${brand} Alpha`, brand, line: "Serie" });
+    const bravo = await h.seedCigar({ canonicalName: `${brand} Bravo`, brand, line: "Serie" });
+    await addProductPhoto(alpha, "suppressed");
+    await addProductPhoto(bravo, "approved");
+
+    const wall = (await browseBrands(h.deps, userA)).brands.find((b) => b.brand === brand)!;
+    expect(wall.coverCigarId).toBe(bravo);
+
+    const page = await getBrand(h.deps, userA, { slug: brandSlug(brand) });
+    expect(page.coverCigarId).toBe(bravo);
+    expect(page.lines.find((l) => l.line === "Serie")!.coverCigarId).toBe(bravo);
+  });
+
+  // --- catalog_status exclusion in browse (DESIGN-003 §Curation) ------------
+
+  it("browseCatalog and browseBrands omit excluded and merged cigars", async () => {
+    const brand = `Excl ${tag}`;
+    const active = await h.seedCigar({ canonicalName: `${brand} Active`, brand, type: "NC" });
+    const excluded = await h.seedCigar({ canonicalName: `${brand} Excluded`, brand, type: "NC" });
+    const merged = await h.seedCigar({ canonicalName: `${brand} Merged`, brand, type: "NC" });
+    await setCatalogStatus(excluded, "excluded");
+    await setCatalogStatus(merged, "merged");
+
+    const res = await browseCatalog(h.deps, userA, { q: brand });
+    expect(res.cigars.map((c) => c.cigarId).sort()).toEqual([active]);
+    expect(res.totalCount).toBe(1);
+
+    // The brand wall counts only the active row.
+    const wall = (await browseBrands(h.deps, userA)).brands.find((b) => b.brand === brand)!;
+    expect(wall.cigarCount).toBe(1);
+
+    // The brand page shows only the active cigar.
+    const page = await getBrand(h.deps, userA, { slug: brandSlug(brand) });
+    const shownIds = [...page.lines.flatMap((l) => l.cigars), ...page.loose].map((c) => c.cigarId);
+    expect(shownIds.sort()).toEqual([active]);
+  });
+
+  it("restoring an excluded cigar (status back to active) returns it to browse", async () => {
+    const brand = `Restore ${tag}`;
+    const cigarId = await h.seedCigar({ canonicalName: `${brand} Only`, brand });
+    await setCatalogStatus(cigarId, "excluded");
+    expect((await browseCatalog(h.deps, userA, { q: brand })).cigars).toHaveLength(0);
+    await setCatalogStatus(cigarId, "active");
+    expect((await browseCatalog(h.deps, userA, { q: brand })).cigars.map((c) => c.cigarId)).toEqual([cigarId]);
   });
 });

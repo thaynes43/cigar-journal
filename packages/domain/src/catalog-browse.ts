@@ -333,9 +333,10 @@ interface BrandRow {
 
 // The library root: every distinct brand (whitespace-trimmed, empty → null) with
 // its stick count, line count, the cigar types it spans, and a borrowed poster
-// cover. The cover is the brand's first-by-name cigar that has a product photo,
-// picked in the same grouped LEFT JOIN (product_photos is 1:1 so it never fans
-// out the counts) — no N+1. Sorted by brand name with the unbranded shelf last.
+// cover. The cover is the brand's first-by-name cigar that has a SERVABLE product
+// photo (the join excludes `suppressed` — DESIGN-003 §Curation), picked in the
+// same grouped LEFT JOIN (product_photos is 1:1 so it never fans out the counts)
+// — no N+1. Sorted by brand name with the unbranded shelf last.
 //
 // The ownership and type facets (DESIGN-002 §IA) filter the wall BEFORE the
 // grouping and compose: only cigars matching BOTH survive, so a brand with zero
@@ -350,6 +351,9 @@ export async function browseBrands(
 ): Promise<BrowseBrandsResult> {
   const facet = ownershipCondition(args.own);
   const conds: SQL[] = [];
+  // Only active rows populate the brand wall (DESIGN-003 §Curation): excluded
+  // pollution and merged tombstones drop out of the counts, covers, and shelves.
+  conds.push(sql`c.catalog_status = 'active'`);
   if (args.type) conds.push(sql`c.type = ${args.type}`);
   if (facet) conds.push(facet);
   const joins = facet ? ownershipJoins(principal) : sql``;
@@ -363,7 +367,7 @@ export async function browseBrands(
       (array_agg(c.id ORDER BY c.canonical_name ASC, c.id ASC)
         FILTER (WHERE pp.id IS NOT NULL))[1] AS cover_cigar_id
     FROM cigars c
-    LEFT JOIN product_photos pp ON pp.cigar_id = c.id
+    LEFT JOIN product_photos pp ON pp.cigar_id = c.id AND pp.rights <> 'suppressed'
     ${joins}
     ${where}
     GROUP BY nullif(btrim(c.brand), '')
@@ -457,8 +461,11 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
 // The caller-scoped overlay expression, shared by every tile read: a LEFT JOIN
 // to the caller's smokes only, aggregated per cigar. `count` is 0 and `rating`
 // is null when the caller has never smoked the cigar. A LEFT JOIN to
-// product_photos (1:1 with a cigar) folds in whether a crawler photo exists,
-// without a second query (ADR-007). The ownershipJoins fold in the want mark
+// product_photos (1:1 with a cigar) folds in whether a servable crawler photo
+// exists, without a second query (ADR-007). The join excludes `suppressed`
+// photos (rights takedown, DESIGN-003 §Curation), so a cigar whose only photo is
+// suppressed reads has_product_photo=false and falls back to its monogram. The
+// ownershipJoins fold in the want mark
 // (for the badge — PRD-003 R-WANT-3) and the acquired/consumed aggregates (for
 // the ownership facet and sorts), all pre-aggregated so nothing fans out and no
 // user's state leaks into another's tiles. `created_at` rides along for the
@@ -483,7 +490,7 @@ function tileSelect(principal: Principal): SQL {
       max(co.best_seen_at) AS best_seen_at
     FROM cigars c
     LEFT JOIN smokes s ON s.cigar_id = c.id AND s.user_id = ${principal.userId}
-    LEFT JOIN product_photos pp ON pp.cigar_id = c.id
+    LEFT JOIN product_photos pp ON pp.cigar_id = c.id AND pp.rights <> 'suppressed'
     ${ownershipJoins(principal)}
     LEFT JOIN favorites f ON f.cigar_id = c.id AND f.user_id = ${principal.userId}
     ${OFFER_JOIN}
@@ -492,7 +499,9 @@ function tileSelect(principal: Principal): SQL {
 
 // A brand page: the brand resolved from its slug, its lines (alphabetical, each
 // with its cigars by canonical name), and the loose cigars with no line. Unknown
-// slug → CigarNotFoundError.
+// slug → CigarNotFoundError. Only active rows count (DESIGN-003 §Curation): a
+// brand whose cigars are all excluded/merged resolves to no active rows and 404s,
+// and an excluded/merged member never appears on the page.
 export async function getBrand(
   deps: Deps,
   principal: Principal,
@@ -501,7 +510,7 @@ export async function getBrand(
   const distinct = await deps.db.execute(sql`
     SELECT DISTINCT nullif(btrim(brand), '') AS brand
     FROM cigars
-    WHERE nullif(btrim(brand), '') IS NOT NULL
+    WHERE nullif(btrim(brand), '') IS NOT NULL AND catalog_status = 'active'
   `);
   const brand = (distinct.rows as unknown as { brand: string }[])
     .map((r) => r.brand)
@@ -510,7 +519,7 @@ export async function getBrand(
 
   const result = await deps.db.execute(sql`
     ${tileSelect(principal)}
-    WHERE nullif(btrim(c.brand), '') = ${brand}
+    WHERE nullif(btrim(c.brand), '') = ${brand} AND c.catalog_status = 'active'
     GROUP BY c.id
     ORDER BY c.canonical_name ASC
   `);
@@ -569,6 +578,10 @@ export async function browseCatalog(
   // only the joins its active filters need (countJoinsFor).
   const facet = ownershipCondition(args.own);
   const filters: SQL[] = [];
+  // The unified grid shows only active rows (DESIGN-003 §Curation): excluded
+  // pollution and merged tombstones never appear in browse or its total. Applied
+  // to both the page and the count query (both derive from `filters`).
+  filters.push(sql`c.catalog_status = 'active'`);
   if (q) {
     const pattern = likePattern(q);
     filters.push(

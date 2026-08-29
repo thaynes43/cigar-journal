@@ -1,4 +1,4 @@
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import {
   auditLog,
   cigars,
@@ -12,6 +12,8 @@ import {
   wants,
   favorites,
   type CigarRow,
+  type ListingMatchRow,
+  type ProductPhotoRow,
 } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
 import type {
@@ -23,11 +25,17 @@ import type {
   DismissDuplicateResult,
   CurationQueueResult,
   CurationQueueCigar,
+  SetListingMatchStatusInput,
+  SetListingMatchStatusResult,
+  SetCatalogStatusInput,
+  SetCatalogStatusResult,
+  SetProductPhotoRightsInput,
+  SetProductPhotoRightsResult,
 } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { numbersCompatible } from "./cigar-resolution.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
-import { CigarNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
+import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 
 // Catalog hygiene — the curator's toolkit (ADR-006). Merge re-points every
 // reference off a duplicate and deletes it; verify flips the lifecycle flag; the
@@ -55,7 +63,9 @@ function assertCurator(principal: Principal): void {
   }
 }
 
-// JSON-safe audit snapshot of a catalog row — dates as ISO strings.
+// JSON-safe audit snapshot of a catalog row — dates as ISO strings. Carries the
+// lifecycle columns (catalogStatus/mergedInto) so exclude/restore/merge audits
+// record the before/after state a future Undo reads.
 function cigarSnapshot(row: CigarRow): Record<string, unknown> {
   return {
     id: row.id,
@@ -67,12 +77,43 @@ function cigarSnapshot(row: CigarRow): Record<string, unknown> {
     type: row.type,
     manufacturer: row.manufacturer,
     verification: row.verification,
+    catalogStatus: row.catalogStatus,
+    mergedInto: row.mergedInto,
     createdAt: row.createdAt.toISOString(),
+  };
+}
+
+// JSON-safe audit snapshot of a listing match — the mutable link a curator/agent
+// confirms or unmatches.
+function listingMatchSnapshot(row: ListingMatchRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    vendorId: row.vendorId,
+    listingKey: row.listingKey,
+    cigarId: row.cigarId,
+    status: row.status,
+  };
+}
+
+// JSON-safe audit snapshot of a product photo — enough to identify the row and
+// record the rights transition, without the storage keys.
+function productPhotoSnapshot(row: ProductPhotoRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    cigarId: row.cigarId,
+    vendorId: row.vendorId,
+    sourceUrl: row.sourceUrl,
+    rights: row.rights,
   };
 }
 
 async function loadCigar(tx: Queryer, cigarId: string): Promise<CigarRow | undefined> {
   const rows = await tx.select().from(cigars).where(eq(cigars.id, cigarId)).limit(1);
+  return rows[0];
+}
+
+async function loadListingMatch(tx: Queryer, matchId: string): Promise<ListingMatchRow | undefined> {
+  const rows = await tx.select().from(listingMatches).where(eq(listingMatches.id, matchId)).limit(1);
   return rows[0];
 }
 
@@ -92,7 +133,7 @@ export async function mergeCigars(
   const requestFingerprint = fingerprint(input);
 
   try {
-    return await deps.db.transaction((tx) => mergeWithinTx(tx, principal, input, requestFingerprint));
+    return await deps.db.transaction((tx) => mergeWithinTx(tx, deps, principal, input, requestFingerprint));
   } catch (error) {
     // Concurrent first-writer committed the key between our check and insert.
     if (isUniqueViolation(error)) {
@@ -108,6 +149,7 @@ export async function mergeCigars(
 
 async function mergeWithinTx(
   tx: Tx,
+  deps: Deps,
   principal: Principal,
   input: MergeCigarsInput,
   requestFingerprint: string,
@@ -146,8 +188,8 @@ async function mergeWithinTx(
 
   // Product photo: at most one per cigar (unique constraint). The target keeps
   // its own when it has one; otherwise it adopts the source's. When the target
-  // already has a photo the source's is discarded — the cigar-delete cascade
-  // (product_photos.cigar_id ON DELETE CASCADE) removes it.
+  // already has a photo the source keeps its own — the source is now a tombstone
+  // (no longer deleted, see below), so its photo simply stays on the hidden row.
   const targetPhoto = await tx
     .select({ id: productPhotos.id })
     .from(productPhotos)
@@ -220,9 +262,24 @@ async function mergeWithinTx(
     .where(eq(favorites.cigarId, source.id))
     .returning({ id: favorites.id });
 
-  // Everything is off the source now; delete it (any leftover source photo goes
-  // via cascade).
-  await tx.delete(cigars).where(eq(cigars.id, source.id));
+  // Everything is off the source now — TOMBSTONE it instead of deleting
+  // (DESIGN-003 §Curation "Merge stops hard-deleting … so Undo is real"). The
+  // source survives with catalog_status='merged' and merged_into pointing at the
+  // survivor, keeping its data. Every catalog-facing read excludes non-active
+  // rows (catalog-browse / reads / curationQueue), so the tombstone never appears
+  // in browse, search, or the duplicate queue. A leftover source product photo
+  // (when the target already had one) stays attached to the hidden row.
+  //
+  // NOTE (undo scope): re-pointing back on unmerge would need to know WHICH rows
+  // moved (smokes/purchases indistinguishable from the target's own after the
+  // merge, and the want/favorite de-dupe dropped rows entirely). That demands a
+  // per-merge bookkeeping table, so unmergeCigar is intentionally NOT built here
+  // (DESIGN-003 wave 3 note) — the tombstone preserves the data for a later, real
+  // undo rather than a half-built one.
+  await tx
+    .update(cigars)
+    .set({ catalogStatus: "merged", mergedInto: target.id, updatedAt: deps.now() })
+    .where(eq(cigars.id, source.id));
 
   const repointed = {
     smokes: smokeRows.length,
@@ -243,7 +300,8 @@ async function mergeWithinTx(
     before,
     after: {
       target: cigarSnapshot(target),
-      deletedSourceId: source.id,
+      tombstonedSourceId: source.id,
+      mergedInto: target.id,
       repointed,
       wantsDeduped: dedupedWantRows.length,
       favoritesDeduped: dedupedFavoriteRows.length,
@@ -441,6 +499,360 @@ async function dismissWithinTx(
 }
 
 // --------------------------------------------------------------------------
+// setListingMatchStatus — a curator/agent verdict on a vendor listing→cigar
+// link (DESIGN-003 §Curation "Missing human primitive"). Confirm keeps the
+// resolved cigar; unmatch clears it.
+// --------------------------------------------------------------------------
+
+// Confirming keeps the match's cigar; unmatching clears it to null — the schema's
+// implied invariant, since a crawler-created unmatched row carries cigar_id null.
+// Reads already gate offers on lm.status IN ('auto','confirmed') (catalog-browse
+// OFFER_JOIN, reads latestSeries), so an unmatched link stops contributing offers
+// regardless of the cleared column; product photos link by cigar_id (never through
+// a match), so they are untouched. The prior cigar_id rides the audit `before` for
+// reversibility. Idempotent via the ADR-003 envelope; audits in-transaction.
+// (The crawler protects only a `confirmed` row from re-matching — match.ts — so an
+// unmatched verdict may be re-proposed as `auto` on a later crawl, by design.)
+export async function setListingMatchStatus(
+  deps: Deps,
+  principal: Principal,
+  input: SetListingMatchStatusInput,
+): Promise<SetListingMatchStatusResult> {
+  assertCurator(principal);
+  const requestFingerprint = fingerprint(input);
+
+  try {
+    return await deps.db.transaction((tx) =>
+      setListingMatchStatusWithinTx(tx, deps, principal, input, requestFingerprint),
+    );
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as SetListingMatchStatusResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function setListingMatchStatusWithinTx(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  input: SetListingMatchStatusInput,
+  requestFingerprint: string,
+): Promise<SetListingMatchStatusResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as SetListingMatchStatusResult), replayed: true };
+  }
+
+  const match = await loadListingMatch(tx, input.matchId);
+  // No dedicated not-found code for a listing match (curator-only admin surface);
+  // a bad id is a fixable input, reported as validation_error.
+  if (!match) {
+    throw new ValidationError([{ path: "matchId", message: "No listing match matches the given id." }]);
+  }
+  // Confirming a match to no cigar is meaningless — the resolver must have linked
+  // one first (or the caller passes 'unmatched').
+  if (input.status === "confirmed" && match.cigarId == null) {
+    throw new ValidationError([{ path: "matchId", message: "A match with no cigar cannot be confirmed." }]);
+  }
+
+  const before = listingMatchSnapshot(match);
+  const nextCigarId = input.status === "unmatched" ? null : match.cigarId;
+  await tx
+    .update(listingMatches)
+    .set({ status: input.status, cigarId: nextCigarId, updatedAt: deps.now() })
+    .where(eq(listingMatches.id, match.id));
+
+  await tx.insert(auditLog).values({
+    userId: principal.userId,
+    actor: "web",
+    action: "listing_match.set_status",
+    smokeId: null,
+    before,
+    after: { ...before, status: input.status, cigarId: nextCigarId },
+    correlationId: input.correlationId ?? input.clientRequestId,
+  });
+
+  const result: SetListingMatchStatusResult = {
+    matchId: match.id,
+    status: input.status,
+    cigarId: nextCigarId,
+    replayed: false,
+  };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "set_listing_match_status",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// --------------------------------------------------------------------------
+// excludeCigar / restoreCigar — hide a catalog Cigar from browse/search/queue
+// without deleting it, and undo that (DESIGN-003 §Curation).
+// --------------------------------------------------------------------------
+
+// EXCLUDED ≠ DELETED. An excluded cigar drops out of every catalog-facing read
+// (browse/brands/shelves/brand pages/search/curation queue — all filter
+// catalog_status='active'), but it is NOT removed: its detail page stays reachable
+// by direct id and its owner's smokes/journal reads still resolve (getCigar and
+// the smoke reads do not filter status). This is the rule for "non-cigar pollution"
+// and for hiding an entry without destroying an owner's history — reversible via
+// restoreCigar. Idempotent via the ADR-003 envelope; audits in-transaction.
+export async function excludeCigar(
+  deps: Deps,
+  principal: Principal,
+  input: SetCatalogStatusInput,
+): Promise<SetCatalogStatusResult> {
+  assertCurator(principal);
+  const requestFingerprint = fingerprint(input);
+
+  try {
+    return await deps.db.transaction((tx) => excludeWithinTx(tx, deps, principal, input, requestFingerprint));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as SetCatalogStatusResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function excludeWithinTx(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  input: SetCatalogStatusInput,
+  requestFingerprint: string,
+): Promise<SetCatalogStatusResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as SetCatalogStatusResult), replayed: true };
+  }
+
+  const current = await loadCigar(tx, input.cigarId);
+  if (!current) throw new CigarNotFoundError();
+  // A merged tombstone is not an exclude target — it is undone by unmerge (a future
+  // primitive), not by exclude/restore.
+  if (current.catalogStatus === "merged") {
+    throw new ValidationError([{ path: "cigarId", message: "A merged cigar cannot be excluded." }]);
+  }
+
+  const before = cigarSnapshot(current);
+  await tx
+    .update(cigars)
+    .set({ catalogStatus: "excluded", updatedAt: deps.now() })
+    .where(eq(cigars.id, current.id));
+
+  await tx.insert(auditLog).values({
+    userId: principal.userId,
+    actor: "web",
+    action: "cigar.exclude",
+    smokeId: null,
+    before,
+    after: { ...before, catalogStatus: "excluded" },
+    correlationId: input.correlationId ?? input.clientRequestId,
+  });
+
+  const result: SetCatalogStatusResult = { cigarId: current.id, catalogStatus: "excluded", replayed: false };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "exclude_cigar",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// Restore an excluded cigar to active. The audit's `reverts` self-links the most
+// recent cigar.exclude for this cigar (the reversibility substrate, migration
+// 0012) so the review console can render this as an undo of that action.
+export async function restoreCigar(
+  deps: Deps,
+  principal: Principal,
+  input: SetCatalogStatusInput,
+): Promise<SetCatalogStatusResult> {
+  assertCurator(principal);
+  const requestFingerprint = fingerprint(input);
+
+  try {
+    return await deps.db.transaction((tx) => restoreWithinTx(tx, deps, principal, input, requestFingerprint));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as SetCatalogStatusResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function restoreWithinTx(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  input: SetCatalogStatusInput,
+  requestFingerprint: string,
+): Promise<SetCatalogStatusResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as SetCatalogStatusResult), replayed: true };
+  }
+
+  const current = await loadCigar(tx, input.cigarId);
+  if (!current) throw new CigarNotFoundError();
+  // A merged tombstone is restored by unmerge (which re-points its data back), not
+  // by flipping the flag — restore only reverses an exclude.
+  if (current.catalogStatus === "merged") {
+    throw new ValidationError([{ path: "cigarId", message: "A merged cigar is restored by unmerge, not restore." }]);
+  }
+
+  // The exclude this restore undoes: the most recent cigar.exclude audit whose
+  // snapshot names this cigar. Null when the cigar was never excluded (a restore
+  // of an already-active row is a harmless no-op with no revert link).
+  const excludeAudit = await tx
+    .select({ id: auditLog.id })
+    .from(auditLog)
+    .where(and(eq(auditLog.action, "cigar.exclude"), sql`(${auditLog.after} ->> 'id') = ${current.id}`))
+    .orderBy(desc(auditLog.createdAt))
+    .limit(1);
+  const revertsId = excludeAudit[0]?.id ?? null;
+
+  const before = cigarSnapshot(current);
+  await tx
+    .update(cigars)
+    .set({ catalogStatus: "active", updatedAt: deps.now() })
+    .where(eq(cigars.id, current.id));
+
+  await tx.insert(auditLog).values({
+    userId: principal.userId,
+    actor: "web",
+    action: "cigar.restore",
+    smokeId: null,
+    before,
+    after: { ...before, catalogStatus: "active" },
+    reverts: revertsId,
+    correlationId: input.correlationId ?? input.clientRequestId,
+  });
+
+  const result: SetCatalogStatusResult = { cigarId: current.id, catalogStatus: "active", replayed: false };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "restore_cigar",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// --------------------------------------------------------------------------
+// setProductPhotoRights — approve or suppress a catalog cigar's product photo
+// (DESIGN-003 §Curation "Fix the rights bug first").
+// --------------------------------------------------------------------------
+
+// Sets the single product photo's rights. `suppressed` is a takedown: getProductPhoto
+// stops serving it and every cover/has-photo read (catalog-browse) drops it, falling
+// back to the monogram. `approved` clears a photo for the (future) public path;
+// `pending` is the crawl default. Curator-only, audited in-transaction, idempotent
+// via the ADR-003 envelope — the reachable approve/suppress the rights bug lacked.
+export async function setProductPhotoRights(
+  deps: Deps,
+  principal: Principal,
+  input: SetProductPhotoRightsInput,
+): Promise<SetProductPhotoRightsResult> {
+  assertCurator(principal);
+  const requestFingerprint = fingerprint(input);
+
+  try {
+    return await deps.db.transaction((tx) =>
+      setProductPhotoRightsWithinTx(tx, principal, input, requestFingerprint),
+    );
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as SetProductPhotoRightsResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function setProductPhotoRightsWithinTx(
+  tx: Tx,
+  principal: Principal,
+  input: SetProductPhotoRightsInput,
+  requestFingerprint: string,
+): Promise<SetProductPhotoRightsResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as SetProductPhotoRightsResult), replayed: true };
+  }
+
+  const rows = await tx.select().from(productPhotos).where(eq(productPhotos.cigarId, input.cigarId)).limit(1);
+  const photo = rows[0];
+  if (!photo) throw new PhotoNotFoundError();
+
+  const before = productPhotoSnapshot(photo);
+  await tx.update(productPhotos).set({ rights: input.rights }).where(eq(productPhotos.id, photo.id));
+
+  await tx.insert(auditLog).values({
+    userId: principal.userId,
+    actor: "web",
+    action: "product_photo.set_rights",
+    smokeId: null,
+    before,
+    after: { ...before, rights: input.rights },
+    correlationId: input.correlationId ?? input.clientRequestId,
+  });
+
+  const result: SetProductPhotoRightsResult = {
+    cigarId: input.cigarId,
+    rights: input.rights,
+    replayed: false,
+  };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "set_product_photo_rights",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// --------------------------------------------------------------------------
 // curationQueue — the admin read: unverified backlog + duplicate candidates.
 // --------------------------------------------------------------------------
 
@@ -493,27 +905,31 @@ export async function curationQueue(deps: Deps, principal: Principal): Promise<C
   assertCurator(principal);
   const db = deps.db;
 
-  // Unverified backlog, oldest first (the entries that have waited longest).
+  // Unverified backlog, oldest first (the entries that have waited longest). Only
+  // active rows — excluded pollution and merged tombstones are not backlog
+  // (DESIGN-003 §Curation).
   const unverifiedIdRows = await db
     .select({ id: cigars.id })
     .from(cigars)
-    .where(eq(cigars.verification, "unverified"))
+    .where(and(eq(cigars.verification, "unverified"), eq(cigars.catalogStatus, "active")))
     .orderBy(asc(cigars.createdAt))
     .limit(UNVERIFIED_CAP);
   const unverifiedIds = unverifiedIdRows.map((r) => r.id);
 
   // Near-duplicate candidate pairs across DISTINCT rows (c1.id < c2.id dedupes
   // the mirror pair). The `%` join prefilters via the trigram GIN index; the
-  // explicit similarity filter applies the strong-match bar. Pairs a curator
-  // has ruled distinct (duplicate_dismissals, stored with the same id-ordering)
-  // stay out of the queue.
+  // explicit similarity filter applies the strong-match bar. Only active rows are
+  // candidates (DESIGN-003 §Curation) — an already-merged tombstone or an excluded
+  // row is never re-surfaced as a duplicate. Pairs a curator has ruled distinct
+  // (duplicate_dismissals, stored with the same id-ordering) stay out of the queue.
   const pairResult = await db.execute(sql`
     SELECT c1.id AS a_id, c2.id AS b_id,
            c1.canonical_name AS a_name, c2.canonical_name AS b_name,
            similarity(c1.canonical_name, c2.canonical_name) AS sim
     FROM cigars c1
     JOIN cigars c2 ON c1.id < c2.id AND c1.canonical_name % c2.canonical_name
-    WHERE similarity(c1.canonical_name, c2.canonical_name) > ${DUPLICATE_THRESHOLD}
+    WHERE c1.catalog_status = 'active' AND c2.catalog_status = 'active'
+      AND similarity(c1.canonical_name, c2.canonical_name) > ${DUPLICATE_THRESHOLD}
       AND NOT EXISTS (
         SELECT 1 FROM duplicate_dismissals d
         WHERE d.cigar_a_id = c1.id AND d.cigar_b_id = c2.id

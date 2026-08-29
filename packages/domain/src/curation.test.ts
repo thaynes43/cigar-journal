@@ -14,11 +14,22 @@ import {
   favorites,
 } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
-import { mergeCigars, verifyCigar, dismissDuplicate, curationQueue } from "./curation.js";
+import {
+  mergeCigars,
+  verifyCigar,
+  dismissDuplicate,
+  curationQueue,
+  setListingMatchStatus,
+  excludeCigar,
+  restoreCigar,
+  setProductPhotoRights,
+} from "./curation.js";
+import { getProductPhoto } from "./product-photos.js";
+import { getCigar, searchCigars, getCigarOffers } from "./reads.js";
 import { setWant } from "./wants.js";
 import { setFavorite } from "./favorites.js";
 import type { Principal } from "./index.js";
-import { UnauthorizedError, CigarNotFoundError, ValidationError } from "./errors.js";
+import { UnauthorizedError, CigarNotFoundError, PhotoNotFoundError, ValidationError } from "./errors.js";
 
 describe("curation", () => {
   let h: DomainHarness;
@@ -108,11 +119,12 @@ describe("curation", () => {
         targetCigarId: target,
       }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(UnauthorizedError);
-      // Nothing happened — both rows survive.
-      expect(await h.deps.db.select().from(cigars).where(eq(cigars.id, source))).toHaveLength(1);
+      // Nothing happened — both rows survive, source still active.
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, source));
+      expect(row!.catalogStatus).toBe("active");
     });
 
-    it("re-points every referencing table, deletes the source, and audits cigar.merge", async () => {
+    it("re-points every referencing table, tombstones the source, and audits cigar.merge", async () => {
       const source = await seedUnverified("Padron Dupe Source");
       const target = await seedUnverified("Padron Keeper Target");
 
@@ -141,8 +153,11 @@ describe("curation", () => {
         favorites: 0,
       });
 
-      // Source cigar is gone.
-      expect(await h.deps.db.select().from(cigars).where(eq(cigars.id, source))).toHaveLength(0);
+      // Source cigar is tombstoned, not deleted: it survives with
+      // catalog_status='merged' and merged_into pointing at the survivor (DESIGN-003).
+      const [sourceRow] = await h.deps.db.select().from(cigars).where(eq(cigars.id, source));
+      expect(sourceRow!.catalogStatus).toBe("merged");
+      expect(sourceRow!.mergedInto).toBe(target);
 
       // Every reference now points at the target.
       const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId));
@@ -161,7 +176,7 @@ describe("curation", () => {
 
       // Audit row with before/after snapshots.
       const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
-      const audit = audits.find((a) => (a.after as { deletedSourceId?: string }).deletedSourceId === source);
+      const audit = audits.find((a) => (a.after as { tombstonedSourceId?: string }).tombstonedSourceId === source);
       expect(audit).toBeDefined();
       expect(audit!.actor).toBe("web");
       expect((audit!.before as { source: { id: string } }).source.id).toBe(source);
@@ -205,10 +220,14 @@ describe("curation", () => {
       });
       expect(result.repointed.productPhotos).toBe(0);
 
-      // Target still has exactly its own photo; the source's is gone with the row.
+      // Target still has exactly its own photo; the source keeps its own on the
+      // tombstone (no longer cascade-deleted), so it never collides with the target's.
       const photos = await h.deps.db.select().from(productPhotos).where(eq(productPhotos.cigarId, target));
       expect(photos).toHaveLength(1);
       expect(photos[0]!.objectKey).toBe("obj/keep-tgt");
+      const srcPhotos = await h.deps.db.select().from(productPhotos).where(eq(productPhotos.cigarId, source));
+      expect(srcPhotos).toHaveLength(1);
+      expect(srcPhotos[0]!.objectKey).toBe("obj/keep-src");
     });
 
     it("rejects a self-merge with a field-pathed validation_error", async () => {
@@ -248,7 +267,7 @@ describe("curation", () => {
       expect(second.repointed).toEqual(first.repointed);
       // Exactly one cigar.merge audit row for this source.
       const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
-      const forSource = audits.filter((a) => (a.after as { deletedSourceId?: string }).deletedSourceId === source);
+      const forSource = audits.filter((a) => (a.after as { tombstonedSourceId?: string }).tombstonedSourceId === source);
       expect(forSource).toHaveLength(1);
     });
 
@@ -271,7 +290,7 @@ describe("curation", () => {
       // Only admin's mark moved; user's source mark was dropped as a duplicate.
       expect(result.repointed.wants).toBe(1);
 
-      // Nothing left on the (deleted) source; the target carries both users' marks.
+      // Nothing left on the tombstoned source; the target carries both users' marks.
       expect(await h.deps.db.select().from(wants).where(eq(wants.cigarId, source))).toHaveLength(0);
       const onTarget = await h.deps.db.select().from(wants).where(eq(wants.cigarId, target));
       expect(onTarget.map((w) => w.userId).sort()).toEqual([user.userId, admin.userId].sort());
@@ -279,7 +298,7 @@ describe("curation", () => {
       // The audit notes both the re-point and the de-dupe.
       const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
       const audit = audits.find(
-        (a) => (a.after as { deletedSourceId?: string }).deletedSourceId === source,
+        (a) => (a.after as { tombstonedSourceId?: string }).tombstonedSourceId === source,
       );
       expect((audit!.after as { repointed: { wants: number } }).repointed.wants).toBe(1);
       expect((audit!.after as { wantsDeduped: number }).wantsDeduped).toBe(1);
@@ -304,7 +323,7 @@ describe("curation", () => {
       // Only admin's mark moved; user's source mark was dropped as a duplicate.
       expect(result.repointed.favorites).toBe(1);
 
-      // Nothing left on the (deleted) source; the target carries both users' marks.
+      // Nothing left on the tombstoned source; the target carries both users' marks.
       expect(await h.deps.db.select().from(favorites).where(eq(favorites.cigarId, source))).toHaveLength(0);
       const onTarget = await h.deps.db.select().from(favorites).where(eq(favorites.cigarId, target));
       expect(onTarget.map((f) => f.userId).sort()).toEqual([user.userId, admin.userId].sort());
@@ -312,7 +331,7 @@ describe("curation", () => {
       // The audit notes both the re-point and the de-dupe.
       const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
       const audit = audits.find(
-        (a) => (a.after as { deletedSourceId?: string }).deletedSourceId === source,
+        (a) => (a.after as { tombstonedSourceId?: string }).tombstonedSourceId === source,
       );
       expect((audit!.after as { repointed: { favorites: number } }).repointed.favorites).toBe(1);
       expect((audit!.after as { favoritesDeduped: number }).favoritesDeduped).toBe(1);
@@ -524,6 +543,255 @@ describe("curation", () => {
       // erroring (onConflictDoNothing) — the verdict is naturally idempotent.
       const again = await dismissDuplicate(h.deps, admin, { ...input, clientRequestId: newRequestId() });
       expect(again.replayed).toBe(false);
+    });
+  });
+
+  // --- setListingMatchStatus (DESIGN-003 §Curation) -------------------------
+
+  describe("setListingMatchStatus", () => {
+    async function addMatch(
+      cigarId: string | null,
+      status: "auto" | "confirmed" | "unmatched" = "auto",
+    ): Promise<string> {
+      const [m] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `lm-${newRequestId()}`, cigarId, status })
+        .returning({ id: listingMatches.id });
+      return m!.id;
+    }
+
+    it("rejects a non-admin principal", async () => {
+      const cigarId = await seedUnverified("LM Reject");
+      const matchId = await addMatch(cigarId);
+      const error = await setListingMatchStatus(h.deps, user, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "confirmed",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("confirm keeps the cigar and audits listing_match.set_status", async () => {
+      const cigarId = await seedUnverified("LM Confirm");
+      const matchId = await addMatch(cigarId);
+      const result = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "confirmed",
+      });
+      expect(result.status).toBe("confirmed");
+      expect(result.cigarId).toBe(cigarId);
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(row!.status).toBe("confirmed");
+      expect(row!.cigarId).toBe(cigarId);
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "listing_match.set_status"));
+      const audit = audits.find((a) => (a.after as { id?: string }).id === matchId);
+      expect(audit).toBeDefined();
+      expect(audit!.actor).toBe("web");
+    });
+
+    it("unmatch clears the cigar link and stops the match contributing offers", async () => {
+      const cigarId = await seedUnverified("LM Unmatch");
+      const matchId = await addMatch(cigarId);
+      await h.deps.db
+        .insert(offers)
+        .values({ vendorId, listingMatchId: matchId, price: "9.99", currency: "USD", inStock: true });
+      // Before: the offer reaches the cigar through the auto match.
+      expect(await getCigarOffers(h.deps, { cigarId })).toHaveLength(1);
+
+      const result = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "unmatched",
+      });
+      expect(result.status).toBe("unmatched");
+      expect(result.cigarId).toBeNull();
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(row!.status).toBe("unmatched");
+      expect(row!.cigarId).toBeNull();
+      // The prior cigar id survives in the audit before-snapshot (reversibility).
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "listing_match.set_status"));
+      const audit = audits.find(
+        (a) => (a.before as { id?: string }).id === matchId && (a.after as { status?: string }).status === "unmatched",
+      );
+      expect((audit!.before as { cigarId?: string }).cigarId).toBe(cigarId);
+      // After: the unmatched link no longer feeds the cigar's offers.
+      expect(await getCigarOffers(h.deps, { cigarId })).toHaveLength(0);
+    });
+
+    it("refuses to confirm a match with no cigar", async () => {
+      const matchId = await addMatch(null, "unmatched");
+      const error = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "confirmed",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+    });
+
+    it("errors validation for a missing match id", async () => {
+      const error = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId: "00000000-0000-0000-0000-000000000000",
+        status: "unmatched",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+    });
+
+    it("replays an identical retry", async () => {
+      const cigarId = await seedUnverified("LM Replay");
+      const matchId = await addMatch(cigarId);
+      const input = { clientRequestId: newRequestId(), matchId, status: "confirmed" as const };
+      const first = await setListingMatchStatus(h.deps, admin, input);
+      const second = await setListingMatchStatus(h.deps, admin, input);
+      expect(first.replayed).toBe(false);
+      expect(second.replayed).toBe(true);
+    });
+  });
+
+  // --- excludeCigar / restoreCigar (DESIGN-003 §Curation) -------------------
+
+  describe("excludeCigar / restoreCigar", () => {
+    it("rejects a non-admin principal", async () => {
+      const cigarId = await seedUnverified("Excl Reject");
+      const error = await excludeCigar(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigarId,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.catalogStatus).toBe("active");
+    });
+
+    it("hides the cigar from search but keeps its detail reachable by id, and audits", async () => {
+      const brand = `ExclBrand ${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: `${brand} Pollution`, brand });
+      // Owner smoke — the excluded cigar must still resolve its detail page.
+      await addSmoke(cigarId, user);
+
+      const result = await excludeCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId });
+      expect(result.catalogStatus).toBe("excluded");
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.catalogStatus).toBe("excluded");
+
+      // Hidden from the picker search…
+      const search = await searchCigars(h.deps, user, { query: `${brand} Pollution` });
+      expect(search.matches.find((m) => m.cigarId === cigarId)).toBeUndefined();
+      // …but still reachable by direct id (the owner's journal keeps working).
+      const detail = await getCigar(h.deps, user, { cigarId });
+      expect(detail.cigar.cigarId).toBe(cigarId);
+
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.exclude"));
+      expect(audits.find((a) => (a.after as { id?: string }).id === cigarId)).toBeDefined();
+    });
+
+    it("restore returns the cigar to active and its audit reverts the exclude", async () => {
+      const cigarId = await seedUnverified("Excl Restore");
+      await excludeCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId });
+      const excludeAudit = (
+        await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.exclude"))
+      ).find((a) => (a.after as { id?: string }).id === cigarId)!;
+
+      const result = await restoreCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId });
+      expect(result.catalogStatus).toBe("active");
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.catalogStatus).toBe("active");
+
+      // The reversibility substrate: the restore audit self-links the exclude it undoes.
+      const restoreAudit = (
+        await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.restore"))
+      ).find((a) => (a.after as { id?: string }).id === cigarId)!;
+      expect(restoreAudit.reverts).toBe(excludeAudit.id);
+    });
+
+    it("refuses to exclude a merged tombstone", async () => {
+      const source = await seedUnverified("Excl Merged Source");
+      const target = await seedUnverified("Excl Merged Target");
+      await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+      const error = await excludeCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: source,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+    });
+
+    it("replays an identical exclude retry", async () => {
+      const cigarId = await seedUnverified("Excl Replay");
+      const input = { clientRequestId: newRequestId(), cigarId };
+      const first = await excludeCigar(h.deps, admin, input);
+      const second = await excludeCigar(h.deps, admin, input);
+      expect(first.replayed).toBe(false);
+      expect(second.replayed).toBe(true);
+    });
+  });
+
+  // --- setProductPhotoRights (DESIGN-003 §Curation) -------------------------
+
+  describe("setProductPhotoRights", () => {
+    it("rejects a non-admin principal", async () => {
+      const cigarId = await seedUnverified("Rights Reject");
+      await addProductPhoto(cigarId, "rights-reject");
+      const error = await setProductPhotoRights(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        rights: "suppressed",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("suppress stops getProductPhoto serving the photo and audits the transition", async () => {
+      const cigarId = await seedUnverified("Rights Suppress");
+      await addProductPhoto(cigarId, "rights-suppress");
+      // Served while pending.
+      await expect(getProductPhoto(h.deps, { cigarId })).resolves.toBeDefined();
+
+      const result = await setProductPhotoRights(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        rights: "suppressed",
+      });
+      expect(result.rights).toBe("suppressed");
+
+      // Now treated as absent → PhotoNotFoundError (the serving route 404s on this).
+      await expect(getProductPhoto(h.deps, { cigarId })).rejects.toBeInstanceOf(PhotoNotFoundError);
+
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "product_photo.set_rights"));
+      const audit = audits.find((a) => (a.after as { cigarId?: string }).cigarId === cigarId);
+      expect((audit!.before as { rights?: string }).rights).toBe("pending");
+      expect((audit!.after as { rights?: string }).rights).toBe("suppressed");
+    });
+
+    it("approve makes a suppressed photo servable again", async () => {
+      const cigarId = await seedUnverified("Rights Approve");
+      await addProductPhoto(cigarId, "rights-approve");
+      await setProductPhotoRights(h.deps, admin, { clientRequestId: newRequestId(), cigarId, rights: "suppressed" });
+      await expect(getProductPhoto(h.deps, { cigarId })).rejects.toBeInstanceOf(PhotoNotFoundError);
+      await setProductPhotoRights(h.deps, admin, { clientRequestId: newRequestId(), cigarId, rights: "approved" });
+      await expect(getProductPhoto(h.deps, { cigarId })).resolves.toBeDefined();
+    });
+
+    it("errors photo_not_found when the cigar has no product photo", async () => {
+      const cigarId = await seedUnverified("Rights NoPhoto");
+      const error = await setProductPhotoRights(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        rights: "approved",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(PhotoNotFoundError);
+    });
+
+    it("replays an identical retry", async () => {
+      const cigarId = await seedUnverified("Rights Replay");
+      await addProductPhoto(cigarId, "rights-replay");
+      const input = { clientRequestId: newRequestId(), cigarId, rights: "approved" as const };
+      const first = await setProductPhotoRights(h.deps, admin, input);
+      const second = await setProductPhotoRights(h.deps, admin, input);
+      expect(first.replayed).toBe(false);
+      expect(second.replayed).toBe(true);
     });
   });
 });

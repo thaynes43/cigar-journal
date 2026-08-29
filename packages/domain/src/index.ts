@@ -41,10 +41,20 @@ export {
   type RecordObservationResult,
 } from "./price-observations.js";
 
-// Catalog curation (ADR-006): merge duplicates, dismiss false-positive pairs,
-// verify entries, and the admin queue. Curator-only — each service re-checks
-// the principal role.
-export { mergeCigars, verifyCigar, dismissDuplicate, curationQueue } from "./curation.js";
+// Catalog curation (ADR-006, DESIGN-003 §Curation): merge duplicates (tombstone,
+// not delete), dismiss false-positive pairs, verify entries, set listing-match
+// status, exclude/restore catalog rows, set product-photo rights, and the admin
+// queue. Curator-only — each service re-checks the principal role.
+export {
+  mergeCigars,
+  verifyCigar,
+  dismissDuplicate,
+  curationQueue,
+  setListingMatchStatus,
+  excludeCigar,
+  restoreCigar,
+  setProductPhotoRights,
+} from "./curation.js";
 export { getMyInventory, deriveHoldingSummary, getHoldingForCigar } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
 
