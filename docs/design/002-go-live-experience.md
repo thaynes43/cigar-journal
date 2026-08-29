@@ -240,6 +240,12 @@ price history below threshold → text, not chart.
 segments join it; panels stack in composition order; the ledger keeps
 horizontal scroll (PRD-002 R-X-1).
 
+**Wait states (owner rule, 2026-08-29):** every asynchronous affordance
+shows a busy label while work is in flight — "Uploading…" on photo tiles,
+in-place dimming plus skeletons on refetching grids. A pending action is
+never visually idle, and a completed flow always offers a next step (the
+upload page links to the smoke after "Added."); no dead ends.
+
 ## UI strings — PROPOSALS (Fable-lane review before implementation)
 
 Implementers use these exactly or flag the gap; never invent alternates.
@@ -262,6 +268,8 @@ Implementers use these exactly or flag the gap; never invent alternates.
 | Purchase clear affordance | want badge + `Clear` |
 | Shelf headings | `In your humidor` · `Wanted` · `Recently added` |
 | Smoke-list provenance tag | `humidor` |
+| Photo tile busy state | `Uploading…` |
+| Upload page after success | `Added.` + `Open the smoke` |
 
 ## Owner decisions (2026-08-28)
 

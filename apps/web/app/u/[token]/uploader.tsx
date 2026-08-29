@@ -10,6 +10,7 @@ import { ui } from "@/lib/ui";
 export function TokenUploader({ token }: { token: string }) {
   const [state, setState] = useState<"idle" | "pending" | "done" | "error">("idle");
   const [preview, setPreview] = useState<string | null>(null);
+  const [smokeId, setSmokeId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -26,6 +27,8 @@ export function TokenUploader({ token }: { token: string }) {
         setState("error");
         return;
       }
+      const view = (await res.json().catch(() => null)) as { smokeId?: string } | null;
+      setSmokeId(view?.smokeId ?? null);
       setPreview(URL.createObjectURL(file));
       setState("done");
     } catch {
@@ -43,6 +46,11 @@ export function TokenUploader({ token }: { token: string }) {
           <img src={preview} alt="" className="aspect-square w-44 rounded-card object-cover" />
         ) : null}
         <p className="text-sm text-ink">Added.</p>
+        {smokeId ? (
+          <a href={`/smokes/${smokeId}`} className={ui.button}>
+            Open the smoke
+          </a>
+        ) : null}
       </div>
     );
   }
@@ -56,10 +64,16 @@ export function TokenUploader({ token }: { token: string }) {
         aria-busy={state === "pending"}
         className={`flex aspect-square w-44 flex-col items-center justify-center gap-1 rounded-card border border-dashed border-line text-muted transition-colors hover:border-accent hover:text-accent focus-visible:ring-2 focus-visible:ring-accent/25 focus-visible:outline-none ${state === "pending" ? "animate-pulse" : ""}`}
       >
-        <span aria-hidden className="text-2xl leading-none">
-          +
-        </span>
-        <span className="label-caps">Add photo</span>
+        {state === "pending" ? (
+          <span className="label-caps">Uploading…</span>
+        ) : (
+          <>
+            <span aria-hidden className="text-2xl leading-none">
+              +
+            </span>
+            <span className="label-caps">Add photo</span>
+          </>
+        )}
       </button>
       <input
         ref={fileRef}
