@@ -1,4 +1,4 @@
-# Session handoff — 2026-08-29 EOD (catalog rework + curation agent operational)
+# Session handoff — 2026-08-29 night (v0.26.1: full board sweep, vendors live)
 
 For a cold-start agent. The durable backlog is GitHub issues (label `backlog`);
 this file is the bridge: where the last session left prod, and what to pick up.
@@ -6,7 +6,26 @@ Overwrite it at the next major handoff.
 
 ## Where prod stands
 
-- **v0.25.1** live and verified. On top of 0.24.0 (below): filter chips
+- **v0.26.1** live and verified. The evening five-lane wave (all merged +
+  deployed): markdown fidelity (#146 — react-markdown whitelist, unblocks the
+  #97 flip), review console with agent-runs list + per-row Undo (#149),
+  vendor expansion (#147/#150 — decided_by re-crawl guard, purchase_linkout
+  posture, probe CLI, approved-list import), OAuth loopback fix (#144,
+  prod-verified, #140 closed), Playwright e2e suite (#148 — 17 specs, own CI
+  job). Issues #124/#125/#126/#128/#140 all closed.
+- **Crawls are LIVE** (owner directive superseded the launch gate): offers
+  weekly Sun 08:00 UTC, enrich daily 09:00 UTC (first run verified: 1 photo).
+  **Cuban Lou's crawl_enabled** (photos + price seeds, purchase_linkout=false
+  — never a buy destination, unapproved-source labeled). First seed:
+  987 pages, 890 parsed, 807 non-cigar skipped, 83 auto, 56 created, 82
+  offers, 60 photos. Catalog photos 853→914; CC 1→6; owner humidor
+  photoless 63→55 — remainder closes via curation-agent triage (1,569 in
+  queue), human merges of owner↔crawler dup pairs (console), and uploads.
+- **2 Guys DISABLED**: robots/ToS fine but its sitemap content VARIES between
+  fetches (1,462 /store/ locs, then 0) — needs variance handling (#127).
+  **Small Batch DISABLED**: root-level slugs, needs negative-prefix gate.
+  Probe nit: sample N locs, not the first (#127).
+- **v0.25.1** shipped earlier. On top of 0.24.0 (below): filter chips
   (#136 — Brand/In stock/Smoked/Favorites, wave 6 done, #124 closed), the
   curator product-photo upload path (#139 — direct + phone upload-link +
   "Missing photos" worklist of the owner's 63 photoless holds), the MCP
