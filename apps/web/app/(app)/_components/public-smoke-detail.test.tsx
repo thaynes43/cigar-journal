@@ -32,7 +32,9 @@ const hostile: PublicSmokeView = {
     impression: "Verdict: <script>alert('impression')</script>.",
   },
   pairing: ["<script>alert('pairing')</script>"],
-  originalMarkdown: "## Heading\n\nDanger <script>alert('markdown')</script> here.",
+  originalMarkdown:
+    "## Heading\n\nDanger <script>alert('markdown')</script> here.\n\n" +
+    "[clickme](javascript:alert('href')) and ![x](https://blocked.example/x.png)",
   photos: [],
 };
 
@@ -50,5 +52,10 @@ describe("PublicSmokeDetail", () => {
     // renderer interprets structure, not HTML.
     expect(html).toContain("<h3");
     expect(html).toContain("Danger");
+    // The imported markdown's link is sanitized (javascript: href stripped → inert
+    // text) and its image dropped, so neither reaches the anonymous reader.
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("blocked.example");
+    expect(html).toContain("clickme");
   });
 });
