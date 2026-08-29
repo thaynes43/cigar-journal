@@ -136,6 +136,17 @@ describe("OAuth AS route handlers", () => {
     expect(check.ok).toBe(true);
   });
 
+  it("returns 400 invalid_request for a JSON token body (form-encoding is the contract)", async () => {
+    const req = new Request(`${ORIGIN}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_type: "authorization_code", code: "x" }),
+    });
+    const res = await tokenRoute.POST(req);
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toMatchObject({ error: "invalid_request" });
+  });
+
   it("returns unsupported_grant_type for an unknown grant", async () => {
     const reg = await oauth.registerClient(dbmod.db, { redirect_uris: [REDIRECT] });
     const req = new Request(`${ORIGIN}/oauth/token`, {

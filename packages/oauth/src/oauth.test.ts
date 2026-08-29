@@ -15,6 +15,8 @@ import {
   protectedResourceMetadata,
   registerClient,
   getClient,
+  redirectUriMatches,
+  resolveAuthorizationClient,
   validateAuthorizationParams,
   createAuthorizationTransaction,
   getConsentView,
@@ -249,6 +251,100 @@ describe("@cj/oauth authorization server", () => {
     expect(await getConsentView(db, txnId)).toBeUndefined();
   });
 
+  // ---- loopback redirect_uri matching (RFC 8252 §7.3, issue #140) ----------
+
+  async function clientWith(redirectUris: string[]): Promise<OAuthClientRow> {
+    const reg = await registerClient(db, {
+      redirect_uris: redirectUris,
+      token_endpoint_auth_method: "none",
+    });
+    return (await getClient(db, reg.client_id))!;
+  }
+
+  it("authorizes a client registered with ONLY the 127.0.0.1 loopback form across every loopback variant", async () => {
+    const client = await clientWith(["http://127.0.0.1:9999/cb"]);
+    // Same form, the localhost name, the IPv6 literal, and a different ephemeral
+    // port all resolve the client (the whole point of the exemption).
+    for (const incoming of [
+      "http://127.0.0.1:9999/cb",
+      "http://localhost:9999/cb",
+      "http://[::1]:9999/cb",
+      "http://127.0.0.1:54321/cb",
+      "http://localhost:1/cb",
+    ]) {
+      const resolved = await resolveAuthorizationClient(db, client.clientId, incoming);
+      expect(resolved.clientId).toBe(client.clientId);
+    }
+  });
+
+  it("authorizes a localhost-registered client presenting the 127.0.0.1 form (and vice versa)", async () => {
+    const named = await clientWith(["http://localhost:8080/callback"]);
+    expect((await resolveAuthorizationClient(db, named.clientId, "http://127.0.0.1:8080/callback")).clientId).toBe(named.clientId);
+    const ipv6 = await clientWith(["http://[::1]:7000/cb"]);
+    expect((await resolveAuthorizationClient(db, ipv6.clientId, "http://127.0.0.1:7000/cb")).clientId).toBe(ipv6.clientId);
+  });
+
+  it("rejects a loopback redirect whose PATH or QUERY differs, and never widens to a non-loopback host", async () => {
+    const client = await clientWith(["http://127.0.0.1:9999/cb"]);
+    // Port/host are exempt; path and query are not.
+    await expectOAuthError(
+      resolveAuthorizationClient(db, client.clientId, "http://localhost:9999/other"),
+      "invalid_redirect_uri",
+    );
+    await expectOAuthError(
+      resolveAuthorizationClient(db, client.clientId, "http://localhost:9999/cb?x=1"),
+      "invalid_redirect_uri",
+    );
+    // A registered loopback URI must not match an attacker-controlled host.
+    await expectOAuthError(
+      resolveAuthorizationClient(db, client.clientId, "http://evil.example.com:9999/cb"),
+      "invalid_redirect_uri",
+    );
+  });
+
+  it("keeps NON-loopback redirect URIs exact-match (no port/host slack)", async () => {
+    const client = await clientWith(["https://client.example.com/callback"]);
+    expect((await resolveAuthorizationClient(db, client.clientId, "https://client.example.com/callback")).clientId).toBe(client.clientId);
+    // Same host, different port → rejected (only loopback ignores the port).
+    await expectOAuthError(
+      resolveAuthorizationClient(db, client.clientId, "https://client.example.com:8443/callback"),
+      "invalid_redirect_uri",
+    );
+    // https loopback is not the http-loopback callback case → stays exact.
+    const httpsLoopback = await clientWith(["https://127.0.0.1:9999/cb"]);
+    await expectOAuthError(
+      resolveAuthorizationClient(db, httpsLoopback.clientId, "http://127.0.0.1:9999/cb"),
+      "invalid_redirect_uri",
+    );
+  });
+
+  it("exchanges a code when the token leg presents a different loopback form than the authorize leg", async () => {
+    const client = await clientWith(["http://127.0.0.1:9999/cb"]);
+    const { verifier, challenge } = pkce();
+    const { txnId } = await createAuthorizationTransaction(db, {
+      client,
+      userId,
+      redirectUri: "http://127.0.0.1:9999/cb", // browser/authorize leg
+      validated: validateAuthorizationParams({
+        responseType: "code",
+        scope: "journal:read",
+        codeChallenge: challenge,
+        codeChallengeMethod: "S256",
+        resource: RESOURCE,
+      }),
+    });
+    const code = new URL((await grantConsent(db, txnId, userId)).redirectUrl).searchParams.get("code")!;
+    // Native client hands the localhost form + a different port at /token.
+    const tokens = await exchangeAuthorizationCode(db, {
+      client,
+      code,
+      codeVerifier: verifier,
+      redirectUri: "http://localhost:12345/cb",
+      resource: RESOURCE,
+    });
+    expect(tokens.access_token).toBeTruthy();
+  });
+
   // ---- PKCE + audience negatives -------------------------------------------
 
   it("rejects PKCE plain and a missing challenge at authorize", () => {
@@ -458,5 +554,44 @@ describe("@cj/oauth authorization server", () => {
     // The stored hash matches sha256 of the issued token.
     expect(accessRows.some((r) => r.tokenHash === hashToken(tokens.access_token))).toBe(true);
     expect(refreshRows.some((r) => r.tokenHash === hashToken(tokens.refresh_token!))).toBe(true);
+  });
+});
+
+// Pure matcher unit tests — no DB, no env. The loopback exemption (RFC 8252 §7.3)
+// versus strict exact-match for everything else (issue #140).
+describe("redirectUriMatches", () => {
+  it("treats 127.0.0.1 / [::1] / localhost as interchangeable and ignores the port", () => {
+    const forms = ["http://127.0.0.1:9999/cb", "http://localhost:9999/cb", "http://[::1]:9999/cb"];
+    for (const a of forms) {
+      for (const b of forms) expect(redirectUriMatches(a, b)).toBe(true);
+    }
+    // Port is exempt on loopback.
+    expect(redirectUriMatches("http://127.0.0.1:9999/cb", "http://127.0.0.1:1/cb")).toBe(true);
+    expect(redirectUriMatches("http://localhost:80/cb", "http://[::1]:65535/cb")).toBe(true);
+  });
+
+  it("still requires the path, query, and fragment to match on loopback", () => {
+    expect(redirectUriMatches("http://127.0.0.1:9999/cb", "http://localhost:9999/other")).toBe(false);
+    expect(redirectUriMatches("http://127.0.0.1:9999/cb", "http://localhost:9999/cb?x=1")).toBe(false);
+    expect(redirectUriMatches("http://127.0.0.1:9999/cb#a", "http://localhost:9999/cb#b")).toBe(false);
+    expect(redirectUriMatches("http://127.0.0.1:9999/cb?a=1", "http://localhost:9999/cb?a=1")).toBe(true);
+  });
+
+  it("never widens a loopback registration to a non-loopback or cross-scheme host", () => {
+    expect(redirectUriMatches("http://127.0.0.1:9999/cb", "http://evil.example.com:9999/cb")).toBe(false);
+    expect(redirectUriMatches("http://127.0.0.1:9999/cb", "https://127.0.0.1:9999/cb")).toBe(false);
+    // 127.0.0.1 is loopback; 127.0.0.2 (also 127/8) is deliberately not in the set.
+    expect(redirectUriMatches("http://127.0.0.1:9999/cb", "http://127.0.0.2:9999/cb")).toBe(false);
+  });
+
+  it("keeps non-loopback URIs strictly exact", () => {
+    expect(redirectUriMatches("https://c.example.com/cb", "https://c.example.com/cb")).toBe(true);
+    expect(redirectUriMatches("https://c.example.com/cb", "https://c.example.com:8443/cb")).toBe(false);
+    expect(redirectUriMatches("https://c.example.com/cb", "https://c.example.com/cb2")).toBe(false);
+  });
+
+  it("returns false for an unparseable URI unless byte-identical", () => {
+    expect(redirectUriMatches("not a url", "not a url")).toBe(true);
+    expect(redirectUriMatches("not a url", "http://localhost/cb")).toBe(false);
   });
 });

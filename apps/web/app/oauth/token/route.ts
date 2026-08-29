@@ -14,7 +14,15 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request): Promise<Response> {
   try {
-    const form = await req.formData();
+    // RFC 6749 §4.1.3: the token endpoint takes application/x-www-form-urlencoded.
+    // A non-form body (e.g. JSON) makes formData() throw — that is a malformed
+    // request, not a server fault, so answer invalid_request rather than 500.
+    let form: FormData;
+    try {
+      form = await req.formData();
+    } catch {
+      throw new OAuthError("invalid_request", "Request body must be application/x-www-form-urlencoded");
+    }
     const client = await authenticateClient(db, parseClientAuth(req, form));
     const grantType = str(form.get("grant_type"));
 
