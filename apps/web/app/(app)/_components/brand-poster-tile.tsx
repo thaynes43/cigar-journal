@@ -2,9 +2,11 @@ import Link from "next/link";
 import type { BrandShelf } from "@cj/domain";
 import { BandTile } from "./band-tile";
 
-// The "series" poster: a 2:3 tile for one brand shelf. Links to the brand page
-// when the brand is named; the unbranded shelf renders inert (no slug). Art is
-// the BandTile fallback until a curated/crawled poster lands via `imageUrl`.
+// The "series" poster: a 3:4 tile for one brand shelf, sharing the cigar tile's
+// frame so photo and monogram geometry never vary across the grid (DESIGN-003
+// §Tile — covers are member photos). Links to the brand page when the brand is
+// named; the unbranded shelf renders inert (no slug). Art is the BandTile fallback
+// until a curated/crawled poster lands via `imageUrl`.
 export function BrandPosterTile({
   shelf,
   imageUrl,
@@ -15,7 +17,7 @@ export function BrandPosterTile({
   const name = shelf.brand ?? "Unbranded";
   const body = (
     <>
-      <div className="aspect-[2/3] overflow-hidden rounded-card border border-line transition-colors group-hover:border-accent/60">
+      <div className="aspect-[3/4] overflow-hidden rounded-card border border-line transition-colors group-hover:border-accent/60">
         {imageUrl ? (
           <img src={imageUrl} alt="" className="h-full w-full object-cover" />
         ) : (

@@ -5,6 +5,7 @@ import { getServerCaller } from "@/lib/trpc/server";
 import { requireAuth } from "@/lib/require-auth";
 import { BandTile } from "../../../_components/band-tile";
 import { CigarStillTile } from "../../../_components/cigar-still-tile";
+import { CATALOG_GRID } from "../../../_components/catalog-registry";
 
 // A brand page — the "series". A typographic hero (no brand art asset yet), then
 // each line as a collapsible poster section (the haynesnetwork season pattern),
@@ -39,7 +40,7 @@ export default async function BrandPage({ params }: { params: Promise<{ slug: st
       ))}
 
       {loose.length > 0 ? (
-        <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+        <ul className={CATALOG_GRID}>
           {loose.map((cigar) => (
             <li key={cigar.cigarId}>
               <CigarStillTile
@@ -74,7 +75,7 @@ function LineSection({ line }: { line: LineGroup }) {
           <span className="label-caps">{line.cigars.length}</span>
         </span>
       </summary>
-      <ul className="grid grid-cols-2 gap-4 pt-2 sm:grid-cols-3 lg:grid-cols-4">
+      <ul className={`${CATALOG_GRID} pt-2`}>
         {line.cigars.map((cigar) => (
           <li key={cigar.cigarId}>
             <CigarStillTile

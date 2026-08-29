@@ -20,7 +20,9 @@ export default async function CurationPage() {
   const { unverified, duplicates } = await caller.curation.queue();
 
   return (
-    <div className="flex flex-col gap-10">
+    // Review console, not a catalog grid — it owns a reading measure now the shell
+    // runs full bleed (DESIGN-003 §Layout).
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-10">
       <h1 className="font-display text-2xl font-semibold text-ink">Curation</h1>
 
       <section className="flex flex-col gap-4">

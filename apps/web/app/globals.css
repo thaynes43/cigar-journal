@@ -169,6 +169,17 @@ body {
   color: var(--muted);
 }
 
+/* Hide a scroll container's native scrollbar (DESIGN-003 shelf affordance): the
+ * strip is scrolled by paddles / swipe / keyboard, and the fade mask signals more
+ * content — so the OS bar (a 15–17px layout-occupying band on Windows) is retired.
+ * Colors are untouched; the token contract is unaffected. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 /* Reading surface — the Ledger prose treatment for narratives. */
 @utility prose-ledger {
   font-family: var(--font-serif);

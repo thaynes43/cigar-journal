@@ -1,57 +1,38 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
-import type { CatalogSort, CigarType, OwnershipFacet } from "@cj/domain";
+import { useEffect, useState, type ReactNode } from "react";
+import type { CatalogSort, OwnershipFacet } from "@cj/domain";
 import { ui } from "@/lib/ui";
 import { useDebounced } from "@/lib/use-debounced";
 import {
   CATALOG_ALL_SORTS,
   CATALOG_OWNERSHIP_FACETS,
   CATALOG_TYPE_FACETS,
+  CATALOG_VIEWS,
   OWNERSHIP_FACET_VIEWS,
   TYPE_FACET_VIEWS,
+  catalogUrl,
+  type CatalogState,
   type CatalogTypeFacet,
   type CatalogView,
 } from "./catalog-registry";
 
 // The catalog toolbar owns all browse state (view, q, type, own, sort), and those
-// are the only URL params, so it rebuilds the target URL from its props rather
-// than reading the params back. Filter edits (search, type, ownership, sort)
-// `router.replace` to stay shareable and back-button quiet; the view switch
-// `push`es (PRD-002 conventions). It stays one fixed-height row that pans on
-// mobile, the ownership segments joining it (DESIGN-002 §Mobile / PRD-002 R-X-1).
-interface ToolbarState {
-  view: CatalogView;
-  q: string;
-  type?: CigarType;
-  own: OwnershipFacet;
-  sort: CatalogSort;
-}
+// are the only URL params, so it rebuilds the target URL from its props (via the
+// registry's pure catalogUrl) rather than reading the params back. Filter edits
+// (search, type, ownership, sort) `router.replace` to stay shareable and
+// back-button quiet; the view switch `push`es (PRD-002 conventions). Rails carry
+// leading `label-caps` labels so adjacent segmented groups never read as competing
+// filters (DESIGN-003 §IA labeled-rails). It stays one row that pans on mobile.
 
-export function CatalogToolbar({ view, q, type, own, sort }: ToolbarState) {
+export function CatalogToolbar({ view, q, type, own, sort }: CatalogState) {
   const router = useRouter();
   const pathname = usePathname();
 
-  // Emit only the params a given view answers, each omitting its default so a
-  // shared URL stays minimal: Brands carries `own`; All carries q/type/own/sort;
-  // Ledger carries nothing (it is the Have detail, no facets — DESIGN-002 §IA).
-  function urlFor(next: ToolbarState): string {
-    const params = new URLSearchParams();
-    if (next.view === "all") params.set("view", "all");
-    if (next.view === "ledger") params.set("view", "ledger");
-    if (next.view !== "ledger") {
-      if (next.q.trim()) params.set("q", next.q.trim());
-      if (next.own !== "all") params.set("own", next.own);
-      // Type composes on Brands and All (owner-approved); only sort is All-only.
-      if (next.type) params.set("type", next.type);
-    }
-    if (next.view === "all" && next.sort !== "name") params.set("sort", next.sort);
-    const qs = params.toString();
-    return qs ? `${pathname}?${qs}` : pathname;
-  }
+  const urlFor = (next: CatalogState): string => catalogUrl(pathname, next);
 
-  const state: ToolbarState = { view, q, type, own, sort };
+  const state: CatalogState = { view, q, type, own, sort };
   const [text, setText] = useState(q);
   const debounced = useDebounced(text, 250);
 
@@ -100,41 +81,55 @@ export function CatalogToolbar({ view, q, type, own, sort }: ToolbarState) {
 
       <Segmented
         ariaLabel="Catalog view"
-        options={[
-          { value: "brands", label: "Brands" },
-          { value: "all", label: "All" },
-          { value: "ledger", label: "Ledger" },
-        ]}
+        options={CATALOG_VIEWS.map((v) => ({ value: v.value, label: v.label }))}
         active={view}
         onSelect={switchView}
       />
 
       {showFacets ? (
-        <Segmented
-          ariaLabel="Ownership"
-          options={CATALOG_OWNERSHIP_FACETS.map((f) => ({ value: f.value, label: f.label }))}
-          active={own}
-          onSelect={selectOwn}
-        />
+        <Rail label="Own">
+          <Segmented
+            ariaLabel="Ownership"
+            options={CATALOG_OWNERSHIP_FACETS.map((f) => ({ value: f.value, label: f.label }))}
+            active={own}
+            onSelect={selectOwn}
+          />
+        </Rail>
       ) : null}
 
       {showTypeFacet ? (
-        <Segmented
-          ariaLabel="Type"
-          options={CATALOG_TYPE_FACETS.map((f) => ({ value: f.value, label: f.label }))}
-          active={activeType}
-          onSelect={selectType}
-        />
+        <Rail label="Type">
+          <Segmented
+            ariaLabel="Type"
+            options={CATALOG_TYPE_FACETS.map((f) => ({ value: f.value, label: f.label }))}
+            active={activeType}
+            onSelect={selectType}
+          />
+        </Rail>
       ) : null}
 
       {view === "all" ? (
-        <Segmented
-          ariaLabel="Sort"
-          options={CATALOG_ALL_SORTS.map((s) => ({ value: s.value, label: s.label }))}
-          active={sort}
-          onSelect={selectSort}
-        />
+        <Rail label="Sort">
+          <Segmented
+            ariaLabel="Sort"
+            options={CATALOG_ALL_SORTS.map((s) => ({ value: s.value, label: s.label }))}
+            active={sort}
+            onSelect={selectSort}
+          />
+        </Rail>
       ) : null}
+    </div>
+  );
+}
+
+// A labeled rail: a muted lead label before its segmented group (DESIGN-003
+// §IA), so two adjacent groups never read as one competing filter. The view
+// group stays unlabeled and first.
+function Rail({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      <span className="label-caps whitespace-nowrap">{label}</span>
+      {children}
     </div>
   );
 }

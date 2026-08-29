@@ -6,13 +6,14 @@ import { CatalogAllGrid } from "../_components/catalog-all-grid";
 import { CatalogShelves } from "../_components/catalog-shelves";
 import { BrandPosterTile } from "../_components/brand-poster-tile";
 import { LedgerTable } from "../_components/ledger-table";
-import type { CatalogView } from "../_components/catalog-registry";
+import { CATALOG_GRID, parseView } from "../_components/catalog-registry";
 
-// The unified Catalog surface (PRD-003 R-UNI): one nav entry, three views —
-// Brands (default) · All · Ledger — with the ownership facet (?own=) overlaying
-// Brands and All, and the humidor Ledger folded in as a view (DESIGN-002 §IA).
-// All slice state (view, q, type, own, sort) lives in the URL, so every view is
-// shareable, and `/inventory` redirects here (next.config).
+// The unified Catalog surface (DESIGN-003 §IA): `/cigars` IS the cigar grid.
+// Landing = root shelves (lenses) above the full, filterable grid of every catalog
+// cigar with personal state as badges; `?view=brands` and `?view=ledger` are the
+// two other presentations. The default emits no `view` param (legacy `?view=all`
+// normalizes to it). All slice state (view, q, type, own, sort) lives in the URL,
+// so every surface is shareable, and `/inventory` redirects land on the grid.
 export default async function CatalogPage({
   searchParams,
 }: {
@@ -26,20 +27,21 @@ export default async function CatalogPage({
 }) {
   await requireAuth();
   const params = await searchParams;
-  const view: CatalogView =
-    params.view === "all" ? "all" : params.view === "ledger" ? "ledger" : "brands";
+  const view = parseView(params.view);
   const q = (typeof params.q === "string" ? params.q : "").trim();
   const type: CigarType | undefined =
     params.type === "NC" || params.type === "CC" ? params.type : undefined;
   const own: OwnershipFacet =
     params.own === "have" || params.own === "want" || params.own === "dont" ? params.own : "all";
   const sort: CatalogSort =
-    params.sort === "my-rating" || params.sort === "recently-added" ? params.sort : "name";
+    params.sort === "my-rating" || params.sort === "recently-added" || params.sort === "price"
+      ? params.sort
+      : "name";
 
-  // The root shelves belong to the true brand-wall root: default view, no active
-  // facet (ownership or type), no search. Any narrowing swaps them out for the
-  // filtered result.
-  const atRoot = view === "brands" && own === "all" && type === undefined && q === "";
+  // Root shelves render only at the true grid root: default view, no active facet
+  // (ownership or type), no search. The grid is always present at root, so any
+  // narrowing collapses the shelves but never empties the page (DESIGN-003 §IA).
+  const atRoot = view === "all" && own === "all" && type === undefined && q === "";
 
   return (
     <div className="flex flex-col gap-6">
@@ -47,22 +49,22 @@ export default async function CatalogPage({
       <CatalogToolbar view={view} q={q} type={type} own={own} sort={sort} />
       {view === "ledger" ? (
         <LedgerView />
-      ) : view === "all" ? (
-        <CatalogAllGrid q={q || undefined} type={type} own={own} sort={sort} />
+      ) : view === "brands" ? (
+        <BrandsView q={q} own={own} type={type} />
       ) : (
         <>
           {atRoot ? <CatalogShelves /> : null}
-          <BrandsView q={q} own={own} type={type} />
+          <CatalogAllGrid q={q || undefined} type={type} own={own} sort={sort} />
         </>
       )}
     </div>
   );
 }
 
-// The default view: every brand as a 2:3 poster, filtered by name against `?q=`
-// and by the ownership + type facets (which compose). An active facet re-badges
-// each shelf's counts to the matching subset and drops brands with no match
-// (domain browseBrands).
+// The Brands presentation: every brand as a poster, filtered by name against
+// `?q=` and by the ownership + type facets (which compose). An active facet
+// re-badges each shelf's counts to the matching subset and drops brands with no
+// match (domain browseBrands).
 async function BrandsView({
   q,
   own,
@@ -84,7 +86,7 @@ async function BrandsView({
   }
 
   return (
-    <ul className="grid grid-cols-3 gap-4 sm:grid-cols-4 lg:grid-cols-5">
+    <ul className={CATALOG_GRID}>
       {shown.map((shelf) => (
         <li key={shelf.slug ?? " unbranded"}>
           <BrandPosterTile
