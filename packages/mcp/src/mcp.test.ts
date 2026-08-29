@@ -228,7 +228,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the eleven tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
+  it("lists exactly the twelve tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -245,6 +245,7 @@ describe("@cj/mcp adapter", () => {
           "record_purchase",
           "save_smoke",
           "search_cigars",
+          "set_favorite",
           "set_want",
           "update_smoke",
         ].sort(),
@@ -261,6 +262,7 @@ describe("@cj/mcp adapter", () => {
         "update_smoke",
         "add_smoke_photo",
         "set_want",
+        "set_favorite",
       ])
         expect(readOnly(w)).not.toBe(true);
     });
@@ -331,12 +333,14 @@ describe("@cj/mcp adapter", () => {
       expect((data.cigar as { canonicalName: string }).canonicalName).toContain("Alma del Fuego");
       expect(data).not.toHaveProperty("personalProfile");
       expect(data).not.toHaveProperty("wanted"); // want overlay is journal:read-bounded
+      expect(data).not.toHaveProperty("favorited"); // favorite overlay is journal:read-bounded
     });
     await withClient(ownerCatalogJournal, async (client) => {
       const result = await call(client, "get_cigar", { cigarId: primaryCigarId });
       const data = payloadOf(result) as Record<string, unknown>;
       expect(data).toHaveProperty("personalProfile"); // present (may be null) with journal:read
       expect(data).toHaveProperty("wanted"); // want overlay present with journal:read
+      expect(data).toHaveProperty("favorited"); // favorite overlay present with journal:read
     });
   });
 
@@ -990,6 +994,90 @@ describe("@cj/mcp adapter", () => {
   it("set_want on an unknown cigar returns cigar_not_found", async () => {
     await withClient(ownerFull, async (client) => {
       const result = await call(client, "set_want", { cigarId: randomUUID(), wanted: true });
+      expect(errorOf(result).code).toBe("cigar_not_found");
+    });
+  });
+
+  // ---- set_favorite (the second cigar-level mark) ---------------------------
+
+  it("set_favorite marks and clears a cigar idempotently; get_cigar reflects it under journal:read", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Favorite Wide Churchill", brand: "FW" });
+    await withClient(ownerFull, async (client) => {
+      const marked = payloadOf(
+        await call(client, "set_favorite", { cigarId, favorited: true, note: "my desert-island stick" }),
+      ) as { cigarId: string; favorited: boolean; note: string | null; changed: boolean };
+      expect(marked).toMatchObject({
+        cigarId,
+        favorited: true,
+        note: "my desert-island stick",
+        changed: true,
+      });
+
+      // Idempotent re-mark: no change.
+      const again = payloadOf(await call(client, "set_favorite", { cigarId, favorited: true })) as {
+        changed: boolean;
+      };
+      expect(again.changed).toBe(false);
+
+      // get_cigar (journal:read on ownerFull) reflects the favorite.
+      const got = payloadOf(await call(client, "get_cigar", { cigarId })) as { favorited: boolean };
+      expect(got.favorited).toBe(true);
+
+      // Clear it; get_cigar flips back.
+      const cleared = payloadOf(await call(client, "set_favorite", { cigarId, favorited: false })) as {
+        favorited: boolean;
+        note: string | null;
+      };
+      expect(cleared.favorited).toBe(false);
+      expect(cleared.note).toBeNull();
+      expect(
+        (payloadOf(await call(client, "get_cigar", { cigarId })) as { favorited: boolean }).favorited,
+      ).toBe(false);
+    });
+  });
+
+  it("rejects set_favorite for a token without journal:write: 403", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerCatalogJournal}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "set_favorite", arguments: { cigarId: primaryCigarId, favorited: true } },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+  });
+
+  it("set_favorite isolates by caller — another user's mark never appears in get_cigar", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Favorite Isolation Robusto", brand: "FI" });
+    await withClient(ownerFull, async (client) => {
+      await call(client, "set_favorite", { cigarId, favorited: true });
+    });
+    await withClient(otherFull, async (client) => {
+      const got = payloadOf(await call(client, "get_cigar", { cigarId })) as { favorited: boolean };
+      expect(got.favorited).toBe(false);
+    });
+  });
+
+  it("set_favorite is independent of set_want — one mark never implies the other", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Favorite Not Want Toro", brand: "FNW" });
+    await withClient(ownerFull, async (client) => {
+      await call(client, "set_favorite", { cigarId, favorited: true });
+      const got = payloadOf(await call(client, "get_cigar", { cigarId })) as {
+        favorited: boolean;
+        wanted: boolean;
+      };
+      expect(got.favorited).toBe(true);
+      expect(got.wanted).toBe(false); // favoriting did not want it
+    });
+  });
+
+  it("set_favorite on an unknown cigar returns cigar_not_found", async () => {
+    await withClient(ownerFull, async (client) => {
+      const result = await call(client, "set_favorite", { cigarId: randomUUID(), favorited: true });
       expect(errorOf(result).code).toBe("cigar_not_found");
     });
   });

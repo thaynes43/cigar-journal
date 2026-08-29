@@ -200,6 +200,47 @@ describe("tRPC API", () => {
     expect(err.code).toBe("UNAUTHORIZED");
   });
 
+  it("sets and clears a favorite mark idempotently, reflected in cigars.get, scoped to the caller", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: `Fav Api ${newRequestId()}`, brand: "FA" });
+    const a = caller(h.deps, userA);
+    const b = caller(h.deps, userB);
+
+    // Not favorited initially — and independent of want.
+    const before = await a.cigars.get({ cigarId });
+    expect(before.favorited).toBe(false);
+    expect(before.wanted).toBe(false);
+
+    // Set → get reflects it; re-set is an idempotent no-op.
+    const set = await a.cigars.setFavorite({ cigarId, favorited: true });
+    expect(set).toMatchObject({ cigarId, favorited: true, changed: true });
+    const after = await a.cigars.get({ cigarId });
+    expect(after.favorited).toBe(true);
+    expect(after.wanted).toBe(false); // favoriting did not want it
+    expect((await a.cigars.setFavorite({ cigarId, favorited: true })).changed).toBe(false);
+
+    // Another user never sees A's mark.
+    expect((await b.cigars.get({ cigarId })).favorited).toBe(false);
+
+    // Clear → get flips back.
+    expect((await a.cigars.setFavorite({ cigarId, favorited: false })).favorited).toBe(false);
+    expect((await a.cigars.get({ cigarId })).favorited).toBe(false);
+  });
+
+  it("maps a favorite on an unknown cigar to NOT_FOUND (cigar_not_found)", async () => {
+    const a = caller(h.deps, userA);
+    const err = await trpcError(
+      a.cigars.setFavorite({ cigarId: "00000000-0000-0000-0000-000000000000", favorited: true }),
+    );
+    expect(err.code).toBe("NOT_FOUND");
+    expect((err.cause as DomainError).code).toBe("cigar_not_found");
+  });
+
+  it("requires auth to set a favorite", async () => {
+    const anon = caller(h.deps, null);
+    const err = await trpcError(anon.cigars.setFavorite({ cigarId: "x", favorited: true }));
+    expect(err.code).toBe("UNAUTHORIZED");
+  });
+
   it("surfaces cigar search guidance shapes (single / brand / no match)", async () => {
     await h.seedCigar({ canonicalName: "Bolivar Belicosos Finos", brand: "Bolivar" });
     await h.seedCigar({ canonicalName: "Montecristo Edmundo", brand: "Montecristo" });

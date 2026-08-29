@@ -9,6 +9,7 @@ import {
   productPhotos,
   enrichmentRequests,
   wants,
+  favorites,
   type CigarRow,
 } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
@@ -189,6 +190,24 @@ async function mergeWithinTx(
     .where(eq(wants.cigarId, source.id))
     .returning({ id: wants.id });
 
+  // Favorite marks re-point the same way — the second cigar-level mark, mirroring
+  // wants exactly: drop the source's mark for any user who favorited BOTH sides
+  // FIRST (the target's survives), then re-point the rest. The audit records the
+  // favorite de-dupe count alongside the want one.
+  const dedupedFavoriteRows = await tx
+    .delete(favorites)
+    .where(
+      sql`${favorites.cigarId} = ${source.id} AND EXISTS (
+        SELECT 1 FROM favorites f2 WHERE f2.cigar_id = ${target.id} AND f2.user_id = ${favorites.userId}
+      )`,
+    )
+    .returning({ id: favorites.id });
+  const favoriteRows = await tx
+    .update(favorites)
+    .set({ cigarId: target.id })
+    .where(eq(favorites.cigarId, source.id))
+    .returning({ id: favorites.id });
+
   // Everything is off the source now; delete it (any leftover source photo goes
   // via cascade).
   await tx.delete(cigars).where(eq(cigars.id, source.id));
@@ -200,6 +219,7 @@ async function mergeWithinTx(
     productPhotos: productPhotosRepointed,
     enrichmentRequests: enrichmentRows.length,
     wants: wantRows.length,
+    favorites: favoriteRows.length,
   };
 
   await tx.insert(auditLog).values({
@@ -213,6 +233,7 @@ async function mergeWithinTx(
       deletedSourceId: source.id,
       repointed,
       wantsDeduped: dedupedWantRows.length,
+      favoritesDeduped: dedupedFavoriteRows.length,
     },
     correlationId: input.correlationId ?? input.clientRequestId,
   });

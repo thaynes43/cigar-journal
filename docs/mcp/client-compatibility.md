@@ -60,10 +60,11 @@ refresh of a connector's tool manifest: new tool schemas and descriptions
 (e.g. the `matchedIn`/`matchSnippet` fields and the title-is-metadata
 instruction line; the eleventh tool `set_want`, the `record_purchase.wanted`
 result field, and the `get_cigar` `wanted` overlay added with Want v1; the
-ADR-008 `consumption` block + ask-once "From your humidor?" instruction added
-with explicit consumption) reach a client **only after the user refreshes the
-connector in ChatGPT settings, then starts a new chat** (schema cache is
-per-conversation — see below). The often-noted
+twelfth tool `set_favorite`, its instruction paragraph, and the `get_cigar`
+`favorited` overlay added with Favorites v1; the ADR-008 `consumption` block +
+ask-once "From your humidor?" instruction added with explicit consumption) reach
+a client **only after the user refreshes the connector in ChatGPT settings, then
+starts a new chat** (schema cache is per-conversation — see below). The often-noted
 "`ersonal cigar journal…`" text is neither a truncation bug nor our string:
 the owner confirmed it is his own hand-typed connector description in ChatGPT,
 entered with the leading "P" dropped. Our `INSTRUCTIONS` string — a separate,

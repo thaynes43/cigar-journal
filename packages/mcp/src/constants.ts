@@ -1,11 +1,11 @@
 // Server identity, scope map, and the verbatim server instructions the tool
-// contract mandates. These are the client-facing surface: the eleven tool names,
+// contract mandates. These are the client-facing surface: the twelve tool names,
 // the scopes each demands, and the instruction text every client receives at
 // initialize (docs/mcp/tool-contract.md).
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The eleven tools, exactly per the contract. Reads are annotated readOnlyHint.
+// The twelve tools, exactly per the contract. Reads are annotated readOnlyHint.
 export const TOOL_NAMES = [
   "search_cigars",
   "get_cigar",
@@ -18,6 +18,7 @@ export const TOOL_NAMES = [
   "update_smoke",
   "add_smoke_photo",
   "set_want",
+  "set_favorite",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -37,6 +38,7 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   update_smoke: ["journal:write"],
   add_smoke_photo: ["journal:write"],
   set_want: ["journal:write"],
+  set_favorite: ["journal:write"],
 };
 
 // Personal fields on catalog tools require this additional scope.
@@ -90,6 +92,12 @@ of owning or smoking — smoking never clears a want. Clear one only on an expli
 request: call set_want with wanted false. When record_purchase returns wanted:true
 the user just acquired something they had marked as wanted — offer to clear it
 (never clear it silently).
+
+set_favorite flags (or clears) a catalog cigar the user loves — their favorites,
+a mark distinct from want. "Add the Padron to my favorites" is set_favorite with
+favorited true; "take it off my favorites" is favorited false. A favorite is
+independent of want, owning, and smoking, and is never inferred — mark one only
+when the user asks to, never from a smoke's liked field.
 
 A saved smoke can deduct one stick from the user's humidor — but only when they
 say so. When the resolved cigar shows holdings, ask once at finish, "From your

@@ -26,6 +26,7 @@ describe("migrations", () => {
         "audit_log",
         "cigars",
         "duplicate_dismissals",
+        "favorites",
         "idempotency_keys",
         "listing_matches",
         "offers",

@@ -55,8 +55,21 @@ Consumption decision: [ADR-008](../adr/008-explicit-consumption.md).
   flag so the clear is one tap / one conversational beat. Never silent.
 - R-WANT-3 (must) — Surfaces: detail-page toggle, tile badge, ownership
   facet, shelf; MCP `set_want` plus `wanted` on catalog reads.
-- R-WANT-4 (later) — Named lists. Documented migration: `wants` becomes
-  the seeded system list; nothing in v1 may preclude it.
+- R-WANT-4 (later) — Named lists. Documented migration: `wants` and
+  `favorites` become the two seeded system lists; the trigger to build the
+  general named-list model is a *third* list generalizing them (a third
+  cigar-level mark that would otherwise be a third parallel table). Nothing
+  in v1 may preclude it — both mark tables carry the forward-compatible
+  (user, cigar, note, created_at) shape.
+- R-FAV-1 (must) — A second per-user cigar-level mark, `favorites` (user,
+  cigar unique, optional note, created_at), mirroring `wants`. Favorite =
+  a cigar the user *loves*, distinct from Want (a cigar to try/own).
+  Independent of want, owning, and smoking; never inferred (the per-smoke
+  `liked` field stays explicit-only). Surfaces: detail-page toggle beside
+  Want, tile heart; MCP `set_favorite` plus `favorited` on catalog reads.
+  Catalog merge re-points favorites (and wants) to the surviving cigar,
+  de-duplicated. A Favorites shelf/facet may join the library later (not
+  v1).
 
 **Explicit consumption (area: inventory/mcp — ADR-008 governs)**
 

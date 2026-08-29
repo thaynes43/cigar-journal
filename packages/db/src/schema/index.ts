@@ -20,6 +20,7 @@ export * from "./listing-matches.js";
 export * from "./offers.js";
 export * from "./purchases.js";
 export * from "./wants.js";
+export * from "./favorites.js";
 export * from "./idempotency-keys.js";
 export * from "./audit-log.js";
 export * from "./product-photos.js";

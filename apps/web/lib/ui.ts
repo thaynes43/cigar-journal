@@ -29,3 +29,17 @@ export const wantChip = {
   set: "bg-accent text-accent-ink",
   unset: "border border-line text-muted",
 } as const;
+
+// The favorite mark's control shape (DESIGN-002) — the second cigar-level mark.
+// Chip-shaped like the WantToggle, but the state signal is the HEART's fill
+// (♥ set / ♡ unset) in the warm `ember` reserved for hearts; the single amber
+// `accent` stays the want mark's alone. The chip stays outlined in both states
+// so the two marks never read as the same control. Used by the interactive
+// detail toggle; on tiles the favorite rides the art corner (FavoriteBadge).
+export const favoriteChip = {
+  base: "inline-flex items-center gap-1 rounded-chip border px-2.5 py-0.5 text-xs font-medium transition-colors",
+  set: "border-ember/50 text-ink",
+  unset: "border-line text-muted",
+  heartSet: "text-ember",
+  heartUnset: "text-muted",
+} as const;

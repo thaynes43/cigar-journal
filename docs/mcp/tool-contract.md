@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Eleven tools over the application services, client-neutral: any MCP client
+Twelve tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -32,12 +32,12 @@ ADR-005 (integration). Client capability differences live in
 
 Scopes: `catalog:read` (search_cigars, get_cigar), `journal:read`
 (get_my_smokes, get_smoke, get_my_inventory), `journal:write` (save_smoke,
-add_cigar, record_purchase, update_smoke, add_smoke_photo, set_want — including
-lazy catalog create inside save/add and the enrichment queue write).
-**Scope-bounded responses:** catalog tools include personal fields
-(`userSmokeCount`, `personalProfile`, the `wanted` overlay) only when the token
-also carries `journal:read`; otherwise those fields are omitted entirely. Data
-returned never exceeds the scopes presented.
+add_cigar, record_purchase, update_smoke, add_smoke_photo, set_want,
+set_favorite — including lazy catalog create inside save/add and the enrichment
+queue write). **Scope-bounded responses:** catalog tools include personal fields
+(`userSmokeCount`, `personalProfile`, the `wanted` and `favorited` overlays) only
+when the token also carries `journal:read`; otherwise those fields are omitted
+entirely. Data returned never exceeds the scopes presented.
 
 ## Server instructions (sent to every client at initialize)
 
@@ -71,6 +71,12 @@ of owning or smoking — smoking never clears a want. Clear one only on an expli
 request: call set_want with wanted false. When record_purchase returns wanted:true
 the user just acquired something they had marked as wanted — offer to clear it
 (never clear it silently).
+
+set_favorite flags (or clears) a catalog cigar the user loves — their favorites,
+a mark distinct from want. "Add the Padron to my favorites" is set_favorite with
+favorited true; "take it off my favorites" is favorited false. A favorite is
+independent of want, owning, and smoking, and is never inferred — mark one only
+when the user asks to, never from a smoke's liked field.
 
 A saved smoke can deduct one stick from the user's humidor — but only when they
 say so. When the resolved cigar shows holdings, ask once at finish, "From your
@@ -231,10 +237,11 @@ result:
     rating: { average: 87, min: 84, max: 91 }
     lastSmokedAt: "2026-07-30"
   wanted: true                 # present only with journal:read; the caller's want mark
+  favorited: true              # present only with journal:read; the caller's favorite mark
 ```
 
-The want `note` is web-detail display only and stays off this payload; the model
-sets/reads the flag through `set_want`.
+The want and favorite `note`s are web-detail display only and stay off this
+payload; the model sets/reads the flags through `set_want` and `set_favorite`.
 
 ## get_my_smokes — read
 
@@ -674,6 +681,37 @@ drops the note. An unknown `cigarId` is `cigar_not_found`. The `note` is
 MCP-authored only in v1 — the web has no input field — and displays on the cigar
 detail page. Scope `journal:write`; the `wanted` overlay on `search_cigars`/
 `get_cigar` reads under `journal:read`.
+
+## set_favorite — write, idempotent
+
+Mark a catalog cigar as a favorite — one the user *loves* — or clear the mark
+(PRD-003, DESIGN-002). The second per-user cigar-level mark, mirroring `set_want`
+but a distinct meaning: Favorite = loves it, Want = wants to try/own it. A
+favorite is independent of want, owning, and smoking, and is **never inferred**
+— set it only when the user asks ("add the Padrón to my favorites" →
+`set_favorite favorited: true`; "take it off my favorites" → `favorited: false`).
+It is never derived from a smoke's `liked` signal (that field stays explicit-only).
+
+```yaml
+arguments:
+  cigarId: cg_01j9x2             # from a prior search_cigars/get_cigar result
+  favorited: true                # true marks it, false clears it
+  note: "my desert-island stick" # optional; the user's own reason, only if given
+
+result:
+  cigarId: cg_01j9x2
+  favorited: true                # the resulting state (echoes the request)
+  note: "my desert-island stick" # the note now on the mark, or null (null once cleared)
+  changed: true                  # false on an idempotent no-op
+```
+
+**Target-state, not append.** Like `set_want`, the desired end state *is* the
+argument, so the write is idempotent by nature and takes **no `clientRequestId`**
+— a repeat call is a safe no-op (`changed: false`). Setting an already-set mark
+keeps any existing `note` unless a new one is given; clearing drops the note. An
+unknown `cigarId` is `cigar_not_found`. The `note` is MCP-authored only in v1 —
+the web has no input field — and displays on the cigar detail page. Scope
+`journal:write`; the `favorited` overlay on `get_cigar` reads under `journal:read`.
 
 ---
 

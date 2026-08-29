@@ -7,6 +7,7 @@ import {
   smokeConsumptions,
   productPhotos,
   wants,
+  favorites,
   type CigarRow,
   type SmokeRow,
   type SmokeProgressionRow,
@@ -642,12 +643,22 @@ export async function getCigar(
     .where(and(eq(wants.cigarId, args.cigarId), eq(wants.userId, principal.userId)))
     .limit(1);
 
+  // The caller's favorite overlay (PRD-003, DESIGN-002) — the second cigar-level
+  // mark, mirroring the want overlay. Principal-scoped — never another user's.
+  const favoriteRows = await deps.db
+    .select({ note: favorites.note })
+    .from(favorites)
+    .where(and(eq(favorites.cigarId, args.cigarId), eq(favorites.userId, principal.userId)))
+    .limit(1);
+
   return {
     cigar: toCigarView(cigar),
     personalProfile: smokeRows.length > 0 ? computeProfile(smokeRows) : null,
     hasProductPhoto: photoRows.length > 0,
     wanted: wantRows.length > 0,
     wantNote: wantRows[0]?.note ?? null,
+    favorited: favoriteRows.length > 0,
+    favoriteNote: favoriteRows[0]?.note ?? null,
   };
 }
 

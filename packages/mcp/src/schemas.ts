@@ -525,6 +525,33 @@ export const setWantSchema = z
 
 export type SetWantArgs = z.infer<typeof setWantSchema>;
 
+// ---- favorite --------------------------------------------------------------
+
+// The single favorite mark (PRD-003, DESIGN-002) — the second cigar-level mark,
+// mirroring set_want. A target-state write: `favorited: true` marks it, `false`
+// clears it — both idempotent, so no clientRequestId envelope (a repeat call is a
+// safe no-op). Note is optional and MCP-only in v1.
+export const setFavoriteSchema = z
+  .object({
+    cigarId: z
+      .string()
+      .describe("Catalog id from a prior search_cigars/get_cigar result. Never invented."),
+    favorited: z
+      .boolean()
+      .describe(
+        "true to mark the cigar as a favorite, false to clear the mark. Idempotent either way.",
+      ),
+    note: z
+      .string()
+      .nullish()
+      .describe(
+        "Optional free-text reason the user loves it, in their words. Only if they gave one — omit rather than invent. Ignored when clearing; a bare re-mark keeps any existing note.",
+      ),
+  })
+  .strict();
+
+export type SetFavoriteArgs = z.infer<typeof setFavoriteSchema>;
+
 // ---- output schemas --------------------------------------------------------
 //
 // One MCP `outputSchema` per tool (registered in server.ts), also mirrored by the
@@ -637,6 +664,15 @@ export const setWantOutput = z
   .object({
     cigarId: z.string(),
     wanted: z.boolean(),
+    note: z.string().nullable(),
+    changed: z.boolean(),
+  })
+  .passthrough();
+
+export const setFavoriteOutput = z
+  .object({
+    cigarId: z.string(),
+    favorited: z.boolean(),
     note: z.string().nullable(),
     changed: z.boolean(),
   })

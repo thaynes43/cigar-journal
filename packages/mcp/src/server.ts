@@ -12,6 +12,7 @@ import {
   getCigar,
   getMyInventory,
   setWant,
+  setFavorite,
   addSmokePhoto,
   mintPhotoUploadToken,
   UnauthenticatedError,
@@ -47,6 +48,8 @@ import {
   addSmokePhotoSchema,
   setWantSchema,
   setWantOutput,
+  setFavoriteSchema,
+  setFavoriteOutput,
   searchCigarsOutput,
   getCigarOutput,
   getMySmokesOutput,
@@ -66,7 +69,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl, uploadUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The eleven-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The twelve-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -325,12 +328,18 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       run("get_cigar", extra.authInfo, async ({ principal, scopes }) => {
         const result = await getCigar(deps, principal, { cigarId: args.cigarId });
         const personal = scopes.includes(PERSONAL_SCOPE);
-        // personalProfile and the want overlay are present only with journal:read;
-        // otherwise the keys are omitted entirely — data never exceeds scope. The
-        // note is web-detail display only and stays off the tool payload.
+        // personalProfile and the want/favorite overlays are present only with
+        // journal:read; otherwise the keys are omitted entirely — data never
+        // exceeds scope. The notes are web-detail display only and stay off the
+        // tool payload.
         return jsonResult(
           personal
-            ? { cigar: result.cigar, personalProfile: result.personalProfile, wanted: result.wanted }
+            ? {
+                cigar: result.cigar,
+                personalProfile: result.personalProfile,
+                wanted: result.wanted,
+                favorited: result.favorited,
+              }
             : { cigar: result.cigar },
         );
       }),
@@ -663,6 +672,34 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
         const result = await setWant(deps, principal, {
           cigarId: args.cigarId,
           wanted: args.wanted,
+          note: args.note,
+          provenance: { source: "llm-conversation", client: clientId },
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "set_favorite",
+    {
+      title: "Set favorite",
+      description:
+        "Mark a catalog cigar as a favorite — one the user loves — or clear the mark. A favorite is distinct from a want and independent of owning or smoking; it is never inferred from a smoke's liked signal, only set when the user asks (\"add it to my favorites\"). Set `favorited` true to mark, false to clear; add a `note` only if the user gave a reason. Idempotent: repeating a call is a safe no-op (no clientRequestId needed). Output: cigarId, favorited, note, changed.",
+      inputSchema: setFavoriteSchema,
+      outputSchema: setFavoriteOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Set favorite",
+      },
+    },
+    (args, extra) =>
+      run("set_favorite", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+        const result = await setFavorite(deps, principal, {
+          cigarId: args.cigarId,
+          favorited: args.favorited,
           note: args.note,
           provenance: { source: "llm-conversation", client: clientId },
           correlationId,

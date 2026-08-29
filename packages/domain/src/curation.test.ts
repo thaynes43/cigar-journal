@@ -11,10 +11,12 @@ import {
   vendors,
   wants,
   auditLog,
+  favorites,
 } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { mergeCigars, verifyCigar, dismissDuplicate, curationQueue } from "./curation.js";
 import { setWant } from "./wants.js";
+import { setFavorite } from "./favorites.js";
 import type { Principal } from "./index.js";
 import { UnauthorizedError, CigarNotFoundError, ValidationError } from "./errors.js";
 
@@ -135,6 +137,7 @@ describe("curation", () => {
         productPhotos: 1,
         enrichmentRequests: 1,
         wants: 0,
+        favorites: 0,
       });
 
       // Source cigar is gone.
@@ -256,6 +259,39 @@ describe("curation", () => {
       );
       expect((audit!.after as { repointed: { wants: number } }).repointed.wants).toBe(1);
       expect((audit!.after as { wantsDeduped: number }).wantsDeduped).toBe(1);
+    });
+
+    it("re-points favorites and de-dupes when the same user favorited both sides", async () => {
+      const source = await seedUnverified("Favorite Merge Source");
+      const target = await seedUnverified("Favorite Merge Target");
+
+      // `user` favorited BOTH sides → the source mark is the de-dupe drop (target's
+      // survives). `admin` favorited only the source → it re-points with no collision.
+      await setFavorite(h.deps, user, { cigarId: source, favorited: true });
+      await setFavorite(h.deps, user, { cigarId: target, favorited: true });
+      await setFavorite(h.deps, admin, { cigarId: source, favorited: true });
+
+      const result = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+
+      // Only admin's mark moved; user's source mark was dropped as a duplicate.
+      expect(result.repointed.favorites).toBe(1);
+
+      // Nothing left on the (deleted) source; the target carries both users' marks.
+      expect(await h.deps.db.select().from(favorites).where(eq(favorites.cigarId, source))).toHaveLength(0);
+      const onTarget = await h.deps.db.select().from(favorites).where(eq(favorites.cigarId, target));
+      expect(onTarget.map((f) => f.userId).sort()).toEqual([user.userId, admin.userId].sort());
+
+      // The audit notes both the re-point and the de-dupe.
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
+      const audit = audits.find(
+        (a) => (a.after as { deletedSourceId?: string }).deletedSourceId === source,
+      );
+      expect((audit!.after as { repointed: { favorites: number } }).repointed.favorites).toBe(1);
+      expect((audit!.after as { favoritesDeduped: number }).favoritesDeduped).toBe(1);
     });
   });
 

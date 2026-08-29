@@ -266,6 +266,7 @@ interface CatalogTileRow {
   user_rating: number | string | null;
   has_product_photo: boolean | null;
   wanted: boolean | null;
+  favorited: boolean | null;
   // Ordering-only column for the "recently added" keyset cursor; not surfaced on
   // the public tile (CatalogCigarTile stays personal-overlay-only).
   created_at: string | Date;
@@ -288,6 +289,7 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
     userRating: row.user_rating != null ? Number(row.user_rating) : null,
     hasProductPhoto: row.has_product_photo === true,
     wanted: row.wanted === true,
+    favorited: row.favorited === true,
   };
 }
 
@@ -299,7 +301,9 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
 // (for the badge — PRD-003 R-WANT-3) and the acquired/consumed aggregates (for
 // the ownership facet and sorts), all pre-aggregated so nothing fans out and no
 // user's state leaks into another's tiles. `created_at` rides along for the
-// recently-added keyset cursor.
+// recently-added keyset cursor. One more LEFT JOIN to the caller's favorites
+// (1:1 by the UNIQUE (user_id, cigar_id) pair) folds in the favorite mark the
+// same way (PRD-003, DESIGN-002) — the second cigar-level mark, mirroring want.
 function tileSelect(principal: Principal): SQL {
   return sql`
     SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches,
@@ -307,11 +311,13 @@ function tileSelect(principal: Principal): SQL {
       count(s.id)::int AS user_smoke_count,
       round(avg(s.rating))::int AS user_rating,
       bool_or(pp.id IS NOT NULL) AS has_product_photo,
-      bool_or(w.id IS NOT NULL) AS wanted
+      bool_or(w.id IS NOT NULL) AS wanted,
+      bool_or(f.id IS NOT NULL) AS favorited
     FROM cigars c
     LEFT JOIN smokes s ON s.cigar_id = c.id AND s.user_id = ${principal.userId}
     LEFT JOIN product_photos pp ON pp.cigar_id = c.id
     ${ownershipJoins(principal)}
+    LEFT JOIN favorites f ON f.cigar_id = c.id AND f.user_id = ${principal.userId}
   `;
 }
 
