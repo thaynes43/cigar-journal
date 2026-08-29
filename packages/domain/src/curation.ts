@@ -6,6 +6,7 @@ import {
   smokes,
   purchases,
   listingMatches,
+  offers,
   productPhotos,
   enrichmentRequests,
   wants,
@@ -171,6 +172,17 @@ async function mergeWithinTx(
     .where(eq(enrichmentRequests.cigarId, source.id))
     .returning({ id: enrichmentRequests.id });
 
+  // Ad-hoc price observations (record_price, ADR-009) link the cigar directly via
+  // offers.cigar_id — re-point them so the merge keeps that price history instead
+  // of letting the cigar-delete cascade (offers.cigar_id ON DELETE CASCADE) drop
+  // it. Crawler offers carry a null cigar_id (they reach the cigar through the
+  // already-re-pointed listing match), so this touches only the chat observations.
+  const offerRows = await tx
+    .update(offers)
+    .set({ cigarId: target.id })
+    .where(eq(offers.cigarId, source.id))
+    .returning({ id: offers.id });
+
   // Want marks re-point, closing the #45-noted gap where a merge orphaned the
   // source's wants. The UNIQUE(user_id, cigar_id) pair forbids a user holding two
   // marks, so a user who wanted BOTH sides is de-duped: drop the source's mark
@@ -216,6 +228,7 @@ async function mergeWithinTx(
     smokes: smokeRows.length,
     purchases: purchaseRows.length,
     listingMatches: listingRows.length,
+    offers: offerRows.length,
     productPhotos: productPhotosRepointed,
     enrichmentRequests: enrichmentRows.length,
     wants: wantRows.length,

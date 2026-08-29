@@ -62,7 +62,11 @@ instruction line; the eleventh tool `set_want`, the `record_purchase.wanted`
 result field, and the `get_cigar` `wanted` overlay added with Want v1; the
 twelfth tool `set_favorite`, its instruction paragraph, and the `get_cigar`
 `favorited` overlay added with Favorites v1; the ADR-008 `consumption` block +
-ask-once "From your humidor?" instruction added with explicit consumption) reach
+ask-once "From your humidor?" instruction added with explicit consumption; the
+thirteenth–fifteenth tools `request_cigar_enrichment` / `update_cigar` /
+`record_price`, their catalog-repair instruction paragraph, and the additive
+`get_cigar` `enrichment` + `pricing` blocks added with price observations +
+catalog repair, ADR-009) reach
 a client **only after the user refreshes the connector in ChatGPT settings, then
 starts a new chat** (schema cache is per-conversation — see below). The often-noted
 "`ersonal cigar journal…`" text is neither a truncation bug nor our string:

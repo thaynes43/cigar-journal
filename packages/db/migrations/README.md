@@ -18,3 +18,9 @@ init container at startup (ADR-003).
   heuristic backfill, `source = 'heuristic-backfill'`, that seeds existing smokes
   using the retired derivation rule; the heuristic path is deleted from
   `@cj/domain` in the same slice.
+- `0011_price_observations.sql` — `offers` becomes the full price-observation
+  store (ADR-009): `packaging`, `sticks_per_package`, `price_per_stick_cents`,
+  `price_type` (retail|msrp|sale, default retail), `source_name`/`source_url`, and
+  a direct `cigar_id` link for chat-submitted observations with no vendor listing.
+  `vendor_id` becomes nullable, guarded by a vendor-or-source CHECK so every
+  observation still carries a source (a registry vendor OR a named ad-hoc source).

@@ -1,11 +1,11 @@
 // Server identity, scope map, and the verbatim server instructions the tool
-// contract mandates. These are the client-facing surface: the twelve tool names,
+// contract mandates. These are the client-facing surface: the fifteen tool names,
 // the scopes each demands, and the instruction text every client receives at
 // initialize (docs/mcp/tool-contract.md).
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The twelve tools, exactly per the contract. Reads are annotated readOnlyHint.
+// The fifteen tools, exactly per the contract. Reads are annotated readOnlyHint.
 export const TOOL_NAMES = [
   "search_cigars",
   "get_cigar",
@@ -19,13 +19,19 @@ export const TOOL_NAMES = [
   "add_smoke_photo",
   "set_want",
   "set_favorite",
+  "request_cigar_enrichment",
+  "update_cigar",
+  "record_price",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 // Scope required to INVOKE each tool (tool-contract "Scopes" section). Response
 // scope-bounding (personal fields on catalog tools) is a separate, additive
-// check against journal:read inside the read handlers.
+// check against journal:read inside the read handlers. The ADR-009 catalog-repair
+// tools fold into journal:write, matching how add_cigar's lazy catalog create and
+// the enrichment-queue write are already journal:write-scoped (there is no
+// catalog:write scope; catalog mutation rides journal:write by house precedent).
 export const TOOL_SCOPES: Record<ToolName, string[]> = {
   search_cigars: ["catalog:read"],
   get_cigar: ["catalog:read"],
@@ -39,6 +45,9 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   add_smoke_photo: ["journal:write"],
   set_want: ["journal:write"],
   set_favorite: ["journal:write"],
+  request_cigar_enrichment: ["journal:write"],
+  update_cigar: ["journal:write"],
+  record_price: ["journal:write"],
 };
 
 // Personal fields on catalog tools require this additional scope.
@@ -98,6 +107,17 @@ a mark distinct from want. "Add the Padron to my favorites" is set_favorite with
 favorited true; "take it off my favorites" is favorited false. A favorite is
 independent of want, owning, and smoking, and is never inferred — mark one only
 when the user asks to, never from a smoke's liked field.
+
+When an EXISTING catalog cigar is sparse, repair it as you go (get_cigar carries an
+enrichment hint with the missing fields and a pricing summary). request_cigar_enrichment
+queues a background lookup to fill its specs and a product photo — status
+queued | already_queued | recently_enriched | not_needed. update_cigar fills specific
+empty fields from what the user knows: it ONLY fills blanks, never overwriting an
+existing value or a verified entry, and never touches the journal. record_price logs a
+price you found or the user reported — give the packaging it was priced at (single,
+5-pack, box of 20) so per-stick is computed, and never state a per-stick figure without
+its packaging. Name the vendor when it is a known shop, otherwise give a source name (and
+URL). An identical price re-seen within a day is skipped; a changed price is always kept.
 
 A saved smoke can deduct one stick from the user's humidor — but only when they
 say so. When the resolved cigar shows holdings, ask once at finish, "From your

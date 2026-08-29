@@ -15,6 +15,9 @@ import {
   setFavorite,
   addSmokePhoto,
   mintPhotoUploadToken,
+  requestCigarEnrichment,
+  updateCigar,
+  recordPrice,
   UnauthenticatedError,
   UnauthorizedError,
   UnavailableError,
@@ -25,6 +28,8 @@ import {
   type UpdateSmokeInput,
   type AddCigarInput,
   type RecordPurchaseInput,
+  type UpdateCigarInput,
+  type RecordPriceInput,
 } from "@cj/domain";
 import { processPhoto, UnsupportedImageTypeError, type PhotoStorage } from "@cj/photos";
 import {
@@ -50,6 +55,12 @@ import {
   setWantOutput,
   setFavoriteSchema,
   setFavoriteOutput,
+  requestCigarEnrichmentSchema,
+  requestCigarEnrichmentOutput,
+  updateCigarSchema,
+  updateCigarOutput,
+  recordPriceSchema,
+  recordPriceOutput,
   searchCigarsOutput,
   getCigarOutput,
   getMySmokesOutput,
@@ -64,6 +75,8 @@ import {
   type UpdateSmokeArgs,
   type AddCigarArgs,
   type RecordPurchaseArgs,
+  type UpdateCigarArgs,
+  type RecordPriceArgs,
 } from "./schemas.js";
 import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./results.js";
 import { smokeUrl, uploadUrl } from "./config.js";
@@ -262,6 +275,46 @@ function toRecordPurchaseInput(
   };
 }
 
+function toUpdateCigarInput(
+  args: UpdateCigarArgs,
+  clientId: string,
+  correlationId: string,
+): UpdateCigarInput {
+  return {
+    clientRequestId: args.clientRequestId,
+    cigarId: args.cigarId,
+    // fields mirror UpdateCigarFields; the domain re-checks each leaf and gates
+    // every write on null + unverified.
+    fields: args.fields as unknown as UpdateCigarInput["fields"],
+    provenance: { source: "llm-conversation", client: clientId },
+    correlationId,
+  };
+}
+
+function toRecordPriceInput(
+  args: RecordPriceArgs,
+  clientId: string,
+  correlationId: string,
+): RecordPriceInput {
+  return {
+    clientRequestId: args.clientRequestId,
+    cigarId: args.cigarId,
+    price: args.price,
+    currency: args.currency,
+    packaging: args.packaging,
+    sticksPerPackage: args.sticksPerPackage,
+    vendorName: args.vendorName,
+    sourceName: args.sourceName,
+    sourceUrl: args.sourceUrl,
+    // null (from the lenient enum) → domain default retail.
+    priceType: args.priceType ?? undefined,
+    inStock: args.inStock,
+    observedAt: args.observedAt,
+    provenance: { source: "llm-conversation", client: clientId },
+    correlationId,
+  };
+}
+
 function toUpdateInput(
   args: UpdateSmokeArgs,
   clientId: string,
@@ -328,19 +381,26 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       run("get_cigar", extra.authInfo, async ({ principal, scopes }) => {
         const result = await getCigar(deps, principal, { cigarId: args.cigarId });
         const personal = scopes.includes(PERSONAL_SCOPE);
+        // The enrichment hint and pricing summary are catalog-scoped (ADR-009) —
+        // same for every viewer, so they ride the base payload under catalog:read.
         // personalProfile and the want/favorite overlays are present only with
         // journal:read; otherwise the keys are omitted entirely — data never
         // exceeds scope. The notes are web-detail display only and stay off the
         // tool payload.
+        const base = {
+          cigar: result.cigar,
+          enrichment: result.enrichment,
+          pricing: result.pricing,
+        };
         return jsonResult(
           personal
             ? {
-                cigar: result.cigar,
+                ...base,
                 personalProfile: result.personalProfile,
                 wanted: result.wanted,
                 favorited: result.favorited,
               }
-            : { cigar: result.cigar },
+            : base,
         );
       }),
   );
@@ -704,6 +764,76 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           provenance: { source: "llm-conversation", client: clientId },
           correlationId,
         });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "request_cigar_enrichment",
+    {
+      title: "Request cigar enrichment",
+      description:
+        "Queue a background lookup to fill an EXISTING sparse cigar's specs and a product photo (ADR-009). Use when get_cigar shows an enrichment hint with missing fields. It never creates a cigar and never touches the journal. Idempotent: repeating is safe (no clientRequestId needed). `status` is queued (a request was enqueued), already_queued (one is pending), recently_enriched (the crawler recently filled it), or not_needed (already complete); `missingFields` lists the gaps and `verification` the current trust state.",
+      inputSchema: requestCigarEnrichmentSchema,
+      outputSchema: requestCigarEnrichmentOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Request cigar enrichment",
+      },
+    },
+    (args, extra) =>
+      run("request_cigar_enrichment", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+        const result = await requestCigarEnrichment(deps, principal, {
+          cigarId: args.cigarId,
+          provenance: { source: "llm-conversation", client: clientId },
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "update_cigar",
+    {
+      title: "Update cigar",
+      description:
+        "Fill blank factual fields on an existing catalog cigar from what the user knows (ADR-009). Fill-nulls-only: a field is written ONLY when it is currently blank AND the cigar is unverified — chat never overwrites an existing value or a curator-verified entry, and never touches the journal. Pass only the fields you can fill. Output: changedFields (written), skipped (provided but already set or verified-locked), verification. Reuse the clientRequestId on retries.",
+      inputSchema: updateCigarSchema,
+      outputSchema: updateCigarOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Update cigar",
+      },
+    },
+    (args, extra) =>
+      run("update_cigar", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+        const result = await updateCigar(deps, principal, toUpdateCigarInput(args, clientId, correlationId));
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "record_price",
+    {
+      title: "Record price",
+      description:
+        "Log a price you found or the user reported for a catalog cigar (ADR-009). Give the packaging it was priced at (single, 5-pack, box of 20) and sticksPerPackage so per-stick is computed — never state a per-stick figure without its packaging. Name the vendor when it is a known shop; otherwise give a sourceName (and sourceUrl) — a source is required. Record only stated facts: never invent a price. An identical price re-seen within a day is skipped (deduped:true, recorded:false); a changed price is always kept. Reuse the clientRequestId on retries.",
+      inputSchema: recordPriceSchema,
+      outputSchema: recordPriceOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Record price",
+      },
+    },
+    (args, extra) =>
+      run("record_price", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+        const result = await recordPrice(deps, principal, toRecordPriceInput(args, clientId, correlationId));
         return jsonResult(result);
       }),
   );

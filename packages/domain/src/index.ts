@@ -13,7 +13,29 @@ export { addCigar } from "./add-cigar.js";
 export { recordPurchase } from "./record-purchase.js";
 export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
-export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, browseCigars } from "./reads.js";
+export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, getCigarPricing, browseCigars } from "./reads.js";
+
+// Catalog repair + price observations (ADR-009). request_cigar_enrichment repairs
+// an existing sparse cigar through the enrichment queue; update_cigar fills null
+// catalog fields (never verified/non-null values, never the journal); record_price
+// appends a chat-submitted observation through the shared offers dedupe.
+export {
+  requestCigarEnrichment,
+  assessEnrichmentFields,
+  type EnrichmentAssessment,
+  type EnrichmentRequestStatus,
+} from "./enrichment.js";
+export { updateCigar } from "./update-cigar.js";
+export { recordPrice } from "./record-price.js";
+// The single price-observation writer — one append-with-dedupe path shared by the
+// crawler ingest and record_price (ADR-009).
+export {
+  recordPriceObservation,
+  computePricePerStickCents,
+  DEDUPE_WINDOW_MS,
+  type PriceObservationInput,
+  type RecordObservationResult,
+} from "./price-observations.js";
 
 // Catalog curation (ADR-006): merge duplicates, dismiss false-positive pairs,
 // verify entries, and the admin queue. Curator-only — each service re-checks

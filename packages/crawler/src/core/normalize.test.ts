@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { extractJsonLd } from "./jsonld.js";
-import { normalizeListing, isCigarCategory, isCigarListing, decodeEntities } from "./normalize.js";
+import { normalizeListing, isCigarCategory, isCigarListing, decodeEntities, parsePackaging } from "./normalize.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
 import { loadFixture } from "../testing/fixtures.js";
 
@@ -70,6 +70,8 @@ describe("isCigarListing", () => {
     imageUrl: null,
     sku: null,
     categoryPath: ["Home", "Shop", "Cigars"],
+    packaging: null,
+    sticksPerPackage: null,
   });
 
   it("rejects sets, kits, and mixed cases living under cigar categories", () => {
@@ -80,5 +82,34 @@ describe("isCigarListing", () => {
 
   it("keeps a plain cigar listing", () => {
     expect(isCigarListing(listing("Arturo Fuente Don Carlos Double Robusto"), foxCigar)).toBe(true);
+  });
+});
+
+describe("parsePackaging", () => {
+  it("reads a box-of-N marker", () => {
+    expect(parsePackaging("Padron 1964 Anniversary Maduro Torpedo Box of 20")).toEqual({
+      packaging: "box",
+      sticksPerPackage: 20,
+    });
+  });
+
+  it("reads pack-of-N and N-pack markers", () => {
+    expect(parsePackaging("Oliva Serie V Melanio Pack of 5")).toEqual({ packaging: "5-pack", sticksPerPackage: 5 });
+    expect(parsePackaging("Oliva Serie V 5-Pack")).toEqual({ packaging: "5-pack", sticksPerPackage: 5 });
+    expect(parsePackaging("Oliva Serie V 5 Pack")).toEqual({ packaging: "5-pack", sticksPerPackage: 5 });
+  });
+
+  it("reads a single marker as one stick", () => {
+    expect(parsePackaging("Padron 1964 Anniversary Torpedo Single")).toEqual({
+      packaging: "single",
+      sticksPerPackage: 1,
+    });
+  });
+
+  it("leaves an unmarked name unknown — never guessed", () => {
+    expect(parsePackaging("Padron 1964 Anniversary Maduro Torpedo")).toEqual({
+      packaging: null,
+      sticksPerPackage: null,
+    });
   });
 });

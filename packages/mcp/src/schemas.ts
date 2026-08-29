@@ -552,6 +552,104 @@ export const setFavoriteSchema = z
 
 export type SetFavoriteArgs = z.infer<typeof setFavoriteSchema>;
 
+// ---- catalog repair + price observations (ADR-009) -------------------------
+
+// request_cigar_enrichment: queue a background lookup for an EXISTING sparse
+// cigar. Target-state / idempotent (reuses the enrichment queue's dedupe) — no
+// clientRequestId envelope, mirroring set_want.
+export const requestCigarEnrichmentSchema = z
+  .object({
+    cigarId: z
+      .string()
+      .describe(
+        "Catalog id (from search_cigars/get_cigar) of an existing cigar to enrich. Never invented; this never creates a cigar.",
+      ),
+  })
+  .strict();
+
+export type RequestCigarEnrichmentArgs = z.infer<typeof requestCigarEnrichmentSchema>;
+
+// update_cigar: fill-nulls-only catalog repair. Every field is optional; only a
+// field currently null on an unverified cigar is written — a non-null value or a
+// verified entry is never overwritten. canonicalName is identity and not fillable.
+const updateCigarFields = z
+  .object({
+    brand: z.string().nullish().describe("Brand/marque, e.g. Padron. Only if known and currently blank."),
+    line: z.string().nullish().describe("Product line, e.g. '1964 Anniversary'."),
+    edition: z.string().nullish().describe("Limited/special edition designation."),
+    vitola: vitola.nullish().describe("Size/shape; name and dimensions fill independently."),
+    type: cigarType.nullish().describe("NC (non-Cuban) or CC (Cuban)."),
+    manufacturer: z.string().nullish().describe("Manufacturer, if distinct from brand."),
+    factory: z.string().nullish().describe("Factory name."),
+    productionCountry: z.string().nullish().describe("Country of manufacture."),
+    tobacco: tobacco.nullish().describe("Blend/leaf details, all optional."),
+    blendNotes: z.string().nullish().describe("Free-text blend notes."),
+    releaseYear: z.number().nullish().describe("Release year."),
+  })
+  .strict()
+  .describe(
+    "Catalog fields to fill. A field is written ONLY when it is currently blank and the cigar is unverified — chat never overwrites an existing value or a verified entry.",
+  );
+
+export const updateCigarSchema = z
+  .object({
+    clientRequestId: z
+      .string()
+      .describe("A UUID minted once per repair; reuse EXACTLY on retries so replays are recognized."),
+    cigarId: z.string().describe("Catalog id of the cigar to repair, from a prior tool result."),
+    fields: updateCigarFields,
+  })
+  .strict();
+
+export type UpdateCigarArgs = z.infer<typeof updateCigarSchema>;
+
+// record_price: a chat-submitted price observation in the offers model. A source
+// is required — a registry vendor by name, else a named ad-hoc source. Per-stick
+// is derived from price + sticksPerPackage; never state a bare per-stick.
+export const recordPriceSchema = z
+  .object({
+    clientRequestId: z
+      .string()
+      .describe("A UUID minted once per observation; reuse EXACTLY on retries so replays are recognized."),
+    cigarId: z.string().describe("Catalog id the price is for, from a prior tool result. Never invented."),
+    price: z
+      .number()
+      .describe(
+        "The observed price in dollars for the packaging unit (the box price for a box, the single price for a single). Positive.",
+      ),
+    currency: z.string().nullish().describe("ISO 4217 currency code; defaults to USD when omitted."),
+    packaging: z
+      .string()
+      .nullish()
+      .describe("The tier this price is for: single, 5-pack, box of 20, … Give it so per-stick can be computed."),
+    sticksPerPackage: z
+      .number()
+      .int()
+      .nullish()
+      .describe("Sticks in the packaging (single = 1, box of 20 = 20), so per-stick is derived. Omit if unknown."),
+    vendorName: z
+      .string()
+      .nullish()
+      .describe("A shop name, matched to the vendor registry case-insensitively. Omit for an ad-hoc source."),
+    sourceName: z
+      .string()
+      .nullish()
+      .describe("A named source when it is NOT a registry vendor. Required when no vendor matches."),
+    sourceUrl: z.string().nullish().describe("URL for the ad-hoc source, if any."),
+    priceType: z
+      .enum(["retail", "msrp", "sale"])
+      .nullish()
+      .describe("retail | msrp | sale; defaults to retail."),
+    inStock: z.boolean().nullish().describe("Whether it was in stock, if stated."),
+    observedAt: z
+      .string()
+      .nullish()
+      .describe("When the price was observed, ISO date or date-time; defaults to now."),
+  })
+  .strict();
+
+export type RecordPriceArgs = z.infer<typeof recordPriceSchema>;
+
 // ---- output schemas --------------------------------------------------------
 //
 // One MCP `outputSchema` per tool (registered in server.ts), also mirrored by the
@@ -587,7 +685,14 @@ export const searchCigarsOutput = z
   .passthrough();
 
 export const getCigarOutput = z
-  .object({ cigar: looseObject, personalProfile: looseObject.nullish() })
+  .object({
+    cigar: looseObject,
+    personalProfile: looseObject.nullish(),
+    // Additive ADR-009 blocks — enrichment always present, pricing null when no
+    // observations. Permissive, like the rest of the catalog payload.
+    enrichment: looseObject.optional(),
+    pricing: looseObject.nullish(),
+  })
   .passthrough();
 
 const smokeSummaryOutput = z
@@ -675,6 +780,44 @@ export const setFavoriteOutput = z
     favorited: z.boolean(),
     note: z.string().nullable(),
     changed: z.boolean(),
+  })
+  .passthrough();
+
+// ---- catalog repair + price observations (ADR-009) -------------------------
+
+export const requestCigarEnrichmentOutput = z
+  .object({
+    cigarId: z.string(),
+    status: z.string(),
+    missingFields: z.array(z.string()),
+    verification: z.string(),
+    queued: z.boolean(),
+  })
+  .passthrough();
+
+export const updateCigarOutput = z
+  .object({
+    cigarId: z.string(),
+    changedFields: z.array(z.string()),
+    skipped: z.array(z.string()),
+    verification: z.string(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const recordPriceOutput = z
+  .object({
+    observationId: z.string().nullable(),
+    cigarId: z.string(),
+    recorded: z.boolean(),
+    deduped: z.boolean(),
+    packaging: z.string().nullable(),
+    pricePerStick: z.number().nullable(),
+    currency: z.string().nullable(),
+    priceType: z.string(),
+    observedAt: z.string(),
+    source: looseObject,
+    replayed: z.boolean(),
   })
   .passthrough();
 

@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Twelve tools over the application services, client-neutral: any MCP client
+Fifteen tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -33,11 +33,17 @@ ADR-005 (integration). Client capability differences live in
 Scopes: `catalog:read` (search_cigars, get_cigar), `journal:read`
 (get_my_smokes, get_smoke, get_my_inventory), `journal:write` (save_smoke,
 add_cigar, record_purchase, update_smoke, add_smoke_photo, set_want,
-set_favorite — including lazy catalog create inside save/add and the enrichment
-queue write). **Scope-bounded responses:** catalog tools include personal fields
+set_favorite, request_cigar_enrichment, update_cigar, record_price — including
+lazy catalog create inside save/add, the enrichment queue write, conversational
+catalog repair, and chat-submitted price observations). There is no
+`catalog:write` scope: catalog mutation rides `journal:write` by house precedent
+(the same scope already gates add_cigar's lazy create and the enrichment write).
+**Scope-bounded responses:** catalog tools include personal fields
 (`userSmokeCount`, `personalProfile`, the `wanted` and `favorited` overlays) only
 when the token also carries `journal:read`; otherwise those fields are omitted
-entirely. Data returned never exceeds the scopes presented.
+entirely. The additive `get_cigar` `enrichment` and `pricing` blocks are
+catalog-scoped (market/catalog data, identical for every viewer) and ride
+`catalog:read`. Data returned never exceeds the scopes presented.
 
 ## Server instructions (sent to every client at initialize)
 
@@ -77,6 +83,17 @@ a mark distinct from want. "Add the Padron to my favorites" is set_favorite with
 favorited true; "take it off my favorites" is favorited false. A favorite is
 independent of want, owning, and smoking, and is never inferred — mark one only
 when the user asks to, never from a smoke's liked field.
+
+When an EXISTING catalog cigar is sparse, repair it as you go (get_cigar carries an
+enrichment hint with the missing fields and a pricing summary). request_cigar_enrichment
+queues a background lookup to fill its specs and a product photo — status
+queued | already_queued | recently_enriched | not_needed. update_cigar fills specific
+empty fields from what the user knows: it ONLY fills blanks, never overwriting an
+existing value or a verified entry, and never touches the journal. record_price logs a
+price you found or the user reported — give the packaging it was priced at (single,
+5-pack, box of 20) so per-stick is computed, and never state a per-stick figure without
+its packaging. Name the vendor when it is a known shop, otherwise give a source name (and
+URL). An identical price re-seen within a day is skipped; a changed price is always kept.
 
 A saved smoke can deduct one stick from the user's humidor — but only when they
 say so. When the resolved cigar shows holdings, ask once at finish, "From your
@@ -231,6 +248,21 @@ result:
     releaseYear: null
     type: NC
     verification: verified
+  enrichment:                  # additive (ADR-009); always present, catalog-scoped
+    recommended: true          #   a background enrichment would help (photo/dims missing)
+    missingFields: [dimensions, tobacco, productPhoto]
+    verification: unverified
+  pricing:                     # additive (ADR-009); null when no observations exist
+    lowest:                    #   the comparison figure, ALWAYS with its packaging
+      perStick: true           #   true → `amount` is per-stick; false → package price
+      amount: 16.70
+      packaging: box
+      sticksPerPackage: 20
+    currency: USD
+    observedAt: "2026-08-28T18:02:00Z"
+    sourceCount: 2             #   distinct sources with a current observation
+    observationCount: 9        #   total observations recorded for the cigar
+    refreshRecommended: false  #   latest observation older than the 30d window
   personalProfile:             # present only with journal:read; null if never smoked
     smokeCount: 3
     recurringDescriptors: [citrus, baking-spice, earth]
@@ -242,6 +274,15 @@ result:
 
 The want and favorite `note`s are web-detail display only and stay off this
 payload; the model sets/reads the flags through `set_want` and `set_favorite`.
+
+**Enrichment + pricing hints (ADR-009, additive, catalog-scoped).** `enrichment`
+reports whether a background lookup would help (`recommended`), the missing
+catalog fields, and the verification state — the model acts on it with
+`request_cigar_enrichment` / `update_cigar`. `pricing` is the compact market
+summary: `lowest` is the best current per-stick when derivable (else the lowest
+package price), **always carrying its packaging** — a bare per-stick figure is
+banned (owner ruling). `pricing` is `null` when the cigar has no observations;
+`refreshRecommended` trips when the newest observation is older than 30 days.
 
 ## get_my_smokes — read
 
@@ -712,6 +753,112 @@ keeps any existing `note` unless a new one is given; clearing drops the note. An
 unknown `cigarId` is `cigar_not_found`. The `note` is MCP-authored only in v1 —
 the web has no input field — and displays on the cigar detail page. Scope
 `journal:write`; the `favorited` overlay on `get_cigar` reads under `journal:read`.
+
+## request_cigar_enrichment — write, idempotent
+
+Queue a background lookup to fill an **existing** sparse cigar's specs and a
+product photo (ADR-009). `add_cigar` covers only missing cigars; this repairs one
+already in the catalog. It never creates a cigar and never touches the journal.
+
+```yaml
+arguments:
+  cigarId: cg_01j9x2             # an existing catalog id; from search_cigars/get_cigar
+
+result:
+  cigarId: cg_01j9x2
+  status: queued                 # queued | already_queued | recently_enriched | not_needed
+  missingFields: [dimensions, tobacco, productPhoto]
+  verification: unverified
+  queued: true                   # a request row was inserted (false for the other statuses)
+```
+
+**Target-state, not append.** Reuses the `enrichment_requests` queue and its
+dedupe (the gap-fill flow's pending/fulfilled gate), so it is idempotent by nature
+and takes **no `clientRequestId`** — a repeat is a safe no-op. `status` is
+`queued` (enqueued now), `already_queued` (one is pending/in progress),
+`recently_enriched` (a fulfilled request exists — the crawler recently filled it),
+or `not_needed` (already complete — a photo and full dimensions, nothing the
+lookup adds). An unknown `cigarId` is `cigar_not_found`. Scope `journal:write`.
+
+## update_cigar — write, idempotent
+
+Fill blank factual catalog fields from what the user knows (ADR-009) — the
+conversational half of catalog repair. **Fill-nulls-only:** a field is written
+ONLY while it is currently null AND the cigar is unverified; a non-null value or a
+curator-verified entry is never overwritten (trust order, ADR-006; verification
+stays curator-only). Never touches the journal. `canonicalName` is identity and
+not fillable here.
+
+```yaml
+arguments:
+  clientRequestId: 5f2c9e10-...
+  cigarId: cg_01j9x2
+  fields:                        # every field optional; pass only what you can fill
+    brand: Padron
+    vitola: { name: Torpedo, lengthInches: 6.0, ringGauge: 52 }
+    type: NC
+    tobacco:
+      wrapper: { country: Nicaragua }
+    releaseYear: 1994
+
+result:
+  cigarId: cg_01j9x2
+  changedFields: [brand, vitola.name, vitola.lengthInches, vitola.ringGauge, type, tobacco, releaseYear]
+  skipped: []                    # provided but not written (already set, or verified-locked)
+  verification: unverified
+  replayed: false
+```
+
+`changedFields` are the fields actually filled; `skipped` are provided fields left
+untouched because they were already non-null or the entry is verified. A verified
+cigar fills nothing (all fields skipped). Retry-safe through the mutation envelope,
+like `update_smoke`. Vitola sub-fields fill independently. Scope `journal:write`.
+
+## record_price — write, idempotent
+
+Log a price observation for a catalog cigar in the offers model (ADR-009) — the
+same store and the same 24h dedupe the crawler uses. Only stated facts travel;
+never invent a price.
+
+```yaml
+arguments:
+  clientRequestId: a7d1f004-...
+  cigarId: cg_01j9x2
+  price: 334.00                  # dollars, the packaging unit's observed price
+  packaging: box                 # single | 5-pack | box | … — the tier this price is for
+  sticksPerPackage: 20           # so per-stick is computed (single = 1)
+  vendorName: Small Batch Cigar  # a registry shop, matched case-insensitively;
+                                 #   OR give a sourceName (+ sourceUrl) for an ad-hoc source
+  sourceName: null               # required when no registry vendor matches
+  sourceUrl: null
+  priceType: retail              # retail | msrp | sale (default retail)
+  inStock: true
+  observedAt: null               # ISO date/time; defaults to now
+
+result:
+  observationId: of_01ke         # the offers row id, or null when deduped
+  cigarId: cg_01j9x2
+  recorded: true                 # a row was written
+  deduped: false                 # true → skipped as identical within 24h (recorded false)
+  packaging: box
+  pricePerStick: 16.70           # dollars, derived from price / sticksPerPackage; null if not
+  currency: USD
+  priceType: retail
+  observedAt: "2026-08-28T18:02:00Z"
+  source: { vendorId: ve_01, vendorName: Small Batch Cigar, name: null, url: null }
+  replayed: false
+```
+
+**A source is required** — a registry vendor by name, else a named ad-hoc source
+(the vendor-or-source rule; an unmatched `vendorName` becomes the ad-hoc source
+name so it is never lost). No vendor and no source is a `validation_error`.
+**Per-stick is computed only from `price` + `sticksPerPackage`** and never travels
+without its packaging (owner ruling). An observation identical to the latest one
+for the same (cigar, source, packaging) — same price, currency, availability —
+within 24h is **skipped** (`recorded: false`, `deduped: true`); a changed price
+always inserts. Retry-safe through the envelope; an unknown `cigarId` is
+`cigar_not_found`. Provenance is server-stamped `llm-conversation`; ad-hoc sources
+never mint registry vendor rows. Scope `journal:write`.
 
 ---
 
