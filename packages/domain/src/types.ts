@@ -693,6 +693,11 @@ export interface CigarOffer {
   vendor: string;
   // true when `vendor` is a registry vendor, false for an ad-hoc chat source.
   isRegistryVendor: boolean;
+  // Is this vendor a place to buy? (ADR-006, owner ruling 2026-08-29). false for a
+  // registry vendor crawled for depth but never presented as a purchase
+  // destination (Cuban Lou's): the detail page drops the link-out and labels the
+  // row unapproved. Always true for ad-hoc sources (nothing to gate).
+  purchaseLinkout: boolean;
   price: number | null; // the packaging unit's price, in dollars
   currency: string | null;
   inStock: boolean | null;

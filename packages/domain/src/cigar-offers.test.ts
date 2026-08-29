@@ -155,6 +155,50 @@ describe("getCigarOffers", () => {
     expect(result).toEqual([]);
   });
 
+  it("surfaces purchaseLinkout: false for a no-linkout vendor, true otherwise", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Montecristo No. 2", brand: "Montecristo" });
+
+    // A registry vendor crawled for depth but not a purchase destination.
+    const [noLink] = await h.deps.db
+      .insert(vendors)
+      .values({ name: "Cuban Lou's", focus: "CC", approvalStatus: "unapproved", purchaseLinkout: false })
+      .returning({ id: vendors.id });
+    const noLinkMatch = await addMatch(noLink!.id, cigarId, "cl-monte-2", "auto");
+    await addOffer(noLink!.id, noLinkMatch, {
+      price: "20.00",
+      currency: "USD",
+      inStock: true,
+      listingUrl: "https://cubanlous.example/monte-2",
+      seenAt: new Date("2026-08-20T00:00:00Z"),
+    });
+
+    // A normal registry vendor (purchase_linkout defaults true).
+    const normal = await addVendor("Normal Shop");
+    const normalMatch = await addMatch(normal, cigarId, "ns-monte-2", "auto");
+    await addOffer(normal, normalMatch, {
+      price: "25.00",
+      currency: "USD",
+      inStock: true,
+      listingUrl: "https://normal.example/monte-2",
+      seenAt: new Date("2026-08-21T00:00:00Z"),
+    });
+
+    // An ad-hoc/chat source (no vendor row) → purchaseLinkout true (nothing to gate).
+    await h.deps.db.insert(offers).values({
+      cigarId,
+      sourceName: "Chat Source",
+      price: "22.00",
+      currency: "USD",
+      inStock: true,
+      seenAt: new Date("2026-08-22T00:00:00Z"),
+    });
+
+    const result = await getCigarOffers(h.deps, { cigarId });
+    expect(result.find((o) => o.vendor === "Cuban Lou's")!.purchaseLinkout).toBe(false);
+    expect(result.find((o) => o.vendor === "Normal Shop")!.purchaseLinkout).toBe(true);
+    expect(result.find((o) => o.vendor === "Chat Source")!.purchaseLinkout).toBe(true);
+  });
+
   it("getCigarOfferHistory reports span, per-stick range, and observation count", async () => {
     const cigarId = await h.seedCigar({ canonicalName: "History Toro", brand: "Chronicle" });
     const vendor = await addVendor("Chronicle Shop");

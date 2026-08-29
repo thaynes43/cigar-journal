@@ -16,6 +16,13 @@ export const foxCigar: VendorAdapter = {
   name: "Fox Cigar",
   url: "https://foxcigar.com",
   sitemapUrl: "https://foxcigar.com/sitemap.xml",
+  // Registry posture: NC vendor the owner buys from, probe-verified live
+  // 2026-08-28, offers shown and linked out normally.
+  focus: "NC",
+  crawlEnabled: true,
+  approvalStatus: "owner-added",
+  displayEnabled: true,
+  purchaseLinkout: true,
   productPathPrefix: "/shop/",
   cigarCategoryPattern: /cigar/i,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?/i,

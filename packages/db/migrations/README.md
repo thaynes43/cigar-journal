@@ -24,3 +24,10 @@ init container at startup (ADR-003).
   a direct `cigar_id` link for chat-submitted observations with no vendor listing.
   `vendor_id` becomes nullable, guarded by a vendor-or-source CHECK so every
   observation still carries a source (a registry vendor OR a named ad-hoc source).
+- `0017_listing_match_decided_by.sql` — `listing_matches.decided_by`
+  (crawler|curator|agent, default crawler): the crawler preserves ANY
+  non-crawler decision on re-crawl, not just `confirmed` (ADR-006 curator
+  outranks crawler). Backfilled 'crawler'.
+- `0018_vendor_purchase_linkout.sql` — `vendors.purchase_linkout` (boolean,
+  default true): a crawled vendor whose offers/photos are ingested but which is
+  never presented as a place to buy (owner ruling 2026-08-29 — Cuban Lou's).

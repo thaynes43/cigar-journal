@@ -817,6 +817,9 @@ const cigarOfferOutput = z
   .object({
     vendor: z.string(),
     isRegistryVendor: z.boolean(),
+    // false = crawled for depth but not a purchase destination (ADR-006, e.g.
+    // Cuban Lou's) — present the price, never a buy link.
+    purchaseLinkout: z.boolean().optional(),
     price: z.number().nullish(),
     currency: z.string().nullish(),
     inStock: z.boolean().nullish(),

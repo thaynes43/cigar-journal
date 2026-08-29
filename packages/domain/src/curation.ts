@@ -121,6 +121,7 @@ function listingMatchSnapshot(row: ListingMatchRow): Record<string, unknown> {
     listingKey: row.listingKey,
     cigarId: row.cigarId,
     status: row.status,
+    decidedBy: row.decidedBy,
   };
 }
 
@@ -593,9 +594,14 @@ async function setListingMatchStatusWithinTx(
 
   const before = listingMatchSnapshot(match);
   const nextCigarId = input.status === "unmatched" ? null : match.cigarId;
+  // Stamp provenance so a later crawl preserves this verdict (ADR-006, migration
+  // 0017). The agent curation surface passes attribution.actor='agent'; the web
+  // console leaves it absent → 'curator'. Actor is server-derived (see
+  // auditAttribution), never a tool argument.
+  const decidedBy = input.attribution?.actor === "agent" ? "agent" : "curator";
   await tx
     .update(listingMatches)
-    .set({ status: input.status, cigarId: nextCigarId, updatedAt: deps.now() })
+    .set({ status: input.status, cigarId: nextCigarId, decidedBy, updatedAt: deps.now() })
     .where(eq(listingMatches.id, match.id));
 
   await tx.insert(auditLog).values({
@@ -604,7 +610,7 @@ async function setListingMatchStatusWithinTx(
     action: "listing_match.set_status",
     smokeId: null,
     before,
-    after: { ...before, status: input.status, cigarId: nextCigarId },
+    after: { ...before, status: input.status, cigarId: nextCigarId, decidedBy },
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 

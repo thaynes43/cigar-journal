@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- HAND-WRITTEN representative WooCommerce sitemap fixture (ADR-006). The probe
+     must confirm the live root path/shape and product prefix. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://www.cubanlous.com/</loc></url>
+  <url><loc>https://www.cubanlous.com/product/montecristo-no-4/</loc></url>
+  <url><loc>https://www.cubanlous.com/product/xikar-cutter/</loc></url>
+  <url><loc>https://www.cubanlous.com/about/</loc></url>
+</urlset>

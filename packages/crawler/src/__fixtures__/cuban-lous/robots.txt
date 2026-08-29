@@ -1,0 +1,9 @@
+# www.cubanlous.com robots.txt — HAND-WRITTEN representative fixture (ADR-006).
+# NOT a live capture: the dev pod cannot reach this domain. The probe must
+# confirm the real robots.txt before enabling crawling. WooCommerce default:
+# only /wp-admin/ disallowed.
+User-agent: *
+Disallow: /wp-admin/
+Allow: /wp-admin/admin-ajax.php
+
+Sitemap: https://www.cubanlous.com/sitemap_index.xml

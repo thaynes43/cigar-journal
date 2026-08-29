@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- HAND-WRITTEN representative fixture (ADR-006): the dev pod cannot fetch the
+     live sitemap; the probe must confirm its real shape and product path. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://www.2guyscigars.com/</loc></url>
+  <url><loc>https://www.2guyscigars.com/product/padron-1926-serie-no-9-maduro/</loc></url>
+  <url><loc>https://www.2guyscigars.com/product/xikar-xi3-cutter/</loc></url>
+  <url><loc>https://www.2guyscigars.com/about-us/</loc></url>
+</urlset>
