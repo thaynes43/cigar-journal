@@ -1030,14 +1030,18 @@ describe("@cj/mcp adapter", () => {
       });
       expect(await remainingFor(client, cigarId)).toBe(3);
 
-      // fromHumidor: true deducts exactly one.
+      // fromHumidor: true deducts exactly one; the result carries holdingAfter
+      // (present only when a consumption block was supplied — mirrors record_purchase).
       const args = {
         clientRequestId: randomUUID(),
         cigar: { cigarId },
         overallDescriptors: ["humidor"],
         consumption: { fromHumidor: true },
       };
-      await call(client, "save_smoke", args);
+      const saved = payloadOf(await call(client, "save_smoke", args)) as {
+        holdingAfter?: { totalAcquired: number; remaining: number };
+      };
+      expect(saved.holdingAfter).toEqual({ totalAcquired: 3, remaining: 2 });
       expect(await remainingFor(client, cigarId)).toBe(2);
 
       // Replaying the identical save is idempotent — no second deduction.

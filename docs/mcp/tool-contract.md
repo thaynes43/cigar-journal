@@ -402,7 +402,7 @@ arguments:
   assessment:
     strength: medium-full        # mild..full spectrum, null ok
     body: full
-    liked: true                  # coarse signal when no number was given
+    liked: true                  # ONLY when explicitly stated — never inferred from tone/prose/rating; omit otherwise
     rating: null                 # 0-100 ONLY if the user stated one
     impression: >
       Complex and easy to like; burn issues on this stick only.
@@ -421,6 +421,9 @@ result:
     url: https://cigars.haynesnetwork.com/smokes/sm_01jc8x
     cigar: { cigarId: cg_01j9x2, verification: verified }
   cigarCreated: false            # true when `described` created an unverified entry
+  holdingAfter:                  # PRESENT ONLY when a `consumption` block was supplied
+    totalAcquired: 7             #   (additive; mirrors record_purchase's holdingAfter)
+    remaining: 6                 #   max(0, totalAcquired − count(consumptions)) (ADR-008)
   replayed: false
 ```
 
@@ -430,7 +433,10 @@ from the humidor. `fromHumidor: true` links the smoke to the caller's holdings
 came from elsewhere. **Omitting the block is unknown — it deducts nothing, and
 the schema never forces the model to invent provenance.** The server instructions
 carry the ask-once "From your humidor?" beat; a replayed save (same envelope) does
-not double-deduct.
+not double-deduct. **When (and only when) a `consumption` block is present, the
+result carries `holdingAfter { totalAcquired, remaining }`** — the derived stock
+after the smoke, so the model can confirm the new count without a follow-up read
+(additive; mirrors `record_purchase`).
 
 **Minimum validity:** a cigar reference plus at least one substantive field
 (non-empty progression, overallDescriptors, journal.narrative, or

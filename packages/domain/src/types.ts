@@ -130,6 +130,12 @@ export interface SaveSmokeResult {
     cigar: SavedCigar;
   };
   cigarCreated: boolean;
+  // The derived stock picture AFTER this smoke, present ONLY when the save
+  // carried a `consumption` block (ADR-008 / DESIGN-002 ask-once flow). Additive
+  // and mirrors record_purchase's `holdingAfter`, so an agent that just recorded
+  // "yes, from the humidor" can read back the new remaining without a follow-up
+  // read. Absent when no consumption block was supplied (nothing was deducted).
+  holdingAfter?: { totalAcquired: number; remaining: number };
   replayed: boolean;
 }
 
@@ -517,16 +523,37 @@ export interface GetBrandResult {
   loose: CatalogCigarTile[]; // cigars with no line, a trailing section
 }
 
-// The All-view sort vocabulary. One entry today; the union and the runtime
-// CATALOG_SORTS registry grow together as sorts land (registry discipline).
-export type CatalogSort = "name";
+// The All-view sort vocabulary (PRD-003 R-UNI-3). `price` WAITS for ADR-009's
+// per-stick offer column — it is deliberately absent here rather than faked from
+// raw offer price. The union and the runtime CATALOG_SORTS registry grow together
+// as sorts land (registry discipline).
+export type CatalogSort = "name" | "my-rating" | "recently-added";
+
+// The ownership facet (PRD-003 R-UNI-2, DESIGN-002 §IA). Exclusive segments over
+// the caller's personal overlay: `have` = explicit remaining > 0, `want` =
+// flagged, `dont` = no active holding (previously-owned-and-emptied included).
+// `all` is the unfiltered default. Principal-scoped, so it never reflects
+// another user's state; the MCP browse tool exposes the same states as
+// independent booleans (DESIGN-002), the web toolbar as one exclusive control.
+export type OwnershipFacet = "all" | "have" | "want" | "dont";
 
 export interface BrowseCatalogArgs {
   q?: string;
   type?: CigarType;
   sort?: CatalogSort;
+  // The caller's ownership overlay filter; omitted or `all` applies no filter.
+  own?: OwnershipFacet;
   cursor?: string | null;
   limit?: number;
+}
+
+// browseBrands args — the ownership and type facets, which compose. An active
+// facet filters the wall to brands with ≥1 matching cigar and re-badges each
+// shelf's counts to the matching subset (DESIGN-002 §IA facet-mechanics-on-Brands;
+// the type facet extends the same mechanics to Brands, owner-approved).
+export interface BrowseBrandsArgs {
+  own?: OwnershipFacet;
+  type?: CigarType;
 }
 
 export interface BrowseCatalogResult {
@@ -620,6 +647,11 @@ export interface MergeCigarsResult {
     listingMatches: number;
     productPhotos: number; // 0 or 1 — the target keeps its own when it has one
     enrichmentRequests: number;
+    // Want marks moved to the target. When the same user wanted BOTH sides, the
+    // target's mark is kept and the source's is dropped (the UNIQUE(user,cigar)
+    // pair forbids a duplicate) — a de-dupe the audit's `wantsDeduped` records.
+    // Closes the #45-noted gap where a merge orphaned the source's wants.
+    wants: number;
   };
   replayed: boolean;
 }

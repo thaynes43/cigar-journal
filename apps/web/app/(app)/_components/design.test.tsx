@@ -7,6 +7,7 @@ import { StrengthMeter, strengthStep } from "./strength-meter";
 import { VitalsBlock } from "./vitals-block";
 import { Chips } from "./chips";
 import { WantBadge } from "./want-badge";
+import { RecordSmokeButton } from "./record-smoke-button";
 
 describe("BandTile", () => {
   it("keeps a house on one ground color across its lines", () => {
@@ -200,6 +201,22 @@ describe("Chips", () => {
     expect(html).toContain("cocoa");
     expect(html).toContain("baker&#x27;s chocolate");
     expect(html).toContain("italic");
+  });
+});
+
+describe("RecordSmokeButton", () => {
+  it("is icon-only: named for assistive tech, no visible text at any width", () => {
+    const html = renderToStaticMarkup(<RecordSmokeButton />);
+    expect(html).toContain('aria-label="Record a smoke"');
+    expect(html).toContain('title="Record a smoke"');
+    expect(html).toContain("bg-accent"); // the accent chip is the affordance
+    expect(html).toContain("M16.5 3.5"); // the Feather edit-3 pencil path
+    // No rendered "Record a smoke" text node — the label lives only on the attrs.
+    expect(html).not.toMatch(/>\s*Record a smoke\s*</);
+  });
+
+  it("links to the record page", () => {
+    expect(renderToStaticMarkup(<RecordSmokeButton />)).toContain('href="/smokes/new"');
   });
 });
 

@@ -8,6 +8,7 @@ import { resolveCigar } from "./cigar-resolution.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
 import { applyConsumptionOnSave } from "./consumption.js";
+import { deriveHoldingSummary } from "./inventory.js";
 
 // Persist one finished Smoke. Validate → resolve cigar (create unverified if
 // described) → write smoke + progression + idempotency key + audit row in ONE
@@ -115,6 +116,16 @@ async function saveWithinTx(
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 
+  // When the save carried a consumption block (ADR-008 / DESIGN-002 ask-once
+  // flow), report the derived stock picture AFTER the smoke so the caller reads
+  // back the new remaining without a follow-up read (mirrors record_purchase's
+  // holdingAfter). Read inside this transaction to see the just-linked
+  // consumption. Absent when no block was supplied — nothing was deducted.
+  const holdingAfter =
+    input.consumption !== undefined
+      ? await deriveHoldingSummary(tx, principal.userId, cigar.cigarId)
+      : undefined;
+
   const result: SaveSmokeResult = {
     smoke: {
       smokeId: smoke.id,
@@ -122,6 +133,7 @@ async function saveWithinTx(
       cigar: { cigarId: cigar.cigarId, canonicalName: cigar.canonicalName, verification: cigar.verification },
     },
     cigarCreated: cigar.created,
+    ...(holdingAfter ? { holdingAfter } : {}),
     replayed: false,
   };
 

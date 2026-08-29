@@ -33,6 +33,26 @@ const config: NextConfig = {
   },
   // Linting is a dedicated CI job (`pnpm lint`), not the build's concern.
   eslint: { ignoreDuringBuilds: true },
+  // Inventory collapsed into the Catalog (DESIGN-002 §IA / PRD-003 R-UNI-1): old
+  // /inventory links keep working by redirecting into the equivalent catalog
+  // views. The table view maps to the Ledger; the poster grid maps to the Have
+  // facet. Temporary (307) — the humidor's home is a product decision that may
+  // still move, and a hard 308 would be cached past any such change.
+  async redirects() {
+    return [
+      {
+        source: "/inventory",
+        has: [{ type: "query", key: "view", value: "table" }],
+        destination: "/cigars?view=ledger",
+        permanent: false,
+      },
+      {
+        source: "/inventory",
+        destination: "/cigars?own=have",
+        permanent: false,
+      },
+    ];
+  },
 };
 
 export default config;

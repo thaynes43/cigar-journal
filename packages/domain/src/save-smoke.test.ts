@@ -337,4 +337,35 @@ describe("saveSmoke", () => {
       .where(eq(smokeConsumptions.smokeId, first.smoke.smokeId));
     expect(rows).toHaveLength(1); // linked once, not twice
   });
+
+  it("returns holdingAfter only when a consumption block was supplied, reflecting the deduction", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "HoldingAfter Toro", brand: "HA" });
+    await h.deps.db.insert(purchases).values({ userId: user.userId, cigarId, quantity: 3 });
+
+    // No consumption block → no holdingAfter (nothing was deducted, none reported).
+    const omitted = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["marker"],
+    });
+    expect(omitted.holdingAfter).toBeUndefined();
+
+    // fromHumidor: false — the block is present, so the (undeducted) stock is reported.
+    const off = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["lounge"],
+      consumption: { fromHumidor: false },
+    });
+    expect(off.holdingAfter).toEqual({ totalAcquired: 3, remaining: 3 });
+
+    // fromHumidor: true — deducts one; holdingAfter shows the new remaining (mirrors record_purchase).
+    const deduct = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["humidor"],
+      consumption: { fromHumidor: true },
+    });
+    expect(deduct.holdingAfter).toEqual({ totalAcquired: 3, remaining: 2 });
+  });
 });
