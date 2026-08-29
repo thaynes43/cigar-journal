@@ -438,7 +438,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Save smoke",
       description:
-        "Persist one finished smoke, called once when the user signals the cigar is over — never per observation. Omit anything the user did not establish; sparse is correct.",
+        "Persist one finished smoke, called once when the user signals the cigar is over — never per observation. Omit anything the user did not establish; sparse is correct. When you pass a consumption block (the ask-once 'From your humidor?' beat), the result adds holdingAfter { totalAcquired, remaining } so you can confirm the new count without another read.",
       inputSchema: saveSmokeSchema,
       outputSchema: saveSmokeOutput,
       annotations: {
@@ -463,6 +463,10 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
             },
           },
           cigarCreated: result.cigarCreated,
+          // Present only when a consumption block was supplied (ADR-008): the
+          // derived stock after the deduction, mirroring record_purchase's
+          // holdingAfter. Additive — undefined serializes away when absent.
+          holdingAfter: result.holdingAfter,
           replayed: result.replayed,
         });
       }),

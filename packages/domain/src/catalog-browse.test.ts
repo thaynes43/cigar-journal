@@ -2,6 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { productPhotos } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
+import { recordPurchase } from "./record-purchase.js";
+import { setWant } from "./wants.js";
 import { browseBrands, getBrand, browseCatalog, brandSlug } from "./catalog-browse.js";
 import { CigarNotFoundError } from "./errors.js";
 import type { Principal } from "./index.js";
@@ -52,7 +54,7 @@ describe("catalog browse", () => {
     // A brand-null cigar produces the unbranded shelf.
     await h.seedCigar({ canonicalName: `Orphan ${tag}`, type: "CC" });
 
-    const { brands } = await browseBrands(h.deps);
+    const { brands } = await browseBrands(h.deps, userA);
 
     const shelf = brands.find((b) => b.brand === brand)!;
     expect(shelf).toBeDefined();
@@ -140,7 +142,7 @@ describe("catalog browse", () => {
     const bare = `Bare ${tag}`;
     await h.seedCigar({ canonicalName: `${bare} Solo`, brand: bare }); // no photo anywhere
 
-    const { brands } = await browseBrands(h.deps);
+    const { brands } = await browseBrands(h.deps, userA);
 
     const cover = brands.find((b) => b.brand === withPhotos)!;
     expect(cover.coverCigarId).toBe(bravo);
@@ -236,5 +238,214 @@ describe("catalog browse", () => {
     expect(seen).toHaveLength(total); // full coverage
     expect(new Set(seen).size).toBe(total); // no duplicates across pages
     expect(pages).toBe(3); // 2 + 2 + 1
+  });
+
+  // --- ownership facet (PRD-003 R-UNI-2) -----------------------------------
+
+  it("browseCatalog ownership facet partitions have / want / dont over the caller's overlay", async () => {
+    const brand = `Facet ${tag}`;
+    const have = await h.seedCigar({ canonicalName: `${brand} Have`, brand });
+    const want = await h.seedCigar({ canonicalName: `${brand} Want`, brand });
+    const dont = await h.seedCigar({ canonicalName: `${brand} Dont`, brand });
+
+    // Have: an acquisition leaves remaining > 0. Want: a flag, no holding. Dont: nothing.
+    await recordPurchase(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: have },
+      quantity: 2,
+    });
+    await setWant(h.deps, userA, { cigarId: want, wanted: true });
+
+    const ids = async (own: "all" | "have" | "want" | "dont"): Promise<string[]> =>
+      (await browseCatalog(h.deps, userA, { q: brand, own })).cigars.map((c) => c.cigarId).sort();
+
+    expect(await ids("all")).toEqual([have, want, dont].sort());
+    expect(await ids("have")).toEqual([have]);
+    expect(await ids("want")).toEqual([want]);
+    // Dont = no active holding — the wanted-but-unowned cigar qualifies too.
+    expect(await ids("dont")).toEqual([want, dont].sort());
+
+    // totalCount tracks the facet, not the whole q set.
+    expect((await browseCatalog(h.deps, userA, { q: brand, own: "have" })).totalCount).toBe(1);
+
+    // Principal-scoped: userB sees none of userA's have/want state.
+    expect((await browseCatalog(h.deps, userB, { q: brand, own: "have" })).cigars).toHaveLength(0);
+    expect((await browseCatalog(h.deps, userB, { q: brand, own: "want" })).cigars).toHaveLength(0);
+  });
+
+  it("browseCatalog moves an emptied humidor cigar from have to dont (explicit consumption)", async () => {
+    const brand = `Empty ${tag}`;
+    const solo = await h.seedCigar({ canonicalName: `${brand} Solo`, brand });
+    await recordPurchase(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: solo },
+      quantity: 1,
+    });
+    expect((await browseCatalog(h.deps, userA, { q: brand, own: "have" })).cigars.map((c) => c.cigarId)).toEqual([
+      solo,
+    ]);
+
+    // Consume the one stick — remaining floors to 0.
+    await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: solo },
+      overallDescriptors: ["done"],
+      consumption: { fromHumidor: true },
+    });
+
+    expect((await browseCatalog(h.deps, userA, { q: brand, own: "have" })).cigars).toHaveLength(0);
+    expect((await browseCatalog(h.deps, userA, { q: brand, own: "dont" })).cigars.map((c) => c.cigarId)).toEqual([
+      solo,
+    ]);
+  });
+
+  it("browseBrands ownership facet filters the wall to matching brands and re-badges counts", async () => {
+    const owned = `OwnedBrand ${tag}`;
+    const unowned = `UnownedBrand ${tag}`;
+    const ownedCigar = await h.seedCigar({ canonicalName: `${owned} A`, brand: owned, line: "L1" });
+    await h.seedCigar({ canonicalName: `${owned} B`, brand: owned, line: "L2" }); // not owned
+    await h.seedCigar({ canonicalName: `${unowned} X`, brand: unowned });
+    await recordPurchase(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: ownedCigar },
+      quantity: 3,
+    });
+
+    // No facet: full counts, both brands present.
+    const all = await browseBrands(h.deps, userA);
+    expect(all.brands.find((b) => b.brand === owned)!.cigarCount).toBe(2);
+    expect(all.brands.find((b) => b.brand === unowned)).toBeDefined();
+
+    // Have facet: the owned brand re-badges to its 1 matching cigar / 1 line; the
+    // fully-unowned brand drops off the wall.
+    const have = await browseBrands(h.deps, userA, { own: "have" });
+    const ownedShelf = have.brands.find((b) => b.brand === owned)!;
+    expect(ownedShelf.cigarCount).toBe(1);
+    expect(ownedShelf.lineCount).toBe(1);
+    expect(have.brands.find((b) => b.brand === unowned)).toBeUndefined();
+  });
+
+  it("browseBrands type facet filters and composes with ownership, re-badging counts", async () => {
+    const brand = `TypeBrand ${tag}`;
+    const ncOwned = await h.seedCigar({ canonicalName: `${brand} NC One`, brand, type: "NC" });
+    await h.seedCigar({ canonicalName: `${brand} NC Two`, brand, type: "NC" });
+    await h.seedCigar({ canonicalName: `${brand} CC One`, brand, type: "CC" });
+    await recordPurchase(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: ncOwned },
+      quantity: 1,
+    });
+
+    // Type facet on Brands: re-badges to the two NC cigars, types collapses to NC.
+    const nc = await browseBrands(h.deps, userA, { type: "NC" });
+    const ncShelf = nc.brands.find((b) => b.brand === brand)!;
+    expect(ncShelf.cigarCount).toBe(2);
+    expect(ncShelf.types).toEqual(["NC"]);
+
+    // Compose type + ownership: only the owned NC cigar survives.
+    const ncHave = await browseBrands(h.deps, userA, { type: "NC", own: "have" });
+    expect(ncHave.brands.find((b) => b.brand === brand)!.cigarCount).toBe(1);
+
+    // CC facet re-badges to the single CC cigar.
+    const cc = await browseBrands(h.deps, userA, { type: "CC" });
+    expect(cc.brands.find((b) => b.brand === brand)!.cigarCount).toBe(1);
+  });
+
+  // --- sorts (PRD-003 R-UNI-3) ---------------------------------------------
+
+  it("browseCatalog sorts by my-rating (rated desc, unrated last) with keyset paging", async () => {
+    const brand = `Rate ${tag}`;
+    const hi = await h.seedCigar({ canonicalName: `${brand} Hi`, brand });
+    const lo = await h.seedCigar({ canonicalName: `${brand} Lo`, brand });
+    const un = await h.seedCigar({ canonicalName: `${brand} Un`, brand });
+    await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: hi },
+      overallDescriptors: ["m"],
+      assessment: { rating: 95 },
+    });
+    await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: lo },
+      overallDescriptors: ["m"],
+      assessment: { rating: 40 },
+    });
+
+    const res = await browseCatalog(h.deps, userA, { q: brand, sort: "my-rating" });
+    expect(res.cigars.map((c) => c.cigarId)).toEqual([hi, lo, un]);
+
+    // Keyset over the aggregate sort: page size 1 covers all three in order.
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const p: Awaited<ReturnType<typeof browseCatalog>> = await browseCatalog(h.deps, userA, {
+        q: brand,
+        sort: "my-rating",
+        limit: 1,
+        cursor,
+      });
+      for (const c of p.cigars) seen.push(c.cigarId);
+      cursor = p.nextCursor;
+      pages++;
+    } while (cursor && pages < 10);
+    expect(seen).toEqual([hi, lo, un]);
+  });
+
+  it("browseCatalog sorts recently-added newest first with keyset paging", async () => {
+    const brand = `Recent ${tag}`;
+    const old = await h.seedCigar({
+      canonicalName: `${brand} Old`,
+      brand,
+      createdAt: new Date("2020-01-01T00:00:00.000Z"),
+    });
+    const mid = await h.seedCigar({
+      canonicalName: `${brand} Mid`,
+      brand,
+      createdAt: new Date("2021-01-01T00:00:00.000Z"),
+    });
+    const neu = await h.seedCigar({
+      canonicalName: `${brand} New`,
+      brand,
+      createdAt: new Date("2022-01-01T00:00:00.000Z"),
+    });
+
+    const res = await browseCatalog(h.deps, userA, { q: brand, sort: "recently-added" });
+    expect(res.cigars.map((c) => c.cigarId)).toEqual([neu, mid, old]);
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const p: Awaited<ReturnType<typeof browseCatalog>> = await browseCatalog(h.deps, userA, {
+        q: brand,
+        sort: "recently-added",
+        limit: 1,
+        cursor,
+      });
+      for (const c of p.cigars) seen.push(c.cigarId);
+      cursor = p.nextCursor;
+      pages++;
+    } while (cursor && pages < 10);
+    expect(seen).toEqual([neu, mid, old]);
+  });
+
+  it("a cursor minted under one sort is rejected under another (page restarts, no garbage)", async () => {
+    const brand = `SortSwitch ${tag}`;
+    await h.seedCigar({ canonicalName: `${brand} A`, brand });
+    await h.seedCigar({ canonicalName: `${brand} B`, brand });
+
+    const first = await browseCatalog(h.deps, userA, { q: brand, sort: "name", limit: 1 });
+    expect(first.nextCursor).not.toBeNull();
+    // Hand a name-sort cursor to a my-rating browse: it decodes as absent, so the
+    // page starts fresh rather than paging with a mismatched key.
+    const switched = await browseCatalog(h.deps, userA, {
+      q: brand,
+      sort: "my-rating",
+      limit: 1,
+      cursor: first.nextCursor,
+    });
+    expect(switched.cigars).toHaveLength(1);
+    expect(switched.totalCount).toBe(2);
   });
 });

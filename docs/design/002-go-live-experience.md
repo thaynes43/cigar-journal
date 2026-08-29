@@ -39,8 +39,12 @@ Avoided: silent inventory decrement, exclusive Have/Want, per-state tabs,
 ## IA: one catalog, three views
 
 **Collapse Inventory into Catalog** (supersedes PRD-002 R-INV-1's separate
-nav surface; the ledger table survives as a view). Nav becomes: Journal
-(`/`), Catalog, Record a smoke, Curation (admin).
+nav surface; the ledger table survives as a view). Nav is one non-wrapping
+row that fits a 360–390pt phone: the **wordmark** ("Cigar Journal",
+font-display) *is* the Journal link (`/`) — no separate Journal item — then
+Catalog and Curation (admin only); the right cluster carries the record
+action as an **icon-only** accent chip (no text at any width) and Sign out.
+Inventory is gone.
 
 - **Views:** Brands (default) · All · Ledger. Brands and All are the
   existing poster library. **Ledger** is the purchases-lots table moved from
@@ -252,7 +256,8 @@ Implementers use these exactly or flag the gap; never invent alternates.
 
 | Surface | Proposed string |
 |---|---|
-| Nav item | `Catalog` (unchanged) |
+| Nav row | wordmark (→ Journal) · `Catalog` · `Curation` (admin) · [record icon] · Sign out |
+| Record icon button | pencil SVG (Feather edit-3), `aria-label`/`title` = `Record a smoke` |
 | View toggle | `Brands` · `All` · `Ledger` |
 | Ownership facet | `All` · `Have` · `Want` · `Don't have` |
 | Want toggle (unset/set) | `Want` (same label both states; fill signals state) |
@@ -270,6 +275,10 @@ Implementers use these exactly or flag the gap; never invent alternates.
 | Smoke-list provenance tag | `humidor` |
 | Photo tile busy state | `Uploading…` |
 | Upload page after success | `Added.` + `Open the smoke` |
+| Ledger columns | the current inventory-table columns plus `Consumed` and `Left` |
+| Ledger discrepancy cell | `N over` (danger tone; `title="Consumption exceeds recorded purchases"`) |
+| Lot picker | label `Lot`; `—` is the unattributed option |
+| Type facet (Brands + All) | `Both` · `NC` · `CC` (owner-approved on Brands too) |
 
 ## Owner decisions (2026-08-28)
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { keepPreviousData } from "@tanstack/react-query";
-import type { CigarType } from "@cj/domain";
+import type { CatalogSort, CigarType, OwnershipFacet } from "@cj/domain";
 import { api } from "@/lib/trpc/react";
 import { ui } from "@/lib/ui";
 import { CigarStillTile } from "./cigar-still-tile";
@@ -14,10 +14,21 @@ const SKELETON_COUNT = 8;
 // IntersectionObserver sentinel (600px rootMargin) fetches ahead, with a manual
 // Load more button as the fallback. Filter changes keep the prior page visible
 // and dimmed while the new one loads (keepPreviousData); the first load shows a
-// skeleton grid. State (q/type) is owned by the URL and passed in as props.
-export function CatalogAllGrid({ q, type }: { q?: string; type?: CigarType }) {
+// skeleton grid. State (q/type/own/sort) is owned by the URL and passed in as
+// props. `own: "all"` is normalized to undefined so it carries no filter.
+export function CatalogAllGrid({
+  q,
+  type,
+  own,
+  sort,
+}: {
+  q?: string;
+  type?: CigarType;
+  own?: OwnershipFacet;
+  sort?: CatalogSort;
+}) {
   const query = api.catalog.browse.useInfiniteQuery(
-    { q, type },
+    { q, type, own: own === "all" ? undefined : own, sort },
     {
       getNextPageParam: (last) => last.nextCursor,
       placeholderData: keepPreviousData,

@@ -8,6 +8,7 @@ import {
   listingMatches,
   productPhotos,
   enrichmentRequests,
+  wants,
   type CigarRow,
 } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
@@ -169,6 +170,25 @@ async function mergeWithinTx(
     .where(eq(enrichmentRequests.cigarId, source.id))
     .returning({ id: enrichmentRequests.id });
 
+  // Want marks re-point, closing the #45-noted gap where a merge orphaned the
+  // source's wants. The UNIQUE(user_id, cigar_id) pair forbids a user holding two
+  // marks, so a user who wanted BOTH sides is de-duped: drop the source's mark
+  // (the target's survives) FIRST, then re-point the rest — the re-point can no
+  // longer collide. The audit records the de-dupe count.
+  const dedupedWantRows = await tx
+    .delete(wants)
+    .where(
+      sql`${wants.cigarId} = ${source.id} AND EXISTS (
+        SELECT 1 FROM wants w2 WHERE w2.cigar_id = ${target.id} AND w2.user_id = ${wants.userId}
+      )`,
+    )
+    .returning({ id: wants.id });
+  const wantRows = await tx
+    .update(wants)
+    .set({ cigarId: target.id })
+    .where(eq(wants.cigarId, source.id))
+    .returning({ id: wants.id });
+
   // Everything is off the source now; delete it (any leftover source photo goes
   // via cascade).
   await tx.delete(cigars).where(eq(cigars.id, source.id));
@@ -179,6 +199,7 @@ async function mergeWithinTx(
     listingMatches: listingRows.length,
     productPhotos: productPhotosRepointed,
     enrichmentRequests: enrichmentRows.length,
+    wants: wantRows.length,
   };
 
   await tx.insert(auditLog).values({
@@ -187,7 +208,12 @@ async function mergeWithinTx(
     action: "cigar.merge",
     smokeId: null,
     before,
-    after: { target: cigarSnapshot(target), deletedSourceId: source.id, repointed },
+    after: {
+      target: cigarSnapshot(target),
+      deletedSourceId: source.id,
+      repointed,
+      wantsDeduped: dedupedWantRows.length,
+    },
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 

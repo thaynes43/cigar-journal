@@ -9,10 +9,12 @@ import {
   productPhotos,
   enrichmentRequests,
   vendors,
+  wants,
   auditLog,
 } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { mergeCigars, verifyCigar, dismissDuplicate, curationQueue } from "./curation.js";
+import { setWant } from "./wants.js";
 import type { Principal } from "./index.js";
 import { UnauthorizedError, CigarNotFoundError, ValidationError } from "./errors.js";
 
@@ -132,6 +134,7 @@ describe("curation", () => {
         listingMatches: 1,
         productPhotos: 1,
         enrichmentRequests: 1,
+        wants: 0,
       });
 
       // Source cigar is gone.
@@ -220,6 +223,39 @@ describe("curation", () => {
       const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
       const forSource = audits.filter((a) => (a.after as { deletedSourceId?: string }).deletedSourceId === source);
       expect(forSource).toHaveLength(1);
+    });
+
+    it("re-points wants and de-dupes when the same user wanted both sides (#45 gap)", async () => {
+      const source = await seedUnverified("Want Merge Source");
+      const target = await seedUnverified("Want Merge Target");
+
+      // `user` wanted BOTH sides → the source mark is the de-dupe drop (target's
+      // survives). `admin` wanted only the source → it re-points with no collision.
+      await setWant(h.deps, user, { cigarId: source, wanted: true });
+      await setWant(h.deps, user, { cigarId: target, wanted: true });
+      await setWant(h.deps, admin, { cigarId: source, wanted: true });
+
+      const result = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+
+      // Only admin's mark moved; user's source mark was dropped as a duplicate.
+      expect(result.repointed.wants).toBe(1);
+
+      // Nothing left on the (deleted) source; the target carries both users' marks.
+      expect(await h.deps.db.select().from(wants).where(eq(wants.cigarId, source))).toHaveLength(0);
+      const onTarget = await h.deps.db.select().from(wants).where(eq(wants.cigarId, target));
+      expect(onTarget.map((w) => w.userId).sort()).toEqual([user.userId, admin.userId].sort());
+
+      // The audit notes both the re-point and the de-dupe.
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
+      const audit = audits.find(
+        (a) => (a.after as { deletedSourceId?: string }).deletedSourceId === source,
+      );
+      expect((audit!.after as { repointed: { wants: number } }).repointed.wants).toBe(1);
+      expect((audit!.after as { wantsDeduped: number }).wantsDeduped).toBe(1);
     });
   });
 

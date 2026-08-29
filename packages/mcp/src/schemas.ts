@@ -186,7 +186,12 @@ const assessment = z
         "Nicotine strength on the mild..full spectrum, e.g. medium-full. Omit if unstated.",
       ),
     body: z.string().nullish().describe("Body/weight of the smoke, e.g. full. Omit if unstated."),
-    liked: z.boolean().nullish().describe("Coarse like/dislike signal when no number was given."),
+    liked: z
+      .boolean()
+      .nullish()
+      .describe(
+        "Only when the user explicitly said they liked or disliked it — never inferred from tone, prose, or the rating. Omit otherwise.",
+      ),
     rating,
     impression: z.string().nullish().describe("The user's overall impression, in their words."),
   })
@@ -592,6 +597,10 @@ export const saveSmokeOutput = z
         cigar: looseObject,
       })
       .passthrough(),
+    holdingAfter: z
+      .object({ totalAcquired: z.number(), remaining: z.number() })
+      .passthrough()
+      .optional(),
     cigarCreated: z.boolean(),
     replayed: z.boolean(),
   })
