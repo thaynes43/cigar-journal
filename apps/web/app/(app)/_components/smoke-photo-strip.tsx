@@ -102,10 +102,16 @@ export function SmokePhotoStrip({
             aria-busy={pending}
             className={`flex aspect-square flex-col items-center justify-center gap-1 rounded-card border border-dashed border-line text-muted transition-colors hover:border-accent hover:text-accent focus-visible:ring-2 focus-visible:ring-accent/25 focus-visible:outline-none ${pending ? "animate-pulse" : ""}`}
           >
-            <span aria-hidden className="text-2xl leading-none">
-              +
-            </span>
-            <span className="label-caps">Add photo</span>
+            {pending ? (
+              <span className="label-caps">Uploading…</span>
+            ) : (
+              <>
+                <span aria-hidden className="text-2xl leading-none">
+                  +
+                </span>
+                <span className="label-caps">Add photo</span>
+              </>
+            )}
           </button>
         ) : null}
       </div>
