@@ -265,7 +265,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the twenty-four tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
+  it("lists exactly the twenty-five tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -298,6 +298,7 @@ describe("@cj/mcp adapter", () => {
           "exclude_cigar",
           "restore_cigar",
           "set_product_photo_rights",
+          "rename_cigar",
         ].sort(),
       );
 
@@ -331,6 +332,7 @@ describe("@cj/mcp adapter", () => {
         "exclude_cigar",
         "restore_cigar",
         "set_product_photo_rights",
+        "rename_cigar",
       ])
         expect(readOnly(w)).not.toBe(true);
     });
@@ -2036,5 +2038,37 @@ describe("@cj/mcp adapter", () => {
     });
     const all = await h.pg.db.select().from(productPhotos);
     expect(all.find((p) => p.cigarId === cigarId)!.rights).toBe("suppressed");
+  });
+
+  it("get_cigar is callable under a curation:read token (no catalog:read) — catalog detail only, no personal overlay", async () => {
+    // The curate agent reads a cigar's full detail while triaging under a
+    // curation-only token (#126). catalog:read OR curation:read authorizes get_cigar.
+    await withClient(adminCuration, async (client) => {
+      const result = await call(client, "get_cigar", { cigarId: primaryCigarId });
+      const data = payloadOf(result) as Record<string, unknown>;
+      expect((data.cigar as { cigarId: string }).cigarId).toBe(primaryCigarId);
+      expect(data.enrichment).toBeDefined();
+      // No journal:read on this token → the personal overlay is omitted entirely.
+      expect(data.personalProfile).toBeUndefined();
+      expect(data.wanted).toBeUndefined();
+    });
+  });
+
+  it("rename_cigar sets a cigar's canonical name (agent surface)", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Padron 1926 No 9 Maldura" });
+    await withClient(adminCuration, async (client) => {
+      const res = payloadOf(
+        await call(client, "rename_cigar", {
+          clientRequestId: randomUUID(),
+          cigarId,
+          canonicalName: "Padrón 1926 No. 9 Maduro",
+          runId: randomUUID(),
+          confidence: 0.95,
+        }),
+      ) as { canonicalName: string; changed: boolean };
+      expect(res.changed).toBe(true);
+      expect(res.canonicalName).toBe("Padrón 1926 No. 9 Maduro");
+    });
+    expect((await cigarById(cigarId))!.canonicalName).toBe("Padrón 1926 No. 9 Maduro");
   });
 });

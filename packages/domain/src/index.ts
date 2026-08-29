@@ -60,6 +60,13 @@ export {
   // curationWorklist is the paged drain queue the ops agent works through.
   setCigarFacts,
   curationWorklist,
+  // DESIGN-003 wave 4b (issue #126, #45): the review console — rename a canonical
+  // name, the recent-agent-runs reads, and Undo (write an action's inverse, linked
+  // through the audit `reverts` self-link; a verify undo flips to unverified inline).
+  renameCigar,
+  agentRuns,
+  agentRunRows,
+  undoCurationAction,
 } from "./curation.js";
 export { getMyInventory, deriveHoldingSummary, getHoldingForCigar } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";

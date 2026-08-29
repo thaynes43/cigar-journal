@@ -15,11 +15,16 @@ export function BrandPosterTile({
   imageUrl?: string | null;
 }) {
   const name = shelf.brand ?? "Unbranded";
+  // Fingerprint the cover thumb with its photo id so a Replace busts the cache (issue 127).
+  const src =
+    imageUrl != null && shelf.coverProductPhotoId != null
+      ? `${imageUrl}?v=${shelf.coverProductPhotoId}`
+      : imageUrl;
   const body = (
     <>
       <div className="aspect-[3/4] overflow-hidden rounded-card border border-line transition-colors group-hover:border-accent/60">
-        {imageUrl ? (
-          <img src={imageUrl} alt="" className="h-full w-full object-cover" />
+        {src ? (
+          <img src={src} alt="" className="h-full w-full object-cover" />
         ) : (
           <BandTile name={name} shape="fill" />
         )}

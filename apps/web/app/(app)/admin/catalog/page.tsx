@@ -8,6 +8,8 @@ import { ui } from "@/lib/ui";
 import { DismissButton } from "./dismiss-button";
 import { MergeButton } from "./merge-button";
 import { VerifyButton } from "./verify-button";
+import { RenameButton } from "./rename-button";
+import { RecentAgentRuns } from "./recent-agent-runs";
 
 // Catalog review console (ADR-006, DESIGN-003 §Chrome), admin-only: a non-admin
 // gets a 404 so the route's existence never leaks. Moved from /curation to
@@ -21,9 +23,10 @@ export default async function CatalogReviewPage() {
   if (!principal || principal.role !== "admin") notFound();
 
   const caller = await getServerCaller();
-  const [{ unverified, duplicates }, missingPhotos] = await Promise.all([
+  const [{ unverified, duplicates }, missingPhotos, { runs }] = await Promise.all([
     caller.curation.queue(),
     caller.curation.missingPhotos(),
+    caller.curation.agentRuns(),
   ]);
 
   return (
@@ -31,6 +34,14 @@ export default async function CatalogReviewPage() {
     // runs full bleed (DESIGN-003 §Layout).
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-10">
       <h1 className="font-display text-2xl font-semibold text-ink">Catalog review</h1>
+
+      {/* The agent's work, grouped by run, newest first — each run expandable to
+          its rows with a per-row Undo where a true inverse exists (DESIGN-003
+          §Curation, issue 126). */}
+      <section className="flex flex-col gap-4">
+        <h2 className="label-caps">Recent agent runs</h2>
+        <RecentAgentRuns runs={runs} />
+      </section>
 
       {/* The owner's photoless holdings — the worklist the upload path clears
           (DESIGN-003 §Images). Absent when empty. */}
@@ -91,7 +102,10 @@ export default async function CatalogReviewPage() {
                   {cigar.brand ? <span className="label-caps">{cigar.brand}</span> : null}
                   <Counts cigar={cigar} />
                 </div>
-                <VerifyButton cigarId={cigar.cigarId} />
+                <div className="flex flex-wrap items-center gap-2">
+                  <RenameButton cigarId={cigar.cigarId} canonicalName={cigar.canonicalName} />
+                  <VerifyButton cigarId={cigar.cigarId} />
+                </div>
               </li>
             ))}
           </ul>

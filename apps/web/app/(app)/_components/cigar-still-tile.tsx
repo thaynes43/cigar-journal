@@ -24,6 +24,10 @@ export function CigarStillTile({
   imageUrl?: string | null;
 }) {
   const subtitle = [cigar.vitola.name, cigar.type].filter(Boolean).join(" · ");
+  // Fingerprint the immutable thumb URL with the photo id so a Replace is seen at
+  // once instead of the cached prior image (issue 127), mirroring the detail hero's fix.
+  // The id is present exactly when a servable photo exists (so imageUrl is set too).
+  const src = imageUrl != null && cigar.productPhotoId != null ? `${imageUrl}?v=${cigar.productPhotoId}` : imageUrl;
   // Per-stick price-at-a-glance (DESIGN-003 §Tile, R-PRICE-2): shown only when the
   // best offer derives a per-stick figure; a package-only offer carries none, so
   // the tile shows nothing rather than a misleading number (DESIGN-002 honesty).
@@ -64,8 +68,8 @@ export function CigarStillTile({
   return (
     <Link href={`/cigars/${cigar.cigarId}`} className="group flex h-full flex-col gap-2">
       <div className="relative aspect-[3/4] overflow-hidden rounded-card border border-line transition-colors group-hover:border-accent/60">
-        {imageUrl ? (
-          <img src={imageUrl} alt="" className="h-full w-full object-cover" />
+        {src ? (
+          <img src={src} alt="" className="h-full w-full object-cover" />
         ) : (
           <BandTile name={cigar.canonicalName} shape="fill" />
         )}

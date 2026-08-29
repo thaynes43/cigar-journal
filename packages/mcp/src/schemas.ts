@@ -1098,6 +1098,22 @@ export const setProductPhotoRightsSchema = z
 
 export type SetProductPhotoRightsArgs = z.infer<typeof setProductPhotoRightsSchema>;
 
+// rename_cigar (#45): set a cigar's canonical name — the one authorized path, since
+// canonicalName is identity (update_cigar/set_cigar_facts never touch it).
+export const renameCigarSchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    cigarId: z.string().describe("Catalog id of the cigar to rename, from a get_curation_queue row."),
+    canonicalName: z
+      .string()
+      .describe("The corrected canonical name (identity). Trimmed and must be non-empty; overwrites the current name."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type RenameCigarArgs = z.infer<typeof renameCigarSchema>;
+
 // ---- curation output schemas (permissive, like the rest) -------------------
 
 // One page of the worklist: exactly one payload array populated per kind, mirrored
@@ -1141,4 +1157,13 @@ export const setCatalogStatusOutput = z
 
 export const setProductPhotoRightsOutput = z
   .object({ cigarId: z.string(), rights: z.string(), replayed: z.boolean() })
+  .passthrough();
+
+export const renameCigarOutput = z
+  .object({
+    cigarId: z.string(),
+    canonicalName: z.string(),
+    changed: z.boolean(),
+    replayed: z.boolean(),
+  })
   .passthrough();

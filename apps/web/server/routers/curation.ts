@@ -9,6 +9,10 @@ import {
   excludeCigar,
   restoreCigar,
   setProductPhotoRights,
+  renameCigar,
+  agentRuns,
+  agentRunRows,
+  undoCurationAction,
   getProductPhotoState,
   mintProductPhotoUploadToken,
 } from "@cj/domain";
@@ -94,4 +98,35 @@ export const curationRouter = router({
       }),
     )
     .mutation(({ ctx, input }) => setProductPhotoRights(ctx.deps, ctx.principal, input)),
+
+  // Set a cigar's canonical name (#45) — the one authorized identity edit.
+  rename: adminProcedure
+    .input(
+      z.object({
+        clientRequestId: z.string(),
+        cigarId: z.string().uuid(),
+        canonicalName: z.string(),
+      }),
+    )
+    .mutation(({ ctx, input }) => renameCigar(ctx.deps, ctx.principal, input)),
+
+  // Recent agent runs (DESIGN-003 §Curation review console, #126): the runs list
+  // grouped from the audit log by run_id, and a run's expandable rows.
+  agentRuns: adminProcedure.query(({ ctx }) => agentRuns(ctx.deps, ctx.principal)),
+
+  agentRunRows: adminProcedure
+    .input(
+      z.object({
+        runId: z.string(),
+        cursor: z.string().nullish(),
+        limit: z.number().int().optional(),
+      }),
+    )
+    .query(({ ctx, input }) => agentRunRows(ctx.deps, ctx.principal, input)),
+
+  // Undo one agent action by its inverse (exclude→restore, listing/photo/facts→prior
+  // value, verify→unverify), linked through the audit `reverts` self-link.
+  undo: adminProcedure
+    .input(z.object({ clientRequestId: z.string(), auditId: z.string().uuid() }))
+    .mutation(({ ctx, input }) => undoCurationAction(ctx.deps, ctx.principal, input)),
 });

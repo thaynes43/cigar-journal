@@ -25,6 +25,10 @@ import {
   setProductPhotoRights,
   setCigarFacts,
   curationWorklist,
+  renameCigar,
+  agentRuns,
+  agentRunRows,
+  undoCurationAction,
 } from "./curation.js";
 import { getProductPhoto } from "./product-photos.js";
 import { getCigar, searchCigars, getCigarOffers } from "./reads.js";
@@ -1069,6 +1073,312 @@ describe("curation", () => {
         if (!cursor) break;
       }
       expect(found).toBe(true);
+    });
+  });
+
+  // --- excludeCigar → match_triage cascade (DESIGN-003 wave 4b, #126) --------
+
+  describe("excludeCigar → triage cascade", () => {
+    async function addAutoMatch(cigarId: string): Promise<string> {
+      const [m] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `casc-${newRequestId()}`, cigarId, status: "auto" })
+        .returning({ id: listingMatches.id });
+      return m!.id;
+    }
+
+    it("unmatches the cigar's auto listings in-transaction and records them on the exclude audit", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Cascade ${newRequestId().slice(0, 8)}` });
+      const matchId = await addAutoMatch(cigarId);
+
+      await excludeCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId });
+
+      const [match] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(match!.status).toBe("unmatched");
+      expect(match!.cigarId).toBeNull();
+
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.exclude"));
+      const audit = audits.find((a) => (a.after as { id?: string }).id === cigarId)!;
+      expect((audit.after as { cascadeUnmatched?: string[] }).cascadeUnmatched).toEqual([matchId]);
+    });
+
+    it("keeps the excluded cigar's auto match out of match_triage", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Triage Gone ${newRequestId().slice(0, 8)}` });
+      const matchId = await addAutoMatch(cigarId);
+
+      // Before exclusion it is a triage candidate.
+      const surfaced = async (): Promise<boolean> => {
+        let cursor: string | null = null;
+        for (let i = 0; i < 500; i++) {
+          const page = await curationWorklist(h.deps, admin, { kind: "match_triage", limit: 200, cursor });
+          if (page.matches!.some((m) => m.matchId === matchId)) return true;
+          cursor = page.nextCursor;
+          if (!cursor) break;
+        }
+        return false;
+      };
+      expect(await surfaced()).toBe(true);
+
+      await excludeCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId });
+      expect(await surfaced()).toBe(false);
+    });
+
+    it("also filters an auto match still pointing at an already-excluded cigar", async () => {
+      // Simulate the prod state: an excluded cigar with a leftover 'auto' match
+      // (the crawler could re-propose one after exclusion). The read filter, not the
+      // cascade, must keep it out of triage.
+      const cigarId = await h.seedCigar({ canonicalName: `Leftover ${newRequestId().slice(0, 8)}` });
+      await excludeCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId });
+      const matchId = await addAutoMatch(cigarId); // an 'auto' link re-created post-exclusion
+
+      let cursor: string | null = null;
+      let seen = false;
+      for (let i = 0; i < 500; i++) {
+        const page = await curationWorklist(h.deps, admin, { kind: "match_triage", limit: 200, cursor });
+        if (page.matches!.some((m) => m.matchId === matchId)) seen = true;
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(seen).toBe(false);
+    });
+  });
+
+  // --- renameCigar (#45; DESIGN-003 wave 4b) --------------------------------
+
+  describe("renameCigar", () => {
+    it("rejects a non-admin principal", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Rename Reject" });
+      const error = await renameCigar(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        canonicalName: "Nope",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("sets the canonical name (trimmed) and audits before→after", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Padron 1926 No 9 Maldura" });
+      const result = await renameCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        canonicalName: "  Padrón 1926 No. 9 Maduro  ",
+      });
+      expect(result.changed).toBe(true);
+      expect(result.canonicalName).toBe("Padrón 1926 No. 9 Maduro");
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.canonicalName).toBe("Padrón 1926 No. 9 Maduro");
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.rename"));
+      const audit = audits.find((a) => (a.after as { id?: string }).id === cigarId)!;
+      expect((audit.before as { canonicalName?: string }).canonicalName).toBe("Padron 1926 No 9 Maldura");
+      expect((audit.after as { canonicalName?: string }).canonicalName).toBe("Padrón 1926 No. 9 Maduro");
+    });
+
+    it("is a no-op (no audit) when the name already matches", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Already Right" });
+      const result = await renameCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        canonicalName: "Already Right",
+      });
+      expect(result.changed).toBe(false);
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.rename"));
+      expect(audits.find((a) => (a.after as { id?: string }).id === cigarId)).toBeUndefined();
+    });
+
+    it("rejects an empty name", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Keeps Name" });
+      const error = await renameCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        canonicalName: "   ",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+    });
+
+    it("replays an identical retry", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Rename Replay A" });
+      const input = { clientRequestId: newRequestId(), cigarId, canonicalName: "Rename Replay B" };
+      const first = await renameCigar(h.deps, admin, input);
+      const second = await renameCigar(h.deps, admin, input);
+      expect(first.replayed).toBe(false);
+      expect(second.replayed).toBe(true);
+    });
+  });
+
+  // --- Recent agent runs + Undo (DESIGN-003 wave 4b, #126) ------------------
+
+  describe("agent runs + undo", () => {
+    const RUN = "wo-cigar-test-run";
+
+    it("groups agent audit rows by run_id, newest first, with per-action counts", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const a = await h.seedCigar({ canonicalName: `Run A ${newRequestId().slice(0, 6)}`, verification: "unverified" });
+      const b = await h.seedCigar({ canonicalName: `Run B ${newRequestId().slice(0, 6)}`, brand: "Old" });
+      await verifyCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: a,
+        attribution: { actor: "agent", runId, confidence: 0.9 },
+      });
+      await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: b,
+        fields: { brand: "New" },
+        attribution: { actor: "agent", runId, confidence: 0.8 },
+      });
+
+      const { runs } = await agentRuns(h.deps, admin);
+      const run = runs.find((r) => r.runId === runId)!;
+      expect(run).toBeDefined();
+      expect(run.total).toBe(2);
+      const byAction = new Map(run.actions.map((x) => [x.action, x.count]));
+      expect(byAction.get("cigar.verify")).toBe(1);
+      expect(byAction.get("cigar.set_facts")).toBe(1);
+    });
+
+    it("run rows carry the target name, confidence, summary, and reversible flag", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Rows Target", brand: "Before" });
+      await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "After" },
+        attribution: { actor: "agent", runId, confidence: 0.75 },
+      });
+      const { rows } = await agentRunRows(h.deps, admin, { runId });
+      expect(rows).toHaveLength(1);
+      const row = rows[0]!;
+      expect(row.action).toBe("cigar.set_facts");
+      expect(row.targetName).toBe("Rows Target");
+      expect(row.confidence).toBeCloseTo(0.75, 5);
+      expect(row.summary).toContain("brand: Before → After");
+      expect(row.reversible).toBe(true);
+      expect(row.reverted).toBe(false);
+    });
+
+    // The id of a run's audit row for a given action (a run may have several rows).
+    async function agentAudit(runId: string, action: string): Promise<string> {
+      const rows = await h.deps.db.select().from(auditLog).where(eq(auditLog.runId, runId));
+      return rows.find((r) => r.action === action)!.id;
+    }
+
+    it("undo of an exclude restores the cigar and links reverts", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Undo Exclude" });
+      await excludeCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        attribution: { actor: "agent", runId, confidence: 1 },
+      });
+      const auditId = await agentAudit(runId, "cigar.exclude");
+
+      const result = await undoCurationAction(h.deps, admin, { clientRequestId: newRequestId(), auditId });
+      expect(result.action).toBe("cigar.exclude");
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.catalogStatus).toBe("active");
+      const [undo] = await h.deps.db.select().from(auditLog).where(eq(auditLog.id, result.undoAuditId));
+      expect(undo!.action).toBe("cigar.restore");
+      expect(undo!.reverts).toBe(auditId);
+      expect(undo!.actor).toBe("web");
+
+      // The row now shows reverted (state, not a button) and refuses a second undo.
+      const { rows } = await agentRunRows(h.deps, admin, { runId });
+      expect(rows[0]!.reverted).toBe(true);
+      expect(rows[0]!.reversible).toBe(false);
+      const again = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId,
+      }).catch((e: unknown) => e);
+      expect(again).toBeInstanceOf(ValidationError);
+    });
+
+    it("undo of a verify flips back to unverified", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Undo Verify", verification: "unverified" });
+      await verifyCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        attribution: { actor: "agent", runId, confidence: 1 },
+      });
+      const auditId = await agentAudit(runId, "cigar.verify");
+      const result = await undoCurationAction(h.deps, admin, { clientRequestId: newRequestId(), auditId });
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.verification).toBe("unverified");
+      const [undo] = await h.deps.db.select().from(auditLog).where(eq(auditLog.id, result.undoAuditId));
+      expect(undo!.action).toBe("cigar.unverify");
+      expect(undo!.reverts).toBe(auditId);
+    });
+
+    it("undo of a listing_match verdict restores the prior status and cigar link", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Undo Match" });
+      const [m] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `undo-${newRequestId()}`, cigarId, status: "auto" })
+        .returning({ id: listingMatches.id });
+      await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId: m!.id,
+        status: "unmatched",
+        attribution: { actor: "agent", runId, confidence: 1 },
+      });
+      const auditId = await agentAudit(runId, "listing_match.set_status");
+      await undoCurationAction(h.deps, admin, { clientRequestId: newRequestId(), auditId });
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, m!.id));
+      expect(row!.status).toBe("auto");
+      expect(row!.cigarId).toBe(cigarId);
+    });
+
+    it("undo of a photo-rights change restores the prior rights", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Undo Rights" });
+      await addProductPhoto(cigarId, `pr-${newRequestId().slice(0, 6)}`);
+      await setProductPhotoRights(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        rights: "suppressed",
+        attribution: { actor: "agent", runId, confidence: 1 },
+      });
+      const auditId = await agentAudit(runId, "product_photo.set_rights");
+      await undoCurationAction(h.deps, admin, { clientRequestId: newRequestId(), auditId });
+      const [photo] = await h.deps.db.select().from(productPhotos).where(eq(productPhotos.cigarId, cigarId));
+      expect(photo!.rights).toBe("pending");
+    });
+
+    it("undo of set_facts writes the before-values back", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Undo Facts", brand: "Original", type: null });
+      await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "Changed", type: "CC" },
+        attribution: { actor: "agent", runId, confidence: 1 },
+      });
+      const auditId = await agentAudit(runId, "cigar.set_facts");
+      await undoCurationAction(h.deps, admin, { clientRequestId: newRequestId(), auditId });
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.brand).toBe("Original");
+      expect(row!.type).toBeNull();
+    });
+
+    it("refuses to undo a non-reversible action (merge)", async () => {
+      const source = await h.seedCigar({ canonicalName: `Merge Undo Src ${newRequestId().slice(0, 6)}` });
+      const target = await h.seedCigar({ canonicalName: `Merge Undo Tgt ${newRequestId().slice(0, 6)}` });
+      await mergeCigars(h.deps, admin, { clientRequestId: newRequestId(), sourceCigarId: source, targetCigarId: target });
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
+      const mergeAudit = audits.find((a) => (a.after as { tombstonedSourceId?: string }).tombstonedSourceId === source)!;
+      const error = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: mergeAudit.id,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+    });
+
+    it("rejects a non-admin principal", async () => {
+      const error = await undoCurationAction(h.deps, user, {
+        clientRequestId: newRequestId(),
+        auditId: "00000000-0000-0000-0000-000000000000",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
     });
   });
 });

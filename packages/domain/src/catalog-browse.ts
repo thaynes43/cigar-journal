@@ -338,6 +338,7 @@ interface BrandRow {
   line_count: number;
   types: string[] | null;
   cover_cigar_id: string | null;
+  cover_photo_id: string | null;
 }
 
 // The library root: every distinct brand (whitespace-trimmed, empty → null) with
@@ -374,7 +375,9 @@ export async function browseBrands(
       count(DISTINCT nullif(btrim(c.line), ''))::int AS line_count,
       array_agg(DISTINCT c.type) FILTER (WHERE c.type IS NOT NULL) AS types,
       (array_agg(c.id ORDER BY c.canonical_name ASC, c.id ASC)
-        FILTER (WHERE pp.id IS NOT NULL))[1] AS cover_cigar_id
+        FILTER (WHERE pp.id IS NOT NULL))[1] AS cover_cigar_id,
+      (array_agg(pp.id::text ORDER BY c.canonical_name ASC, c.id ASC)
+        FILTER (WHERE pp.id IS NOT NULL))[1] AS cover_photo_id
     FROM cigars c
     LEFT JOIN product_photos pp ON pp.cigar_id = c.id AND pp.rights <> 'suppressed'
     ${joins}
@@ -390,6 +393,7 @@ export async function browseBrands(
     lineCount: Number(row.line_count),
     types: [...((row.types ?? []) as CigarType[])].sort(),
     coverCigarId: row.cover_cigar_id ?? null,
+    coverProductPhotoId: row.cover_photo_id ?? null,
   }));
 
   return { brands };
@@ -408,6 +412,8 @@ interface CatalogTileRow {
   user_smoke_count: number | string;
   user_rating: number | string | null;
   has_product_photo: boolean | null;
+  // The servable photo's id (null when none) — fingerprints the tile thumb (#127).
+  product_photo_id: string | null;
   wanted: boolean | null;
   favorited: boolean | null;
   // The caller's derived stock (acquired − consumed, floored), for the tile's
@@ -461,6 +467,7 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
     userRating: row.user_rating != null ? Number(row.user_rating) : null,
     remaining: row.remaining != null ? Number(row.remaining) : 0,
     hasProductPhoto: row.has_product_photo === true,
+    productPhotoId: row.product_photo_id ?? null,
     wanted: row.wanted === true,
     favorited: row.favorited === true,
     price: toTilePrice(row),
@@ -489,6 +496,7 @@ function tileSelect(principal: Principal): SQL {
       round(avg(s.rating))::int AS user_rating,
       ${REMAINING_AGG}::int AS remaining,
       bool_or(pp.id IS NOT NULL) AS has_product_photo,
+      max(pp.id::text) AS product_photo_id,
       bool_or(w.id IS NOT NULL) AS wanted,
       bool_or(f.id IS NOT NULL) AS favorited,
       max(co.best_pps_cents)::int AS best_pps_cents,
@@ -552,15 +560,25 @@ export async function getBrand(
   // one; deriving from the fetched rows adds no query.
   const lines: LineGroup[] = [...byLine.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([line, cigars]) => ({
-      line,
-      cigars,
-      coverCigarId: cigars.find((c) => c.hasProductPhoto)?.cigarId ?? null,
-    }));
+    .map(([line, cigars]) => {
+      const cover = cigars.find((c) => c.hasProductPhoto) ?? null;
+      return {
+        line,
+        cigars,
+        coverCigarId: cover?.cigarId ?? null,
+        coverProductPhotoId: cover?.productPhotoId ?? null,
+      };
+    });
 
-  const coverCigarId = tiles.find((tile) => tile.hasProductPhoto)?.cigarId ?? null;
+  const brandCover = tiles.find((tile) => tile.hasProductPhoto) ?? null;
 
-  return { brand, coverCigarId, lines, loose };
+  return {
+    brand,
+    coverCigarId: brandCover?.cigarId ?? null,
+    coverProductPhotoId: brandCover?.productPhotoId ?? null,
+    lines,
+    loose,
+  };
 }
 
 // The All-cigars browse: q/brand/type/ownership filtered (the web's exclusive
