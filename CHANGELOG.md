@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/thaynes43/cigar-journal/compare/v0.19.0...v0.20.0) (2026-08-29)
+
+
+### Features
+
+* favorites — the second cigar-level mark ([#108](https://github.com/thaynes43/cigar-journal/issues/108)) ([#111](https://github.com/thaynes43/cigar-journal/issues/111)) ([cf61e2b](https://github.com/thaynes43/cigar-journal/commit/cf61e2b78f43eaeb9254aa350423912ba78a3137))
+
 ## [0.19.0](https://github.com/thaynes43/cigar-journal/compare/v0.18.0...v0.19.0) (2026-08-29)
 
 
