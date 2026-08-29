@@ -10,6 +10,9 @@ import {
   queryMySmokes,
   searchCigars,
   getCigar,
+  browseCatalog,
+  getCigarOffers,
+  getCigarOfferHistory,
   getMyInventory,
   setWant,
   setFavorite,
@@ -44,6 +47,10 @@ import type { McpAuthExtra } from "./auth.js";
 import {
   searchCigarsSchema,
   getCigarSchema,
+  browseCatalogSchema,
+  browseCatalogOutput,
+  getOffersSchema,
+  getOffersOutput,
   getMySmokesSchema,
   getSmokeSchema,
   saveSmokeSchema,
@@ -82,7 +89,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl, uploadUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The twelve-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The seventeen-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -402,6 +409,86 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
               }
             : base,
         );
+      }),
+  );
+
+  server.registerTool(
+    "browse_catalog",
+    {
+      title: "Browse catalog",
+      description:
+        "Page the cigar catalog with composable filters and sorts — the tool for browsing, filtering, and shopping questions (use search_cigars instead to resolve one named cigar). Filters combine in one call: q (name/brand/line text), brand (one brand exactly), type (NC|CC), and independent booleans inHumidor / wanted / smoked / inStock (each true or false, all AND together). Sort by name, my-rating, recently-added, or price (cheapest current per-stick first; unpriced cigars last). Returns tiles with a catalog-scoped price-at-a-glance (per-stick with its packaging, or the package price) plus, under journal:read, the personal overlay (smokeCount, myRating, remaining, wanted, favorited); without journal:read the personal filters and overlay are omitted. Page with the returned nextCursor.",
+      inputSchema: browseCatalogSchema,
+      outputSchema: browseCatalogOutput,
+      annotations: { readOnlyHint: true, title: "Browse catalog" },
+    },
+    (args, extra) =>
+      run("browse_catalog", extra.authInfo, async ({ principal, scopes }) => {
+        const personal = scopes.includes(PERSONAL_SCOPE);
+        // Personal overlay AND the personal filters are journal:read-bounded:
+        // without it, inHumidor/wanted/smoked are dropped (the result set never
+        // leaks the user's own state) and the overlay fields are omitted from each
+        // tile. Catalog + market data (q/brand/type/inStock/price sort and
+        // price-at-a-glance) always apply — the same scope-bounding idiom as
+        // search_cigars/get_cigar, extended to the filters that read personal state.
+        const result = await browseCatalog(deps, principal, {
+          q: args.q,
+          brand: args.brand,
+          type: args.type,
+          sort: args.sort,
+          inStock: args.inStock,
+          ...(personal
+            ? { inHumidor: args.inHumidor, wanted: args.wanted, smoked: args.smoked }
+            : {}),
+          cursor: args.cursor,
+          limit: args.limit,
+        });
+        const cigars = result.cigars.map((t) => ({
+          cigarId: t.cigarId,
+          canonicalName: t.canonicalName,
+          brand: t.brand,
+          line: t.line,
+          vitola: t.vitola,
+          type: t.type,
+          verification: t.verification,
+          // Price-at-a-glance is catalog/market data — always included (ADR-009);
+          // a per-stick figure always carries its packaging (shape-enforced).
+          price: t.price,
+          // Personal overlay: present only with journal:read. hasProductPhoto is
+          // a web-only tile field and stays excluded to keep the payload stable.
+          ...(personal
+            ? {
+                smokeCount: t.userSmokeCount,
+                myRating: t.userRating,
+                remaining: t.remaining,
+                wanted: t.wanted,
+                favorited: t.favorited,
+              }
+            : {}),
+        }));
+        return jsonResult({ cigars, nextCursor: result.nextCursor, totalCount: result.totalCount });
+      }),
+  );
+
+  server.registerTool(
+    "get_offers",
+    {
+      title: "Get offers",
+      description:
+        "Current market offers for one cigar plus a compact price history — use when the user asks about price or where to buy. Each offer carries the vendor (with isRegistryVendor), price and currency, per-stick figure with its packaging, stock, when it was seen, and a listing link. The history block gives first/last seen, the min/max per-stick observed, and the total observation count. Kept separate from get_cigar to protect that tool's token budget; returns empty offers and a zeroed history when nothing is recorded.",
+      inputSchema: getOffersSchema,
+      outputSchema: getOffersOutput,
+      annotations: { readOnlyHint: true, title: "Get offers" },
+    },
+    (args, extra) =>
+      run("get_offers", extra.authInfo, async () => {
+        // Catalog/market-scoped (offers are the same for every viewer), so no
+        // personal bounding. Both reads run over the same observation set.
+        const [offers, history] = await Promise.all([
+          getCigarOffers(deps, { cigarId: args.cigarId }),
+          getCigarOfferHistory(deps, { cigarId: args.cigarId }),
+        ]);
+        return jsonResult({ offers, history });
       }),
   );
 

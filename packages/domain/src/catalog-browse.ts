@@ -5,6 +5,7 @@ import type {
   BrowseBrandsArgs,
   BrowseBrandsResult,
   CatalogCigarTile,
+  CatalogTilePrice,
   CigarType,
   GetBrandResult,
   LineGroup,
@@ -28,10 +29,9 @@ const MAX_BROWSE_LIMIT = 96;
 // The All-view sorts this level answers, a typed const tuple so callers can
 // derive a zod enum rather than scattering the literals — a level declares what
 // it sorts by. Stays in step with the CatalogSort union in types.ts. `price`
-// deliberately WAITS for ADR-009's per-stick offer column (do not fake it from
-// raw offer price); adding it here is the only change the price-surfaces issue
-// makes to this registry.
-export const CATALOG_SORTS = ["name", "my-rating", "recently-added"] as const satisfies readonly CatalogSort[];
+// keys off ADR-009's stored per-stick offer column (`price_per_stick_cents`),
+// unpriced cigars grouped last (see sortSpec / OFFER_JOIN).
+export const CATALOG_SORTS = ["name", "my-rating", "recently-added", "price"] as const satisfies readonly CatalogSort[];
 
 // A URL/data-model-stable brand key: lowercase, every run of non-alphanumerics
 // collapsed to one hyphen, ends trimmed. Deterministic, so the same brand slugs
@@ -123,6 +123,81 @@ function ownershipJoins(principal: Principal): SQL {
 // never touched reads remaining 0 (a "don't have").
 const REMAINING = sql`(coalesce(pur.acquired, 0) - coalesce(con.consumed, 0))`;
 
+// The same scalar in an AGGREGATE form, for SELECTing `remaining` on a grouped
+// tile query (the page groups by c.id, so the 1:1 ownership-join columns must be
+// wrapped in an aggregate). max() over the per-cigar value returns that value;
+// floored at zero to match inventory's displayed remaining (ADR-008).
+const REMAINING_AGG = sql`greatest(coalesce(max(pur.acquired), 0) - coalesce(max(con.consumed), 0), 0)`;
+
+// The per-cigar best-offer aggregate (PRD-003 R-PRICE-2 / R-UNI-3, ADR-009),
+// catalog/market-scoped so it takes no principal. One pre-aggregated row per
+// cigar — folded into a tile read as a 1:1 LEFT JOIN, so it never fans out the
+// GROUP BY and the unfiltered/unpriced browse pays nothing (co is null). It
+// mirrors reads.ts `latestSeries`/`getCigarPricing`: the current observation per
+// (source, packaging) series (the two offer paths unioned — crawler rows through
+// their auto|confirmed listing match, ad-hoc/chat rows direct via cigar_id), then
+// the single best row per cigar — in-stock preferred, cheapest per-stick where
+// derivable (ties toward singles), else the lowest package price. `best_pps_cents`
+// is the price sort key and the per-stick display figure (null → the tile shows
+// the package price); `has_in_stock` backs the inStock filter.
+const OFFER_JOIN = sql`
+  LEFT JOIN (
+    WITH obs AS (
+      SELECT lm.cigar_id AS cigar_id, v.name AS source,
+             o.in_stock, o.price, o.currency, o.seen_at, o.created_at, o.id,
+             o.packaging, o.sticks_per_package, o.price_per_stick_cents
+      FROM offers o
+      JOIN listing_matches lm ON lm.id = o.listing_match_id
+      JOIN vendors v ON v.id = o.vendor_id
+      WHERE lm.status IN ('auto', 'confirmed')
+      UNION ALL
+      SELECT o.cigar_id AS cigar_id, COALESCE(v.name, o.source_name) AS source,
+             o.in_stock, o.price, o.currency, o.seen_at, o.created_at, o.id,
+             o.packaging, o.sticks_per_package, o.price_per_stick_cents
+      FROM offers o
+      LEFT JOIN vendors v ON v.id = o.vendor_id
+      WHERE o.listing_match_id IS NULL AND o.cigar_id IS NOT NULL
+    ),
+    latest AS (
+      SELECT DISTINCT ON (cigar_id, source, packaging) *
+      FROM obs
+      ORDER BY cigar_id, source, packaging, seen_at DESC, created_at DESC, id DESC
+    ),
+    best AS (
+      SELECT DISTINCT ON (cigar_id)
+        cigar_id, price_per_stick_cents, price, currency, packaging,
+        sticks_per_package, seen_at
+      FROM latest
+      ORDER BY cigar_id,
+        (in_stock IS FALSE) ASC,
+        (price_per_stick_cents IS NULL) ASC,
+        price_per_stick_cents ASC NULLS LAST,
+        price ASC NULLS LAST,
+        sticks_per_package ASC NULLS LAST,
+        seen_at DESC, id DESC
+    )
+    SELECT b.cigar_id,
+      b.price_per_stick_cents AS best_pps_cents,
+      b.price AS best_price,
+      b.currency AS best_currency,
+      b.packaging AS best_packaging,
+      b.sticks_per_package AS best_sticks,
+      b.seen_at::text AS best_seen_at,
+      bool_or(l.in_stock IS NOT FALSE) AS has_in_stock
+    FROM best b
+    JOIN latest l ON l.cigar_id = b.cigar_id
+    GROUP BY b.cigar_id, b.price_per_stick_cents, b.price, b.currency,
+             b.packaging, b.sticks_per_package, b.seen_at
+  ) co ON co.cigar_id = c.id
+`;
+
+// The price-sort keyset encodes an unpriced (null per-stick) tail row with this
+// sentinel key, since the sort orders `best_pps_cents ASC NULLS LAST`: a numeric
+// key pages within the priced rows (and then into the null tail), this sentinel
+// walks the null tail alone. Not a valid number, so it never collides with a
+// real cents key.
+const NULL_PRICE_KEY = "~";
+
 // The exclusive facet condition (DESIGN-002 §IA): `have` = remaining > 0, `want`
 // = the mark exists, `dont` = no active holding. `all`/undefined applies none.
 // References only the ownershipJoins columns, so it belongs in WHERE (pre-group).
@@ -137,6 +212,44 @@ function ownershipCondition(own: OwnershipFacet | undefined): SQL | null {
     default:
       return null; // "all" or undefined — no filter
   }
+}
+
+// The MCP surface's independent, composable overlay filters (DESIGN-002, PRD-003
+// R-MCP-1). Each is tri-state — undefined skips, true requires the property,
+// false requires its absence — and they AND together (and with the web's `own`
+// facet), unlike that one exclusive control. `inHumidor`/`wanted` reference the
+// pre-aggregated ownershipJoins columns; `inStock` the OFFER_JOIN's has_in_stock;
+// `smoked` a principal-scoped EXISTS. All pre-group, so they belong in WHERE, and
+// none leak another user's state. Callers must ensure the referenced joins are
+// present (tileSelect always carries them; the count query adds them per filter).
+function overlayFilters(principal: Principal, args: BrowseCatalogArgs): SQL[] {
+  const conds: SQL[] = [];
+  if (args.inHumidor === true) conds.push(sql`${REMAINING} > 0`);
+  if (args.inHumidor === false) conds.push(sql`${REMAINING} <= 0`);
+  if (args.wanted === true) conds.push(sql`w.id IS NOT NULL`);
+  if (args.wanted === false) conds.push(sql`w.id IS NULL`);
+  if (args.smoked === true)
+    conds.push(
+      sql`EXISTS (SELECT 1 FROM smokes sx WHERE sx.cigar_id = c.id AND sx.user_id = ${principal.userId})`,
+    );
+  if (args.smoked === false)
+    conds.push(
+      sql`NOT EXISTS (SELECT 1 FROM smokes sx WHERE sx.cigar_id = c.id AND sx.user_id = ${principal.userId})`,
+    );
+  if (args.inStock === true) conds.push(sql`co.has_in_stock IS TRUE`);
+  if (args.inStock === false) conds.push(sql`co.has_in_stock IS NOT TRUE`);
+  return conds;
+}
+
+// Which joins the COUNT query needs for the active filters (the page query's
+// tileSelect always carries all of them). `own`/inHumidor/wanted need the
+// ownershipJoins; inStock needs the OFFER_JOIN; brand/type/q/smoked need neither
+// (plain columns or a self-contained EXISTS).
+function countJoinsFor(principal: Principal, args: BrowseCatalogArgs, facet: SQL | null): SQL {
+  const needsOwnership =
+    facet != null || args.inHumidor !== undefined || args.wanted !== undefined;
+  const needsOffers = args.inStock !== undefined;
+  return sql`${needsOwnership ? ownershipJoins(principal) : sql``}${needsOffers ? OFFER_JOIN : sql``}`;
 }
 
 // The caller's rounded average rating as a NON-NULL sort key: unrated cigars
@@ -169,6 +282,23 @@ function sortSpec(sort: CatalogSort): SortSpec {
         where: null,
         having: (cur) =>
           sql`(${RATING_KEY} < ${Number(cur.key)} OR (${RATING_KEY} = ${Number(cur.key)} AND c.id > ${cur.id}::uuid))`,
+      };
+    case "price":
+      // best current per-stick offer ASC (cheapest first), NULLS LAST so unpriced
+      // cigars group after priced ones (R-UNI-3), id ASC to break ties. The key is
+      // a per-cigar column of the OFFER_JOIN, available pre-group, so the cursor
+      // continues the page in WHERE (not HAVING); the null tail is walked via the
+      // NULL_PRICE_KEY sentinel. ORDER BY reads the aggregated max() form (the page
+      // groups by c.id), which equals the 1:1 join's value.
+      return {
+        orderBy: sql`max(co.best_pps_cents) ASC NULLS LAST, c.id ASC`,
+        cursorKey: (row) =>
+          row.best_pps_cents != null ? String(Number(row.best_pps_cents)) : NULL_PRICE_KEY,
+        where: (cur) =>
+          cur.key === NULL_PRICE_KEY
+            ? sql`(co.best_pps_cents IS NULL AND c.id > ${cur.id}::uuid)`
+            : sql`(co.best_pps_cents > ${Number(cur.key)} OR (co.best_pps_cents = ${Number(cur.key)} AND c.id > ${cur.id}::uuid) OR co.best_pps_cents IS NULL)`,
+        having: null,
       };
     case "recently-added":
       // created_at DESC (newest first), id DESC to break ties — a plain-column
@@ -267,9 +397,38 @@ interface CatalogTileRow {
   has_product_photo: boolean | null;
   wanted: boolean | null;
   favorited: boolean | null;
+  // The caller's derived stock (acquired − consumed, floored), for the tile's
+  // "in humidor" overlay (ADR-008).
+  remaining: number | string | null;
+  // Price-at-a-glance columns from OFFER_JOIN (the single best current offer).
+  // `best_pps_cents` is also the `price` sort key. All null when no offer exists.
+  best_pps_cents: number | string | null;
+  best_price: number | string | null;
+  best_currency: string | null;
+  best_packaging: string | null;
+  best_sticks: number | string | null;
+  best_seen_at: string | null;
   // Ordering-only column for the "recently added" keyset cursor; not surfaced on
   // the public tile (CatalogCigarTile stays personal-overlay-only).
   created_at: string | Date;
+}
+
+// The tile's price-at-a-glance from the best-offer columns (ADR-009). A per-stick
+// figure when one is derivable (`best_pps_cents` set), else the package price;
+// either way carrying its packaging, so a bare per-stick figure never travels.
+// Null when the cigar has no offer (co is null → best_seen_at null).
+function toTilePrice(row: CatalogTileRow): CatalogTilePrice | null {
+  if (row.best_seen_at == null) return null;
+  const seenAt = new Date(row.best_seen_at).toISOString();
+  const sticksPerPackage = row.best_sticks != null ? Number(row.best_sticks) : null;
+  const pps = row.best_pps_cents != null ? Number(row.best_pps_cents) : null;
+  if (pps != null) {
+    return { perStick: true, amount: pps / 100, packaging: row.best_packaging, sticksPerPackage, currency: row.best_currency, seenAt };
+  }
+  if (row.best_price != null) {
+    return { perStick: false, amount: Number(row.best_price), packaging: row.best_packaging, sticksPerPackage, currency: row.best_currency, seenAt };
+  }
+  return null;
 }
 
 function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
@@ -287,9 +446,11 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
     verification: row.verification,
     userSmokeCount: Number(row.user_smoke_count),
     userRating: row.user_rating != null ? Number(row.user_rating) : null,
+    remaining: row.remaining != null ? Number(row.remaining) : 0,
     hasProductPhoto: row.has_product_photo === true,
     wanted: row.wanted === true,
     favorited: row.favorited === true,
+    price: toTilePrice(row),
   };
 }
 
@@ -310,14 +471,22 @@ function tileSelect(principal: Principal): SQL {
       c.ring_gauge, c.type, c.verification, c.created_at::text AS created_at,
       count(s.id)::int AS user_smoke_count,
       round(avg(s.rating))::int AS user_rating,
+      ${REMAINING_AGG}::int AS remaining,
       bool_or(pp.id IS NOT NULL) AS has_product_photo,
       bool_or(w.id IS NOT NULL) AS wanted,
-      bool_or(f.id IS NOT NULL) AS favorited
+      bool_or(f.id IS NOT NULL) AS favorited,
+      max(co.best_pps_cents)::int AS best_pps_cents,
+      max(co.best_price) AS best_price,
+      max(co.best_currency) AS best_currency,
+      max(co.best_packaging) AS best_packaging,
+      max(co.best_sticks)::int AS best_sticks,
+      max(co.best_seen_at) AS best_seen_at
     FROM cigars c
     LEFT JOIN smokes s ON s.cigar_id = c.id AND s.user_id = ${principal.userId}
     LEFT JOIN product_photos pp ON pp.cigar_id = c.id
     ${ownershipJoins(principal)}
     LEFT JOIN favorites f ON f.cigar_id = c.id AND f.user_id = ${principal.userId}
+    ${OFFER_JOIN}
   `;
 }
 
@@ -376,11 +545,12 @@ export async function getBrand(
   return { brand, coverCigarId, lines, loose };
 }
 
-// The All-cigars browse: q/type/ownership filtered, sorted (name | my-rating |
-// recently-added), keyset-paginated per sort so pages never dup or gap. Fetches
-// one extra row to decide whether a next cursor exists. The ownership facet and
-// the cursor thread through WHERE for plain-column sorts and HAVING for the
-// aggregate `my-rating` sort (see sortSpec).
+// The All-cigars browse: q/brand/type/ownership filtered (the web's exclusive
+// `own` facet or the MCP surface's independent inHumidor/wanted/smoked/inStock
+// booleans), sorted (name | my-rating | recently-added | price), keyset-paginated
+// per sort so pages never dup or gap. Fetches one extra row to decide whether a
+// next cursor exists. The filters and cursor thread through WHERE for plain-column
+// / per-cigar-join sorts and HAVING for the aggregate `my-rating` sort (sortSpec).
 export async function browseCatalog(
   deps: Deps,
   principal: Principal,
@@ -392,10 +562,11 @@ export async function browseCatalog(
   const spec = sortSpec(sort);
   const cursor = decodeCursor(args.cursor, sort);
 
-  // q/type filters plus the ownership facet, shared by the page and the count
-  // query (both must apply the same membership). The facet references the
-  // ownershipJoins columns, which tileSelect already carries; the count query
-  // adds those joins itself when a facet is active.
+  // q/brand/type filters, the exclusive ownership facet, and the independent
+  // overlay booleans — shared by the page and the count query (both must apply
+  // the same membership). The overlay conditions reference the ownershipJoins /
+  // OFFER_JOIN columns, which tileSelect always carries; the count query adds
+  // only the joins its active filters need (countJoinsFor).
   const facet = ownershipCondition(args.own);
   const filters: SQL[] = [];
   if (q) {
@@ -404,8 +575,10 @@ export async function browseCatalog(
       sql`(c.canonical_name ILIKE ${pattern} OR c.brand ILIKE ${pattern} OR c.line ILIKE ${pattern})`,
     );
   }
+  if (args.brand) filters.push(sql`lower(btrim(c.brand)) = lower(btrim(${args.brand}))`);
   if (args.type) filters.push(sql`c.type = ${args.type}`);
   if (facet) filters.push(facet);
+  filters.push(...overlayFilters(principal, args));
 
   // The page WHERE adds the plain-column cursor condition; an aggregate-sort
   // cursor goes to HAVING instead (referenced below).
@@ -433,10 +606,10 @@ export async function browseCatalog(
       ? encodeCursor({ sort, key: spec.cursorKey(lastRow), id: lastRow.id })
       : null;
 
-  // Total matching the filters (q/type/facet), ignoring the cursor. The facet
-  // needs the ownershipJoins here too, but only when it is active.
+  // Total matching the filters (q/brand/type/facet/overlay), ignoring the cursor.
+  // The count query carries only the joins its active filters reference.
   const filterWhere = filters.length > 0 ? sql`WHERE ${sql.join(filters, sql` AND `)}` : sql``;
-  const countJoins = facet ? ownershipJoins(principal) : sql``;
+  const countJoins = countJoinsFor(principal, args, facet);
   const totals = await deps.db.execute(sql`
     SELECT count(*)::int AS total FROM cigars c ${countJoins} ${filterWhere}
   `);

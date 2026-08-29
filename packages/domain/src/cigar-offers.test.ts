@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { vendors, listingMatches, offers, type ListingMatchRow } from "@cj/db";
 import { createHarness, type DomainHarness } from "./testing/harness.js";
-import { getCigarOffers } from "./reads.js";
+import { getCigarOffers, getCigarOfferHistory } from "./reads.js";
 
 describe("getCigarOffers", () => {
   let h: DomainHarness;
@@ -153,5 +153,49 @@ describe("getCigarOffers", () => {
     const cigarId = await h.seedCigar({ canonicalName: "Undocumented Lonsdale", brand: "Nobody" });
     const result = await getCigarOffers(h.deps, { cigarId });
     expect(result).toEqual([]);
+  });
+
+  it("getCigarOfferHistory reports span, per-stick range, and observation count", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "History Toro", brand: "Chronicle" });
+    const vendor = await addVendor("Chronicle Shop");
+    const match = await addMatch(vendor, cigarId, "chron-sku");
+    // Three observations over time, per-stick 1420 / 1890 / 1650 cents.
+    await addOffer(vendor, match, {
+      price: "142.00",
+      currency: "USD",
+      pricePerStickCents: 1420,
+      seenAt: new Date("2026-06-01T00:00:00Z"),
+    });
+    await addOffer(vendor, match, {
+      price: "189.00",
+      currency: "USD",
+      pricePerStickCents: 1890,
+      seenAt: new Date("2026-07-01T00:00:00Z"),
+    });
+    await addOffer(vendor, match, {
+      price: "165.00",
+      currency: "USD",
+      pricePerStickCents: 1650,
+      seenAt: new Date("2026-08-15T00:00:00Z"),
+    });
+
+    const history = await getCigarOfferHistory(h.deps, { cigarId });
+    expect(history.observationCount).toBe(3);
+    expect(history.firstSeenAt).toBe("2026-06-01T00:00:00.000Z");
+    expect(history.lastSeenAt).toBe("2026-08-15T00:00:00.000Z");
+    expect(history.minPricePerStick).toBe(14.2);
+    expect(history.maxPricePerStick).toBe(18.9);
+  });
+
+  it("getCigarOfferHistory is empty (nulls, zero count) for a cigar with no offers", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Blank Robusto", brand: "Nobody" });
+    const history = await getCigarOfferHistory(h.deps, { cigarId });
+    expect(history).toEqual({
+      firstSeenAt: null,
+      lastSeenAt: null,
+      minPricePerStick: null,
+      maxPricePerStick: null,
+      observationCount: 0,
+    });
   });
 });

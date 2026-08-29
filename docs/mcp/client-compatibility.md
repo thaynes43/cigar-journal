@@ -66,7 +66,10 @@ ask-once "From your humidor?" instruction added with explicit consumption; the
 thirteenth–fifteenth tools `request_cigar_enrichment` / `update_cigar` /
 `record_price`, their catalog-repair instruction paragraph, and the additive
 `get_cigar` `enrichment` + `pricing` blocks added with price observations +
-catalog repair, ADR-009) reach
+catalog repair, ADR-009; the sixteenth–seventeenth tools `browse_catalog` /
+`get_offers`, browse_catalog's personal-overlay + price-at-a-glance tiles, and the
+consolidated server instructions added with the unified-catalog MCP surface,
+PRD-003 R-MCP-1/-2) reach
 a client **only after the user refreshes the connector in ChatGPT settings, then
 starts a new chat** (schema cache is per-conversation — see below). The often-noted
 "`ersonal cigar journal…`" text is neither a truncation bug nor our string:

@@ -13,7 +13,7 @@ export { addCigar } from "./add-cigar.js";
 export { recordPurchase } from "./record-purchase.js";
 export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
-export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, getCigarPricing, getCigarPriceHistory, browseCigars } from "./reads.js";
+export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, getCigarOfferHistory, getCigarPricing, getCigarPriceHistory, browseCigars } from "./reads.js";
 
 // Catalog repair + price observations (ADR-009). request_cigar_enrichment repairs
 // an existing sparse cigar through the enrichment queue; update_cigar fills null

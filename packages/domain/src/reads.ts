@@ -32,6 +32,7 @@ import type {
   CigarOffer,
   CigarPricing,
   CigarPricePoint,
+  OfferHistory,
   PriceType,
 } from "./types.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
@@ -793,6 +794,49 @@ export async function getCigarOffers(
     pricePerStick: row.price_per_stick_cents != null ? row.price_per_stick_cents / 100 : null,
     priceType: row.price_type,
   }));
+}
+
+// The compact price history behind get_offers (PRD-003 R-MCP-2, ADR-009): span
+// and per-stick range over the cigar's whole observation series — the SAME two
+// offer paths getCigarPricing counts (crawler rows through their auto|confirmed
+// listing match; ad-hoc/chat rows direct via cigar_id), aggregated in one pass.
+// per-stick bounds cover only observations where a per-stick figure is stored;
+// null when the cigar has no such observation. Catalog-scoped — no principal.
+export async function getCigarOfferHistory(
+  deps: Deps,
+  args: { cigarId: string },
+): Promise<OfferHistory> {
+  const result = await deps.db.execute(sql`
+    WITH obs AS (
+      SELECT o.seen_at, o.price_per_stick_cents
+      FROM offers o
+      JOIN listing_matches lm ON lm.id = o.listing_match_id
+      WHERE lm.cigar_id = ${args.cigarId} AND lm.status IN ('auto', 'confirmed')
+      UNION ALL
+      SELECT o.seen_at, o.price_per_stick_cents FROM offers o
+      WHERE o.cigar_id = ${args.cigarId} AND o.listing_match_id IS NULL
+    )
+    SELECT count(*)::int AS n,
+           min(seen_at) AS first_seen, max(seen_at) AS last_seen,
+           min(price_per_stick_cents) AS min_pps, max(price_per_stick_cents) AS max_pps
+    FROM obs
+  `);
+  const row = (
+    result.rows as unknown as {
+      n: number;
+      first_seen: string | Date | null;
+      last_seen: string | Date | null;
+      min_pps: number | null;
+      max_pps: number | null;
+    }[]
+  )[0];
+  return {
+    firstSeenAt: row?.first_seen != null ? new Date(row.first_seen).toISOString() : null,
+    lastSeenAt: row?.last_seen != null ? new Date(row.last_seen).toISOString() : null,
+    minPricePerStick: row?.min_pps != null ? Number(row.min_pps) / 100 : null,
+    maxPricePerStick: row?.max_pps != null ? Number(row.max_pps) / 100 : null,
+    observationCount: Number(row?.n ?? 0),
+  };
 }
 
 // In-stock is "not explicitly out of stock" — an unknown (null) stock counts as
