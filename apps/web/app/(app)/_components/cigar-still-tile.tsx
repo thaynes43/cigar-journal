@@ -8,11 +8,12 @@ import { FavoriteBadge } from "./favorite-badge";
 
 // The "episode" still: a 16:9 tile for one cigar at its vitola. Below the art,
 // a one-line name, a `vitola · type` subtitle, and a badge row capped at three
-// (DESIGN-002): the want mark and the rating seal lead; the caller's smoke count
-// then dimensions fill the rest, dims yielding first. The favorite mark does NOT
-// enter that capped row — it rides the art corner as a heart (FavoriteBadge), so
-// it never evicts a dims/smoked/rating badge. Art is the BandTile fallback until
-// an ADR-007 ProductPhoto lands via `imageUrl`.
+// (DESIGN-002): the remaining count, the want mark, and the rating seal lead in
+// that priority; dimensions fill a free slot and yield first, and the smoked-count
+// folds into the detail page. The favorite mark does NOT enter that capped row —
+// it rides the art corner as a heart (FavoriteBadge), so it never evicts a
+// dims/remaining/rating badge. Art is the BandTile fallback until an ADR-007
+// ProductPhoto lands via `imageUrl`.
 export function CigarStillTile({
   cigar,
   imageUrl,
@@ -26,26 +27,32 @@ export function CigarStillTile({
       ? `${cigar.vitola.lengthInches}" × ${cigar.vitola.ringGauge}`
       : null;
 
-  // Cap three, by priority (DESIGN-002): want and the seal are always kept; the
-  // remaining slot(s) go to smoked-count, then dims. Visual order places the
-  // filler chips first, then want, then the seal (rightmost).
+  // Cap three, by priority (DESIGN-002 badge-row discipline): the remaining count,
+  // the want mark, and the rating seal lead in that order; dimensions are the sole
+  // filler and yield first, and the smoked-count folds into the detail page ("Your
+  // history") rather than riding a tile. The favorite mark rides the art corner
+  // (FavoriteBadge), never this row.
+  const remaining =
+    cigar.remaining > 0 ? (
+      <span key="remaining" className={`${ui.chip} tabular-nums`}>
+        ×{cigar.remaining}
+      </span>
+    ) : null;
   const want = cigar.wanted ? <WantBadge key="want" /> : null;
   const seal =
     cigar.userRating != null ? <RatingSeal key="seal" rating={cigar.userRating} size="sm" /> : null;
-  const filler = [
-    cigar.userSmokeCount > 0 ? (
-      <span key="smoked" className={ui.chip}>
-        smoked ×{cigar.userSmokeCount}
-      </span>
-    ) : null,
-    dims ? (
+  const dimsBadge =
+    dims != null ? (
       <span key="dims" className={`${ui.chipOutline} tabular-nums`}>
         {dims}
       </span>
-    ) : null,
-  ].filter((node) => node !== null);
-  const fillerSlots = Math.max(0, 3 - (want ? 1 : 0) - (seal ? 1 : 0));
-  const badges = [...filler.slice(0, fillerSlots), want, seal].filter((node) => node !== null);
+    ) : null;
+  // The three marks are never evicted; the dims chip only appears when a slot is
+  // free (dims yields first), and it sits at the left of the row.
+  const marks = [remaining, want, seal].filter((node) => node !== null);
+  const badges = (
+    marks.length < 3 && dimsBadge ? [remaining, dimsBadge, want, seal] : [remaining, want, seal]
+  ).filter((node) => node !== null);
 
   return (
     <Link href={`/cigars/${cigar.cigarId}`} className="group flex h-full flex-col gap-2">

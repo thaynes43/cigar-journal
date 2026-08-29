@@ -277,6 +277,8 @@ Implementers use these exactly or flag the gap; never invent alternates.
 | Upload page after success | `Added.` + `Open the smoke` |
 | Ledger columns | the current inventory-table columns plus `Consumed` and `Left` |
 | Ledger discrepancy cell | `N over` (danger tone; `title="Consumption exceeds recorded purchases"`) |
+| Detail humidor discrepancy line | `N over — consumption exceeds recorded purchases` (danger tone, links the Ledger; the panel line carries the explanation visibly — a title tooltip is unreachable on touch) |
+| Favorite toggle (unset/set) | `Favorite` (same label both states; ember-heart fill signals state — the second cigar-level mark, owner-approved 2026-08-28) |
 | Lot picker | label `Lot`; `—` is the unattributed option |
 | Type facet (Brands + All) | `Both` · `NC` · `CC` (owner-approved on Brands too) |
 

@@ -20,6 +20,7 @@ export function SmokePhotoStrip({
 }) {
   const [photos, setPhotos] = useState<SmokePhotoView[]>(initial);
   const [pending, setPending] = useState(false);
+  const [removingId, setRemovingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -54,12 +55,17 @@ export function SmokePhotoStrip({
 
   async function remove(photoId: string) {
     setError(null);
-    const res = await fetch(`/api/photos/${photoId}`, { method: "DELETE" });
-    if (!res.ok && res.status !== 204) {
-      setError("Could not remove the photo.");
-      return;
+    setRemovingId(photoId);
+    try {
+      const res = await fetch(`/api/photos/${photoId}`, { method: "DELETE" });
+      if (!res.ok && res.status !== 204) {
+        setError("Could not remove the photo.");
+        return;
+      }
+      setPhotos((prev) => prev.filter((p) => p.photoId !== photoId));
+    } finally {
+      setRemovingId(null);
     }
-    setPhotos((prev) => prev.filter((p) => p.photoId !== photoId));
   }
 
   return (
@@ -68,7 +74,8 @@ export function SmokePhotoStrip({
         {photos.map((photo) => (
           <div
             key={photo.photoId}
-            className="relative aspect-square overflow-hidden rounded-card border border-line"
+            aria-busy={removingId === photo.photoId}
+            className={`relative aspect-square overflow-hidden rounded-card border border-line transition-opacity ${removingId === photo.photoId ? "opacity-50" : ""}`}
           >
             <a
               href={`/api/photos/${photo.photoId}`}
@@ -87,7 +94,8 @@ export function SmokePhotoStrip({
                 type="button"
                 aria-label="Remove photo"
                 onClick={() => remove(photo.photoId)}
-                className="absolute top-1 right-1 flex size-6 items-center justify-center rounded-full border border-line bg-bg/80 text-sm leading-none text-muted transition-colors hover:text-danger"
+                disabled={removingId === photo.photoId}
+                className="absolute top-1 right-1 flex size-6 items-center justify-center rounded-full border border-line bg-bg/80 text-sm leading-none text-muted transition-colors hover:text-danger disabled:opacity-50"
               >
                 ×
               </button>
