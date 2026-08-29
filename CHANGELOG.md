@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/thaynes43/cigar-journal/compare/v0.17.0...v0.18.0) (2026-08-29)
+
+
+### Features
+
+* explicit consumption — a smoke deducts by link ([#88](https://github.com/thaynes43/cigar-journal/issues/88), ADR-008) ([#106](https://github.com/thaynes43/cigar-journal/issues/106)) ([04e3248](https://github.com/thaynes43/cigar-journal/commit/04e3248bc162c02d050d9ee4f4833203a5045bdd))
+* want v1 — the independent mark ([#105](https://github.com/thaynes43/cigar-journal/issues/105)) ([f6fc29f](https://github.com/thaynes43/cigar-journal/commit/f6fc29f5b4e5237505a6cec11b37ea451608a674))
+
+
+### Bug Fixes
+
+* **web:** wait states on photo tiles, exit after upload ([#102](https://github.com/thaynes43/cigar-journal/issues/102)) ([3548075](https://github.com/thaynes43/cigar-journal/commit/3548075ac36840a245a2fff39d1d8bfbf3f2b7c7))
+
 ## [0.17.0](https://github.com/thaynes43/cigar-journal/compare/v0.16.0...v0.17.0) (2026-08-28)
 
 
