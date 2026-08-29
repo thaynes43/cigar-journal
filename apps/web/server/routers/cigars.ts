@@ -1,5 +1,13 @@
 import { z } from "zod";
-import { searchCigars, getCigar, getCigarOffers, browseCigars, setWant, setFavorite } from "@cj/domain";
+import {
+  searchCigars,
+  getCigar,
+  getCigarOffers,
+  getCigarPriceHistory,
+  browseCigars,
+  setWant,
+  setFavorite,
+} from "@cj/domain";
 import { router, authedProcedure } from "../trpc";
 
 // Catalog reads plus the want mark. `search` and `get` are scoped to the caller
@@ -21,6 +29,12 @@ export const cigarsRouter = router({
   offers: authedProcedure
     .input(z.object({ cigarId: z.string() }))
     .query(({ ctx, input }) => getCigarOffers(ctx.deps, input)),
+
+  // The cigar's per-stick price observations over time — the detail page's
+  // price-history line (DESIGN-002 §Price). Catalog/market-only, like `offers`.
+  priceHistory: authedProcedure
+    .input(z.object({ cigarId: z.string() }))
+    .query(({ ctx, input }) => getCigarPriceHistory(ctx.deps, input)),
 
   // The single want mark (PRD-003 R-WANT). Idempotent set/clear; provenance is
   // stamped `manual` — the web is the manual writer, a client can't spoof it. No

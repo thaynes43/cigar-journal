@@ -16,10 +16,20 @@ interface Described {
 // Cigar resolution: search-as-you-type against the catalog; a picked match links
 // by id. No match (or the "Describe it" affordance) reveals inline described
 // fields — the domain creates an unverified catalog entry from them on save.
-export function CigarPicker({ onChange }: { onChange: (ref: CigarRef | null) => void }) {
+// `initial` pre-resolves the picker to a known cigar (the /smokes/new?cigarId=
+// deep link from the detail page's record action); it stays changeable.
+export function CigarPicker({
+  onChange,
+  initial,
+}: {
+  onChange: (ref: CigarRef | null) => void;
+  initial?: { cigarId: string; canonicalName: string } | null;
+}) {
   const [mode, setMode] = useState<"search" | "describe">("search");
   const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<{ cigarId: string; canonicalName: string } | null>(null);
+  const [selected, setSelected] = useState<{ cigarId: string; canonicalName: string } | null>(
+    initial ?? null,
+  );
   const [described, setDescribed] = useState<Described>({ canonicalName: "", brand: "", vitola: "", type: "" });
 
   const debouncedQuery = useDebounced(query, 250);

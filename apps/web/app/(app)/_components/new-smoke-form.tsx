@@ -12,9 +12,18 @@ import { ProgressionEditor, type ProgressionDraft } from "./progression-editor";
 import { ConsumptionControl, type ConsumptionDraft } from "./consumption-control";
 import { emptyDetails, buildSaveInput, type SmokeDetailsDraft } from "./smoke-draft";
 
-export function NewSmokeForm() {
+// `initialCigar` pre-resolves the picker from the /smokes/new?cigarId= deep link
+// (the detail page's record action). Resolving it here means the "From my humidor"
+// default engages by itself once the holding read returns — no extra param needed.
+export function NewSmokeForm({
+  initialCigar,
+}: {
+  initialCigar?: { cigarId: string; canonicalName: string } | null;
+}) {
   const router = useRouter();
-  const [cigar, setCigar] = useState<CigarRef | null>(null);
+  const [cigar, setCigar] = useState<CigarRef | null>(
+    initialCigar ? { cigarId: initialCigar.cigarId } : null,
+  );
   const [details, setDetails] = useState<SmokeDetailsDraft>(emptyDetails);
   const [progression, setProgression] = useState<ProgressionDraft[]>([]);
   // One request id per intent, so a retried submit is an idempotent replay.
@@ -76,6 +85,7 @@ export function NewSmokeForm() {
       <section className={`${ui.card} flex flex-col gap-3`}>
         <span className={ui.legend}>Cigar</span>
         <CigarPicker
+          initial={initialCigar}
           onChange={(ref) => {
             setCigar(ref);
             if (ref) setCigarMissing(false);

@@ -209,8 +209,10 @@ export async function getHoldingForCigar(
       purchaseId: purchases.id,
       purchasedAt: purchases.purchasedAt,
       boxDate: purchases.boxDate,
+      humidorAt: purchases.humidorAt,
       quantity: purchases.quantity,
       packaging: purchases.packaging,
+      pricePerStick: purchases.pricePerStick,
       vendorName: vendors.name,
     })
     .from(purchases)
@@ -222,8 +224,10 @@ export async function getHoldingForCigar(
       purchaseId: r.purchaseId,
       purchasedAt: r.purchasedAt,
       boxDate: r.boxDate,
+      humidorAt: r.humidorAt,
       quantity: r.quantity,
       packaging: r.packaging,
+      pricePerStick: r.pricePerStick != null ? Number(r.pricePerStick) : null,
       vendor: r.vendorName,
     }))
     // Newest purchase first, nulls last (ISO date strings sort lexically).
@@ -243,12 +247,17 @@ export async function getHoldingForCigar(
   `);
   const consumed = Number((consumedResult.rows[0] as { consumed: number }).consumed);
 
+  // Aging mirrors getMyInventory: earliest humidor date, else earliest box date.
+  const agingSince =
+    minDate(lots.map((l) => l.humidorAt)) ?? minDate(lots.map((l) => l.boxDate));
+
   return {
     cigarId,
     hasHolding: lots.length > 0,
     totalAcquired,
     remaining: Math.max(0, totalAcquired - consumed),
     overConsumed: Math.max(0, consumed - totalAcquired),
+    agingSince,
     lots,
   };
 }

@@ -12,6 +12,8 @@ import { StrengthMeter } from "../../_components/strength-meter";
 import { VitalsBlock } from "../../_components/vitals-block";
 import { WantToggle } from "../../_components/want-toggle";
 import { FavoriteToggle } from "../../_components/favorite-toggle";
+import { HoldingPanel } from "../../_components/holding-panel";
+import { PriceSpark } from "../../_components/price-spark";
 
 function vitola(cigar: CigarView): string | null {
   const dims =
@@ -62,9 +64,19 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
 
   const { cigar, personalProfile, hasProductPhoto, wanted, wantNote, favorited, favoriteNote } =
     data;
-  const { smokes } = await caller.smokes.list({ cigarId: id, limit: 50 });
-  const offers = await caller.cigars.offers({ cigarId: id });
+  const [{ smokes }, offers, priceHistory, holding] = await Promise.all([
+    caller.smokes.list({ cigarId: id, limit: 50 }),
+    caller.cigars.offers({ cigarId: id }),
+    caller.cigars.priceHistory({ cigarId: id }),
+    caller.inventory.forCigar({ cigarId: id }),
+  ]);
   const blend = cigar.tobacco ? blendLines(cigar.tobacco) : [];
+
+  // Offer staleness (DESIGN-002 §Price, 30d window): the row and its date stay,
+  // but the whole row drops to muted. Price history gate: a spark past ≥3
+  // observations over ≥2 distinct days, else a first/last-seen text line.
+  const now = Date.now();
+  const historyDays = new Set(priceHistory.map((p) => p.seenAt.slice(0, 10)));
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-8">
@@ -97,6 +109,9 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
             <div className="flex flex-wrap items-center gap-2">
               <WantToggle cigarId={cigar.cigarId} initialWanted={wanted} />
               <FavoriteToggle cigarId={cigar.cigarId} initialFavorited={favorited} />
+              <Link href={`/smokes/new?cigarId=${cigar.cigarId}`} className={ui.primary}>
+                Record a smoke
+              </Link>
             </div>
             {wantNote ? (
               <p className="font-serif text-sm leading-relaxed text-muted">{wantNote}</p>
@@ -155,14 +170,21 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
                     ? formatPrice(offer.price, offer.currency)
                     : "—";
               const priced = offer.pricePerStick != null || offer.price != null;
+              // Stale rows (seen > 30 days ago) keep their date but the whole row
+              // drops to muted (DESIGN-002 §Price staleness rule).
+              const stale = now - new Date(offer.seenAt).getTime() > 30 * 24 * 60 * 60 * 1000;
               const inner = (
                 <>
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="truncate text-sm text-ink">{offer.vendor}</span>
+                    <span className={`truncate text-sm ${stale ? "text-muted" : "text-ink"}`}>
+                      {offer.vendor}
+                    </span>
                     <span className="label-caps text-muted">{meta}</span>
                   </div>
                   <span className="flex flex-col items-end gap-0.5">
-                    <span className={`text-sm tabular-nums ${priced ? "text-ink" : "text-muted"}`}>
+                    <span
+                      className={`text-sm tabular-nums ${priced && !stale ? "text-ink" : "text-muted"}`}
+                    >
                       {amount}
                     </span>
                     {pack ? <span className="label-caps text-muted">{pack}</span> : null}
@@ -189,8 +211,18 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
               );
             })}
           </ul>
+          {priceHistory.length >= 3 && historyDays.size >= 2 ? (
+            <PriceSpark points={priceHistory} />
+          ) : priceHistory.length >= 2 ? (
+            <p className="label-caps text-muted">
+              first seen {formatSeenAt(priceHistory[0]!.seenAt)} · last seen{" "}
+              {formatSeenAt(priceHistory[priceHistory.length - 1]!.seenAt)}
+            </p>
+          ) : null}
         </section>
       ) : null}
+
+      {holding.hasHolding ? <HoldingPanel holding={holding} /> : null}
 
       {personalProfile ? (
         <section className="flex flex-col gap-4 rounded-card border border-accent/30 bg-surface p-5">
@@ -232,7 +264,10 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
                     className="flex items-center gap-4 rounded-card border border-line bg-surface p-4 transition-colors hover:border-accent/60"
                   >
                     <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                      <span className="label-caps">{when ?? "—"}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="label-caps">{when ?? "—"}</span>
+                        {smoke.fromHumidor ? <span className={ui.chipOutline}>humidor</span> : null}
+                      </div>
                       <Chips items={smoke.descriptors.slice(0, 4)} />
                     </div>
                     <RatingSeal rating={smoke.rating} liked={smoke.liked} size="sm" />

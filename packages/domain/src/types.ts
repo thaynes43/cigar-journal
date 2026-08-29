@@ -608,6 +608,16 @@ export interface CigarOffer {
   priceType: PriceType;
 }
 
+// One day-grained per-stick price observation for the cigar's history line
+// (DESIGN-002 §Price price-history). Only observations with a DERIVABLE per-stick
+// appear: the trend's y-axis is per-stick, so a point without one has no honest
+// place on it — never a fake axis. Ordered oldest-first. Catalog-scoped, like
+// the offers snapshot (market data is the same for every viewer).
+export interface CigarPricePoint {
+  seenAt: string; // ISO-8601 instant of the observation
+  pricePerStick: number; // dollars
+}
+
 // A catalog-only cigar summary for browse listings — no per-caller personal
 // fields (browseCigars stays catalog-scoped by design).
 export interface CatalogCigar {
@@ -769,8 +779,10 @@ export interface CigarHoldingLot {
   purchaseId: string;
   purchasedAt: string | null;
   boxDate: string | null;
+  humidorAt: string | null;
   quantity: number | null;
   packaging: string | null;
+  pricePerStick: number | null; // what-I-paid (PPS), the humidor panel's lots ledger
   vendor: string | null;
 }
 
@@ -780,6 +792,7 @@ export interface CigarHolding {
   totalAcquired: number;
   remaining: number; // floored at zero
   overConsumed: number;
+  agingSince: string | null; // earliest humidor_at, else earliest box_date (ISO date)
   lots: CigarHoldingLot[]; // newest purchase first
 }
 
