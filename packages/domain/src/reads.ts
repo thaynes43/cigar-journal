@@ -30,10 +30,13 @@ import type {
   BrowseCigarsResult,
   CatalogCigar,
   CigarOffer,
+  CigarPricing,
+  PriceType,
 } from "./types.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
 import { normalizeDescriptor } from "./descriptors.js";
 import { toSmokePhotoView } from "./mapping.js";
+import { assessEnrichmentFields } from "./enrichment.js";
 import { validateQueryFilters } from "./validation.js";
 
 const DEFAULT_SMOKE_LIMIT = 10;
@@ -651,10 +654,23 @@ export async function getCigar(
     .where(and(eq(favorites.cigarId, args.cigarId), eq(favorites.userId, principal.userId)))
     .limit(1);
 
+  // Additive catalog-repair + market hints (ADR-009), both catalog-scoped (same
+  // for every viewer). `enrichment` reuses the shared completeness gate; `pricing`
+  // is the compact summary over the cigar's observations (null when none).
+  const hasProductPhoto = photoRows.length > 0;
+  const enrichmentFields = assessEnrichmentFields(cigar, hasProductPhoto);
+  const pricing = await getCigarPricing(deps, args.cigarId);
+
   return {
     cigar: toCigarView(cigar),
     personalProfile: smokeRows.length > 0 ? computeProfile(smokeRows) : null,
-    hasProductPhoto: photoRows.length > 0,
+    enrichment: {
+      recommended: !enrichmentFields.complete,
+      missingFields: enrichmentFields.missingFields,
+      verification: cigar.verification,
+    },
+    pricing,
+    hasProductPhoto,
     wanted: wantRows.length > 0,
     wantNote: wantRows[0]?.note ?? null,
     favorited: favoriteRows.length > 0,
@@ -697,50 +713,163 @@ export async function browseCigars(deps: Deps): Promise<BrowseCigarsResult> {
   };
 }
 
-interface CigarOfferRow {
-  vendor: string;
+// A cigar's price observations older than this are stale enough to flag a refresh
+// on the compact get_cigar summary (ADR-009, 30d staleness window).
+const PRICING_STALE_MS = 30 * 24 * 60 * 60 * 1000;
+
+interface SeriesRow {
+  source: string;
+  is_registry: boolean;
   price: string | null; // numeric column — pg returns it as a string
   currency: string | null;
   in_stock: boolean | null;
   listing_url: string | null;
   seen_at: string | Date; // timestamptz
+  packaging: string | null;
+  sticks_per_package: number | null;
+  price_per_stick_cents: number | null;
+  price_type: PriceType;
 }
 
-// The current market snapshot for a cigar: the newest offer per vendor among its
-// auto|confirmed listing matches, cheapest first (nulls last). Catalog-scoped,
-// not owner-scoped — market data is the same for every viewer, so no principal.
-// One query: DISTINCT ON collapses each vendor's append-only price series to its
-// latest row, then the outer select orders by price — no N+1 across vendors.
+// The current observation per (source, packaging) series for a cigar, cheapest
+// per-stick first (nulls last), then package price. One query over the unified
+// observation set (ADR-009): crawler/registry rows reach the cigar through their
+// auto|confirmed listing match (the curator-authoritative link); ad-hoc chat rows
+// link directly via cigar_id with no listing match. DISTINCT ON collapses each
+// append-only series to its latest row — no N+1 across sources/packagings.
+async function latestSeries(deps: Deps, cigarId: string): Promise<SeriesRow[]> {
+  const result = await deps.db.execute(sql`
+    WITH obs AS (
+      SELECT v.name AS source, TRUE AS is_registry,
+             o.price, o.currency, o.in_stock,
+             COALESCE(o.listing_url, o.source_url) AS listing_url,
+             o.seen_at, o.created_at, o.id,
+             o.packaging, o.sticks_per_package, o.price_per_stick_cents, o.price_type
+      FROM offers o
+      JOIN listing_matches lm ON lm.id = o.listing_match_id
+      JOIN vendors v ON v.id = o.vendor_id
+      WHERE lm.cigar_id = ${cigarId} AND lm.status IN ('auto', 'confirmed')
+      UNION ALL
+      SELECT COALESCE(v.name, o.source_name) AS source, (o.vendor_id IS NOT NULL) AS is_registry,
+             o.price, o.currency, o.in_stock,
+             COALESCE(o.listing_url, o.source_url) AS listing_url,
+             o.seen_at, o.created_at, o.id,
+             o.packaging, o.sticks_per_package, o.price_per_stick_cents, o.price_type
+      FROM offers o
+      LEFT JOIN vendors v ON v.id = o.vendor_id
+      WHERE o.cigar_id = ${cigarId} AND o.listing_match_id IS NULL
+    )
+    SELECT source, is_registry, price, currency, in_stock, listing_url, seen_at,
+           packaging, sticks_per_package, price_per_stick_cents, price_type
+    FROM (
+      SELECT DISTINCT ON (source, packaging) *
+      FROM obs
+      ORDER BY source, packaging, seen_at DESC, created_at DESC, id DESC
+    ) latest
+    ORDER BY latest.price_per_stick_cents ASC NULLS LAST, latest.price ASC NULLS LAST, latest.source ASC
+  `);
+  return result.rows as unknown as SeriesRow[];
+}
+
+// The current market snapshot for a cigar: the newest observation per (source,
+// packaging) series, best per-stick first. Catalog-scoped, not owner-scoped —
+// market data is the same for every viewer, so no principal.
 export async function getCigarOffers(
   deps: Deps,
   args: { cigarId: string },
 ): Promise<CigarOffer[]> {
-  const result = await deps.db.execute(sql`
-    SELECT vendor, price, currency, in_stock, listing_url, seen_at
-    FROM (
-      SELECT DISTINCT ON (o.vendor_id)
-        v.name AS vendor,
-        o.price AS price,
-        o.currency AS currency,
-        o.in_stock AS in_stock,
-        o.listing_url AS listing_url,
-        o.seen_at AS seen_at
-      FROM offers o
-      JOIN listing_matches lm ON lm.id = o.listing_match_id
-      JOIN vendors v ON v.id = o.vendor_id
-      WHERE lm.cigar_id = ${args.cigarId}
-        AND lm.status IN ('auto', 'confirmed')
-      ORDER BY o.vendor_id, o.seen_at DESC, o.created_at DESC, o.id DESC
-    ) latest
-    ORDER BY latest.price ASC NULLS LAST, latest.vendor ASC
-  `);
-
-  return (result.rows as unknown as CigarOfferRow[]).map((row) => ({
-    vendor: row.vendor,
+  const rows = await latestSeries(deps, args.cigarId);
+  return rows.map((row) => ({
+    vendor: row.source,
+    isRegistryVendor: Boolean(row.is_registry),
     price: row.price != null ? Number(row.price) : null,
     currency: row.currency,
     inStock: row.in_stock,
     listingUrl: row.listing_url,
     seenAt: new Date(row.seen_at).toISOString(),
+    packaging: row.packaging,
+    sticksPerPackage: row.sticks_per_package,
+    pricePerStick: row.price_per_stick_cents != null ? row.price_per_stick_cents / 100 : null,
+    priceType: row.price_type,
   }));
+}
+
+// In-stock is "not explicitly out of stock" — an unknown (null) stock counts as
+// available, since the crawler leaves it null when the listing didn't say.
+function available(row: SeriesRow): boolean {
+  return row.in_stock !== false;
+}
+
+// The compact pricing summary (ADR-009): the best CURRENT per-stick (in-stock
+// preferred, ties toward singles) with its packaging, else the lowest package
+// price with packaging; plus distinct-source and observation counts and the 30d
+// staleness flag. Null when the cigar has no observations. The per-stick figure
+// never travels without its packaging — the display rule is enforced by shape.
+export async function getCigarPricing(deps: Deps, cigarId: string): Promise<CigarPricing | null> {
+  const rows = await latestSeries(deps, cigarId);
+  if (rows.length === 0) return null;
+
+  const totals = await deps.db.execute(sql`
+    WITH obs AS (
+      SELECT o.id, o.seen_at
+      FROM offers o
+      JOIN listing_matches lm ON lm.id = o.listing_match_id
+      WHERE lm.cigar_id = ${cigarId} AND lm.status IN ('auto', 'confirmed')
+      UNION ALL
+      SELECT o.id, o.seen_at FROM offers o
+      WHERE o.cigar_id = ${cigarId} AND o.listing_match_id IS NULL
+    )
+    SELECT count(*)::int AS n, max(seen_at) AS latest FROM obs
+  `);
+  const totalsRow = (totals.rows as unknown as { n: number; latest: string | Date | null }[])[0];
+  const observationCount = Number(totalsRow?.n ?? rows.length);
+  const latestSeen = totalsRow?.latest != null ? new Date(totalsRow.latest) : null;
+
+  // Prefer in-stock series; fall back to all when nothing is in stock.
+  const preferred = rows.filter(available);
+  const pool = preferred.length > 0 ? preferred : rows;
+
+  // Best per-stick with a derivable figure; ties toward singles (fewest sticks).
+  const perStick = pool
+    .filter((r) => r.price_per_stick_cents != null)
+    .sort(
+      (a, b) =>
+        a.price_per_stick_cents! - b.price_per_stick_cents! ||
+        (a.sticks_per_package ?? Infinity) - (b.sticks_per_package ?? Infinity),
+    );
+  // Otherwise the lowest package price.
+  const byPrice = pool
+    .filter((r) => r.price != null)
+    .sort((a, b) => Number(a.price) - Number(b.price));
+
+  const best = perStick[0] ?? byPrice[0] ?? null;
+  const lowest =
+    best == null
+      ? null
+      : best.price_per_stick_cents != null
+        ? {
+            perStick: true as const,
+            amount: best.price_per_stick_cents / 100,
+            packaging: best.packaging,
+            sticksPerPackage: best.sticks_per_package,
+          }
+        : {
+            perStick: false as const,
+            amount: Number(best.price),
+            packaging: best.packaging,
+            sticksPerPackage: best.sticks_per_package,
+          };
+
+  const sourceCount = new Set(rows.map((r) => r.source)).size;
+  const observedAt = best != null ? new Date(best.seen_at).toISOString() : new Date(rows[0]!.seen_at).toISOString();
+  const refreshRecommended = latestSeen != null && deps.now().getTime() - latestSeen.getTime() > PRICING_STALE_MS;
+
+  return {
+    lowest,
+    currency: best?.currency ?? rows[0]!.currency,
+    observedAt,
+    sourceCount,
+    observationCount,
+    refreshRecommended,
+  };
 }

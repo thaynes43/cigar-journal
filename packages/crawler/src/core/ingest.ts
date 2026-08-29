@@ -4,11 +4,11 @@ import {
   cigars,
   crawlRuns,
   enrichmentRequests,
-  offers,
   productPhotos,
   type Database,
   type EnrichmentRequestRow,
 } from "@cj/db";
+import { recordPriceObservation } from "@cj/domain";
 import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedPhoto } from "@cj/photos";
 import type { VendorAdapter } from "../adapters/types.js";
 import { collectSitemapUrls } from "./sitemap.js";
@@ -240,17 +240,26 @@ async function ingestListing(
     });
     if (status === "auto") stats.matchesAuto += 1;
 
-    await tx.insert(offers).values({
+    // One offers write path shared with record_price — the 24h dedupe skips an
+    // identical observation (ADR-009). Crawler offers link to their cigar through
+    // the listing match (curator-authoritative), so cigar_id stays null here.
+    const observation = await recordPriceObservation(tx, {
+      cigarId: null,
       vendorId: options.vendorId,
+      sourceName: null,
+      sourceUrl: null,
+      listingMatchId: match.id,
       listingUrl: url,
-      seenAt: now,
-      price: priceToDecimal(listing.priceCents),
+      packaging: listing.packaging,
+      sticksPerPackage: listing.sticksPerPackage,
+      priceCents: listing.priceCents,
       currency: listing.currency,
       inStock: listing.inStock,
-      listingMatchId: match.id,
+      priceType: "retail",
       raw: { listing, product },
+      seenAt: now,
     });
-    stats.offersWritten += 1;
+    if (observation.inserted) stats.offersWritten += 1;
 
     return linkedCigarId;
   });
@@ -422,17 +431,23 @@ async function tryEnrichCandidates(
         now,
       });
       stats.matchesAuto += 1;
-      await tx.insert(offers).values({
+      const observation = await recordPriceObservation(tx, {
+        cigarId: null,
         vendorId: options.vendorId,
+        sourceName: null,
+        sourceUrl: null,
+        listingMatchId: match.id,
         listingUrl: candidate.url,
-        seenAt: now,
-        price: priceToDecimal(listing.priceCents),
+        packaging: listing.packaging,
+        sticksPerPackage: listing.sticksPerPackage,
+        priceCents: listing.priceCents,
         currency: listing.currency,
         inStock: listing.inStock,
-        listingMatchId: match.id,
+        priceType: "retail",
         raw: { listing, product },
+        seenAt: now,
       });
-      stats.offersWritten += 1;
+      if (observation.inserted) stats.offersWritten += 1;
     });
 
     try {

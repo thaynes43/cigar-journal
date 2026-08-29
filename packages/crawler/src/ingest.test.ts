@@ -62,7 +62,7 @@ describe("crawler ingest (embedded Postgres)", () => {
     await pg?.stop();
   });
 
-  it("seed creates one unverified cigar, an offer, and a photo; a second run appends only an offer", async () => {
+  it("seed creates one unverified cigar, an offer, and a photo; a second identical run dedupes the offer", async () => {
     const storage = createMemoryPhotoStorage();
     const routes = {
       [ROBOTS]: { body: loadFixture("robots.txt") },
@@ -118,7 +118,8 @@ describe("crawler ingest (embedded Postgres)", () => {
     await expect(storage.get(photos[0]!.objectKey)).resolves.toBeDefined();
     await expect(storage.get(photos[0]!.thumbKey)).resolves.toBeDefined();
 
-    // Second run: append a second offer, but no duplicate cigar or photo.
+    // Second run at the same instant, identical price/stock: the 24h dedupe skips
+    // the offer (ADR-009) — no new offer, cigar, or photo.
     const second = await runIngest(deps(createMockFetcher(routes), storage), {
       adapter: foxCigar,
       vendorId,
@@ -126,17 +127,31 @@ describe("crawler ingest (embedded Postgres)", () => {
     });
     expect(second.stats.cigarsCreated).toBe(0);
     expect(second.stats.photosCaptured).toBe(0);
-    expect(second.stats.offersWritten).toBe(1);
+    expect(second.stats.offersWritten).toBe(0);
     expect(second.stats.matchesAuto).toBe(1);
 
     expect(await pg.db.select().from(cigars).where(eq(cigars.canonicalName, PADRON_NAME))).toHaveLength(1);
-    expect(await pg.db.select().from(offers).where(eq(offers.vendorId, vendorId))).toHaveLength(2);
+    expect(await pg.db.select().from(offers).where(eq(offers.vendorId, vendorId))).toHaveLength(1);
     expect(await pg.db.select().from(productPhotos).where(eq(productPhotos.cigarId, cigarId))).toHaveLength(1);
 
-    // Both runs wrote a succeeded crawl_runs row with stats.
+    // A later run whose price changed DOES append (history is never rewritten).
+    const laterRoutes = {
+      ...routes,
+      [PADRON_URL]: { body: loadFixture("product-padron.html").replace("24.50", "26.00") },
+    };
+    const third = await runIngest(
+      { db: pg.db, fetcher: createMockFetcher(laterRoutes), storage, now: () => new Date("2026-08-29T12:00:00.000Z"), processPhoto: fakeProcessPhoto },
+      { adapter: foxCigar, vendorId, mode: "offers" },
+    );
+    expect(third.stats.offersWritten).toBe(1);
+    const afterThird = await pg.db.select().from(offers).where(eq(offers.vendorId, vendorId));
+    expect(afterThird).toHaveLength(2);
+    expect(afterThird.some((o) => Number(o.price) === 26)).toBe(true);
+
+    // All three runs wrote a succeeded crawl_runs row with stats.
     const runs = await pg.db.select().from(crawlRuns).where(eq(crawlRuns.vendorId, vendorId));
-    expect(runs).toHaveLength(2);
-    expect(runs.every((r) => r.status === "succeeded" && r.kind === "seed")).toBe(true);
+    expect(runs).toHaveLength(3);
+    expect(runs.every((r) => r.status === "succeeded")).toBe(true);
     expect(runs.every((r) => r.finishedAt !== null && r.stats !== null)).toBe(true);
   });
 

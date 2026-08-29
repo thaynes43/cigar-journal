@@ -15,6 +15,30 @@ export interface NormalizedListing {
   imageUrl: string | null;
   sku: string | null;
   categoryPath: string[];
+  // Packaging tier + count parsed from the listing name/breadcrumb when the vendor
+  // exposes it (ADR-009). CONSERVATIVE — an unstated packaging stays null, never
+  // guessed. Fed to the offers observation so per-stick can be derived.
+  packaging: string | null;
+  sticksPerPackage: number | null;
+}
+
+// Conservative packaging parse (ADR-009): recognize only unambiguous pack/box
+// markers in the product name; anything else stays unknown (null/null). A single
+// stick yields sticksPerPackage 1 so per-stick equals the price. Ordered most- to
+// least-specific so "box of 20" wins over a lone "20".
+export function parsePackaging(name: string): { packaging: string | null; sticksPerPackage: number | null } {
+  const boxOf = /\bbox\s+of\s+(\d{1,3})\b/i.exec(name);
+  if (boxOf) return { packaging: "box", sticksPerPackage: Number(boxOf[1]) };
+
+  const packOf = /\bpack\s+of\s+(\d{1,2})\b/i.exec(name);
+  if (packOf) return { packaging: `${packOf[1]}-pack`, sticksPerPackage: Number(packOf[1]) };
+
+  const nPack = /\b(\d{1,2})[\s-]?pack\b/i.exec(name);
+  if (nPack) return { packaging: `${nPack[1]}-pack`, sticksPerPackage: Number(nPack[1]) };
+
+  if (/\bsingles?\b/i.test(name)) return { packaging: "single", sticksPerPackage: 1 };
+
+  return { packaging: null, sticksPerPackage: null };
 }
 
 function firstOf<T>(value: T | T[] | undefined): T | undefined {
@@ -83,6 +107,7 @@ export function normalizeListing(product: JsonLdProduct, breadcrumbs: string[]):
 
   const offer = firstOf(product.offers);
   const { cents, currency } = priceFromOffer(offer);
+  const packaging = parsePackaging(name);
 
   return {
     name,
@@ -93,6 +118,8 @@ export function normalizeListing(product: JsonLdProduct, breadcrumbs: string[]):
     sku: typeof product.sku === "string" ? product.sku : null,
     // Drop the trailing breadcrumb (the product itself); the rest is taxonomy.
     categoryPath: breadcrumbs.length > 1 ? breadcrumbs.slice(0, -1) : [...breadcrumbs],
+    packaging: packaging.packaging,
+    sticksPerPackage: packaging.sticksPerPackage,
   };
 }
 

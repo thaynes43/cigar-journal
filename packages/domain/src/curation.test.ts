@@ -134,6 +134,7 @@ describe("curation", () => {
         smokes: 1,
         purchases: 1,
         listingMatches: 1,
+        offers: 0, // the seeded offer links via its listing match, not offers.cigar_id
         productPhotos: 1,
         enrichmentRequests: 1,
         wants: 0,
@@ -166,6 +167,29 @@ describe("curation", () => {
       expect((audit!.before as { source: { id: string } }).source.id).toBe(source);
       expect((audit!.before as { target: { id: string } }).target.id).toBe(target);
       expect((audit!.after as { repointed: { smokes: number } }).repointed.smokes).toBe(1);
+    });
+
+    it("re-points an ad-hoc price observation (offers.cigar_id) so merge keeps its history", async () => {
+      const source = await seedUnverified("AdHoc Price Source");
+      const target = await seedUnverified("AdHoc Price Target");
+
+      // A record_price-style observation: linked directly via cigar_id, no listing
+      // match, a named ad-hoc source. Its offers.cigar_id ON DELETE CASCADE would
+      // otherwise drop it when the source is deleted.
+      const [offer] = await h.deps.db
+        .insert(offers)
+        .values({ cigarId: source, sourceName: "Chat Shop", price: "12.50", currency: "USD" })
+        .returning({ id: offers.id });
+
+      const result = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+      expect(result.repointed.offers).toBe(1);
+
+      const [row] = await h.deps.db.select().from(offers).where(eq(offers.id, offer!.id));
+      expect(row!.cigarId).toBe(target); // survived + re-pointed, not cascade-deleted
     });
 
     it("keeps the target's own photo when it already has one (source photo discarded)", async () => {

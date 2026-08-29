@@ -26,6 +26,17 @@ function origin(part: { country?: string | null; region?: string | null } | null
   return [part.region, part.country].filter(Boolean).join(", ") || null;
 }
 
+// The packaging descriptor shown beside a price (ADR-009 display rule). A bare
+// tier like "box" gains its count ("box of 20") when known; a tier that already
+// names its count ("5-pack") or a single is left as-is.
+function packagingLabel(offer: { packaging: string | null; sticksPerPackage: number | null }): string | null {
+  if (!offer.packaging) return null;
+  if (offer.sticksPerPackage && offer.sticksPerPackage > 1 && !/\d/.test(offer.packaging)) {
+    return `${offer.packaging} of ${offer.sticksPerPackage}`;
+  }
+  return offer.packaging;
+}
+
 function blendLines(tobacco: Tobacco): { label: string; value: string }[] {
   const lines: { label: string; value: string }[] = [];
   const wrapper = origin(tobacco.wrapper);
@@ -126,26 +137,40 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
           <ul className="flex flex-col gap-2">
             {offers.map((offer) => {
               const meta = [
+                offer.isRegistryVendor ? null : "community source",
                 formatSeenAt(offer.seenAt),
                 offer.inStock === false ? "out of stock" : null,
               ]
                 .filter(Boolean)
                 .join(" · ");
+              // Display rule (ADR-009): the comparison axis is per-stick, ALWAYS
+              // shown WITH its packaging ("$16.70/stick · box of 20"); a bare
+              // per-stick figure is banned. Fall back to the package price when
+              // per-stick is not derivable.
+              const pack = packagingLabel(offer);
+              const amount =
+                offer.pricePerStick != null
+                  ? `${formatPrice(offer.pricePerStick, offer.currency)}/stick`
+                  : offer.price != null
+                    ? formatPrice(offer.price, offer.currency)
+                    : "—";
+              const priced = offer.pricePerStick != null || offer.price != null;
               const inner = (
                 <>
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span className="truncate text-sm text-ink">{offer.vendor}</span>
                     <span className="label-caps text-muted">{meta}</span>
                   </div>
-                  <span
-                    className={`text-sm tabular-nums ${offer.price != null ? "text-ink" : "text-muted"}`}
-                  >
-                    {offer.price != null ? formatPrice(offer.price, offer.currency) : "—"}
+                  <span className="flex flex-col items-end gap-0.5">
+                    <span className={`text-sm tabular-nums ${priced ? "text-ink" : "text-muted"}`}>
+                      {amount}
+                    </span>
+                    {pack ? <span className="label-caps text-muted">{pack}</span> : null}
                   </span>
                 </>
               );
               return (
-                <li key={offer.vendor}>
+                <li key={`${offer.vendor}·${offer.packaging ?? ""}`}>
                   {offer.listingUrl ? (
                     <a
                       href={offer.listingUrl}

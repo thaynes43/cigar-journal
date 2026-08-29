@@ -10,6 +10,8 @@ export type SmokedAtPrecision = "minute" | "approximate" | "day";
 export type ProvenanceSource = "llm-conversation" | "manual" | "legacy-import";
 export type DrawBurn = "excellent" | "good" | "fair" | "poor";
 export type SmokeOutput = "low" | "medium" | "high";
+// Price-observation classification (ADR-009). `retail` is the default.
+export type PriceType = "retail" | "msrp" | "sale";
 
 export type { Tobacco, SmokeContext, SmokePhotoKind };
 
@@ -243,6 +245,80 @@ export interface SetFavoriteResult {
   changed: boolean;
 }
 
+// Conversational catalog repair (ADR-009), fill-nulls-only. Each field fills the
+// matching catalog column ONLY while it is null and the cigar is unverified; a
+// non-null value or a verified entry is never overwritten (trust order, ADR-006).
+// canonicalName is identity and never fillable here. Vitola sub-fields fill
+// independently. Retry-safe via the mutation envelope, like update_smoke.
+export interface UpdateCigarFields {
+  brand?: string | null;
+  line?: string | null;
+  edition?: string | null;
+  vitola?: VitolaInput | null;
+  type?: CigarType | null;
+  manufacturer?: string | null;
+  factory?: string | null;
+  productionCountry?: string | null;
+  tobacco?: Tobacco | null;
+  blendNotes?: string | null;
+  releaseYear?: number | null;
+}
+
+export interface UpdateCigarInput {
+  clientRequestId: string;
+  cigarId: string;
+  fields: UpdateCigarFields;
+  provenance?: ProvenanceInput;
+  correlationId?: string;
+}
+
+export interface UpdateCigarResult {
+  cigarId: string;
+  // Dot-path labels of the fields actually written (were null, now filled).
+  changedFields: string[];
+  // Provided fields NOT written — already non-null, or the entry is verified.
+  skipped: string[];
+  verification: Verification;
+  replayed: boolean;
+}
+
+// Chat-submitted price observation (ADR-009) in the offers model. Operates on an
+// existing cigar. Source is a registry vendor by name OR a named ad-hoc source
+// (required when no vendor matches); `price` is the observed dollar price for the
+// packaging unit, from which per-stick is derived when the count is known.
+export interface RecordPriceInput {
+  clientRequestId: string;
+  cigarId: string;
+  vendorName?: string | null;
+  sourceName?: string | null;
+  sourceUrl?: string | null;
+  price: number; // dollars, the packaging unit's observed price
+  currency?: string | null; // defaults to USD
+  packaging?: string | null;
+  sticksPerPackage?: number | null;
+  priceType?: PriceType; // defaults to retail
+  inStock?: boolean | null;
+  observedAt?: string | null; // ISO date/date-time; defaults to now
+  provenance?: ProvenanceInput;
+  correlationId?: string;
+}
+
+export interface RecordPriceResult {
+  // The offers row id, or null when the 24h dedupe skipped an identical obs.
+  observationId: string | null;
+  cigarId: string;
+  recorded: boolean; // a row was written
+  deduped: boolean; // skipped as identical within the 24h window
+  packaging: string | null;
+  pricePerStick: number | null; // dollars, when derivable
+  currency: string | null;
+  priceType: PriceType;
+  observedAt: string; // ISO instant
+  // Where the observation came from — exactly one of vendor / ad-hoc name is set.
+  source: { vendorId: string | null; vendorName: string | null; name: string | null; url: string | null };
+  replayed: boolean;
+}
+
 export interface UpdateSmokeChanges {
   cigar?: { resolveTo: string };
   smokedAt?: SmokedAtInput;
@@ -452,9 +528,46 @@ export interface PersonalProfile {
   typicalStrength: string | null;
 }
 
+// The additive enrichment hint on get_cigar (ADR-009): whether a background
+// enrichment would help (recommended — the crawler-fillable gate of photo + full
+// dims), the fuller list of missing catalog fields, and the current verification
+// state. Catalog-scoped — same for every viewer, so present under catalog:read.
+export interface CigarEnrichmentHint {
+  recommended: boolean;
+  missingFields: string[];
+  verification: Verification;
+}
+
+// The additive compact pricing summary on get_cigar (ADR-009). The comparison
+// axis is per-stick, ALWAYS displayed with its packaging ("$16.70/stick · box of
+// 20") — a bare per-stick figure is banned. `lowest` is the best in-stock current
+// per-stick when derivable, else the lowest package price, either way carrying its
+// packaging. Null when the cigar has no observations. Catalog-scoped.
+export interface CigarPricingLowest {
+  // true → `amount` is per-stick; false → the package price (per-stick not derivable).
+  perStick: boolean;
+  amount: number; // dollars
+  packaging: string | null;
+  sticksPerPackage: number | null;
+}
+
+export interface CigarPricing {
+  lowest: CigarPricingLowest | null;
+  currency: string | null;
+  observedAt: string; // ISO — when the `lowest` figure was observed
+  sourceCount: number; // distinct sources (vendors + ad-hoc names) with a current observation
+  observationCount: number; // total observations recorded for the cigar
+  // The latest observation is older than the 30d staleness window (ADR-009).
+  refreshRecommended: boolean;
+}
+
 export interface GetCigarResult {
   cigar: CigarView;
   personalProfile: PersonalProfile | null;
+  // Additive catalog-repair + market hints (ADR-009). `enrichment` is always
+  // present; `pricing` is null when the cigar has no price observations.
+  enrichment: CigarEnrichmentHint;
+  pricing: CigarPricing | null;
   // Whether a crawler-captured product photo exists (ADR-007); drives the detail
   // hero image via the authed proxy route.
   hasProductPhoto: boolean;
@@ -478,12 +591,21 @@ export interface GetCigarResult {
 // numeric column coerced to a number, null when the crawl observed no price;
 // `seenAt` is the observation instant (ISO-8601).
 export interface CigarOffer {
-  vendor: string; // vendors.name via offers.vendor_id
-  price: number | null;
+  // The source name — a registry vendor OR a named ad-hoc source (ADR-009).
+  vendor: string;
+  // true when `vendor` is a registry vendor, false for an ad-hoc chat source.
+  isRegistryVendor: boolean;
+  price: number | null; // the packaging unit's price, in dollars
   currency: string | null;
   inStock: boolean | null;
   listingUrl: string | null;
   seenAt: string;
+  // Packaging tier + per-stick economics (ADR-009). `pricePerStick` (dollars) is
+  // shown WITH its packaging on the cigar page; null when not derivable.
+  packaging: string | null;
+  sticksPerPackage: number | null;
+  pricePerStick: number | null;
+  priceType: PriceType;
 }
 
 // A catalog-only cigar summary for browse listings — no per-caller personal
@@ -687,6 +809,10 @@ export interface MergeCigarsResult {
     smokes: number;
     purchases: number;
     listingMatches: number;
+    // Ad-hoc price observations (record_price) linked directly via offers.cigar_id;
+    // crawler offers re-point through their listing match, so they are not counted
+    // here. Re-pointed rather than cascade-dropped so merge keeps price history.
+    offers: number;
     productPhotos: number; // 0 or 1 — the target keeps its own when it has one
     enrichmentRequests: number;
     // Want marks moved to the target. When the same user wanted BOTH sides, the

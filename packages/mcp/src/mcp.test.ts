@@ -228,7 +228,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the twelve tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
+  it("lists exactly the fifteen tools with readOnlyHint on the five reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -242,11 +242,14 @@ describe("@cj/mcp adapter", () => {
           "get_my_inventory",
           "get_my_smokes",
           "get_smoke",
+          "record_price",
           "record_purchase",
+          "request_cigar_enrichment",
           "save_smoke",
           "search_cigars",
           "set_favorite",
           "set_want",
+          "update_cigar",
           "update_smoke",
         ].sort(),
       );
@@ -263,6 +266,9 @@ describe("@cj/mcp adapter", () => {
         "add_smoke_photo",
         "set_want",
         "set_favorite",
+        "request_cigar_enrichment",
+        "update_cigar",
+        "record_price",
       ])
         expect(readOnly(w)).not.toBe(true);
     });
@@ -1080,6 +1086,143 @@ describe("@cj/mcp adapter", () => {
       const result = await call(client, "set_favorite", { cigarId: randomUUID(), favorited: true });
       expect(errorOf(result).code).toBe("cigar_not_found");
     });
+  });
+
+  // ---- catalog repair + price observations (ADR-009) ------------------------
+
+  it("request_cigar_enrichment queues a sparse cigar (row in DB), then reports already_queued", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Diplomaticos No 2", verification: "unverified" });
+    await withClient(ownerFull, async (client) => {
+      const first = payloadOf(await call(client, "request_cigar_enrichment", { cigarId })) as {
+        status: string;
+        queued: boolean;
+        missingFields: string[];
+        verification: string;
+      };
+      expect(first.status).toBe("queued");
+      expect(first.queued).toBe(true);
+      expect(first.missingFields).toContain("productPhoto");
+      expect(first.verification).toBe("unverified");
+      expect(await enrichmentRows(cigarId)).toHaveLength(1);
+
+      const second = payloadOf(await call(client, "request_cigar_enrichment", { cigarId })) as {
+        status: string;
+      };
+      expect(second.status).toBe("already_queued");
+      expect(await enrichmentRows(cigarId)).toHaveLength(1);
+    });
+  });
+
+  it("update_cigar fills only null fields and never overwrites a verified entry", async () => {
+    const sparse = await h.seedCigar({ canonicalName: "Repair Target", brand: "Kept Brand", verification: "unverified" });
+    const locked = await h.seedCigar({ canonicalName: "Verified Entry", verification: "verified" });
+    await withClient(ownerFull, async (client) => {
+      const filled = payloadOf(
+        await call(client, "update_cigar", {
+          clientRequestId: randomUUID(),
+          cigarId: sparse,
+          fields: { brand: "New Brand", line: "New Line", type: "CC" },
+        }),
+      ) as { changedFields: string[]; skipped: string[] };
+      expect(filled.changedFields).toEqual(expect.arrayContaining(["line", "type"]));
+      expect(filled.skipped).toContain("brand"); // already non-null
+
+      const detail = payloadOf(await call(client, "get_cigar", { cigarId: sparse })) as {
+        cigar: { brand: string | null; line: string | null };
+      };
+      expect(detail.cigar.brand).toBe("Kept Brand");
+      expect(detail.cigar.line).toBe("New Line");
+
+      const onVerified = payloadOf(
+        await call(client, "update_cigar", {
+          clientRequestId: randomUUID(),
+          cigarId: locked,
+          fields: { brand: "Should Not Land" },
+        }),
+      ) as { changedFields: string[]; skipped: string[] };
+      expect(onVerified.changedFields).toEqual([]);
+      expect(onVerified.skipped).toContain("brand");
+    });
+  });
+
+  it("record_price observes a price, dedupes an identical repeat, and surfaces per-stick-with-packaging on get_cigar", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Priced Via MCP", verification: "unverified" });
+    await h.pg.db.insert(vendors).values({ name: "MCP Box Shop" });
+    await withClient(ownerFull, async (client) => {
+      const first = payloadOf(
+        await call(client, "record_price", {
+          clientRequestId: randomUUID(),
+          cigarId,
+          vendorName: "mcp box shop",
+          price: 334,
+          packaging: "box",
+          sticksPerPackage: 20,
+          inStock: true,
+          observedAt: "2026-08-29T10:00:00Z",
+        }),
+      ) as { recorded: boolean; deduped: boolean; pricePerStick: number; source: { vendorName: string | null } };
+      expect(first.recorded).toBe(true);
+      expect(first.pricePerStick).toBeCloseTo(16.7, 2);
+      expect(first.source.vendorName).toBe("MCP Box Shop");
+
+      // Identical observation within 24h (different envelope) → deduped.
+      const dupe = payloadOf(
+        await call(client, "record_price", {
+          clientRequestId: randomUUID(),
+          cigarId,
+          vendorName: "mcp box shop",
+          price: 334,
+          packaging: "box",
+          sticksPerPackage: 20,
+          inStock: true,
+          observedAt: "2026-08-29T16:00:00Z",
+        }),
+      ) as { recorded: boolean; deduped: boolean };
+      expect(dupe.recorded).toBe(false);
+      expect(dupe.deduped).toBe(true);
+
+      const detail = payloadOf(await call(client, "get_cigar", { cigarId })) as {
+        pricing: { lowest: { perStick: boolean; amount: number; packaging: string | null } | null } | null;
+        enrichment: { recommended: boolean };
+      };
+      expect(detail.pricing?.lowest).toEqual({
+        perStick: true,
+        amount: 16.7,
+        packaging: "box",
+        sticksPerPackage: 20,
+      });
+      expect(detail.enrichment.recommended).toBe(true);
+    });
+  });
+
+  it("record_price requires a source when no registry vendor matches", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "No Source Cigar" });
+    await withClient(ownerFull, async (client) => {
+      const result = await call(client, "record_price", {
+        clientRequestId: randomUUID(),
+        cigarId,
+        price: 12,
+      });
+      expect(errorOf(result).code).toBe("validation_error");
+    });
+  });
+
+  it("rejects record_price for a token without journal:write: 403", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerCatalogJournal}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "record_price",
+          arguments: { clientRequestId: randomUUID(), cigarId: primaryCigarId, sourceName: "Somewhere", price: 10 },
+        },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
   });
 
   // ---- explicit consumption (ADR-008) ---------------------------------------
