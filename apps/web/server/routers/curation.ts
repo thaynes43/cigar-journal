@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   curationQueue,
+  cigarsMissingPhotos,
   dismissDuplicate,
   mergeCigars,
   verifyCigar,
@@ -8,6 +9,8 @@ import {
   excludeCigar,
   restoreCigar,
   setProductPhotoRights,
+  getProductPhotoState,
+  mintProductPhotoUploadToken,
 } from "@cj/domain";
 import { router, adminProcedure } from "../trpc";
 
@@ -16,6 +19,23 @@ import { router, adminProcedure } from "../trpc";
 // the ADR-003 mutation envelope (clientRequestId) so a double-submit is idempotent.
 export const curationRouter = router({
   queue: adminProcedure.query(({ ctx }) => curationQueue(ctx.deps, ctx.principal)),
+
+  // The "Missing photos" worklist (DESIGN-003 §Images): the curator's held cigars
+  // with no servable product photo — each links its detail page to upload one.
+  missingPhotos: adminProcedure.query(({ ctx }) => cigarsMissingPhotos(ctx.deps, ctx.principal)),
+
+  // The current product-photo rights for one cigar (or null), driving the detail-
+  // page admin control's initial state. Admin-only.
+  photoState: adminProcedure
+    .input(z.object({ cigarId: z.string().uuid() }))
+    .query(({ ctx, input }) => getProductPhotoState(ctx.deps, ctx.principal, input)),
+
+  // Mint a single-use product-photo upload link for a cigar (DESIGN-003 §Images).
+  // The curator opens it on a phone to attach the photo; the raw token is returned
+  // once (never re-derivable) and the client builds the absolute /u/<token> URL.
+  mintPhotoUploadLink: adminProcedure
+    .input(z.object({ cigarId: z.string().uuid() }))
+    .mutation(({ ctx, input }) => mintProductPhotoUploadToken(ctx.deps, ctx.principal, input)),
 
   merge: adminProcedure
     .input(

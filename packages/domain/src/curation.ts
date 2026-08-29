@@ -41,6 +41,7 @@ import type {
   WorklistCigar,
   WorklistMatch,
   DuplicateCandidatePair,
+  MissingPhotoCigar,
 } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { strongLinkCompatible } from "./cigar-resolution.js";
@@ -66,6 +67,9 @@ const DUPLICATE_THRESHOLD = 0.6;
 // priority hygiene work is always in view.
 const DUPLICATE_PAIR_CAP = 50;
 const UNVERIFIED_CAP = 200;
+// The photoless-holdings worklist is bounded like the other admin reads; the
+// owner's real gap (the 46 CC humidor + a handful of NC) sits well under this.
+const MISSING_PHOTOS_CAP = 500;
 
 function assertCurator(principal: Principal): void {
   if (principal.role !== "admin") {
@@ -1386,4 +1390,54 @@ export async function curationWorklist(
       return { kind: input.kind, duplicates: page.duplicates, nextCursor: page.nextCursor };
     }
   }
+}
+
+// --------------------------------------------------------------------------
+// cigarsMissingPhotos — the "Missing photos" worklist (DESIGN-003 §Images): the
+// curator's held cigars that lack a servable product photo. Curator-only.
+// --------------------------------------------------------------------------
+
+// Every active catalog cigar the CALLER holds a purchase lot for, that has no
+// non-suppressed product photo — the worklist the upload path clears (the owner's
+// Cuban humidor can never be crawled). Principal-scoped to the curator's own
+// holdings (a suppressed-only photo counts as missing, matching the tile join's
+// `rights <> 'suppressed'` gate). Highest remaining first, so what is actually in
+// the humidor leads; capped like the other admin reads.
+export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Promise<MissingPhotoCigar[]> {
+  assertCurator(principal);
+  const result = await deps.db.execute(sql`
+    SELECT c.id AS cigar_id, c.canonical_name, c.brand,
+           greatest(coalesce(pur.acquired, 0) - coalesce(con.consumed, 0), 0)::int AS remaining
+    FROM cigars c
+    JOIN (
+      SELECT cigar_id, sum(quantity)::int AS acquired
+      FROM purchases WHERE user_id = ${principal.userId}
+      GROUP BY cigar_id
+    ) pur ON pur.cigar_id = c.id
+    LEFT JOIN (
+      SELECT s2.cigar_id, count(sc.smoke_id)::int AS consumed
+      FROM smokes s2 JOIN smoke_consumptions sc ON sc.smoke_id = s2.id
+      WHERE s2.user_id = ${principal.userId}
+      GROUP BY s2.cigar_id
+    ) con ON con.cigar_id = c.id
+    WHERE c.catalog_status = 'active'
+      AND NOT EXISTS (
+        SELECT 1 FROM product_photos pp
+        WHERE pp.cigar_id = c.id AND pp.rights <> 'suppressed'
+      )
+    ORDER BY remaining DESC, c.canonical_name ASC
+    LIMIT ${MISSING_PHOTOS_CAP}
+  `);
+  const rows = result.rows as unknown as {
+    cigar_id: string;
+    canonical_name: string;
+    brand: string | null;
+    remaining: number;
+  }[];
+  return rows.map((r) => ({
+    cigarId: r.cigar_id,
+    canonicalName: r.canonical_name,
+    brand: r.brand,
+    remaining: Number(r.remaining),
+  }));
 }

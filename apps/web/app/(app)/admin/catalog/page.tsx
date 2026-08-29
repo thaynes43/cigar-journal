@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { getPrincipal } from "@cj/auth";
@@ -20,13 +21,37 @@ export default async function CatalogReviewPage() {
   if (!principal || principal.role !== "admin") notFound();
 
   const caller = await getServerCaller();
-  const { unverified, duplicates } = await caller.curation.queue();
+  const [{ unverified, duplicates }, missingPhotos] = await Promise.all([
+    caller.curation.queue(),
+    caller.curation.missingPhotos(),
+  ]);
 
   return (
     // Review console, not a catalog grid — it owns a reading measure now the shell
     // runs full bleed (DESIGN-003 §Layout).
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-10">
       <h1 className="font-display text-2xl font-semibold text-ink">Catalog review</h1>
+
+      {/* The owner's photoless holdings — the worklist the upload path clears
+          (DESIGN-003 §Images). Absent when empty. */}
+      {missingPhotos.length > 0 ? (
+        <section className="flex flex-col gap-4">
+          <h2 className="label-caps">Missing photos</h2>
+          <ul className="rounded-card border border-line bg-surface">
+            {missingPhotos.map((cigar) => (
+              <li key={cigar.cigarId} className="border-b border-line/60 last:border-b-0">
+                <Link
+                  href={`/cigars/${cigar.cigarId}`}
+                  className="flex min-w-0 flex-col gap-1 px-4 py-3 transition-colors hover:text-accent"
+                >
+                  <span className="font-display font-semibold text-ink">{cigar.canonicalName}</span>
+                  {cigar.brand ? <span className="label-caps">{cigar.brand}</span> : null}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       <section className="flex flex-col gap-4">
         <h2 className="label-caps">Duplicates</h2>

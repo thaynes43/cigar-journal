@@ -16,6 +16,7 @@ import { FavoriteToggle } from "../../_components/favorite-toggle";
 import { HoldingPanel } from "../../_components/holding-panel";
 import { PriceSpark } from "../../_components/price-spark";
 import { LocalDate } from "../../_components/local-date";
+import { ProductPhotoAdmin } from "../../_components/product-photo-admin";
 
 function vitola(cigar: CigarView): string | null {
   const dims =
@@ -53,7 +54,8 @@ function blendLines(tobacco: Tobacco): { label: string; value: string }[] {
 }
 
 export default async function CigarDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  await requireAuth();
+  const principal = await requireAuth();
+  const isAdmin = principal.role === "admin";
   const { id } = await params;
   const caller = await getServerCaller();
 
@@ -65,7 +67,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
     throw error;
   }
 
-  const { cigar, personalProfile, hasProductPhoto, wanted, wantNote, favorited, favoriteNote } =
+  const { cigar, personalProfile, hasProductPhoto, productPhotoId, wanted, wantNote, favorited, favoriteNote } =
     data;
   const [{ smokes }, offers, priceHistory, holding] = await Promise.all([
     caller.smokes.list({ cigarId: id, limit: 50 }),
@@ -73,6 +75,9 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
     caller.cigars.priceHistory({ cigarId: id }),
     caller.inventory.forCigar({ cigarId: id }),
   ]);
+  // Admin-only: the photo's current rights (or null), so the detail page can offer
+  // Add/Upload-link vs Replace/Suppress vs Approve without a client round trip.
+  const photoState = isAdmin ? await caller.curation.photoState({ cigarId: id }) : null;
   const blend = cigar.tobacco ? blendLines(cigar.tobacco) : [];
 
   // Offer staleness (DESIGN-002 §Price, 30d window): the row and its date stay,
@@ -85,7 +90,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
     <div className="mx-auto flex max-w-3xl flex-col gap-8">
       {hasProductPhoto ? (
         <img
-          src={`/api/product-photos/${id}/full`}
+          src={`/api/product-photos/${id}?v=${productPhotoId}`}
           alt=""
           className="max-h-80 w-full rounded-card border border-line object-contain"
         />
@@ -138,6 +143,10 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
           />
         </div>
       </header>
+
+      {isAdmin ? (
+        <ProductPhotoAdmin cigarId={cigar.cigarId} initialRights={photoState?.rights ?? null} />
+      ) : null}
 
       {cigar.blendNotes || blend.length > 0 ? (
         <section className="flex flex-col gap-3">

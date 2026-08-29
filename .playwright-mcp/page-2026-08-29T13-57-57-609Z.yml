@@ -1,0 +1,30 @@
+- generic [ref=f2e8]:
+  - generic [ref=f2e9] [cursor=pointer]:
+    - generic "Select language"
+    - combobox "Select language" [ref=f2e10]:
+      - option "English" [selected]
+      - option "العربية (Arabic)"
+      - option "български (Bulgarian)"
+      - option "čeština (Czech)"
+      - option "Nederlands (Dutch)"
+      - option "suomi (Finnish)"
+      - option "français (French)"
+      - option "Deutsch (German)"
+      - option "italiano (Italian)"
+      - option "norsk bokmål (Norwegian Bokmål)"
+      - option "polski (Polish)"
+      - option "português (Portuguese)"
+      - option "русский (Russian)"
+      - option "español (Spanish)"
+      - option "Türkçe (Turkish)"
+      - option "简体中文 (Simplified Chinese)"
+      - option "繁體中文 (Traditional Chinese)"
+      - option "日本語 (Japanese)"
+      - option "한국어 (Korean)"
+    - text: ⋯
+  - banner
+  - main "Authentication form" [ref=f2e11]:
+    - img "authentik Logo" [ref=f2e13]
+    - progressbar [ref=f2e15]
+  - contentinfo "Site footer" [ref=f2e19]:
+    - list "Site links" [ref=f2e21]

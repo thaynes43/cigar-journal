@@ -661,9 +661,14 @@ export interface GetCigarResult {
   // present; `pricing` is null when the cigar has no price observations.
   enrichment: CigarEnrichmentHint;
   pricing: CigarPricing | null;
-  // Whether a crawler-captured product photo exists (ADR-007); drives the detail
-  // hero image via the authed proxy route.
+  // Whether a servable product photo exists (ADR-007); drives the detail hero
+  // image via the authed proxy route. Suppressed photos read false.
   hasProductPhoto: boolean;
+  // The photo row's id (null when none) — a fresh uuid on every capture/upload/
+  // replace. The web fingerprints the immutable hero URL with it so a Replace is
+  // seen at once instead of the cached prior image. Web-detail only: the MCP
+  // get_cigar payload maps explicit fields and never surfaces it.
+  productPhotoId: string | null;
   // The caller's want overlay (PRD-003 R-WANT-3). `wanted` drives the detail-page
   // WantToggle fill; `wantNote` is the optional MCP-authored "why" the page
   // displays when present (no input field in v1). Principal-scoped — never
@@ -1056,6 +1061,18 @@ export interface CurationQueueResult {
   unverified: CurationQueueCigar[];
   // Near-duplicate pairs, highest similarity first — the merge backlog.
   duplicates: DuplicateCandidatePair[];
+}
+
+// One row of the "Missing photos" worklist (DESIGN-003 §Images): a catalog cigar
+// the curator HOLDS (has a purchase lot) that has no servable product photo — the
+// gap the upload path fills (the owner's Cuban humidor can never be crawled). The
+// detail-page link is the action. `remaining` is the curator's derived stock, so
+// the list can lead with what is actually in the humidor.
+export interface MissingPhotoCigar {
+  cigarId: string;
+  canonicalName: string;
+  brand: string | null;
+  remaining: number;
 }
 
 // The catalog lifecycle values (DESIGN-003 §Curation, migration 0013): `active`

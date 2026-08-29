@@ -1,0 +1,8 @@
+- generic [active] [ref=f3e1]:
+  - generic [ref=f3e3]:
+    - generic [ref=f3e4]:
+      - generic [ref=f3e12]: haynesnetwork
+      - heading "haynesnetwork" [level=1] [ref=f3e13]
+    - paragraph [ref=f3e14]: The front door to the Haynes Plex ecosystem.
+    - button "Sign in with Plex (Authentik)" [ref=f3e15] [cursor=pointer]
+  - alert [ref=f3e16]
