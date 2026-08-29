@@ -5,6 +5,7 @@ import { createHarness, newRequestId, type DomainHarness } from "./testing/harne
 import { saveSmoke } from "./save-smoke.js";
 import { recordPurchase } from "./record-purchase.js";
 import { setWant } from "./wants.js";
+import { setFavorite } from "./favorites.js";
 import { browseBrands, getBrand, browseCatalog, brandSlug } from "./catalog-browse.js";
 import { CigarNotFoundError } from "./errors.js";
 import type { Principal } from "./index.js";
@@ -631,6 +632,24 @@ describe("catalog browse", () => {
     // userB never smoked either — smoked:true is empty, smoked:false is both.
     expect((await browseCatalog(h.deps, userB, { q: brand, smoked: true })).cigars).toHaveLength(0);
     expect((await browseCatalog(h.deps, userB, { q: brand, smoked: false })).cigars).toHaveLength(2);
+  });
+
+  it("browseCatalog favorited filter partitions the caller's favorite marks, principal-scoped", async () => {
+    const brand = `Favorited ${tag}`;
+    const favorited = await h.seedCigar({ canonicalName: `${brand} Loved`, brand });
+    const plain = await h.seedCigar({ canonicalName: `${brand} Plain`, brand });
+    await setFavorite(h.deps, userA, { cigarId: favorited, favorited: true });
+
+    const idsA = async (v: boolean): Promise<string[]> =>
+      (await browseCatalog(h.deps, userA, { q: brand, favorited: v })).cigars.map((c) => c.cigarId).sort();
+    expect(await idsA(true)).toEqual([favorited]);
+    expect(await idsA(false)).toEqual([plain]);
+    expect((await browseCatalog(h.deps, userA, { q: brand, favorited: true })).totalCount).toBe(1);
+
+    // userB marked neither — favorited:true is empty, favorited:false is both;
+    // one user's favorite never reaches another's filter.
+    expect((await browseCatalog(h.deps, userB, { q: brand, favorited: true })).cigars).toHaveLength(0);
+    expect((await browseCatalog(h.deps, userB, { q: brand, favorited: false })).cigars).toHaveLength(2);
   });
 
   // --- rights-filtered reads (DESIGN-003 §Curation) -------------------------

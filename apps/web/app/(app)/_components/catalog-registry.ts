@@ -74,21 +74,49 @@ export const CATALOG_ALL_SORTS: readonly { value: CatalogSort; label: string }[]
   { value: "price", label: "Price" },
 ];
 
-// The full browse slice state the toolbar owns and the URL stores.
+// The filter chips (DESIGN-003 §IA), grid-only. `Brand` carries an exact brand
+// value; `In stock` / `Smoked` / `Favorites` are boolean presence flags. Each maps
+// to an independent, composable domain overlay filter that ANDs with the `own`
+// rail. The chip strings are fixed by the design (`Clear all` is the one addition,
+// flagged — it is not in the DESIGN-003 strings table).
+export const CATALOG_CHIPS = {
+  brand: "Brand",
+  inStock: "In stock",
+  smoked: "Smoked",
+  favorites: "Favorites",
+  clearAll: "Clear all",
+} as const;
+
+// The full browse slice state the toolbar owns and the URL stores. `brand` /
+// `inStock` / `smoked` / `favorites` are the grid-only filter chips (DESIGN-003
+// wave 6); every non-grid presentation drops them (see catalogUrl).
 export interface CatalogState {
   view: CatalogView;
   q: string;
   type?: CigarType;
   own: OwnershipFacet;
   sort: CatalogSort;
+  brand?: string;
+  inStock: boolean;
+  smoked: boolean;
+  favorites: boolean;
+}
+
+// True when any grid filter chip is active — the same "non-root" signal the rails
+// carry (an active chip collapses the shelves; the grid persists). Pure, so both
+// the page's `atRoot` test and the toolbar's `Clear all` gate read it identically.
+export function hasActiveChip(state: Pick<CatalogState, "brand" | "inStock" | "smoked" | "favorites">): boolean {
+  return Boolean(state.brand) || state.inStock || state.smoked || state.favorites;
 }
 
 // Build the target URL for a slice state, emitting only the params a given view
 // answers and omitting each default so a shared URL stays minimal (DESIGN-003 URL
-// contract): the grid (default) emits no `view` and carries q/type/own/sort;
-// Brands carries `view=brands` + q/type/own (drops sort); Ledger carries only
-// `view=ledger` (it is the Have detail, no facets — DESIGN-002 §IA). Pure, so the
-// contract is unit-tested directly.
+// contract): the grid (default) emits no `view` and carries q/type/own/sort plus
+// the filter chips (brand/instock/smoked/favorites); Brands carries `view=brands`
+// + q/type/own (drops sort and chips); Ledger carries only `view=ledger` (it is
+// the Have detail, no facets — DESIGN-002 §IA). Pure, so the contract is
+// unit-tested directly. Legacy URLs are unaffected — a chip param that is off
+// emits nothing, so pre-wave URLs round-trip unchanged.
 export function catalogUrl(pathname: string, next: CatalogState): string {
   const params = new URLSearchParams();
   if (next.view === "brands") params.set("view", "brands");
@@ -99,7 +127,16 @@ export function catalogUrl(pathname: string, next: CatalogState): string {
     // Type composes on the grid and Brands (owner-approved); sort is grid-only.
     if (next.type) params.set("type", next.type);
   }
-  if (next.view === "all" && next.sort !== "name") params.set("sort", next.sort);
+  if (next.view === "all") {
+    if (next.sort !== "name") params.set("sort", next.sort);
+    // Filter chips are grid-only. `brand` carries its exact value; the booleans
+    // are presence flags (present=on, absent=off) — the "1" is a placeholder, the
+    // parse only tests presence.
+    if (next.brand?.trim()) params.set("brand", next.brand.trim());
+    if (next.inStock) params.set("instock", "1");
+    if (next.smoked) params.set("smoked", "1");
+    if (next.favorites) params.set("favorites", "1");
+  }
   const qs = params.toString();
   return qs ? `${pathname}?${qs}` : pathname;
 }

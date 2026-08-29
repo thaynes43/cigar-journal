@@ -847,11 +847,13 @@ export interface BrowseCatalogArgs {
   // The MCP surface's independent, composable overlay filters (DESIGN-002): each
   // is tri-state — undefined = no filter, true = has the property, false = lacks
   // it — and they AND together (and with `own`), unlike the exclusive web facet.
-  // `inHumidor`/`wanted`/`smoked` are the caller's personal state (principal-
-  // scoped); `inStock` is catalog/market state (a current in-stock offer exists).
+  // `inHumidor`/`wanted`/`smoked`/`favorited` are the caller's personal state
+  // (principal-scoped); `inStock` is catalog/market state (a current in-stock
+  // offer exists).
   inHumidor?: boolean;
   wanted?: boolean;
   smoked?: boolean;
+  favorited?: boolean;
   inStock?: boolean;
   cursor?: string | null;
   limit?: number;
