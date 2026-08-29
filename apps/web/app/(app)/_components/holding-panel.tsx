@@ -2,7 +2,6 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import type { CigarHolding, CigarHoldingLot } from "@cj/domain";
 import { ui } from "@/lib/ui";
-import { formatMonthYear } from "@/lib/format";
 import { LocalDate } from "./local-date";
 
 // The "Your humidor" panel (DESIGN-002 §detail §4): the caller's holding for this
@@ -63,12 +62,20 @@ export function HoldingPanel({ holding }: { holding: CigarHolding }) {
           {holding.remaining} <span className="text-base font-normal text-muted">left</span>
         </span>
         {holding.agingSince ? (
-          <span className="label-caps text-muted">since {formatMonthYear(holding.agingSince)}</span>
+          <span className="label-caps text-muted">
+            since <LocalDate format="monthYear" value={holding.agingSince} />
+          </span>
         ) : null}
       </div>
 
       {holding.overConsumed > 0 ? (
-        <Link href="/cigars?view=ledger" className="text-sm text-danger hover:underline">
+        // Unlike the ledger CELL (bare `N over` + title), the panel line carries
+        // its explanation visibly — a title tooltip is unreachable on touch, and
+        // the full-width line has the room (DESIGN-002 strings table).
+        <Link
+          href="/cigars?view=ledger"
+          className="self-start text-sm text-danger hover:underline"
+        >
           {holding.overConsumed} over — consumption exceeds recorded purchases
         </Link>
       ) : null}

@@ -4,7 +4,7 @@ import { TRPCError } from "@trpc/server";
 import type { CigarView, GetCigarResult, Tobacco } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
 import { requireAuth } from "@/lib/require-auth";
-import { formatSmokedAt, formatDay, formatPrice, formatSeenAt } from "@/lib/format";
+import { formatPrice, formatSeenAt } from "@/lib/format";
 import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
 import { BandTile } from "../../_components/band-tile";
@@ -15,6 +15,7 @@ import { WantToggle } from "../../_components/want-toggle";
 import { FavoriteToggle } from "../../_components/favorite-toggle";
 import { HoldingPanel } from "../../_components/holding-panel";
 import { PriceSpark } from "../../_components/price-spark";
+import { LocalDate } from "../../_components/local-date";
 
 function vitola(cigar: CigarView): string | null {
   const dims =
@@ -150,7 +151,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
 
       {offers.length > 0 ? (
         <section className="flex flex-col gap-3">
-          <h2 className="label-caps">Prices</h2>
+          <h2 className="label-caps">Price</h2>
           <ul className="flex flex-col gap-2">
             {offers.map((offer) => {
               const meta = [
@@ -247,7 +248,12 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
                   <StrengthMeter value={personalProfile.typicalStrength} showValue />
                 ) : null,
               },
-              { label: "Last smoked", value: formatDay(personalProfile.lastSmokedAt) },
+              {
+                label: "Last smoked",
+                value: personalProfile.lastSmokedAt ? (
+                  <LocalDate format="day" value={personalProfile.lastSmokedAt} />
+                ) : null,
+              },
             ]}
           />
         </section>
@@ -258,7 +264,6 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
           <h2 className="label-caps">Your smokes</h2>
           <ul className="flex flex-col gap-3">
             {smokes.map((smoke) => {
-              const when = formatSmokedAt(smoke.smokedAt);
               return (
                 <li key={smoke.smokeId}>
                   <Link
@@ -267,7 +272,12 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
                   >
                     <div className="flex min-w-0 flex-1 flex-col gap-1.5">
                       <div className="flex items-center gap-2">
-                        <span className="label-caps">{when ?? "—"}</span>
+                        <LocalDate
+                          format="smokedAt"
+                          value={smoke.smokedAt}
+                          className="label-caps"
+                          fallback="—"
+                        />
                         {smoke.fromHumidor ? <span className={ui.chipOutline}>humidor</span> : null}
                       </div>
                       <Chips items={smoke.descriptors.slice(0, 4)} />
