@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.25.0](https://github.com/thaynes43/cigar-journal/compare/v0.24.0...v0.25.0) (2026-08-29)
+
+
+### Features
+
+* **mcp:** curation tool surface — scope, queue reads, curator writes (DESIGN-003 wave 4a) ([#126](https://github.com/thaynes43/cigar-journal/issues/126)) ([#138](https://github.com/thaynes43/cigar-journal/issues/138)) ([0414a24](https://github.com/thaynes43/cigar-journal/commit/0414a2480399030097bd9a2b04e28b14dfa7a52b))
+* **web:** catalog filter chips — brand, in stock, smoked, favorites (DESIGN-003 wave 6) ([#136](https://github.com/thaynes43/cigar-journal/issues/136)) ([a045921](https://github.com/thaynes43/cigar-journal/commit/a045921446b8ea2ec4f9e952ddafa5cc942d1f47))
+* **web:** curator product-photo upload — direct, upload-link, missing-photos worklist ([#139](https://github.com/thaynes43/cigar-journal/issues/139)) ([2261955](https://github.com/thaynes43/cigar-journal/commit/22619559b1eb834a7a4b1ec2071238986ef3bd88))
+
 ## [0.24.0](https://github.com/thaynes43/cigar-journal/compare/v0.23.1...v0.24.0) (2026-08-29)
 
 
