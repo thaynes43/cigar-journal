@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.1](https://github.com/thaynes43/cigar-journal/compare/v0.25.0...v0.25.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **domain:** audit_log.run_id uuid→text — order-key run identities (migration 0016) ([#141](https://github.com/thaynes43/cigar-journal/issues/141)) ([0731f30](https://github.com/thaynes43/cigar-journal/commit/0731f304086ec26f45f9418c9ef22c0052677457))
+
 ## [0.25.0](https://github.com/thaynes43/cigar-journal/compare/v0.24.0...v0.25.0) (2026-08-29)
 
 
