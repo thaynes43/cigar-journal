@@ -8,11 +8,14 @@ import { DismissButton } from "./dismiss-button";
 import { MergeButton } from "./merge-button";
 import { VerifyButton } from "./verify-button";
 
-// Catalog hygiene console (ADR-006), admin-only: a non-admin gets a 404 so the
-// route's existence never leaks. Two backlogs — near-duplicate pairs to merge,
-// and unverified entries to verify. Reads the curator queue through the server
-// caller; the buttons act via curator-gated tRPC mutations.
-export default async function CurationPage() {
+// Catalog review console (ADR-006, DESIGN-003 §Chrome), admin-only: a non-admin
+// gets a 404 so the route's existence never leaks. Moved from /curation to
+// /admin/catalog and reached only from the account menu — users never do catalog
+// data entry, agents do; this console reviews the work. Two backlogs — near-
+// duplicate pairs to merge, and unverified entries to verify. Reads the curator
+// queue through the server caller; the buttons act via curator-gated tRPC
+// mutations (the tRPC router keeps its `curation` name).
+export default async function CatalogReviewPage() {
   const principal = await getPrincipal(await headers());
   if (!principal || principal.role !== "admin") notFound();
 
@@ -23,7 +26,7 @@ export default async function CurationPage() {
     // Review console, not a catalog grid — it owns a reading measure now the shell
     // runs full bleed (DESIGN-003 §Layout).
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-10">
-      <h1 className="font-display text-2xl font-semibold text-ink">Curation</h1>
+      <h1 className="font-display text-2xl font-semibold text-ink">Catalog review</h1>
 
       <section className="flex flex-col gap-4">
         <h2 className="label-caps">Duplicates</h2>

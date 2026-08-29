@@ -1,32 +1,45 @@
 import type { SmokedAt } from "@cj/domain";
 
-const DAY = new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short", day: "numeric" });
-const MINUTE = new Intl.DateTimeFormat("en-US", {
+const DAY_OPTS: Intl.DateTimeFormatOptions = { year: "numeric", month: "short", day: "numeric" };
+const MINUTE_OPTS: Intl.DateTimeFormatOptions = {
   year: "numeric",
   month: "short",
   day: "numeric",
   hour: "numeric",
   minute: "2-digit",
-});
+};
+const MONTH_YEAR_OPTS: Intl.DateTimeFormatOptions = { year: "numeric", month: "short" };
+
+const DAY = new Intl.DateTimeFormat("en-US", DAY_OPTS);
+const MINUTE = new Intl.DateTimeFormat("en-US", MINUTE_OPTS);
+const MONTH_YEAR = new Intl.DateTimeFormat("en-US", MONTH_YEAR_OPTS);
+
+// A stored IANA zone builds a fresh formatter; the un-zoned default (runtime-local)
+// reuses the cached one. Dates are not a hot path, so the per-zone allocation is
+// cheap and needs no cache.
+function fmt(base: Intl.DateTimeFormat, opts: Intl.DateTimeFormatOptions, timeZone?: string) {
+  return timeZone ? new Intl.DateTimeFormat("en-US", { ...opts, timeZone }) : base;
+}
 
 // Render a Smoked-At honoring precision: day-precision drops the clock. Pure —
-// used both server-side and, through <LocalDate>, client-side to show each viewer
-// their own timezone without a hydration mismatch.
-export function formatSmokedAt(smokedAt: SmokedAt): string | null {
+// used both server-side and, through <LocalDate>, client-side. A `timeZone` (the
+// viewer's stored IANA zone, DESIGN-003 §Settings) formats against it on both
+// server and client identically; omitted, it renders in the runtime's own zone.
+export function formatSmokedAt(smokedAt: SmokedAt, timeZone?: string): string | null {
   if (!smokedAt.value) return null;
   const date = new Date(smokedAt.value);
-  return smokedAt.precision === "day" ? DAY.format(date) : MINUTE.format(date);
+  return smokedAt.precision === "day"
+    ? fmt(DAY, DAY_OPTS, timeZone).format(date)
+    : fmt(MINUTE, MINUTE_OPTS, timeZone).format(date);
 }
 
-export function formatDay(iso: string | null): string | null {
-  return iso ? DAY.format(new Date(iso)) : null;
+export function formatDay(iso: string | null, timeZone?: string): string | null {
+  return iso ? fmt(DAY, DAY_OPTS, timeZone).format(new Date(iso)) : null;
 }
-
-const MONTH_YEAR = new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short" });
 
 // A month-and-year stamp, e.g. "Aug 2026" — the inventory tile's aging line.
-export function formatMonthYear(iso: string | null): string | null {
-  return iso ? MONTH_YEAR.format(new Date(iso)) : null;
+export function formatMonthYear(iso: string | null, timeZone?: string): string | null {
+  return iso ? fmt(MONTH_YEAR, MONTH_YEAR_OPTS, timeZone).format(new Date(iso)) : null;
 }
 
 // Whole months elapsed since an ISO date, e.g. "13 mo" — the ledger aging cell.
