@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.26.0](https://github.com/thaynes43/cigar-journal/compare/v0.25.1...v0.26.0) (2026-08-29)
+
+
+### Features
+
+* **crawler:** vendor expansion — 2 Guys, Small Batch, Cuban Lou's (no-linkout posture), decided_by guard, approved-list import ([#127](https://github.com/thaynes43/cigar-journal/issues/127)) ([#147](https://github.com/thaynes43/cigar-journal/issues/147)) ([d0fa2ef](https://github.com/thaynes43/cigar-journal/commit/d0fa2ef0ba165adc38a36868fae9cbb4bced02ec))
+* **ops:** Playwright e2e suite — auth, catalog, journal, admin, public ([#48](https://github.com/thaynes43/cigar-journal/issues/48)) ([#148](https://github.com/thaynes43/cigar-journal/issues/148)) ([13ef674](https://github.com/thaynes43/cigar-journal/commit/13ef67423e0bd4532b62f6b906051099290f08a6))
+* **web:** catalog review console — agent runs, undo, cascade, rename (DESIGN-003 wave 4b) ([#126](https://github.com/thaynes43/cigar-journal/issues/126)) ([#149](https://github.com/thaynes43/cigar-journal/issues/149)) ([b7f3700](https://github.com/thaynes43/cigar-journal/commit/b7f37003f5fe526e54c99e78dcf130a670776c19))
+* **web:** markdown fidelity — parse + sanitize original prose ([#128](https://github.com/thaynes43/cigar-journal/issues/128)) ([#146](https://github.com/thaynes43/cigar-journal/issues/146)) ([9002bc3](https://github.com/thaynes43/cigar-journal/commit/9002bc3400cff81f3be882ce6213281f94a3ab9a))
+
+
+### Bug Fixes
+
+* **oauth:** loopback redirect_uri matching (RFC 8252) + token-endpoint 400 on JSON body ([#144](https://github.com/thaynes43/cigar-journal/issues/144)) ([8ed885d](https://github.com/thaynes43/cigar-journal/commit/8ed885d0260a21286122650de1eb0808ce212486))
+
 ## [0.25.1](https://github.com/thaynes43/cigar-journal/compare/v0.25.0...v0.25.1) (2026-08-29)
 
 
