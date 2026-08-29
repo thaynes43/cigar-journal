@@ -424,6 +424,9 @@ function toCigarMatch(row: CigarMatchRow): CigarMatch {
 //                     or vitola. matches are that brand's catalogued cigars.
 //   multiple_matches— several fuzzy hits and no clean brand/exact winner; ask.
 //   no_match        — nothing plausible; a described save creates the cigar.
+// Only active catalog rows are candidates (DESIGN-003 §Curation): excluded
+// pollution and merged tombstones never resolve here (the picker never offers a
+// hidden row), so a smoke can never re-link to one.
 export async function searchCigars(
   deps: Deps,
   principal: Principal,
@@ -436,7 +439,8 @@ export async function searchCigars(
     SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches, c.ring_gauge, c.type, c.verification,
       (SELECT count(*) FROM smokes s WHERE s.cigar_id = c.id AND s.user_id = ${principal.userId}) AS user_smoke_count
     FROM cigars c
-    WHERE c.canonical_name % ${query} OR coalesce(c.brand, '') % ${query}
+    WHERE c.catalog_status = 'active'
+      AND (c.canonical_name % ${query} OR coalesce(c.brand, '') % ${query})
     ORDER BY GREATEST(similarity(c.canonical_name, ${query}), similarity(coalesce(c.brand, ''), ${query})) DESC
     LIMIT ${limit}
   `);
@@ -456,7 +460,7 @@ export async function searchCigars(
     SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches, c.ring_gauge, c.type, c.verification,
       (SELECT count(*) FROM smokes s WHERE s.cigar_id = c.id AND s.user_id = ${principal.userId}) AS user_smoke_count
     FROM cigars c
-    WHERE lower(c.brand) = lower(${query})
+    WHERE c.catalog_status = 'active' AND lower(c.brand) = lower(${query})
     ORDER BY c.canonical_name
     LIMIT ${limit}
   `);
@@ -643,14 +647,20 @@ function toCatalogCigar(cigar: CigarRow): CatalogCigar {
 // catalog-only (no per-caller personal fields). `totalCount` lets the UI note
 // when the cap elides some. Auth-gated at the adapter; add principal-scoped
 // personal counts here only if the view later folds in the caller's history.
+// Only active rows show (DESIGN-003 §Curation): excluded pollution and merged
+// tombstones drop out of both the list and its total.
 export async function browseCigars(deps: Deps): Promise<BrowseCigarsResult> {
   const rows = await deps.db
     .select()
     .from(cigars)
+    .where(eq(cigars.catalogStatus, "active"))
     .orderBy(asc(cigars.canonicalName))
     .limit(BROWSE_CIGARS_LIMIT);
 
-  const totals = await deps.db.select({ value: count() }).from(cigars);
+  const totals = await deps.db
+    .select({ value: count() })
+    .from(cigars)
+    .where(eq(cigars.catalogStatus, "active"));
 
   return {
     cigars: rows.map(toCatalogCigar),

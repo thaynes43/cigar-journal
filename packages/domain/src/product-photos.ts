@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { productPhotos } from "@cj/db";
 import type { Deps } from "./deps.js";
 import { PhotoNotFoundError } from "./errors.js";
@@ -15,7 +15,11 @@ export interface ProductPhotoObject {
 }
 
 // Storage coordinates for one cigar's product photo, or PhotoNotFoundError when
-// none exists (the route maps that to a 404).
+// none serves (the route maps that to a 404). A `suppressed` photo (rights
+// takedown, DESIGN-003 §Curation) is treated as absent — never served, even to an
+// authed principal — so the serving routes 404 naturally via this read. `pending`
+// and `approved` both serve the authed catalog; the public gate (approved-only)
+// lands with the public serving path.
 export async function getProductPhoto(deps: Deps, args: { cigarId: string }): Promise<ProductPhotoObject> {
   const rows = await deps.db
     .select({
@@ -24,7 +28,7 @@ export async function getProductPhoto(deps: Deps, args: { cigarId: string }): Pr
       contentType: productPhotos.contentType,
     })
     .from(productPhotos)
-    .where(eq(productPhotos.cigarId, args.cigarId))
+    .where(and(eq(productPhotos.cigarId, args.cigarId), ne(productPhotos.rights, "suppressed")))
     .limit(1);
   const photo = rows[0];
   if (!photo) throw new PhotoNotFoundError();

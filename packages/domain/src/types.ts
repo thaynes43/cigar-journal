@@ -1008,3 +1008,69 @@ export interface CurationQueueResult {
   // Near-duplicate pairs, highest similarity first — the merge backlog.
   duplicates: DuplicateCandidatePair[];
 }
+
+// The catalog lifecycle values (DESIGN-003 §Curation, migration 0013): `active`
+// shows everywhere; `excluded` hides from browse/search/queue but stays reachable
+// by direct id; `merged` is a tombstone folded into a survivor by mergeCigars.
+export type CatalogStatus = "active" | "excluded" | "merged";
+
+// The listing→cigar link states (Market context). `auto` is the resolver's guess;
+// a curator/agent confirms or unmatches it via setListingMatchStatus.
+export type ListingMatchStatus = "auto" | "confirmed" | "unmatched";
+
+// Product-photo display gating (ADR-007). `suppressed` is a takedown — never
+// served or shown (DESIGN-003 §Curation).
+export type ProductPhotoRights = "pending" | "approved" | "suppressed";
+
+// A curator/agent verdict on a vendor listing→cigar link (DESIGN-003 §Curation
+// "Missing human primitive"). Confirming keeps the resolved cigar; unmatching
+// clears it (the schema's implied invariant — a crawler-created unmatched row
+// carries no cigar). Idempotent via the mutation envelope; audits in-transaction.
+export interface SetListingMatchStatusInput {
+  clientRequestId: string;
+  matchId: string;
+  status: "confirmed" | "unmatched";
+  correlationId?: string;
+}
+
+export interface SetListingMatchStatusResult {
+  matchId: string;
+  status: "confirmed" | "unmatched";
+  // The linked cigar after the verdict: kept on confirm, null on unmatch. The
+  // prior value rides the audit `before` for reversibility.
+  cigarId: string | null;
+  replayed: boolean;
+}
+
+// Hide a catalog Cigar from browse/search/queue without deleting it, or restore a
+// hidden one (DESIGN-003 §Curation "catalog_status + excludeCigar"). Idempotent
+// via the mutation envelope; audits in-transaction (restore's audit `reverts`
+// self-links the exclude it undoes — the reversibility substrate).
+export interface SetCatalogStatusInput {
+  clientRequestId: string;
+  cigarId: string;
+  correlationId?: string;
+}
+
+export interface SetCatalogStatusResult {
+  cigarId: string;
+  catalogStatus: CatalogStatus;
+  replayed: boolean;
+}
+
+// Approve or suppress (take down) a catalog Cigar's product photo (DESIGN-003
+// §Curation "Fix the rights bug first"). `suppressed` stops the photo serving and
+// drops it from every cover/has-photo read. Idempotent via the mutation envelope;
+// audits in-transaction.
+export interface SetProductPhotoRightsInput {
+  clientRequestId: string;
+  cigarId: string;
+  rights: ProductPhotoRights;
+  correlationId?: string;
+}
+
+export interface SetProductPhotoRightsResult {
+  cigarId: string;
+  rights: ProductPhotoRights;
+  replayed: boolean;
+}
