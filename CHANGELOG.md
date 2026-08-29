@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/thaynes43/cigar-journal/compare/v0.23.0...v0.23.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **web:** DESIGN-002 go-live sweep — tile badges, price heading, per-user dates, wait states ([#120](https://github.com/thaynes43/cigar-journal/issues/120)) ([c77882e](https://github.com/thaynes43/cigar-journal/commit/c77882e9fa72271a22a4c4ebdb5186fa27c3db1c))
+
 ## [0.23.0](https://github.com/thaynes43/cigar-journal/compare/v0.22.0...v0.23.0) (2026-08-29)
 
 
