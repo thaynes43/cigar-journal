@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { SmokedAt } from "@cj/domain";
 import { formatSmokedAt, formatDay, formatMonthYear } from "@/lib/format";
+import { useViewerTimeZone } from "./timezone-provider";
 
 type LocalDateProps = {
   className?: string;
@@ -15,31 +16,36 @@ type LocalDateProps = {
   | { format: "monthYear"; value: string | null }
 );
 
-// Viewer-local date display without a hydration mismatch. Server components
-// format dates in the server's timezone (UTC); to show each viewer their own
-// local date instead, we render nothing until mounted, then swap in the locally
-// formatted string. Server and first client pass agree (both empty), so hydration
-// is clean — the same client-only derivation edit-smoke-form.tsx uses for its
-// timezone-dependent prefill. Formats reuse lib/format.ts, so the rendered shapes
-// are identical to their server-side counterparts.
+// Viewer-local date display without a hydration mismatch. Two modes, chosen by
+// whether the viewer stored a time zone (DESIGN-003 §Settings, via the
+// TimezoneProvider):
+//   • Stored zone: formatting is deterministic across server and client, so the
+//     date renders immediately — server-rendered dates now respect the stored zone
+//     rather than falling back to the server's UTC.
+//   • No stored zone: fall back to the original issue-120 behavior — render nothing
+//     until mounted, then swap in the browser-local string. Server and first client
+//     pass agree (both empty), so hydration stays clean.
+// Formats reuse lib/format.ts, so the rendered shapes match their server-side
+// counterparts exactly.
 export function LocalDate(props: LocalDateProps) {
+  const timeZone = useViewerTimeZone();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
   const hasValue = props.format === "smokedAt" ? props.value.value != null : props.value != null;
   if (!hasValue) return <>{props.fallback ?? null}</>;
 
-  const text = mounted ? formatValue(props) : null;
+  const text = timeZone ? formatValue(props, timeZone) : mounted ? formatValue(props) : null;
   return props.className ? <span className={props.className}>{text}</span> : <>{text}</>;
 }
 
-function formatValue(props: LocalDateProps): string | null {
+function formatValue(props: LocalDateProps, timeZone?: string): string | null {
   switch (props.format) {
     case "smokedAt":
-      return formatSmokedAt(props.value);
+      return formatSmokedAt(props.value, timeZone);
     case "day":
-      return formatDay(props.value);
+      return formatDay(props.value, timeZone);
     case "monthYear":
-      return formatMonthYear(props.value);
+      return formatMonthYear(props.value, timeZone);
   }
 }

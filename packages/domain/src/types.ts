@@ -5,6 +5,8 @@ import type { Tobacco, SmokeContext, SmokePhotoKind } from "@cj/db";
 
 export type CigarType = "NC" | "CC";
 export type Verification = "verified" | "unverified";
+// Whether a user's journal is anonymously readable (ADR-004 visibility; #97).
+export type JournalVisibility = "public" | "private";
 export type SmokedAtSource = "user" | "system-finalized" | "legacy-document" | "unknown";
 export type SmokedAtPrecision = "minute" | "approximate" | "day";
 export type ProvenanceSource = "llm-conversation" | "manual" | "legacy-import";
@@ -354,6 +356,33 @@ export interface DeleteSmokeInput {
 
 export interface DeleteSmokeResult {
   smokeId: string;
+}
+
+// ---- User settings (DESIGN-003 §Settings) ----------------------------------
+
+// The self-serve account surface's read model: the three v1 controls (Profile
+// display name, Journal visibility, Time zone). Principal-scoped — a user only
+// ever reads and writes their own. `displayName`/`timezone` are null when unset
+// (an unset zone renders dates browser-local, the pre-Settings default).
+export interface UserSettings {
+  displayName: string | null;
+  journalVisibility: JournalVisibility;
+  timezone: string | null;
+}
+
+// A target-state settings write: each omitted key is left untouched, so the form
+// can PATCH one section at a time. `displayName: null` / `timezone: null` clear
+// the field (they are nullable columns); a provided journalVisibility flips it.
+// A target-state write like setWant/setFavorite — idempotent (repeating lands on
+// the same state), audited only when something actually changes. Anonymous
+// callers never reach it: the tRPC surface is authedProcedure, so there is no
+// principal-free path to change another account's visibility.
+export interface UpdateUserSettingsInput {
+  displayName?: string | null;
+  journalVisibility?: JournalVisibility;
+  timezone?: string | null;
+  provenance?: ProvenanceInput;
+  correlationId?: string;
 }
 
 export interface CigarView {

@@ -51,6 +51,14 @@ const config: NextConfig = {
         destination: "/cigars?own=have",
         permanent: false,
       },
+      // Curation became Catalog review and moved under /admin (DESIGN-003 §Chrome);
+      // the old path keeps working. Temporary (307) — the console's home may still
+      // move as the curate-agent review UI lands, and a 308 would cache past it.
+      {
+        source: "/curation",
+        destination: "/admin/catalog",
+        permanent: false,
+      },
     ];
   },
 };

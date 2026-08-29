@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { sql } from "drizzle-orm";
 import { startRawTestPostgres, type TestPostgres } from "../testing/embedded-pg.js";
 import { migrate } from "../scripts/migrate.js";
-import { users, cigars, purchases, smokes, smokeConsumptions } from "./index.js";
+import { cigars, purchases, smokes, smokeConsumptions } from "./index.js";
 
 // The 0008 backfill (ADR-008) must run against pre-existing smokes/purchases, so
 // this test migrates everything BEFORE 0008, seeds rows the retired heuristic
@@ -53,8 +53,11 @@ describe("0008 consumption backfill", () => {
     // 1. Everything up to (but not including) the consumption migration.
     await migrate(pg.url, { migrationsDir: dirs.pre });
 
-    // 2. Seed the substrate the heuristic used to read.
-    await pg.db.insert(users).values({ id: userId, email: "backfill@example.com" });
+    // 2. Seed the substrate the heuristic used to read. Seed the user with raw SQL,
+    // not the Drizzle schema: this DB is migrated only to pre-0008, but the schema
+    // carries columns added later (e.g. `timezone`, 0012), and a Drizzle insert
+    // emits every column — so it would reference columns this partial schema lacks.
+    await pg.db.execute(sql`INSERT INTO users (id, email) VALUES (${userId}, 'backfill@example.com')`);
     [cigarX, cigarY, cigarZ] = await Promise.all([
       pg.db.insert(cigars).values({ canonicalName: "Backfill X" }).returning({ id: cigars.id }).then((r) => r[0]!.id),
       pg.db.insert(cigars).values({ canonicalName: "Backfill Y" }).returning({ id: cigars.id }).then((r) => r[0]!.id),

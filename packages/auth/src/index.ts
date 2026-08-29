@@ -50,3 +50,28 @@ export async function getPrincipal(headers: Headers): Promise<Principal | null> 
   const result = await auth.api.getSession({ headers });
   return toPrincipal(result);
 }
+
+// The signed-in viewer's display identity — the Principal plus the name/email the
+// account chrome renders (DESIGN-003 §Chrome user menu). Server-derived from the
+// same session as getPrincipal; the display name maps from `users.display_name`
+// (Better Auth's `name`) and is null when the user never set one. Kept separate
+// from Principal so the domain's identity contract stays name/email-free (ADR-004)
+// — this is presentation, read only by the header.
+export interface Viewer {
+  userId: string;
+  role: "user" | "admin";
+  displayName: string | null;
+  email: string;
+}
+
+export async function getViewer(headers: Headers): Promise<Viewer | null> {
+  const result = await auth.api.getSession({ headers });
+  if (!result) return null;
+  const user = result.user as { id: string; role?: string | null; name?: string | null; email: string };
+  return {
+    userId: user.id,
+    role: user.role === "admin" ? "admin" : "user",
+    displayName: user.name && user.name.trim().length > 0 ? user.name : null,
+    email: user.email,
+  };
+}

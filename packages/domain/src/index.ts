@@ -67,6 +67,12 @@ export { setWant, isWanted } from "./wants.js";
 // the scalar overlay reused by reads.
 export { setFavorite, isFavorited } from "./favorites.js";
 
+// Self-serve account settings (DESIGN-003 §Settings): the caller's own display
+// name, journal visibility, and time zone. getUserSettings reads; updateUserSettings
+// is a target-state, idempotent, audited write — principal-scoped, never another
+// account (the tRPC surface is authedProcedure, so anonymous cannot reach it).
+export { getUserSettings, updateUserSettings } from "./user-settings.js";
+
 // Review-bound smoke photos (ADR-007). Storage is passed explicitly to the
 // mutating services rather than widened into Deps.
 export {
