@@ -150,6 +150,11 @@ export interface AddCigarInput {
   clientRequestId: string;
   cigar: DescribedCigarInput;
   requestEnrichment?: boolean; // default true
+  // Escape hatch (default false = unchanged behavior): set only after the user,
+  // shown search_cigars candidates, confirmed none is their cigar. Skips the
+  // strong-link/ambiguity guard and creates, except a case-insensitive exact
+  // canonical_name match still links. add_cigar-only; never on save/purchase.
+  confirmedDistinct?: boolean;
   provenance?: ProvenanceInput;
   correlationId?: string;
 }

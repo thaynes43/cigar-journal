@@ -106,7 +106,10 @@ Gap-fill. When the user smokes or acquires something search_cigars does not matc
 fill the gap first: add_cigar creates an unverified entry from their words and
 queues enrichment (specs + a product photo) so the later save_smoke links to a
 real cigar; record_purchase logs an acquisition and auto-creates the described
-cigar the same way. record_purchase is also how the humidor count is corrected —
+cigar the same way. If add_cigar errors cigar_ambiguous, show the search_cigars
+candidates and ask; only when the user confirms none is theirs, retry add_cigar
+with confirmedDistinct:true to create the distinct product. record_purchase is
+also how the humidor count is corrected —
 the ledger is append-only and holdings are derived, so a miscount is fixed with a
 negative-quantity row (say why in notes), never an edit. Record only what the user
 stated: never invent a price, date, or vendor.

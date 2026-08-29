@@ -2,7 +2,58 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { sql } from "drizzle-orm";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
+import {
+  numbersCompatible,
+  packagingCompatible,
+  strongLinkCompatible,
+} from "./cigar-resolution.js";
 import type { Principal } from "./index.js";
+
+// Pure guard coverage (no DB): the disqualifiers behind the strong-link filter.
+describe("strong-link guard predicates", () => {
+  it("numbersCompatible: two-sided distinct numbers are incompatible", () => {
+    expect(numbersCompatible("1964 Maduro", "1926 Maduro")).toBe(false);
+    expect(numbersCompatible("Liga Privada T52", "Liga Privada No. 9")).toBe(false);
+  });
+
+  it("numbersCompatible: a one-sided digit extra is incompatible", () => {
+    // The reported bug: the naked name has no digit, so the old "both sides must
+    // differ" rule wrongly called it compatible.
+    expect(numbersCompatible("Davidoff Signature 2000", "Davidoff Signature")).toBe(false);
+    expect(numbersCompatible("Davidoff Signature", "Davidoff Signature 2000")).toBe(false);
+  });
+
+  it("numbersCompatible: agreeing (or absent) numbers stay compatible", () => {
+    expect(numbersCompatible("Padron 1926 Serie No. 1", "Padron 1926 Serie No. 1")).toBe(true);
+    expect(numbersCompatible("Cohiba Robusto", "Cohiba Robustos")).toBe(true);
+    // Same number on both sides — the packaging guard, not this one, separates a pack.
+    expect(numbersCompatible("Davidoff Signature 2000", "Davidoff Signature 2000 Tubos Pack")).toBe(
+      true,
+    );
+  });
+
+  it("packagingCompatible: an extra packaging token is incompatible either direction", () => {
+    expect(
+      packagingCompatible("Davidoff Signature 2000", "Davidoff Signature 2000 Tubos Pack"),
+    ).toBe(false);
+    expect(packagingCompatible("Padron 1964 Tin", "Padron 1964")).toBe(false);
+    expect(packagingCompatible("Oliva Serie V Sampler", "Oliva Serie V")).toBe(false);
+  });
+
+  it("packagingCompatible: no packaging mismatch stays compatible", () => {
+    expect(packagingCompatible("Cohiba Robusto", "Cohiba Robustos")).toBe(true);
+    // Both carry the same packaging token — a match, not a variant gap.
+    expect(packagingCompatible("Padron 1964 Tin", "Padron 1964 Tin")).toBe(true);
+  });
+
+  it("strongLinkCompatible: ANDs both guards", () => {
+    expect(strongLinkCompatible("Davidoff Signature 2000", "Davidoff Signature")).toBe(false);
+    expect(
+      strongLinkCompatible("Davidoff Signature 2000", "Davidoff Signature 2000 Tubos Pack"),
+    ).toBe(false);
+    expect(strongLinkCompatible("Padron 1926 Serie No. 1", "Padron 1926 Serie No. 1")).toBe(true);
+  });
+});
 
 // Regression suite for the strong-match number-token guard (cigar-resolution).
 // pg_trgm similarity is blind to product numbers, so number-distinct names score
@@ -66,5 +117,17 @@ describe("resolveCigar number-token guard", () => {
     });
     expect(result.smoke.cigar.cigarId).toBe(existingId);
     expect(result.cigarCreated).toBe(false);
+  });
+
+  it("does not link Davidoff Signature 2000 onto the naked Davidoff Signature (one-sided digit)", async () => {
+    await expectNoStrongLink("Davidoff Signature", "Davidoff Signature 2000");
+  });
+
+  it("does not link a naked stick onto its Tubos Pack (packaging variant)", async () => {
+    // Tubos-only case: the packaging variant is the sole seeded row, yet the
+    // naked-stick save must still create rather than silently link to a pack.
+    // A distinct product name (the one-sided test above already created a
+    // "…Signature 2000" row in this shared DB — reusing it would exact-link).
+    await expectNoStrongLink("Montecristo Epic 2010 Tubos Pack", "Montecristo Epic 2010");
   });
 });

@@ -33,7 +33,7 @@ import type {
   SetProductPhotoRightsResult,
 } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
-import { numbersCompatible } from "./cigar-resolution.js";
+import { strongLinkCompatible } from "./cigar-resolution.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 
@@ -945,12 +945,13 @@ export async function curationQueue(deps: Deps, principal: Principal): Promise<C
     sim: number;
   }[];
 
-  // The resolver's number-token guard, applied to candidates: names carrying
-  // mutually distinct digit-bearing tokens ("No. 9" vs "T52", "1964" vs "1926")
-  // are different products by definition — never merge candidates, regardless
-  // of trigram score. Post-filtering after the LIMIT can under-fill a capped
-  // page, which is acceptable for an admin backlog view.
-  const pairRows = rawPairRows.filter((p) => numbersCompatible(p.a_name, p.b_name));
+  // The resolver's strong-link guard, applied to candidates: names carrying
+  // distinct digit-bearing tokens ("No. 9" vs "T52", "1964" vs "1926", or a
+  // one-sided "Signature 2000" vs "Signature") or an extra packaging token
+  // ("… Tubos Pack" vs the naked stick) are different products by definition —
+  // never merge candidates, regardless of trigram score. Post-filtering after
+  // the LIMIT can under-fill a capped page, acceptable for an admin backlog view.
+  const pairRows = rawPairRows.filter((p) => strongLinkCompatible(p.a_name, p.b_name));
 
   // One metadata+counts fetch for every cigar referenced by either list.
   const allIds = new Set<string>(unverifiedIds);

@@ -468,6 +468,12 @@ export const addCigarSchema = z
       .describe(
         "Queue a background enrichment request to fill missing specs and a product photo. Defaults to true; set false only to suppress the crawl.",
       ),
+    confirmedDistinct: z
+      .boolean()
+      .optional()
+      .describe(
+        "Set true ONLY after search_cigars returned candidates AND the user explicitly confirmed none is their cigar — it overrides the near-match guard so a distinct product is created instead of erroring or silently linking. Never set it preemptively or on a first attempt; a case-insensitive exact-name match still links regardless. Defaults to false.",
+      ),
   })
   .strict();
 

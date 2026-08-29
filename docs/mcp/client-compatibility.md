@@ -91,6 +91,17 @@ checks were stale in the pre-refresh conversation). Practical rule: after
 any tool-schema deploy, refresh the connector once, then start a new chat.
 Deleting/re-adding the connector is not required.
 
+**2026-08-29 — additive `add_cigar` schema change.** `add_cigar` gained an
+optional boolean `confirmedDistinct` (default false = unchanged behavior): the
+recovery for a near-match deadlock (the strong-link guard now also refuses
+one-sided-number and packaging variants like "Davidoff Signature 2000" vs
+"…Signature" / "…Signature 2000 Tubos Pack"). The model sets it only after
+search_cigars candidates were shown and the user confirmed none is theirs; a
+case-insensitive exact-name match still links. Additive and backward-compatible,
+but per the per-conversation schema cache above it reaches ChatGPT only after a
+**connector refresh AND a new chat** — an in-flight conversation keeps serving
+the pre-change schema and cannot pass the new field.
+
 ## Workflows
 
 **Ideal (design target):** the user talks to ChatGPT normally for the whole
