@@ -13,7 +13,7 @@ import { RecordSmokeButton } from "./record-smoke-button";
 export function SiteHeader({ principal }: { principal: Principal | null }) {
   return (
     <header className="border-b border-line bg-surface">
-      <div className="mx-auto flex w-full max-w-5xl flex-nowrap items-center gap-3 overflow-x-auto px-4 py-3 sm:gap-6 sm:px-6 sm:py-4">
+      <div className="flex w-full flex-nowrap items-center gap-3 overflow-x-auto px-4 py-3 sm:gap-6 sm:px-6 sm:py-4 lg:px-8">
         <Link
           href={principal ? "/" : "/journal"}
           className="shrink-0 font-display text-base font-semibold tracking-wide whitespace-nowrap text-ink sm:text-lg"
