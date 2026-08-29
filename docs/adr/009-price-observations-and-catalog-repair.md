@@ -28,6 +28,15 @@ requested "priceObservations" store exists; it is incomplete, not absent.
   source: a registry vendor OR a named ad-hoc source — never neither. The
   registry stays admin-curated (ADR-006); ad-hoc sources do not mint vendor
   rows.
+- **Packaging tiers (owner ruling, 2026-08-29):** each packaging is its own
+  observation series on the same cigar — never averaged, never blended. The
+  comparison axis is price-per-stick, always displayed with its packaging
+  ("$16.70/stick · box of 20"); a bare per-stick figure is banned. Where the
+  singles price and the best per-stick differ, both are shown; missing tiers
+  are never invented. Price sorting uses best in-stock per-stick with ties
+  toward singles. History charts render one line per (source, packaging)
+  series. A multipack/box product page is the SAME catalog cigar with its
+  packaging recorded — never a new cigar row.
 - **Append-only with a dedupe window:** an observation identical to the
   latest one for the same (cigar, source, packaging) — same price, currency,
   availability — within 24h is skipped, not inserted. Price changes always
