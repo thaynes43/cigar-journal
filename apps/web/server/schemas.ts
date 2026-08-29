@@ -112,3 +112,10 @@ export const queryMySmokesSchema = z.object({
   // MCP get_my_smokes schema deliberately omits it (contract-stable).
   cursor: z.string().nullish(),
 });
+
+// The anonymous public journal index (issue #96): pagination only, no filters —
+// a public reader gets the whole journal, newest first, keyset-paginated.
+export const queryPublicSmokesSchema = z.object({
+  limit: z.number().optional(),
+  cursor: z.string().nullish(),
+});

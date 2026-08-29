@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
 import type { GetBrandResult, LineGroup } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
+import { requireAuth } from "@/lib/require-auth";
 import { BandTile } from "../../../_components/band-tile";
 import { CigarStillTile } from "../../../_components/cigar-still-tile";
 
@@ -9,6 +10,7 @@ import { CigarStillTile } from "../../../_components/cigar-still-tile";
 // each line as a collapsible poster section (the haynesnetwork season pattern),
 // and finally the loose cigars with no line. Unknown slug → 404.
 export default async function BrandPage({ params }: { params: Promise<{ slug: string }> }) {
+  await requireAuth();
   const { slug } = await params;
   const caller = await getServerCaller();
 

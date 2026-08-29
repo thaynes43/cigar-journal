@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
 import type { CigarView, GetCigarResult, Tobacco } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
+import { requireAuth } from "@/lib/require-auth";
 import { formatSmokedAt, formatDay, formatPrice, formatSeenAt } from "@/lib/format";
 import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
@@ -51,6 +52,7 @@ function blendLines(tobacco: Tobacco): { label: string; value: string }[] {
 }
 
 export default async function CigarDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  await requireAuth();
   const { id } = await params;
   const caller = await getServerCaller();
 

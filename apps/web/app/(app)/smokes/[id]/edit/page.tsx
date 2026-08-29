@@ -1,9 +1,11 @@
 import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
 import { getServerCaller } from "@/lib/trpc/server";
+import { requireAuth } from "@/lib/require-auth";
 import { EditSmokeForm } from "../../../_components/edit-smoke-form";
 
 export default async function EditSmokePage({ params }: { params: Promise<{ id: string }> }) {
+  await requireAuth();
   const { id } = await params;
   const caller = await getServerCaller();
 

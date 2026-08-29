@@ -15,6 +15,10 @@ export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
 export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, getCigarOfferHistory, getCigarPricing, getCigarPriceHistory, browseCigars } from "./reads.js";
 
+// Anonymous reads for public journals (PRD-001 R7, ADR-004; issue #96). No
+// Principal — the visibility filter is the authorization, applied server-side.
+export { getPublicSmoke, queryPublicSmokes, publicJournalExists } from "./public-reads.js";
+
 // Catalog repair + price observations (ADR-009). request_cigar_enrichment repairs
 // an existing sparse cigar through the enrichment queue; update_cigar fills null
 // catalog fields (never verified/non-null values, never the journal); record_price
@@ -60,6 +64,7 @@ export {
   addSmokePhoto,
   listSmokePhotos,
   getSmokePhoto,
+  getPublicSmokePhoto,
   removeSmokePhoto,
   type ProcessedImage,
   type AddSmokePhotoInput,

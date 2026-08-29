@@ -1,5 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import { getServerCaller } from "@/lib/trpc/server";
+import { requireAuth } from "@/lib/require-auth";
 import { NewSmokeForm } from "../../_components/new-smoke-form";
 
 // `?cigarId=` pre-resolves the picker (the detail page's "Record a smoke" action,
@@ -10,6 +11,7 @@ export default async function NewSmokePage({
 }: {
   searchParams: Promise<{ cigarId?: string }>;
 }) {
+  await requireAuth();
   const { cigarId } = await searchParams;
   let initialCigar: { cigarId: string; canonicalName: string } | null = null;
   if (cigarId) {

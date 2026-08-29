@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, count, eq } from "drizzle-orm";
-import { auditLog, smokePhotos, smokes } from "@cj/db";
+import { auditLog, smokePhotos, smokes, users } from "@cj/db";
 import type { PhotoStorage } from "@cj/photos";
 import type { Deps, Principal } from "./deps.js";
 import type { SmokePhotoKind, SmokePhotoView } from "./types.js";
@@ -149,6 +149,31 @@ export async function getSmokePhoto(
   const photo = rows[0];
   if (!photo || photo.userId !== principal.userId) throw new PhotoNotFoundError();
   return { objectKey: photo.objectKey, thumbKey: photo.thumbKey, contentType: photo.contentType };
+}
+
+// The storage coordinates of one photo that belongs to a PUBLIC journal, for the
+// anonymous serving path (issue #96). Photos are journal content, so a public
+// journal's photos are viewable without a session — but only via this
+// visibility-gated join. A photo on a private journal (or no such photo) is
+// reported as not-found, the same as getSmokePhoto's cross-user case, so
+// ownership/existence never leaks.
+export async function getPublicSmokePhoto(
+  deps: Deps,
+  args: { photoId: string },
+): Promise<SmokePhotoObject> {
+  const rows = await deps.db
+    .select({
+      objectKey: smokePhotos.objectKey,
+      thumbKey: smokePhotos.thumbKey,
+      contentType: smokePhotos.contentType,
+    })
+    .from(smokePhotos)
+    .innerJoin(users, eq(smokePhotos.userId, users.id))
+    .where(and(eq(smokePhotos.id, args.photoId), eq(users.journalVisibility, "public")))
+    .limit(1);
+  const photo = rows[0];
+  if (!photo) throw new PhotoNotFoundError();
+  return photo;
 }
 
 // Detach one of the caller's photos. The row + audit tombstone go in one
