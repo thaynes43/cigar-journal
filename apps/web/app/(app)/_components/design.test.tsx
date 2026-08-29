@@ -8,6 +8,7 @@ import { VitalsBlock } from "./vitals-block";
 import { Chips } from "./chips";
 import { WantBadge } from "./want-badge";
 import { RecordSmokeButton } from "./record-smoke-button";
+import { FavoriteBadge } from "./favorite-badge";
 
 describe("BandTile", () => {
   it("keeps a house on one ground color across its lines", () => {
@@ -233,6 +234,17 @@ describe("WantBadge", () => {
     expect(html).toContain("Want");
     expect(html).toContain("border-line");
     expect(html).not.toContain("bg-accent");
+  });
+});
+
+describe("FavoriteBadge", () => {
+  it("rides the art corner as a filled heart in ember, never the want accent", () => {
+    const html = renderToStaticMarkup(<FavoriteBadge />);
+    expect(html).toContain("♥");
+    expect(html).toContain("text-ember"); // the heart color, not the amber accent
+    expect(html).toContain("absolute"); // an art overlay, not a badge-row chip
+    expect(html).not.toContain("bg-accent"); // the accent stays the want mark's alone
+    expect(html).toContain('aria-label="Favorite"');
   });
 });
 

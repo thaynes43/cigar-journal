@@ -216,6 +216,33 @@ export interface SetWantResult {
   changed: boolean;
 }
 
+// The single favorite mark (PRD-003, DESIGN-002) — the second cigar-level mark,
+// mirroring SetWant. Favorite = a cigar the user LOVES, distinct from Want (a
+// cigar to try/own). A target-state write: `favorited: true` marks it, `false`
+// clears it — both idempotent, so a repeat call is a safe no-op (no
+// clientRequestId envelope). `note` is an optional free-text "why", MCP-authored
+// only in v1 (the web has no input field). Independent of want, owning, and
+// smoking; never inferred. An unknown cigarId returns cigar_not_found.
+export interface SetFavoriteInput {
+  cigarId: string;
+  favorited: boolean;
+  // When setting (favorited: true): a provided note is stored; an omitted note
+  // keeps any existing note (a re-set never silently wipes it). Ignored when
+  // clearing. An empty/whitespace string is treated as no note.
+  note?: string | null;
+  provenance?: ProvenanceInput;
+  correlationId?: string;
+}
+
+export interface SetFavoriteResult {
+  cigarId: string;
+  favorited: boolean; // the resulting state (echoes the request; idempotent)
+  note: string | null; // the note now on the mark, or null (null once cleared)
+  // Whether this call changed anything — false on an idempotent no-op. Drives
+  // whether an audit row was written.
+  changed: boolean;
+}
+
 export interface UpdateSmokeChanges {
   cigar?: { resolveTo: string };
   smokedAt?: SmokedAtInput;
@@ -437,6 +464,12 @@ export interface GetCigarResult {
   // another user's mark.
   wanted: boolean;
   wantNote: string | null;
+  // The caller's favorite overlay (PRD-003, DESIGN-002) — the second cigar-level
+  // mark, mirroring the want overlay. `favorited` drives the detail-page
+  // FavoriteToggle fill; `favoriteNote` is the optional MCP-authored "why".
+  // Principal-scoped — never another user's mark.
+  favorited: boolean;
+  favoriteNote: string | null;
 }
 
 // One vendor's latest market listing for a cigar (Market context). The offers
@@ -503,6 +536,10 @@ export interface CatalogCigarTile extends CatalogCigar {
   // Whether the caller has marked this cigar as wanted (PRD-003 R-WANT-3); drives
   // the tile's static want badge. Principal-scoped, never leaks across users.
   wanted: boolean;
+  // Whether the caller has marked this cigar as a favorite (PRD-003, DESIGN-002);
+  // drives the tile's static favorite heart. Principal-scoped, never leaks across
+  // users.
+  favorited: boolean;
 }
 
 // One line's cigars within a brand page — the haynesnetwork "season".
@@ -640,7 +677,12 @@ export interface MergeCigarsInput {
 export interface MergeCigarsResult {
   sourceCigarId: string;
   targetCigarId: string;
-  // How many rows moved off the source, per referencing table.
+  // How many rows moved off the source, per referencing table. The two
+  // cigar-level marks (wants, favorites) re-point de-duplicated: when the same
+  // user marked BOTH sides the target's mark is kept and the source's dropped
+  // first (the UNIQUE(user,cigar) pair forbids a duplicate), so each count is
+  // only the marks that actually moved — the drop counts ride the audit
+  // (`wantsDeduped`, `favoritesDeduped`).
   repointed: {
     smokes: number;
     purchases: number;
@@ -652,6 +694,10 @@ export interface MergeCigarsResult {
     // pair forbids a duplicate) — a de-dupe the audit's `wantsDeduped` records.
     // Closes the #45-noted gap where a merge orphaned the source's wants.
     wants: number;
+    // Favorite marks moved to the target, de-duped the same way (the audit's
+    // `favoritesDeduped` records the drop). The second cigar-level mark, mirroring
+    // wants.
+    favorites: number;
   };
   replayed: boolean;
 }

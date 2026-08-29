@@ -11,6 +11,7 @@ import { RatingSeal } from "../../_components/rating-seal";
 import { StrengthMeter } from "../../_components/strength-meter";
 import { VitalsBlock } from "../../_components/vitals-block";
 import { WantToggle } from "../../_components/want-toggle";
+import { FavoriteToggle } from "../../_components/favorite-toggle";
 
 function vitola(cigar: CigarView): string | null {
   const dims =
@@ -48,7 +49,8 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
     throw error;
   }
 
-  const { cigar, personalProfile, hasProductPhoto, wanted, wantNote } = data;
+  const { cigar, personalProfile, hasProductPhoto, wanted, wantNote, favorited, favoriteNote } =
+    data;
   const { smokes } = await caller.smokes.list({ cigarId: id, limit: 50 });
   const offers = await caller.cigars.offers({ cigarId: id });
   const blend = cigar.tobacco ? blendLines(cigar.tobacco) : [];
@@ -81,9 +83,15 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
             {cigar.verification === "unverified" ? (
               <span className={`${ui.chipOutline} self-start`}>unverified</span>
             ) : null}
-            <WantToggle cigarId={cigar.cigarId} initialWanted={wanted} />
+            <div className="flex flex-wrap items-center gap-2">
+              <WantToggle cigarId={cigar.cigarId} initialWanted={wanted} />
+              <FavoriteToggle cigarId={cigar.cigarId} initialFavorited={favorited} />
+            </div>
             {wantNote ? (
               <p className="font-serif text-sm leading-relaxed text-muted">{wantNote}</p>
+            ) : null}
+            {favoriteNote ? (
+              <p className="font-serif text-sm leading-relaxed text-muted">{favoriteNote}</p>
             ) : null}
           </div>
           <VitalsBlock

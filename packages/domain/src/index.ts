@@ -26,6 +26,11 @@ export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from 
 // audited); isWanted is the scalar overlay reused by record_purchase and reads.
 export { setWant, isWanted } from "./wants.js";
 
+// The single favorite mark (PRD-003, DESIGN-002) — the second cigar-level mark,
+// mirroring want. setFavorite sets/clears (idempotent, audited); isFavorited is
+// the scalar overlay reused by reads.
+export { setFavorite, isFavorited } from "./favorites.js";
+
 // Review-bound smoke photos (ADR-007). Storage is passed explicitly to the
 // mutating services rather than widened into Deps.
 export {

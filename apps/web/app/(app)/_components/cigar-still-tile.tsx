@@ -4,12 +4,15 @@ import { ui } from "@/lib/ui";
 import { BandTile } from "./band-tile";
 import { RatingSeal } from "./rating-seal";
 import { WantBadge } from "./want-badge";
+import { FavoriteBadge } from "./favorite-badge";
 
 // The "episode" still: a 16:9 tile for one cigar at its vitola. Below the art,
 // a one-line name, a `vitola · type` subtitle, and a badge row capped at three
 // (DESIGN-002): the want mark and the rating seal lead; the caller's smoke count
-// then dimensions fill the rest, dims yielding first. Art is the BandTile
-// fallback until an ADR-007 ProductPhoto lands via `imageUrl`.
+// then dimensions fill the rest, dims yielding first. The favorite mark does NOT
+// enter that capped row — it rides the art corner as a heart (FavoriteBadge), so
+// it never evicts a dims/smoked/rating badge. Art is the BandTile fallback until
+// an ADR-007 ProductPhoto lands via `imageUrl`.
 export function CigarStillTile({
   cigar,
   imageUrl,
@@ -46,12 +49,13 @@ export function CigarStillTile({
 
   return (
     <Link href={`/cigars/${cigar.cigarId}`} className="group flex h-full flex-col gap-2">
-      <div className="aspect-video overflow-hidden rounded-card border border-line transition-colors group-hover:border-accent/60">
+      <div className="relative aspect-video overflow-hidden rounded-card border border-line transition-colors group-hover:border-accent/60">
         {imageUrl ? (
           <img src={imageUrl} alt="" className="h-full w-full object-cover" />
         ) : (
           <BandTile name={cigar.canonicalName} shape="fill" />
         )}
+        {cigar.favorited ? <FavoriteBadge /> : null}
       </div>
       <div className="flex min-w-0 flex-col gap-1">
         <span className="truncate font-display font-semibold text-ink">{cigar.canonicalName}</span>

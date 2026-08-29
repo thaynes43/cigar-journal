@@ -9,9 +9,11 @@
 -- (user, cigar, note, created_at) shape carries forward untouched, so nothing
 -- here precludes that migration.
 --
--- ON DELETE CASCADE keeps referential integrity when a cigar or user is removed;
--- catalog merge (ADR-006) does not yet repoint wants, so a merge drops the
--- source cigar's marks — acceptable for v1, revisited with the unified catalog.
+-- ON DELETE CASCADE keeps referential integrity when a cigar or user is removed.
+-- Catalog merge (ADR-006, curation.ts) re-points wants to the surviving cigar,
+-- de-duplicated against any mark the user already holds on the target (shipped
+-- with the unified catalog, closing the #45 gap; favorites re-point the same way
+-- from migration 0010 — see mergeCigars).
 
 CREATE TABLE wants (
   id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
