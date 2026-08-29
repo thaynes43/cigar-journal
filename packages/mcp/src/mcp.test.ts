@@ -1933,6 +1933,29 @@ describe("@cj/mcp adapter", () => {
     expect(audit?.confidence).toBeCloseTo(0.91, 5);
   });
 
+  // run_id is TEXT (migration 0016): the run's identity is the dev-env-ops
+  // work-order key, not a uuid — the first live curation run failed every write
+  // on the uuid cast, sanitized to `unavailable` (issue #126, 2026-08-29).
+  it("accepts a work-order-key runId — a non-uuid run identity lands on the audit row", async () => {
+    const { matchId } = await seedAutoMatch("Curation Order Key Toro");
+    const runId = "wo-cigar-curate-20260829";
+    await withClient(adminCuration, async (client) => {
+      const res = payloadOf(
+        await call(client, "set_listing_match_status", {
+          clientRequestId: randomUUID(),
+          matchId,
+          status: "unmatched",
+          runId,
+          confidence: 0.95,
+        }),
+      ) as { status: string };
+      expect(res.status).toBe("unmatched");
+    });
+    const audit = await auditFor("listing_match.set_status", runId);
+    expect(audit?.actor).toBe("agent");
+    expect(audit?.runId).toBe(runId);
+  });
+
   it("set_cigar_facts overwrites a wrong value on a verified cigar (unlike update_cigar) and audits actor agent", async () => {
     const cigarId = await h.seedCigar({
       canonicalName: "Wrongly Branded Corona",

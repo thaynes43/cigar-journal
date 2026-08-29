@@ -18,8 +18,9 @@ export const auditLog = pgTable("audit_log", {
   after: jsonb("after"),
   correlationId: text("correlation_id"),
   // The batch run this action belongs to ("Recent agent runs" groups on it); no
-  // FK — there is no runs table yet.
-  runId: uuid("run_id"),
+  // FK — there is no runs table. Text, not uuid: a run's identity is the
+  // dev-env-ops work-order key ("wo-cigar-curate-20260829"), migration 0016.
+  runId: text("run_id"),
   // The agent's score for an auto-applied proposal (0..1); null for human work.
   confidence: real("confidence"),
   // Self-link to the audit row this action undoes (restore reverts an exclude);

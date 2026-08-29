@@ -991,7 +991,7 @@ export type AddSmokePhotoArgs = z.infer<typeof addSmokePhotoSchema>;
 const runId = z
   .string()
   .nullish()
-  .describe("UUID of the batch run this write belongs to, so the review console can group and undo it. Omit outside a run.");
+  .describe("Identifier of the batch run this write belongs to (e.g. the work-order key), so the review console can group and undo it. Max 128 chars. Omit outside a run.");
 
 const confidence = z
   .number()
