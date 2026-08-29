@@ -102,6 +102,32 @@ but per the per-conversation schema cache above it reaches ChatGPT only after a
 **connector refresh AND a new chat** — an in-flight conversation keeps serving
 the pre-change schema and cannot pass the new field.
 
+## 2026-08-29 — additive curation tool surface (admin only, DESIGN-003 wave 4a)
+
+The MCP server gained an **admin-only catalog-curation surface** (issue #126) —
+the primitives the `curate` ops agent drives over HTTP. Two new OAuth scopes,
+`curation:read` and `curation:write`, join the AS's `scopes_supported`; seven new
+tools join the manifest: `get_curation_queue` (paged read — kinds `unverified`,
+`duplicates`, `match_triage`, `unbranded`, `untyped`, `missing_photos`),
+`set_listing_match_status`, `set_cigar_facts`, `verify_cigar`, `exclude_cigar`,
+`restore_cigar`, `set_product_photo_rights`. There is deliberately **no merge
+tool** — merges stay human-only in the web console.
+
+**Existing clients are unaffected.** This is purely additive (R-MCP-4): the
+seventeen journal/catalog tools, their scopes, and their schemas are unchanged. A
+normal connector token carries `catalog:read`/`journal:*` and never the
+`curation:*` scopes, so the curation tools are invisible-in-practice and
+unreachable to it — a curation `tools/call` on a token lacking the scope returns
+`403 insufficient_scope`. The scope alone is not enough: every curation tool also
+requires an **admin-role principal** (the role is server-derived from the token via
+`users.role`), so a `curation:*` token minted for a non-admin user is rejected with
+`unauthorized`, exactly as the web `adminProcedure` rejects. Curation writes stamp
+`audit_log.actor = 'agent'` and thread the run's `run_id` + `confidence`, distinct
+from conversational writes (`mcp`). No client re-verification is needed for the
+journal workflow; per the per-conversation manifest cache above, the new tools
+reach a client only after a connector refresh and a new chat — but they are not
+intended for conversational clients at all.
+
 ## Workflows
 
 **Ideal (design target):** the user talks to ChatGPT normally for the whole

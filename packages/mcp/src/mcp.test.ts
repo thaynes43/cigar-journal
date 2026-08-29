@@ -17,7 +17,7 @@ import {
 } from "@cj/oauth";
 import { createHarness, type DomainHarness } from "@cj/domain/testing";
 import type { Principal } from "@cj/domain";
-import { purchases, vendors, enrichmentRequests, offers } from "@cj/db";
+import { purchases, vendors, enrichmentRequests, offers, listingMatches, productPhotos, auditLog, cigars } from "@cj/db";
 import { buildApp } from "./app.js";
 import { INSTRUCTIONS } from "./constants.js";
 
@@ -81,6 +81,11 @@ describe("@cj/mcp adapter", () => {
   let ownerCatalogOnly: string;
   let ownerCatalogJournal: string;
   let otherFull: string;
+  // Curation surface (DESIGN-003 wave 4a): an admin principal carrying curation
+  // scope (the ops agent), and the SAME scope on a non-admin user (the gate test).
+  let adminUser: Principal;
+  let adminCuration: string;
+  let ownerCuration: string;
 
   async function mintToken(
     scopes: string[],
@@ -213,6 +218,10 @@ describe("@cj/mcp adapter", () => {
     ownerCatalogOnly = (await mintToken(["catalog:read"], owner.userId)).token;
     ownerCatalogJournal = (await mintToken(["catalog:read", "journal:read"], owner.userId)).token;
     otherFull = (await mintToken(ALL_SCOPES, other.userId)).token;
+
+    adminUser = await h.createUser("curator@example.com", "admin");
+    adminCuration = (await mintToken(["curation:read", "curation:write"], adminUser.userId)).token;
+    ownerCuration = (await mintToken(["curation:read", "curation:write"], owner.userId)).token;
   }, 90_000);
 
   afterAll(async () => {
@@ -256,7 +265,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the seventeen tools with readOnlyHint on the seven reads, and sends the contract instructions", async () => {
+  it("lists exactly the twenty-four tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -281,6 +290,14 @@ describe("@cj/mcp adapter", () => {
           "set_want",
           "update_cigar",
           "update_smoke",
+          // curation surface (admin only)
+          "get_curation_queue",
+          "set_listing_match_status",
+          "set_cigar_facts",
+          "verify_cigar",
+          "exclude_cigar",
+          "restore_cigar",
+          "set_product_photo_rights",
         ].sort(),
       );
 
@@ -294,6 +311,7 @@ describe("@cj/mcp adapter", () => {
         "get_my_smokes",
         "get_smoke",
         "get_my_inventory",
+        "get_curation_queue",
       ])
         expect(readOnly(r)).toBe(true);
       for (const w of [
@@ -307,6 +325,12 @@ describe("@cj/mcp adapter", () => {
         "request_cigar_enrichment",
         "update_cigar",
         "record_price",
+        "set_listing_match_status",
+        "set_cigar_facts",
+        "verify_cigar",
+        "exclude_cigar",
+        "restore_cigar",
+        "set_product_photo_rights",
       ])
         expect(readOnly(w)).not.toBe(true);
     });
@@ -1766,5 +1790,228 @@ describe("@cj/mcp adapter", () => {
       const result = await call(client, "add_smoke_photo", { smokeId });
       expect(errorOf(result).code).toBe("smoke_not_found");
     });
+  });
+
+  // ---- curation surface (admin only; DESIGN-003 wave 4a, issue #126) --------
+
+  // A listing match at status 'auto' linked to a fresh cigar, with an offer that
+  // carries the listing URL — the match_triage row shape the agent judges.
+  async function seedAutoMatch(cigarName: string): Promise<{ matchId: string; cigarId: string }> {
+    const cigarId = await h.seedCigar({ canonicalName: cigarName, verification: "unverified" });
+    const [vendor] = await h.pg.db
+      .insert(vendors)
+      .values({ name: `Vendor ${randomUUID().slice(0, 8)}` })
+      .returning({ id: vendors.id });
+    const [match] = await h.pg.db
+      .insert(listingMatches)
+      .values({ vendorId: vendor!.id, listingKey: `sku-${randomUUID().slice(0, 8)}`, cigarId, status: "auto" })
+      .returning({ id: listingMatches.id });
+    await h.pg.db.insert(offers).values({
+      vendorId: vendor!.id,
+      listingMatchId: match!.id,
+      listingUrl: "https://vendor.example.com/product/xyz",
+      seenAt: new Date("2026-08-25T00:00:00Z"),
+    });
+    return { matchId: match!.id, cigarId };
+  }
+
+  // Audit row for an action within a run — filtered in JS (this package does not
+  // depend on drizzle-orm operators directly, per enrichmentRows above).
+  async function auditFor(
+    action: string,
+    runId: string,
+  ): Promise<{ actor: string; runId: string | null; confidence: number | null; after: unknown } | undefined> {
+    const all = await h.pg.db.select().from(auditLog);
+    const row = all.find((r) => r.runId === runId && r.action === action);
+    return row ? { actor: row.actor, runId: row.runId, confidence: row.confidence, after: row.after } : undefined;
+  }
+
+  async function cigarById(cigarId: string): Promise<(typeof cigars.$inferSelect) | undefined> {
+    const all = await h.pg.db.select().from(cigars);
+    return all.find((r) => r.id === cigarId);
+  }
+
+  it("rejects every curation tool for a curation-scoped NON-admin principal: unauthorized (scope present, role missing)", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Gate Test Robusto", verification: "unverified" });
+    await withClient(ownerCuration, async (client) => {
+      const queue = await call(client, "get_curation_queue", { kind: "unverified" });
+      expect(errorOf(queue).code).toBe("unauthorized");
+      const verify = await call(client, "verify_cigar", { clientRequestId: randomUUID(), cigarId });
+      expect(errorOf(verify).code).toBe("unauthorized");
+    });
+    // The non-admin attempt wrote nothing — the cigar is still unverified.
+    expect((await cigarById(cigarId))!.verification).toBe("unverified");
+  });
+
+  it("rejects a curation tools/call for a journal:write token lacking the curation scope: 403", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerFull}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "set_cigar_facts",
+          arguments: { clientRequestId: randomUUID(), cigarId: primaryCigarId, fields: { brand: "X" } },
+        },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+  });
+
+  it("get_curation_queue pages the unverified backlog with a cursor and serves the other kinds", async () => {
+    // Three unverified cigars older than every other seed, so paging order is stable.
+    const base = new Date("2026-07-01T00:00:00Z").getTime();
+    for (let i = 0; i < 3; i++) {
+      await h.pg.db.insert(cigars).values({
+        canonicalName: `Queue Backlog ${i} ${randomUUID().slice(0, 6)}`,
+        verification: "unverified",
+        createdAt: new Date(base + i * 1000),
+      });
+    }
+    await withClient(adminCuration, async (client) => {
+      const p1 = payloadOf(
+        await call(client, "get_curation_queue", { kind: "unverified", limit: 2 }),
+      ) as { cigars: { cigarId: string; canonicalName: string }[]; nextCursor: string | null };
+      expect(p1.cigars.length).toBe(2);
+      expect(p1.nextCursor).toBeTruthy();
+
+      const p2 = payloadOf(
+        await call(client, "get_curation_queue", { kind: "unverified", limit: 2, cursor: p1.nextCursor }),
+      ) as { cigars: { cigarId: string }[]; nextCursor: string | null };
+      expect(p2.cigars.length).toBeGreaterThanOrEqual(1);
+      // No overlap between the two pages (keyset advanced correctly).
+      const ids1 = new Set(p1.cigars.map((c) => c.cigarId));
+      for (const c of p2.cigars) expect(ids1.has(c.cigarId)).toBe(false);
+
+      // Each other kind returns its own payload array under the same tool.
+      const untyped = payloadOf(await call(client, "get_curation_queue", { kind: "untyped", limit: 5 })) as {
+        cigars: unknown[];
+      };
+      expect(Array.isArray(untyped.cigars)).toBe(true);
+      const unbranded = payloadOf(await call(client, "get_curation_queue", { kind: "unbranded", limit: 5 })) as {
+        cigars: unknown[];
+      };
+      expect(Array.isArray(unbranded.cigars)).toBe(true);
+      const dupes = payloadOf(await call(client, "get_curation_queue", { kind: "duplicates", limit: 5 })) as {
+        duplicates: unknown[];
+      };
+      expect(Array.isArray(dupes.duplicates)).toBe(true);
+    });
+  });
+
+  it("set_listing_match_status confirms an auto match; match_triage carries the listing + cigar facts; audit stamps agent + runId/confidence", async () => {
+    const { matchId, cigarId } = await seedAutoMatch("Curation Match Toro");
+    const runId = randomUUID();
+    await withClient(adminCuration, async (client) => {
+      const q = payloadOf(await call(client, "get_curation_queue", { kind: "match_triage", limit: 200 })) as {
+        matches: { matchId: string; listingUrl: string | null; cigar: { cigarId: string; canonicalName: string } | null }[];
+      };
+      const row = q.matches.find((m) => m.matchId === matchId);
+      expect(row).toBeTruthy();
+      expect(row!.listingUrl).toBe("https://vendor.example.com/product/xyz");
+      expect(row!.cigar?.cigarId).toBe(cigarId);
+      expect(row!.cigar?.canonicalName).toBe("Curation Match Toro");
+
+      const res = payloadOf(
+        await call(client, "set_listing_match_status", {
+          clientRequestId: randomUUID(),
+          matchId,
+          status: "confirmed",
+          runId,
+          confidence: 0.91,
+        }),
+      ) as { status: string; cigarId: string | null };
+      expect(res.status).toBe("confirmed");
+      expect(res.cigarId).toBe(cigarId);
+    });
+    const audit = await auditFor("listing_match.set_status", runId);
+    expect(audit?.actor).toBe("agent");
+    expect(audit?.runId).toBe(runId);
+    expect(audit?.confidence).toBeCloseTo(0.91, 5);
+  });
+
+  it("set_cigar_facts overwrites a wrong value on a verified cigar (unlike update_cigar) and audits actor agent", async () => {
+    const cigarId = await h.seedCigar({
+      canonicalName: "Wrongly Branded Corona",
+      brand: "WrongBrand",
+      type: "NC",
+      verification: "verified",
+    });
+    const runId = randomUUID();
+    await withClient(adminCuration, async (client) => {
+      const res = payloadOf(
+        await call(client, "set_cigar_facts", {
+          clientRequestId: randomUUID(),
+          cigarId,
+          fields: { brand: "Padron", type: "CC" },
+          runId,
+          confidence: 0.8,
+        }),
+      ) as { changedFields: string[]; unchanged: string[]; verification: string };
+      expect([...res.changedFields].sort()).toEqual(["brand", "type"]);
+      expect(res.verification).toBe("verified");
+    });
+    const row = await cigarById(cigarId);
+    expect(row!.brand).toBe("Padron");
+    expect(row!.type).toBe("CC");
+    const audit = await auditFor("cigar.set_facts", runId);
+    expect(audit?.actor).toBe("agent");
+    expect((audit?.after as Record<string, unknown>).brand).toBe("Padron");
+  });
+
+  it("verify_cigar flips an unverified cigar to verified (agent surface)", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Needs Verify Robusto", verification: "unverified" });
+    await withClient(adminCuration, async (client) => {
+      const res = payloadOf(
+        await call(client, "verify_cigar", { clientRequestId: randomUUID(), cigarId, runId: randomUUID(), confidence: 1 }),
+      ) as { verification: string };
+      expect(res.verification).toBe("verified");
+    });
+    expect((await cigarById(cigarId))!.verification).toBe("verified");
+  });
+
+  it("exclude_cigar then restore_cigar round-trips the catalog status (agent surface)", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Pollution Panetela" });
+    await withClient(adminCuration, async (client) => {
+      const ex = payloadOf(
+        await call(client, "exclude_cigar", { clientRequestId: randomUUID(), cigarId, runId: randomUUID() }),
+      ) as { catalogStatus: string };
+      expect(ex.catalogStatus).toBe("excluded");
+      const re = payloadOf(
+        await call(client, "restore_cigar", { clientRequestId: randomUUID(), cigarId, runId: randomUUID() }),
+      ) as { catalogStatus: string };
+      expect(re.catalogStatus).toBe("active");
+    });
+    expect((await cigarById(cigarId))!.catalogStatus).toBe("active");
+  });
+
+  it("set_product_photo_rights suppresses a product photo (agent surface)", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Photo Rights Lonsdale" });
+    await h.pg.db.insert(productPhotos).values({
+      cigarId,
+      objectKey: `obj/${randomUUID()}`,
+      thumbKey: `thumb/${randomUUID()}`,
+      contentType: "image/webp",
+      width: 800,
+      height: 600,
+      bytes: 100,
+      rights: "pending",
+    });
+    await withClient(adminCuration, async (client) => {
+      const res = payloadOf(
+        await call(client, "set_product_photo_rights", {
+          clientRequestId: randomUUID(),
+          cigarId,
+          rights: "suppressed",
+          runId: randomUUID(),
+        }),
+      ) as { rights: string };
+      expect(res.rights).toBe("suppressed");
+    });
+    const all = await h.pg.db.select().from(productPhotos);
+    expect(all.find((p) => p.cigarId === cigarId)!.rights).toBe("suppressed");
   });
 });

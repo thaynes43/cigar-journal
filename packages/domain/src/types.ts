@@ -941,6 +941,18 @@ export interface CigarHolding {
 
 // ---- Curation (ADR-006 catalog hygiene; curator-only) ----------------------
 
+// Who drove a curation write, threaded into the audit row (DESIGN-003 §Curation
+// "Attribution + reversibility"). The web console leaves it absent → actor stays
+// `web`, runId/confidence null (unchanged). The admin MCP curation surface (the
+// operations agent, issue #126) passes actor `agent` plus the batch `runId` and
+// the model's `confidence`, so "Recent agent runs" can group and score the work.
+// Actor is server-derived from the calling surface, never from tool arguments.
+export interface CurationAttribution {
+  actor?: "web" | "agent";
+  runId?: string; // the batch run this write belongs to (agent surface only)
+  confidence?: number; // 0..1 auto-apply score (agent surface only)
+}
+
 // Merge a duplicate catalog Cigar into the one that survives. Re-points every
 // reference off the source, then deletes it (curator-only, ADR-006). Idempotent
 // via the mutation envelope; cigars carry no version column, so distinct-id and
@@ -989,6 +1001,7 @@ export interface MergeCigarsResult {
 export interface VerifyCigarInput {
   clientRequestId: string;
   cigarId: string;
+  attribution?: CurationAttribution;
   correlationId?: string;
 }
 
@@ -1066,6 +1079,7 @@ export interface SetListingMatchStatusInput {
   clientRequestId: string;
   matchId: string;
   status: "confirmed" | "unmatched";
+  attribution?: CurationAttribution;
   correlationId?: string;
 }
 
@@ -1085,6 +1099,7 @@ export interface SetListingMatchStatusResult {
 export interface SetCatalogStatusInput {
   clientRequestId: string;
   cigarId: string;
+  attribution?: CurationAttribution;
   correlationId?: string;
 }
 
@@ -1102,6 +1117,7 @@ export interface SetProductPhotoRightsInput {
   clientRequestId: string;
   cigarId: string;
   rights: ProductPhotoRights;
+  attribution?: CurationAttribution;
   correlationId?: string;
 }
 
@@ -1109,4 +1125,93 @@ export interface SetProductPhotoRightsResult {
   cigarId: string;
   rights: ProductPhotoRights;
   replayed: boolean;
+}
+
+// Curator write of a cigar's identity facts (DESIGN-003 wave 4a, issue #126).
+// Unlike the conversational update_cigar (fill-nulls-only, unverified-only), this
+// OVERWRITES a wrong value and may touch a verified row — the catalog curator's
+// authority. Only the four identity facts are writable here; a field present in
+// `fields` is set to its value (a non-null string, or `null` to clear a wrong one),
+// an omitted field is untouched. Audited before→after per field; idempotent via
+// the mutation envelope.
+export interface SetCigarFactsInput {
+  clientRequestId: string;
+  cigarId: string;
+  fields: {
+    brand?: string | null;
+    line?: string | null;
+    type?: "NC" | "CC" | null;
+    manufacturer?: string | null;
+  };
+  attribution?: CurationAttribution;
+  correlationId?: string;
+}
+
+export interface SetCigarFactsResult {
+  cigarId: string;
+  // Fields actually written (value differed from the current value).
+  changedFields: string[];
+  // Fields supplied whose value already matched — no write, no audit entry.
+  unchanged: string[];
+  verification: Verification;
+  replayed: boolean;
+}
+
+// ---- Curation worklist (the admin drain queue; DESIGN-003 wave 4a) ----------
+
+// The kinds of work the curation queue surfaces. One paged read (get_curation_queue)
+// serves all six via this discriminator, rather than six tools:
+//   unverified    — active cigars still unverified (the verification backlog)
+//   duplicates    — near-duplicate name pairs (human-merge candidates)
+//   match_triage  — vendor listing→cigar auto-matches awaiting confirm/unmatch
+//   unbranded     — active cigars with a null brand (brand backfill)
+//   untyped       — active cigars with a null NC/CC type (type classification)
+//   missing_photos— active cigars with no product photo
+export type CurationWorklistKind =
+  | "unverified"
+  | "duplicates"
+  | "match_triage"
+  | "unbranded"
+  | "untyped"
+  | "missing_photos";
+
+export interface CurationWorklistInput {
+  kind: CurationWorklistKind;
+  // Opaque keyset cursor from a prior page's nextCursor; absent/malformed → page 1.
+  cursor?: string | null;
+  limit?: number;
+}
+
+// A catalog cigar as it appears in a worklist — the identity facts a curator/agent
+// needs to judge a backfill or verification without a second read.
+export interface WorklistCigar {
+  cigarId: string;
+  canonicalName: string;
+  brand: string | null;
+  line: string | null;
+  type: "NC" | "CC" | null;
+  manufacturer: string | null;
+  verification: Verification;
+  createdAt: string; // ISO-8601 instant
+}
+
+// A vendor listing→cigar auto-match awaiting a verdict: the listing on one side
+// (vendor + key + url), the resolver's guessed cigar facts on the other, so a
+// confirm/unmatch call is judgeable in one read.
+export interface WorklistMatch {
+  matchId: string;
+  vendorName: string;
+  listingKey: string;
+  listingUrl: string | null; // most-recent offer's listing URL, when one exists
+  cigar: WorklistCigar | null; // the auto-matched cigar (null once cleared)
+}
+
+// One page of the worklist. Exactly one of the payload arrays is populated per
+// `kind`; `nextCursor` is null on the last page.
+export interface CurationWorklistResult {
+  kind: CurationWorklistKind;
+  cigars?: WorklistCigar[]; // unverified | unbranded | untyped | missing_photos
+  duplicates?: DuplicateCandidatePair[]; // duplicates
+  matches?: WorklistMatch[]; // match_triage
+  nextCursor: string | null;
 }

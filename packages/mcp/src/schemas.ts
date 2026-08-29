@@ -979,3 +979,163 @@ export type UpdateSmokeArgs = z.infer<typeof updateSmokeSchema>;
 export type AddCigarArgs = z.infer<typeof addCigarSchema>;
 export type RecordPurchaseArgs = z.infer<typeof recordPurchaseSchema>;
 export type AddSmokePhotoArgs = z.infer<typeof addSmokePhotoSchema>;
+
+// ---- curation surface (admin only; DESIGN-003 wave 4a, issue #126) ----------
+//
+// The ops-agent tools. Every write carries the attribution the audit substrate
+// needs: `runId` (the batch this write belongs to) and `confidence` (0-1); the
+// adapter stamps actor `agent` server-side (never a tool argument). `runId`/
+// `confidence` are typed leniently (nullish) so a stray value reaches the domain
+// as data, not a protocol error.
+
+const runId = z
+  .string()
+  .nullish()
+  .describe("UUID of the batch run this write belongs to, so the review console can group and undo it. Omit outside a run.");
+
+const confidence = z
+  .number()
+  .nullish()
+  .describe("The agent's confidence for this auto-applied write, 0-1. Apply high-confidence; skip and report low-confidence. Omit when not scoring.");
+
+const curationClientRequestId = z
+  .string()
+  .describe("A UUID minted once per intent; reuse EXACTLY on retries so replays are recognized.");
+
+export const getCurationQueueSchema = z
+  .object({
+    kind: z
+      .enum(["unverified", "duplicates", "match_triage", "unbranded", "untyped", "missing_photos"])
+      .describe(
+        "Which backlog to page: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only), match_triage (vendor listing→cigar auto-matches to confirm/unmatch), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo).",
+      ),
+    cursor: z
+      .string()
+      .nullish()
+      .describe("Keyset cursor from a prior result's nextCursor. Omit for the first page; drain a kind until nextCursor is null."),
+    limit: z.number().int().optional().describe("Max items, default 50, max 200."),
+  })
+  .strict();
+
+export type GetCurationQueueArgs = z.infer<typeof getCurationQueueSchema>;
+
+export const setListingMatchStatusSchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    matchId: z.string().describe("Listing-match id from a get_curation_queue match_triage row."),
+    status: z
+      .enum(["confirmed", "unmatched"])
+      .describe("confirmed keeps the auto-matched cigar; unmatched clears the link (the listing matched no catalog cigar)."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type SetListingMatchStatusArgs = z.infer<typeof setListingMatchStatusSchema>;
+
+export const setCigarFactsSchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    cigarId: z.string().describe("Catalog id of the cigar to correct, from a get_curation_queue row."),
+    fields: z
+      .object({
+        brand: z.string().nullish().describe("Brand/marque, e.g. Padron. null clears a wrong value; omit to leave untouched."),
+        line: z.string().nullish().describe("Product line, e.g. '1964 Anniversary'. null clears; omit to leave untouched."),
+        type: cigarType.nullish().describe("NC (non-Cuban) or CC (Cuban). null clears; omit to leave untouched. Never guess — leave null if uncertain."),
+        manufacturer: z.string().nullish().describe("Manufacturer, if distinct from brand. null clears; omit to leave untouched."),
+      })
+      .strict()
+      .describe(
+        "The identity facts to set. Unlike update_cigar this OVERWRITES a wrong value and may touch a verified row (curator authority). A present field is written; an omitted field is untouched.",
+      ),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type SetCigarFactsArgs = z.infer<typeof setCigarFactsSchema>;
+
+export const verifyCigarSchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    cigarId: z.string().describe("Catalog id of the cigar to mark verified, from a get_curation_queue row."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type VerifyCigarArgs = z.infer<typeof verifyCigarSchema>;
+
+// exclude_cigar and restore_cigar share this shape (a cigar id + attribution).
+const catalogStatusSchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    cigarId: z.string().describe("Catalog id of the cigar, from a get_curation_queue row."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export const excludeCigarSchema = catalogStatusSchema;
+export const restoreCigarSchema = catalogStatusSchema;
+export type ExcludeCigarArgs = z.infer<typeof excludeCigarSchema>;
+export type RestoreCigarArgs = z.infer<typeof restoreCigarSchema>;
+
+export const setProductPhotoRightsSchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    cigarId: z.string().describe("Catalog id whose product photo's rights to set, from a missing_photos/other row."),
+    rights: z
+      .enum(["pending", "approved", "suppressed"])
+      .describe("approved clears the photo for display; suppressed is a takedown (stops serving it, drops it from every cover read); pending is the crawl default."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type SetProductPhotoRightsArgs = z.infer<typeof setProductPhotoRightsSchema>;
+
+// ---- curation output schemas (permissive, like the rest) -------------------
+
+// One page of the worklist: exactly one payload array populated per kind, mirrored
+// loosely so a kind-bounded payload validates.
+export const getCurationQueueOutput = z
+  .object({
+    kind: z.string(),
+    cigars: z.array(looseObject).optional(),
+    duplicates: z.array(looseObject).optional(),
+    matches: z.array(looseObject).optional(),
+    nextCursor: z.string().nullable(),
+  })
+  .passthrough();
+
+export const setListingMatchStatusOutput = z
+  .object({
+    matchId: z.string(),
+    status: z.string(),
+    cigarId: z.string().nullable(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const setCigarFactsOutput = z
+  .object({
+    cigarId: z.string(),
+    changedFields: z.array(z.string()),
+    unchanged: z.array(z.string()),
+    verification: z.string(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const verifyCigarOutput = z
+  .object({ cigarId: z.string(), verification: z.string(), replayed: z.boolean() })
+  .passthrough();
+
+export const setCatalogStatusOutput = z
+  .object({ cigarId: z.string(), catalogStatus: z.string(), replayed: z.boolean() })
+  .passthrough();
+
+export const setProductPhotoRightsOutput = z
+  .object({ cigarId: z.string(), rights: z.string(), replayed: z.boolean() })
+  .passthrough();
