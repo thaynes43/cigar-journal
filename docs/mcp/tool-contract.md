@@ -138,6 +138,21 @@ smokedAt: { value: "2026-08-26T20:15:00-04:00", source: user, precision: minute 
 - Imports (server-side path, not this tool) → `source: legacy-document`
   (usually `precision: day`) or `source: unknown` with null value.
 
+## Tool results (text + structured output)
+
+Every tool declares an MCP **`outputSchema`** (ChatGPT's connector settings flags
+"Output schema recommended" per tool). Following the SDK's structured-output
+contract, each successful result carries the payload **both** as the JSON text
+block (unchanged, byte-for-byte — the fallback path still emits this exact JSON as
+chat text) **and** as `structuredContent` validated against the schema; the two are
+the same object, so they can never diverge. Error results (`isError: true`) carry
+only the text payload and are exempt. The schemas are additive metadata and
+deliberately **permissive** — rich nested objects (cigar/smoke detail, lots) and
+conditional fields (`userSmokeCount`, `personalProfile`, `matchedIn`/`matchSnippet`,
+mode-A photo vs mode-B link) are mirrored loosely so a valid payload is never
+rejected as a protocol error. The payload shapes below are normative; the schemas
+mirror them.
+
 ---
 
 ## search_cigars — read
@@ -593,17 +608,35 @@ invalid/expired failure (`upload_token_invalid`) surfaces on the upload page (41
 
 ### File intake (`openai/fileParams`)
 
-Mode A reads the image handle from the request metadata the OpenAI MCP extension
-supplies: `_meta["openai/fileParams"]`, an array (or single object) of entries
-shaped `{ download_url, file_id, mime_type?, name? }` where `download_url` is a
-**short-lived signed URL** the server must fetch promptly. The adapter parses it
-defensively — array or single object, any unknown shape treated as *absent* so a
-malformed `_meta` silently falls back to mode B rather than erroring. This is the
-only surface that reads `_meta`; the tool's own JSON schema never carries image
-bytes. Field/handle names (`download_url`, `mime_type`, the single-use upload
-link) deliberately track the in-progress MCP file-upload drafts **SEP-2356 /
-SEP-1306**, so swapping to the ratified standard later is a mechanical rename, not
-a redesign.
+**The tool declares its file input.** Per OpenAI's Apps SDK
+([reference](https://developers.openai.com/apps-sdk/reference)) a tool that wants
+an attached file MUST declare it, or ChatGPT forwards nothing (the owner-blocking
+bug: the receive path worked, but with no declaration ChatGPT never sent the
+image). `add_smoke_photo` therefore declares an **optional** top-level `image`
+property and lists it in the **tool-level** `_meta["openai/fileParams"]: ["image"]`
+published in `tools/list`. The MCP SDK (1.30.x) carries this via a `_meta`
+pass-through on `registerTool` — no response hooking needed. The `image` property
+is deliberately **permissive** (every sub-field optional, unknown keys pass
+through, kept out of `required`): a partial or odd file object reaches the handler
+and falls back to mode B rather than failing input validation.
+
+**Two deliveries, one fetch path.** Mode A accepts the file handle from either:
+
+1. the declared **`image` argument** — `{ download_url, file_id, mime_type?,
+   file_name? }` the client fills in for the file param (the standard Apps SDK
+   path ChatGPT uses once the declaration is present); or
+2. request-level **`_meta["openai/fileParams"]`** — the same entry shape (array or
+   single object) carried in request metadata (the earlier, production-proven
+   delivery), still accepted.
+
+In both, `download_url` is a **short-lived signed URL** the server must fetch
+promptly. The adapter parses each defensively — any unknown shape treated as
+*absent* so a malformed argument or `_meta` silently falls back to mode B rather
+than erroring. The tool's JSON schema still never carries image bytes; only the
+signed-URL handle. Field/handle names (`download_url`, `mime_type`, the single-use
+upload link) deliberately track the in-progress MCP file-upload drafts **SEP-2356
+/ SEP-1306**, so swapping to the ratified standard later is a mechanical rename,
+not a redesign.
 
 ## set_want — write, idempotent
 

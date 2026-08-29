@@ -445,9 +445,34 @@ export const recordPurchaseSchema = z
 
 // ---- photo intake ----------------------------------------------------------
 
-// The image is NEVER an input field: it arrives attached to the tool call itself
-// (the OpenAI `_meta["openai/fileParams"]` extension) or not at all. These are
-// only the binding — which smoke, and how to classify/caption the shot.
+// The image is a HOST-FILLED file input, not model text. Per OpenAI's Apps SDK a
+// tool must DECLARE its file inputs — a top-level property listed in the
+// tool-level `_meta["openai/fileParams"]` (published in tools/list) — or ChatGPT
+// never forwards the attached image. We declare `image` here and list it in that
+// _meta on the add_smoke_photo registration (server.ts). ChatGPT then populates
+// `image` with `{ download_url, file_id, mime_type?, file_name? }` (download_url is
+// a SHORT-LIVED signed URL). The legacy request-level `_meta["openai/fileParams"]`
+// delivery is still accepted server-side; both normalize into one fetch path.
+//
+// PERMISSIVE by design: every sub-field is optional and unknown keys pass through,
+// so a partial/odd file object is NOT rejected at input validation but reaches the
+// handler, which fetches a usable one or falls back to the mode-B upload link —
+// never an error (contract "unknown/malformed → mode B"). It is out of `required`.
+const fileParamImage = z
+  .object({
+    download_url: z
+      .string()
+      .optional()
+      .describe("Host-provided signed download URL for the file. Set by the client, never by you."),
+    file_id: z
+      .string()
+      .optional()
+      .describe("Host-provided file id. Set by the client, never by you."),
+    mime_type: z.string().optional().describe("File MIME type, if the host provided one."),
+    file_name: z.string().optional().describe("Original file name, if the host provided one."),
+  })
+  .passthrough();
+
 export const addSmokePhotoSchema = z
   .object({
     smokeId: z
@@ -463,6 +488,11 @@ export const addSmokePhotoSchema = z
       .string()
       .optional()
       .describe("A short caption in the user's words, only if they gave one. Sparse is correct — omit rather than invent."),
+    image: fileParamImage
+      .optional()
+      .describe(
+        "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. Omit it and the tool returns a one-time upload link instead.",
+      ),
   })
   .strict();
 
@@ -489,6 +519,130 @@ export const setWantSchema = z
   .strict();
 
 export type SetWantArgs = z.infer<typeof setWantSchema>;
+
+// ---- output schemas --------------------------------------------------------
+//
+// One MCP `outputSchema` per tool (registered in server.ts), also mirrored by the
+// `structuredContent` the SDK requires alongside the text block. These schemas
+// GATE that structured output (an over-tight schema would turn a valid payload
+// into a protocol error) and hint the result shape to the client — they never
+// reshape the byte-for-byte JSON the text content already carries, so they are
+// deliberately PERMISSIVE: rich/nested catalog and smoke objects are mirrored
+// loosely, conditional fields (userSmokeCount, personalProfile, matchedIn/
+// matchSnippet, mode-A photo vs mode-B link) are optional, nullable leaves are
+// nullish, and every object passes unknown keys through.
+
+// A catalog/detail object whose full shape varies by tool and caller scope
+// (CigarView, SmokeView, inventory lots, vitola): mirrored loosely so a valid
+// payload can never fail output validation.
+const looseObject = z.object({}).passthrough();
+
+const searchMatchOutput = z
+  .object({
+    cigarId: z.string(),
+    canonicalName: z.string(),
+    brand: z.string().nullish(),
+    line: z.string().nullish(),
+    vitola: looseObject.nullish(),
+    type: z.string().nullish(),
+    verification: z.string(),
+    userSmokeCount: z.number().optional(),
+  })
+  .passthrough();
+
+export const searchCigarsOutput = z
+  .object({ matches: z.array(searchMatchOutput), guidance: z.string() })
+  .passthrough();
+
+export const getCigarOutput = z
+  .object({ cigar: looseObject, personalProfile: looseObject.nullish() })
+  .passthrough();
+
+const smokeSummaryOutput = z
+  .object({
+    smokeId: z.string(),
+    cigar: looseObject,
+    smokedAt: looseObject.nullish(),
+    rating: z.number().nullish(),
+    liked: z.boolean().nullish(),
+    descriptors: z.array(z.string()).optional(),
+    summary: z.string().nullish(),
+    matchedIn: z.array(z.string()).optional(),
+    matchSnippet: z.string().nullish(),
+  })
+  .passthrough();
+
+export const getMySmokesOutput = z
+  .object({ smokes: z.array(smokeSummaryOutput), totalMatches: z.number() })
+  .passthrough();
+
+export const getSmokeOutput = z.object({ smoke: looseObject }).passthrough();
+
+export const getMyInventoryOutput = z
+  .object({ holdings: z.array(looseObject), totalSticksRemaining: z.number() })
+  .passthrough();
+
+export const saveSmokeOutput = z
+  .object({
+    smoke: z
+      .object({
+        smokeId: z.string(),
+        version: z.number(),
+        url: z.string(),
+        cigar: looseObject,
+      })
+      .passthrough(),
+    cigarCreated: z.boolean(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const addCigarOutput = z
+  .object({
+    cigar: looseObject,
+    created: z.boolean(),
+    enrichmentQueued: z.boolean(),
+    guidance: z.string(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const recordPurchaseOutput = z
+  .object({
+    purchaseId: z.string(),
+    cigar: looseObject,
+    holdingAfter: z.object({ totalAcquired: z.number(), remaining: z.number() }).passthrough(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const updateSmokeOutput = z
+  .object({
+    smoke: z.object({ smokeId: z.string(), version: z.number() }).passthrough(),
+    changedFields: z.array(z.string()),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const setWantOutput = z
+  .object({
+    cigarId: z.string(),
+    wanted: z.boolean(),
+    note: z.string().nullable(),
+    changed: z.boolean(),
+  })
+  .passthrough();
+
+// Dual-mode: mode A returns { mode, photo }, mode B returns { mode, uploadUrl,
+// expiresAt } — both branches optional so either validates.
+export const addSmokePhotoOutput = z
+  .object({
+    mode: z.string(),
+    photo: looseObject.optional(),
+    uploadUrl: z.string().optional(),
+    expiresAt: z.string().optional(),
+  })
+  .passthrough();
 
 export type SearchCigarsArgs = z.infer<typeof searchCigarsSchema>;
 export type GetCigarArgs = z.infer<typeof getCigarSchema>;

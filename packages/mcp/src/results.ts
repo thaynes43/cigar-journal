@@ -7,11 +7,23 @@ import { mcpEvent } from "./logger.js";
 // also emits this exact JSON as chat text). Errors are returned as tool results
 // with isError:true so the LLM can read the structured payload and act on it
 // (contract §5 "errors are instructions"), never as a transport-level fault.
+//
+// The SAME payload is ALSO returned as `structuredContent`: every tool declares an
+// MCP `outputSchema` (server.ts), and the SDK requires a non-error result to carry
+// `structuredContent` matching that schema (it throws otherwise) — so this is not
+// optional metadata but the SDK's intended structured-output pattern. The text
+// block is byte-for-byte unchanged (contract stability); structuredContent is the
+// identical object, so the two can never diverge.
 
 export type ToolResult = CallToolResult;
 
 export function jsonResult(payload: unknown): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    // Payloads are always objects (verified across every call site); the cast
+    // satisfies structuredContent's object type without reshaping the value.
+    structuredContent: payload as Record<string, unknown>,
+  };
 }
 
 export function errorResult(payload: ErrorPayload): ToolResult {
