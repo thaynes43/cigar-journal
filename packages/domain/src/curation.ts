@@ -2,6 +2,7 @@ import { and, asc, desc, eq, isNull, sql, type SQL } from "drizzle-orm";
 import {
   auditLog,
   cigars,
+  cigarMerges,
   duplicateDismissals,
   smokes,
   purchases,
@@ -12,6 +13,9 @@ import {
   wants,
   favorites,
   type CigarRow,
+  type CigarMergeRow,
+  type CigarMergeLedgerV1,
+  type CigarMergeDroppedMark,
   type ListingMatchRow,
   type ProductPhotoRow,
   type NewCigarRow,
@@ -21,6 +25,11 @@ import type { Deps, Principal, Queryer, Tx } from "./deps.js";
 import type {
   MergeCigarsInput,
   MergeCigarsResult,
+  UnmergeCigarsInput,
+  UnmergeCigarsResult,
+  UnmergeSkip,
+  RecentMerge,
+  RecentMergesResult,
   VerifyCigarInput,
   VerifyCigarResult,
   DismissDuplicateInput,
@@ -63,8 +72,9 @@ import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 
 // Catalog hygiene — the curator's toolkit (ADR-006). Merge re-points every
-// reference off a duplicate and deletes it; verify flips the lifecycle flag; the
-// queue surfaces the unverified backlog and near-duplicate candidates. All three
+// reference off a duplicate and tombstones it (recording what moved, so unmerge
+// can put it back); verify flips the lifecycle flag; the queue surfaces the
+// unverified backlog and near-duplicate candidates. All three
 // are curator-only: verification and duplicate-merge are curator-only per ADR-006
 // and the DDD contexts doc, and the queue reveals the whole catalog's hygiene
 // state, so it is gated too. Mutations audit in-transaction and are idempotent
@@ -165,6 +175,40 @@ async function loadListingMatch(tx: Queryer, matchId: string): Promise<ListingMa
 // mergeCigars — fold a duplicate into the surviving entry (curator-only).
 // --------------------------------------------------------------------------
 
+// Every table whose `cigar_id` a merge moves, one ledger slot each (migration
+// 0020). The merge records the ids it re-points under these keys and the unmerge
+// restores them table by table, so the two ends can never name different sets.
+// A drift test pins this key set against every `cigar_id` column in the schema —
+// a new referencing table fails the suite instead of silently escaping the ledger.
+//
+// Deliberately absent, and why:
+//   smoke_consumptions  — no cigar_id at all; it links smoke→purchase and derives
+//                         user and cigar through the smoke, so nothing to re-point.
+//   duplicate_dismissals— cascade-only; the pair verdict survives on the tombstone.
+//   photo_upload_tokens — short-lived and single-use; a merge outlives them.
+export const MERGE_LEDGER_TABLES = [
+  { key: "smokes", table: "smokes" },
+  { key: "purchases", table: "purchases" },
+  { key: "listingMatches", table: "listing_matches" },
+  { key: "offers", table: "offers" },
+  { key: "enrichmentRequests", table: "enrichment_requests" },
+  { key: "productPhotos", table: "product_photos" },
+  { key: "wants", table: "wants" },
+  { key: "favorites", table: "favorites" },
+] as const;
+
+// A want/favorite row the merge's de-dupe DELETE removed, captured whole so the
+// restore can re-create its identity (same id, note, created_at) rather than a
+// look-alike.
+function droppedMark(row: {
+  id: string;
+  userId: string;
+  note: string | null;
+  createdAt: Date;
+}): CigarMergeDroppedMark {
+  return { id: row.id, userId: row.userId, note: row.note, createdAt: row.createdAt.toISOString() };
+}
+
 export async function mergeCigars(
   deps: Deps,
   principal: Principal,
@@ -210,6 +254,20 @@ async function mergeWithinTx(
   const source = await loadCigar(tx, input.sourceCigarId);
   const target = await loadCigar(tx, input.targetCigarId);
   if (!source || !target) throw new CigarNotFoundError();
+  // Neither side may already be a tombstone — both guards keep every ledger's
+  // referent valid. Re-merging a tombstone elsewhere would strand the first
+  // ledger (its rows would no longer be on the cigar it recorded), and merging
+  // INTO a tombstone would pile references onto a hidden row. Chains still form
+  // as survivors are merged later (A→B, then B→C, then C→D); unmerge handles
+  // those LIFO, newest first.
+  if (source.catalogStatus === "merged") {
+    throw new ValidationError([
+      { path: "sourceCigarId", message: "This cigar is already merged; unmerge it first." },
+    ]);
+  }
+  if (target.catalogStatus === "merged") {
+    throw new ValidationError([{ path: "targetCigarId", message: "Merge into the surviving cigar instead." }]);
+  }
 
   const before = { source: cigarSnapshot(source), target: cigarSnapshot(target) };
 
@@ -244,10 +302,10 @@ async function mergeWithinTx(
     .from(productPhotos)
     .where(eq(productPhotos.cigarId, source.id))
     .limit(1);
-  let productPhotosRepointed = 0;
+  const movedPhotoIds: string[] = [];
   if (sourcePhoto[0] && !targetPhoto[0]) {
     await tx.update(productPhotos).set({ cigarId: target.id }).where(eq(productPhotos.cigarId, source.id));
-    productPhotosRepointed = 1;
+    movedPhotoIds.push(sourcePhoto[0].id);
   }
 
   // Enrichment requests re-point too, so an open gap-fill for the duplicate keeps
@@ -273,7 +331,8 @@ async function mergeWithinTx(
   // source's wants. The UNIQUE(user_id, cigar_id) pair forbids a user holding two
   // marks, so a user who wanted BOTH sides is de-duped: drop the source's mark
   // (the target's survives) FIRST, then re-point the rest — the re-point can no
-  // longer collide. The audit records the de-dupe count.
+  // longer collide. The audit records the de-dupe count; the ledger records the
+  // dropped rows WHOLE, since a delete is the one step a re-point cannot reverse.
   const dedupedWantRows = await tx
     .delete(wants)
     .where(
@@ -281,7 +340,7 @@ async function mergeWithinTx(
         SELECT 1 FROM wants w2 WHERE w2.cigar_id = ${target.id} AND w2.user_id = ${wants.userId}
       )`,
     )
-    .returning({ id: wants.id });
+    .returning();
   const wantRows = await tx
     .update(wants)
     .set({ cigarId: target.id })
@@ -299,7 +358,7 @@ async function mergeWithinTx(
         SELECT 1 FROM favorites f2 WHERE f2.cigar_id = ${target.id} AND f2.user_id = ${favorites.userId}
       )`,
     )
-    .returning({ id: favorites.id });
+    .returning();
   const favoriteRows = await tx
     .update(favorites)
     .set({ cigarId: target.id })
@@ -314,12 +373,11 @@ async function mergeWithinTx(
   // in browse, search, or the duplicate queue. A leftover source product photo
   // (when the target already had one) stays attached to the hidden row.
   //
-  // NOTE (undo scope): re-pointing back on unmerge would need to know WHICH rows
-  // moved (smokes/purchases indistinguishable from the target's own after the
-  // merge, and the want/favorite de-dupe dropped rows entirely). That demands a
-  // per-merge bookkeeping table, so unmergeCigar is intentionally NOT built here
-  // (DESIGN-003 wave 3 note) — the tombstone preserves the data for a later, real
-  // undo rather than a half-built one.
+  // Undo is real because of the `cigar_merges` ledger written below (migration
+  // 0020): the tombstone preserves the DATA, the ledger preserves WHICH rows
+  // moved — which after the merge is otherwise unrecoverable, since a re-pointed
+  // smoke is indistinguishable from one the survivor always had and the
+  // want/favorite de-dupe deleted rows outright.
   await tx
     .update(cigars)
     .set({ catalogStatus: "merged", mergedInto: target.id, updatedAt: deps.now() })
@@ -330,33 +388,69 @@ async function mergeWithinTx(
     purchases: purchaseRows.length,
     listingMatches: listingRows.length,
     offers: offerRows.length,
-    productPhotos: productPhotosRepointed,
+    productPhotos: movedPhotoIds.length,
     enrichmentRequests: enrichmentRows.length,
     wants: wantRows.length,
     favorites: favoriteRows.length,
   };
 
-  await tx.insert(auditLog).values({
-    userId: principal.userId,
-    actor: "web",
-    action: "cigar.merge",
-    smokeId: null,
-    before,
-    after: {
-      target: cigarSnapshot(target),
-      tombstonedSourceId: source.id,
-      mergedInto: target.id,
-      repointed,
-      wantsDeduped: dedupedWantRows.length,
-      favoritesDeduped: dedupedFavoriteRows.length,
+  const mergeAudit = await tx
+    .insert(auditLog)
+    .values({
+      userId: principal.userId,
+      actor: "web",
+      action: "cigar.merge",
+      smokeId: null,
+      before,
+      after: {
+        target: cigarSnapshot(target),
+        tombstonedSourceId: source.id,
+        mergedInto: target.id,
+        repointed,
+        wantsDeduped: dedupedWantRows.length,
+        favoritesDeduped: dedupedFavoriteRows.length,
+      },
+      correlationId: input.correlationId ?? input.clientRequestId,
+    })
+    .returning({ id: auditLog.id });
+
+  // The bookkeeping row — same transaction as the merge, so an effect without its
+  // ledger cannot exist. `repointed` (counts, for the audit's existing readers)
+  // and `moved` (ids, for the restore) are deliberate redundancy: the counts are
+  // a human-readable summary, the ledger is the machine-readable inverse.
+  const ledger: CigarMergeLedgerV1 = {
+    version: 1,
+    sourceBefore: { catalogStatus: source.catalogStatus, mergedInto: source.mergedInto },
+    moved: {
+      smokes: smokeRows.map((r) => r.id),
+      purchases: purchaseRows.map((r) => r.id),
+      listingMatches: listingRows.map((r) => r.id),
+      offers: offerRows.map((r) => r.id),
+      enrichmentRequests: enrichmentRows.map((r) => r.id),
+      productPhotos: movedPhotoIds,
+      wants: wantRows.map((r) => r.id),
+      favorites: favoriteRows.map((r) => r.id),
     },
-    correlationId: input.correlationId ?? input.clientRequestId,
-  });
+    dropped: {
+      wants: dedupedWantRows.map(droppedMark),
+      favorites: dedupedFavoriteRows.map(droppedMark),
+    },
+  };
+  const mergeRow = await tx
+    .insert(cigarMerges)
+    .values({
+      sourceCigarId: source.id,
+      targetCigarId: target.id,
+      auditId: mergeAudit[0]!.id,
+      moves: ledger,
+    })
+    .returning({ id: cigarMerges.id });
 
   const result: MergeCigarsResult = {
     sourceCigarId: source.id,
     targetCigarId: target.id,
     repointed,
+    mergeId: mergeRow[0]!.id,
     replayed: false,
   };
 
@@ -370,6 +464,418 @@ async function mergeWithinTx(
   });
 
   return result;
+}
+
+// --------------------------------------------------------------------------
+// unmergeCigars — reverse one merge from its ledger (curator-only, #45).
+// --------------------------------------------------------------------------
+
+// A parameterised uuid list for an `IN (…)` clause. Explicit casts, because the
+// ids ride as text parameters and Postgres will not infer uuid inside `IN`.
+function uuidList(ids: string[]): SQL {
+  return sql.join(
+    ids.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  );
+}
+
+// The constraint a restore has to respect, per ledger slot, plus the skip reason
+// it produces when it bites. The plain slots have none: their rows carry no
+// uniqueness against the source, so the only way one fails to come back is that
+// it moved on. Both clauses mirror the merge's own SQL in reverse.
+function restoreGuard(table: string, sourceId: string): { clause: SQL; reason: UnmergeSkip["reason"] } | null {
+  switch (table) {
+    // product_photos is UNIQUE(cigar_id): a photo attached to the tombstone after
+    // the merge owns the slot now. Guarding here rather than catching 23505 keeps
+    // the whole unmerge in one transaction.
+    case "product_photos":
+      return {
+        clause: sql`AND NOT EXISTS (SELECT 1 FROM product_photos p2 WHERE p2.cigar_id = ${sourceId}::uuid)`,
+        reason: "source_occupied",
+      };
+    // wants/favorites are UNIQUE(user_id, cigar_id): the user may have re-marked
+    // the tombstone since the merge, and that newer mark wins.
+    case "wants":
+    case "favorites":
+      return {
+        clause: sql`AND NOT EXISTS (
+          SELECT 1 FROM ${sql.identifier(table)} m2
+          WHERE m2.cigar_id = ${sourceId}::uuid AND m2.user_id = ${sql.identifier(table)}.user_id
+        )`,
+        reason: "conflict",
+      };
+    default:
+      return null;
+  }
+}
+
+// Move one slot's ledger rows back to the source. `AND cigar_id = target` is the
+// load-bearing clause: a row a curator moved on since the merge is left exactly
+// where it is, and re-running the statement is a no-op. Rows the ledger names
+// that did not come back are classified — still on the survivor means the guard
+// blocked them, anything else moved on.
+async function restoreLedgerRows(
+  tx: Tx,
+  table: string,
+  ids: string[],
+  sourceId: string,
+  targetId: string,
+  guard: SQL | null,
+): Promise<{ restored: string[]; blocked: string[]; movedOn: string[] }> {
+  const name = sql.identifier(table);
+  const moved = await tx.execute(sql`
+    UPDATE ${name} SET cigar_id = ${sourceId}::uuid
+    WHERE id IN (${uuidList(ids)}) AND cigar_id = ${targetId}::uuid ${guard ?? sql``}
+    RETURNING id
+  `);
+  const restored = (moved.rows as unknown as { id: string }[]).map((r) => r.id);
+  const missing = ids.filter((id) => !restored.includes(id));
+  if (missing.length === 0) return { restored, blocked: [], movedOn: [] };
+
+  const still = await tx.execute(sql`
+    SELECT id FROM ${name} WHERE id IN (${uuidList(missing)}) AND cigar_id = ${targetId}::uuid
+  `);
+  const blocked = (still.rows as unknown as { id: string }[]).map((r) => r.id);
+  return { restored, blocked, movedOn: missing.filter((id) => !blocked.includes(id)) };
+}
+
+// Purchase lots among `ids` whose consumptions ALL belong to smokes that are not
+// coming back — read after the smokes slot restores, so a returning smoke already
+// reads `cigar_id = source`. Only those stay with the survivor: lot and
+// consumption must live on the same cigar or the humidor arithmetic breaks
+// (inventory.ts derives remaining = acquired − consumption links, keyed on
+// purchases.cigar_id and smokes.cigar_id respectively).
+//
+// A lot BOTH sides drew from is deliberately NOT held back. Either placement
+// strands one side's consumptions, and neither error is reliably the smaller: the
+// held-back error is the returning smokes' consumptions, which is the larger count
+// whenever the user had been logging the cigar for a while before the merge — the
+// ordinary shape. The tie goes to the cigar the user actually bought, because only
+// there does assertLotOwned (consumption.ts) let them attribute the next stick from
+// that box. Splitting the purchase row would be the exact inverse; that is an owner
+// decision, not the unmerge's to make.
+async function lotsConsumedOnlyElsewhere(tx: Tx, ids: string[], sourceId: string): Promise<string[]> {
+  const rows = await tx.execute(sql`
+    SELECT sc.purchase_id AS id
+    FROM smoke_consumptions sc
+    JOIN smokes s ON s.id = sc.smoke_id
+    WHERE sc.purchase_id IN (${uuidList(ids)})
+    GROUP BY sc.purchase_id
+    HAVING count(*) FILTER (WHERE s.cigar_id = ${sourceId}::uuid) = 0
+  `);
+  return (rows.rows as unknown as { id: string }[]).map((r) => r.id);
+}
+
+// Re-create one want/favorite the merge's de-dupe DELETEd, with its original id,
+// note and created_at — a restore, not a look-alike. onConflictDoNothing covers
+// both the primary key and UNIQUE(user_id, cigar_id), so a mark the user
+// re-created on the tombstone since the merge simply wins.
+async function restoreDroppedMark(
+  tx: Tx,
+  kind: "wants" | "favorites",
+  mark: CigarMergeDroppedMark,
+  sourceId: string,
+): Promise<boolean> {
+  const values = {
+    id: mark.id,
+    userId: mark.userId,
+    cigarId: sourceId,
+    note: mark.note,
+    createdAt: new Date(mark.createdAt),
+  };
+  const inserted =
+    kind === "wants"
+      ? await tx.insert(wants).values(values).onConflictDoNothing().returning({ id: wants.id })
+      : await tx.insert(favorites).values(values).onConflictDoNothing().returning({ id: favorites.id });
+  return inserted.length > 0;
+}
+
+// Claim a merge ledger for undo: a conditional UPDATE stamping `undone_at`, the
+// same single-use pattern `photo_upload_tokens` uses. It serializes concurrent
+// unmerges (the loser claims nothing) and backstops idempotency even when a
+// second request carries a different clientRequestId. Zero rows claimed is
+// either "no such merge" or "already undone" — distinguished by a plain select
+// so the curator gets the honest message, never a silent no-op.
+async function claimMerge(
+  tx: Tx,
+  deps: Deps,
+  match: SQL,
+  path: string,
+  missingMessage: string,
+): Promise<CigarMergeRow> {
+  const claimed = await tx
+    .update(cigarMerges)
+    .set({ undoneAt: deps.now() })
+    .where(and(match, isNull(cigarMerges.undoneAt)))
+    .returning();
+  if (claimed[0]) return claimed[0];
+  const existing = await tx.select({ id: cigarMerges.id }).from(cigarMerges).where(match).limit(1);
+  throw new ValidationError([
+    { path, message: existing[0] ? "This merge was already unmerged." : missingMessage },
+  ]);
+}
+
+export async function unmergeCigars(
+  deps: Deps,
+  principal: Principal,
+  input: UnmergeCigarsInput,
+): Promise<UnmergeCigarsResult> {
+  assertCurator(principal);
+  const requestFingerprint = fingerprint(input);
+
+  try {
+    return await deps.db.transaction((tx) => unmergeEnvelope(tx, deps, principal, input, requestFingerprint));
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as UnmergeCigarsResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function unmergeEnvelope(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  input: UnmergeCigarsInput,
+  requestFingerprint: string,
+): Promise<UnmergeCigarsResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as UnmergeCigarsResult), replayed: true };
+  }
+
+  const merge = await claimMerge(
+    tx,
+    deps,
+    eq(cigarMerges.id, input.mergeId),
+    "mergeId",
+    "No merge matches the given id.",
+  );
+  const result: UnmergeCigarsResult = {
+    ...(await unmergeWithinTx(tx, deps, principal, merge, input.correlationId ?? input.clientRequestId)),
+    replayed: false,
+  };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "unmerge_cigars",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// The restore itself, shared by the standalone service and the Undo path so both
+// run identical code. The ledger row arrives already claimed. Writes its own
+// `cigar.unmerge` audit linked `reverts` = the merge's audit row, which is also
+// what makes a later Undo of that same merge audit report "already undone".
+async function unmergeWithinTx(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  merge: CigarMergeRow,
+  correlationId: string,
+): Promise<Omit<UnmergeCigarsResult, "replayed">> {
+  const ledger = merge.moves;
+  const source = await loadCigar(tx, merge.sourceCigarId);
+  const target = await loadCigar(tx, merge.targetCigarId);
+  if (!source || !target) throw new CigarNotFoundError();
+  // The ledger only describes a world where the source is still THIS merge's
+  // tombstone. Anything else (re-merged elsewhere, restored by hand) means the
+  // recorded inverse no longer applies.
+  if (source.catalogStatus !== "merged" || source.mergedInto !== target.id) {
+    throw new ValidationError([
+      { path: "mergeId", message: "This merge is no longer the cigar's current state." },
+    ]);
+  }
+  // LIFO. After A→B then B→C, this ledger's ids sit on C, not B: restoring them
+  // "from B" would silently move nothing, and taking them from C would gut the
+  // B→C ledger. Undo the later merge first and this one becomes valid again.
+  if (target.catalogStatus === "merged") {
+    throw new ValidationError([{ path: "mergeId", message: "Undo the later merge first." }]);
+  }
+
+  const restored = {
+    smokes: 0,
+    purchases: 0,
+    listingMatches: 0,
+    offers: 0,
+    productPhotos: 0,
+    enrichmentRequests: 0,
+    wants: 0,
+    favorites: 0,
+  };
+  const skipped: UnmergeSkip[] = [];
+  let crossCigarLots = 0;
+
+  // Rows created on the survivor AFTER the merge are handled structurally, not by
+  // a query: the ledger is an explicit id list captured at merge time, so a
+  // post-merge smoke, purchase, mark or crawler match is simply not in it. No
+  // "move everything pointing at the target" statement exists anywhere here.
+  for (const slot of MERGE_LEDGER_TABLES) {
+    const ids = ledger.moved[slot.key] ?? [];
+    if (ids.length === 0) continue;
+    let movable = ids;
+    if (slot.key === "purchases") {
+      // A lot whose every consumption belongs to a smoke that is NOT coming back
+      // stays with the survivor. getMyInventory builds a holding from `purchases`
+      // and counts consumption by `smokes.cigar_id` (inventory.ts), so returning
+      // such a lot would resurrect sticks the user has smoked AND drop the
+      // survivor out of the humidor entirely — the one skip the user, not the
+      // curator, would feel. Smokes restore first (slot order), so this reads the
+      // post-restore attribution. Bound of the inverse: a lot BOTH sides smoked
+      // from goes back with the source and the survivor's own consumptions no
+      // longer meet a lot — see lotsConsumedOnlyElsewhere for why that direction.
+      const crossCigar = await lotsConsumedOnlyElsewhere(tx, ids, source.id);
+      crossCigarLots = crossCigar.length;
+      movable = ids.filter((id) => !crossCigar.includes(id));
+      for (const rowId of crossCigar) skipped.push({ entity: slot.key, rowId, reason: "consumed_elsewhere" });
+      if (movable.length === 0) continue;
+    }
+    const guard = restoreGuard(slot.table, source.id);
+    const outcome = await restoreLedgerRows(tx, slot.table, movable, source.id, target.id, guard?.clause ?? null);
+    restored[slot.key] = outcome.restored.length;
+    for (const rowId of outcome.blocked) skipped.push({ entity: slot.key, rowId, reason: guard!.reason });
+    for (const rowId of outcome.movedOn) skipped.push({ entity: slot.key, rowId, reason: "moved_on" });
+  }
+
+  for (const mark of ledger.dropped.wants ?? []) {
+    if (await restoreDroppedMark(tx, "wants", mark, source.id)) restored.wants += 1;
+    else skipped.push({ entity: "wants", rowId: mark.id, reason: "conflict" });
+  }
+  for (const mark of ledger.dropped.favorites ?? []) {
+    if (await restoreDroppedMark(tx, "favorites", mark, source.id)) restored.favorites += 1;
+    else skipped.push({ entity: "favorites", rowId: mark.id, reason: "conflict" });
+  }
+
+  // Un-tombstone to the source's PRE-merge lifecycle, not a hardcoded 'active':
+  // unmerging a cigar that was excluded before must not quietly publish it.
+  const restoredSourceStatus: CatalogStatus = ledger.sourceBefore?.catalogStatus ?? "active";
+  await tx
+    .update(cigars)
+    .set({
+      catalogStatus: restoredSourceStatus,
+      mergedInto: ledger.sourceBefore?.mergedInto ?? null,
+      updatedAt: deps.now(),
+    })
+    .where(eq(cigars.id, source.id));
+
+  const undoAudit = await tx
+    .insert(auditLog)
+    .values({
+      userId: principal.userId,
+      // A human curator drove this, whether from the merges list or the Undo
+      // button: actor 'web', no runId — so it never enters "Recent agent runs".
+      ...auditAttribution(undefined),
+      action: "cigar.unmerge",
+      smokeId: null,
+      before: { source: cigarSnapshot(source), target: cigarSnapshot(target) },
+      after: { mergeId: merge.id, restored, skipped, restoredSourceStatus, crossCigarLots },
+      reverts: merge.auditId,
+      correlationId,
+    })
+    .returning({ id: auditLog.id });
+  const undoAuditId = undoAudit[0]!.id;
+  await tx.update(cigarMerges).set({ undoAuditId }).where(eq(cigarMerges.id, merge.id));
+
+  return {
+    mergeId: merge.id,
+    sourceCigarId: source.id,
+    targetCigarId: target.id,
+    restored,
+    skipped,
+    restoredSourceStatus,
+    crossCigarLots,
+    undoAuditId,
+  };
+}
+
+// --------------------------------------------------------------------------
+// recentMerges — the console's merge history + unmerge affordance.
+// --------------------------------------------------------------------------
+
+// A merge audit is actor 'web' with no run_id, so it can never appear in "Recent
+// agent runs" — the merge/unmerge pair needs its own section. Bounded like the
+// other admin reads; newest first.
+const RECENT_MERGES_CAP = 50;
+
+export async function recentMerges(deps: Deps, principal: Principal): Promise<RecentMergesResult> {
+  assertCurator(principal);
+
+  const result = await deps.db.execute(sql`
+    SELECT m.id, m.moves, m.merged_at::text AS merged_at, m.undone_at::text AS undone_at,
+           s.id AS source_id, s.canonical_name AS source_name,
+           s.catalog_status AS source_status, s.merged_into AS source_merged_into,
+           t.id AS target_id, t.canonical_name AS target_name, t.catalog_status AS target_status,
+           jsonb_array_length(ua.after -> 'skipped') AS skipped_count
+    FROM cigar_merges m
+    JOIN cigars s ON s.id = m.source_cigar_id
+    JOIN cigars t ON t.id = m.target_cigar_id
+    -- The unmerge's own audit, for the skip count the console shows: unmerge is
+    -- not always a byte-exact inverse and the console must say so.
+    LEFT JOIN audit_log ua ON ua.id = m.undo_audit_id
+    ORDER BY m.merged_at DESC, m.id DESC
+    LIMIT ${RECENT_MERGES_CAP}
+  `);
+  const rows = result.rows as unknown as {
+    id: string;
+    moves: CigarMergeLedgerV1;
+    merged_at: string;
+    undone_at: string | null;
+    source_id: string;
+    source_name: string;
+    source_status: CatalogStatus;
+    source_merged_into: string | null;
+    target_id: string;
+    target_name: string;
+    target_status: CatalogStatus;
+    skipped_count: number | null;
+  }[];
+
+  const merges: RecentMerge[] = rows.map((r) => {
+    const undone = r.undone_at != null;
+    const blockedByLaterMerge = !undone && r.target_status === "merged";
+    // Same three preconditions unmergeWithinTx enforces, so the console never
+    // renders a button that would error: still this merge's tombstone, survivor
+    // not itself merged, ledger not yet claimed.
+    const stillThisMerge = r.source_status === "merged" && r.source_merged_into === r.target_id;
+    return {
+      mergeId: r.id,
+      mergedAt: new Date(r.merged_at).toISOString(),
+      source: { cigarId: r.source_id, canonicalName: r.source_name },
+      target: { cigarId: r.target_id, canonicalName: r.target_name },
+      moved: movedCounts(r.moves),
+      undone,
+      undoneAt: r.undone_at != null ? new Date(r.undone_at).toISOString() : null,
+      skippedCount: r.skipped_count != null ? Number(r.skipped_count) : null,
+      blockedByLaterMerge,
+      reversible: !undone && !blockedByLaterMerge && stillThisMerge,
+    };
+  });
+  return { merges };
+}
+
+// Per-slot totals for the console chips: everything an unmerge would try to
+// restore, so a de-duped mark counts alongside a re-pointed one (to a curator
+// they are the same "this moved" set). Empty slots are dropped.
+function movedCounts(ledger: CigarMergeLedgerV1): { entity: string; count: number }[] {
+  const dropped: Record<string, number> = {
+    wants: ledger.dropped?.wants?.length ?? 0,
+    favorites: ledger.dropped?.favorites?.length ?? 0,
+  };
+  return MERGE_LEDGER_TABLES.map((slot) => ({
+    entity: slot.key,
+    count: (ledger.moved[slot.key]?.length ?? 0) + (dropped[slot.key] ?? 0),
+  })).filter((c) => c.count > 0);
 }
 
 // --------------------------------------------------------------------------
@@ -696,8 +1202,8 @@ async function excludeWithinTx(
 
   const current = await loadCigar(tx, input.cigarId);
   if (!current) throw new CigarNotFoundError();
-  // A merged tombstone is not an exclude target — it is undone by unmerge (a future
-  // primitive), not by exclude/restore.
+  // A merged tombstone is not an exclude target — it is undone by unmergeCigars,
+  // which re-points its data back, not by exclude/restore.
   if (current.catalogStatus === "merged") {
     throw new ValidationError([{ path: "cigarId", message: "A merged cigar cannot be excluded." }]);
   }
@@ -790,8 +1296,9 @@ async function restoreWithinTx(
 
   const current = await loadCigar(tx, input.cigarId);
   if (!current) throw new CigarNotFoundError();
-  // A merged tombstone is restored by unmerge (which re-points its data back), not
-  // by flipping the flag — restore only reverses an exclude.
+  // A merged tombstone is restored by unmergeCigars (which re-points its data back
+  // and returns the pre-merge status), not by flipping the flag — restore only
+  // reverses an exclude.
   if (current.catalogStatus === "merged") {
     throw new ValidationError([{ path: "cigarId", message: "A merged cigar is restored by unmerge, not restore." }]);
   }
@@ -1571,22 +2078,35 @@ export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Pro
 // reads (grouped runs, a run's rows) and one write (undo an action by its inverse).
 // --------------------------------------------------------------------------
 
-// The agent actions with a TRUE inverse — the only ones the review offers an Undo
-// for. Merge and dismiss have none (a per-merge bookkeeping gap, documented on
-// mergeCigars). set_facts is reversible only when its audit carries the cigar id
-// (recorded from wave 4b on); a legacy set_facts row has no cigar to land the
-// before-values on, so it reports non-reversible (state, not a button).
+// The actions with a TRUE inverse — the only ones the review offers an Undo for.
+// Dismiss has none. Two are conditional on the data the forward action recorded:
+// set_facts needs its audit to carry the cigar id (recorded from wave 4b on), and
+// merge needs its `cigar_merges` ledger (migration 0020) — a legacy row of either
+// kind has nothing to reverse onto and reports non-reversible (state, not a button).
 const REVERSIBLE_ACTIONS = new Set([
   "cigar.exclude",
   "cigar.verify",
   "listing_match.set_status",
   "product_photo.set_rights",
   "cigar.set_facts",
+  "cigar.rename",
+  "cigar.merge",
 ]);
 
-function isReversibleAudit(action: string, before: Record<string, unknown>): boolean {
+// `live` carries the per-row facts the audit JSONB cannot answer on its own: an
+// unspent merge ledger, and whether a rename is still the cigar's current name.
+// Absent (the undo path, which re-checks against the loaded row) they default to
+// permissive — applyInverse is the gate that must not be bypassed, this one keeps
+// the console from offering a button that would error.
+function isReversibleAudit(
+  action: string,
+  before: Record<string, unknown>,
+  live: { hasLedger?: boolean; nameIsCurrent?: boolean } = {},
+): boolean {
   if (!REVERSIBLE_ACTIONS.has(action)) return false;
   if (action === "cigar.set_facts") return typeof before.id === "string";
+  if (action === "cigar.merge") return live.hasLedger === true;
+  if (action === "cigar.rename") return live.nameIsCurrent !== false;
   return true;
 }
 
@@ -1612,6 +2132,11 @@ function summarizeAudit(action: string, before: Record<string, unknown>, after: 
       return `${fmtValue(before.rights)} → ${fmtValue(after.rights)}`;
     case "cigar.rename":
       return `${fmtValue(before.canonicalName)} → ${fmtValue(after.canonicalName)}`;
+    case "cigar.merge": {
+      const source = (before.source ?? {}) as Record<string, unknown>;
+      const target = (before.target ?? {}) as Record<string, unknown>;
+      return `${fmtValue(source.canonicalName)} → ${fmtValue(target.canonicalName)}`;
+    }
     case "cigar.set_facts": {
       const parts = Object.keys(after)
         .filter((k) => k !== "id")
@@ -1701,6 +2226,11 @@ export async function agentRunRows(
     SELECT a.id, a.action, a.created_at::text AS created_at_text, a.confidence,
            a.before, a.after,
            EXISTS (SELECT 1 FROM audit_log r WHERE r.reverts = a.id) AS reverted,
+           cm.id IS NOT NULL AS has_live_ledger,
+           -- A rename is undoable only while the cigar still carries the name it
+           -- wrote: a later rename supersedes it, and writing the older name back
+           -- would silently discard the newer one (canonicalName is identity).
+           tc.canonical_name IS NOT DISTINCT FROM (a.after ->> 'canonicalName') AS name_is_current,
            tc.canonical_name AS target_cigar_name
     FROM audit_log a
     LEFT JOIN cigars tc ON tc.id = (
@@ -1709,8 +2239,15 @@ export async function agentRunRows(
           THEN nullif(a.before->>'id', '')
         WHEN a.action IN ('product_photo.set_rights', 'listing_match.set_status')
           THEN nullif(a.before->>'cigarId', '')
+        WHEN a.action = 'cigar.merge'
+          THEN nullif(a.after->>'tombstonedSourceId', '')
       END
     )::uuid
+    -- The un-undone merge ledger, if any: merge is reversible only through it.
+    -- Merges are actor 'web' today (there is no agent merge tool, and DESIGN-003
+    -- keeps merges human-only), so this join only ever fires if that changes —
+    -- carried so the two reversibility paths cannot drift apart.
+    LEFT JOIN cigar_merges cm ON cm.audit_id = a.id AND cm.undone_at IS NULL
     WHERE a.actor = 'agent' AND a.run_id = ${input.runId} ${keyset}
     ORDER BY a.created_at DESC, a.id DESC
     LIMIT ${limit + 1}
@@ -1723,6 +2260,8 @@ export async function agentRunRows(
     before: unknown;
     after: unknown;
     reverted: boolean;
+    has_live_ledger: boolean;
+    name_is_current: boolean;
     target_cigar_name: string | null;
   }[];
 
@@ -1742,7 +2281,11 @@ export async function agentRunRows(
       confidence: r.confidence != null ? Number(r.confidence) : null,
       targetName: r.target_cigar_name ?? (before.listingKey as string | undefined) ?? null,
       summary: summarizeAudit(r.action, before, after),
-      reversible: isReversibleAudit(r.action, before) && !reverted,
+      reversible:
+        isReversibleAudit(r.action, before, {
+          hasLedger: r.has_live_ledger === true,
+          nameIsCurrent: r.name_is_current === true,
+        }) && !reverted,
       reverted,
     };
   });
@@ -1794,20 +2337,43 @@ async function undoWithinTx(
     throw new ValidationError([{ path: "auditId", message: "No audit action matches the given id." }]);
   }
   const before = (target.before ?? {}) as Record<string, unknown>;
-  if (!isReversibleAudit(target.action, before)) {
-    throw new ValidationError([{ path: "auditId", message: "This action cannot be undone." }]);
-  }
   // Already undone? An audit row whose `reverts` points here means the inverse
   // already ran — the review shows state, not a button, and a second distinct
-  // request must not double-undo. (A replay of the SAME request short-circuited above.)
+  // request must not double-undo. (A replay of the SAME request short-circuited
+  // above.) Checked BEFORE reversibility: an undone merge's ledger is spent, so
+  // the reversibility gate would otherwise report the vaguer "cannot be undone".
   const already = (
     await tx.select({ id: auditLog.id }).from(auditLog).where(eq(auditLog.reverts, target.id)).limit(1)
   )[0];
   if (already) {
     throw new ValidationError([{ path: "auditId", message: "This action was already undone." }]);
   }
+  // A merge is undoable only through a live `cigar_merges` ledger — a merge audited
+  // before that ledger existed has nothing to restore and says so honestly.
+  const liveLedger =
+    target.action === "cigar.merge"
+      ? (
+          await tx
+            .select({ id: cigarMerges.id })
+            .from(cigarMerges)
+            .where(and(eq(cigarMerges.auditId, target.id), isNull(cigarMerges.undoneAt)))
+            .limit(1)
+        )[0]
+      : undefined;
+  if (!isReversibleAudit(target.action, before, { hasLedger: liveLedger != null })) {
+    throw new ValidationError([{ path: "auditId", message: "This action cannot be undone." }]);
+  }
 
-  const undoAuditId = await applyInverse(tx, deps, principal, target.id, target.action, before, input);
+  const undoAuditId = await applyInverse(
+    tx,
+    deps,
+    principal,
+    target.id,
+    target.action,
+    before,
+    (target.after ?? {}) as Record<string, unknown>,
+    input,
+  );
 
   const result: UndoCurationActionResult = {
     auditId: target.id,
@@ -1836,6 +2402,7 @@ async function applyInverse(
   targetId: string,
   action: string,
   before: Record<string, unknown>,
+  after: Record<string, unknown>,
   input: UndoCurationActionInput,
 ): Promise<string> {
   // A human curator drove the undo: actor 'web', no runId/confidence — so it never
@@ -1908,6 +2475,56 @@ async function applyInverse(
       const snap = productPhotoSnapshot(photo);
       await tx.update(productPhotos).set({ rights: prior }).where(eq(productPhotos.id, photoId));
       return writeUndo({ action: "product_photo.set_rights", before: snap, after: { ...snap, rights: prior } });
+    }
+    case "cigar.rename": {
+      const cigarId = String(before.id);
+      const current = await loadCigar(tx, cigarId);
+      if (!current) throw new CigarNotFoundError();
+      // renameCigar rejects an empty name and skips the audit entirely on a no-op,
+      // so a rename audit always carries a real prior name — but the undo reads it
+      // out of JSONB, so it is checked rather than trusted.
+      const prior = before.canonicalName;
+      if (typeof prior !== "string" || prior.trim().length === 0) {
+        throw new ValidationError([{ path: "auditId", message: "This action cannot be undone." }]);
+      }
+      // Staleness gate. canonicalName is identity and nothing versions it, so
+      // undoing a SUPERSEDED rename would write the older raw string over a newer
+      // fix with no error — the daily agent renaming the same cigar twice is the
+      // live shape. The undo applies only while the cigar still carries exactly
+      // the name this audit produced. `agentRunRows` hides the button for the same
+      // reason; this is the check that survives a stale page or a direct call.
+      const applied = after.canonicalName;
+      if (typeof applied === "string" && current.canonicalName !== applied) {
+        throw new ValidationError([
+          { path: "auditId", message: "This rename is no longer the cigar's current name." },
+        ]);
+      }
+      await tx.update(cigars).set({ canonicalName: prior, updatedAt: deps.now() }).where(eq(cigars.id, cigarId));
+      return writeUndo({
+        action: "cigar.rename",
+        before: { id: cigarId, canonicalName: current.canonicalName },
+        after: { id: cigarId, canonicalName: prior },
+      });
+    }
+    case "cigar.merge": {
+      // Delegate to the shared restore, so undoing a merge audit and the console's
+      // Unmerge cannot drift apart. No UI reaches this today: merges are actor
+      // 'web' with no run_id, and `agentRunRows` — the only producer of auditIds
+      // for the Undo button — lists agent rows of a run, so this branch is reached
+      // only by a direct `curation.undo` call. It exists so that call is correct
+      // rather than a no-op, and so an agent merge tool (DESIGN-003 keeps merges
+      // human-only today) would inherit the working inverse. The ledger claim is
+      // the same single-use gate, and unmergeWithinTx writes its own
+      // `cigar.unmerge` audit with reverts = this row, so writeUndo is not used.
+      const merge = await claimMerge(
+        tx,
+        deps,
+        eq(cigarMerges.auditId, targetId),
+        "auditId",
+        "This action cannot be undone.",
+      );
+      const outcome = await unmergeWithinTx(tx, deps, principal, merge, correlationId);
+      return outcome.undoAuditId;
     }
     case "cigar.set_facts": {
       const cigarId = String(before.id);

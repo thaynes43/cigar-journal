@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   cigars,
+  cigarMerges,
   smokes,
+  smokeConsumptions,
   purchases,
   listingMatches,
   offers,
@@ -16,6 +18,9 @@ import {
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import {
   mergeCigars,
+  unmergeCigars,
+  recentMerges,
+  MERGE_LEDGER_TABLES,
   verifyCigar,
   dismissDuplicate,
   curationQueue,
@@ -31,10 +36,11 @@ import {
   undoCurationAction,
 } from "./curation.js";
 import { getProductPhoto } from "./product-photos.js";
+import { getMyInventory } from "./inventory.js";
 import { getCigar, searchCigars, getCigarOffers } from "./reads.js";
 import { setWant } from "./wants.js";
 import { setFavorite } from "./favorites.js";
-import type { Principal, WorklistCigar, WorklistMatch } from "./index.js";
+import type { Principal, UnmergeCigarsResult, WorklistCigar, WorklistMatch } from "./index.js";
 import { UnauthorizedError, CigarNotFoundError, PhotoNotFoundError, ValidationError } from "./errors.js";
 
 describe("curation", () => {
@@ -73,10 +79,10 @@ describe("curation", () => {
     return row!.id;
   }
 
-  async function addPurchase(cigarId: string, owner = user): Promise<string> {
+  async function addPurchase(cigarId: string, owner = user, quantity?: number): Promise<string> {
     const [row] = await h.deps.db
       .insert(purchases)
-      .values({ userId: owner.userId, cigarId })
+      .values({ userId: owner.userId, cigarId, ...(quantity != null ? { quantity } : {}) })
       .returning({ id: purchases.id });
     return row!.id;
   }
@@ -341,6 +347,764 @@ describe("curation", () => {
       );
       expect((audit!.after as { repointed: { favorites: number } }).repointed.favorites).toBe(1);
       expect((audit!.after as { favoritesDeduped: number }).favoritesDeduped).toBe(1);
+    });
+
+    // --- the cigar_merges ledger (migration 0020, #45) ---------------------
+
+    it("writes a ledger naming every re-pointed row and the pre-merge source state", async () => {
+      const source = await seedUnverified("Ledger Source Rows");
+      const target = await seedUnverified("Ledger Target Rows");
+
+      const smokeId = await addSmoke(source);
+      const purchaseId = await addPurchase(source);
+      await addOffer(source, `sku-ledger-${newRequestId().slice(0, 8)}`);
+      const enrichmentId = await addEnrichment(source);
+      await addProductPhoto(source, `ledger-${newRequestId().slice(0, 6)}`);
+      const [adHoc] = await h.deps.db
+        .insert(offers)
+        .values({ cigarId: source, sourceName: "Chat Shop", price: "9.00", currency: "USD" })
+        .returning({ id: offers.id });
+      await setWant(h.deps, user, { cigarId: source, wanted: true });
+      await setFavorite(h.deps, user, { cigarId: source, favorited: true });
+
+      const result = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+
+      const [ledgerRow] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, result.mergeId));
+      expect(ledgerRow!.sourceCigarId).toBe(source);
+      expect(ledgerRow!.targetCigarId).toBe(target);
+      const moves = ledgerRow!.moves;
+      expect(moves.version).toBe(1);
+      expect(moves.sourceBefore).toEqual({ catalogStatus: "active", mergedInto: null });
+      expect(moves.moved.smokes).toEqual([smokeId]);
+      expect(moves.moved.purchases).toEqual([purchaseId]);
+      expect(moves.moved.enrichmentRequests).toEqual([enrichmentId]);
+      expect(moves.moved.offers).toEqual([adHoc!.id]);
+      expect(moves.moved.listingMatches).toHaveLength(1);
+      expect(moves.moved.productPhotos).toHaveLength(1);
+      expect(moves.moved.wants).toHaveLength(1);
+      expect(moves.moved.favorites).toHaveLength(1);
+
+      // The ledger names exactly the rows that ended up on the target.
+      const onTarget = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.cigarId, target));
+      expect(moves.moved.listingMatches).toEqual(onTarget.map((m) => m.id));
+
+      // And it is tied to this merge's audit row.
+      const [mergeAudit] = await h.deps.db.select().from(auditLog).where(eq(auditLog.id, ledgerRow!.auditId));
+      expect(mergeAudit!.action).toBe("cigar.merge");
+      expect((mergeAudit!.after as { tombstonedSourceId?: string }).tombstonedSourceId).toBe(source);
+    });
+
+    it("records the de-duped want/favorite payloads whole, not just their ids", async () => {
+      const source = await seedUnverified("Ledger Dedupe Source");
+      const target = await seedUnverified("Ledger Dedupe Target");
+
+      // `user` marked BOTH sides → the source marks are the de-dupe drops.
+      await setWant(h.deps, user, { cigarId: source, wanted: true, note: "the dropped want" });
+      await setWant(h.deps, user, { cigarId: target, wanted: true });
+      await setFavorite(h.deps, user, { cigarId: source, favorited: true });
+      await setFavorite(h.deps, user, { cigarId: target, favorited: true });
+      // `admin` marked only the source → these move.
+      await setWant(h.deps, admin, { cigarId: source, wanted: true });
+
+      const [droppedWantBefore] = await h.deps.db
+        .select()
+        .from(wants)
+        .where(and(eq(wants.cigarId, source), eq(wants.userId, user.userId)));
+
+      const result = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+
+      const [ledgerRow] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, result.mergeId));
+      const moves = ledgerRow!.moves;
+      expect(moves.dropped.wants).toHaveLength(1);
+      expect(moves.dropped.wants[0]).toEqual({
+        id: droppedWantBefore!.id,
+        userId: user.userId,
+        note: "the dropped want",
+        createdAt: droppedWantBefore!.createdAt.toISOString(),
+      });
+      expect(moves.dropped.favorites).toHaveLength(1);
+      // The mark that survived the de-dupe is in `moved`, not `dropped`.
+      expect(moves.moved.wants).toHaveLength(1);
+    });
+
+    it("writes exactly one ledger row and one audit for a replayed merge", async () => {
+      const source = await seedUnverified("Ledger Replay Source");
+      const target = await seedUnverified("Ledger Replay Target");
+      await addSmoke(source);
+      const input = { clientRequestId: newRequestId(), sourceCigarId: source, targetCigarId: target };
+      const first = await mergeCigars(h.deps, admin, input);
+      const second = await mergeCigars(h.deps, admin, input);
+      expect(second.replayed).toBe(true);
+      expect(second.mergeId).toBe(first.mergeId);
+      const ledgers = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.sourceCigarId, source));
+      expect(ledgers).toHaveLength(1);
+    });
+
+    it("rejects a source that is already a tombstone", async () => {
+      const source = await seedUnverified("Chain Guard A");
+      const middle = await seedUnverified("Chain Guard B");
+      const other = await seedUnverified("Chain Guard C");
+      await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: middle,
+      });
+      const error = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: other,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields.some((f) => f.path === "sourceCigarId")).toBe(true);
+    });
+
+    it("rejects a target that is already a tombstone", async () => {
+      const tombstone = await seedUnverified("Tombstone Target A");
+      const survivor = await seedUnverified("Tombstone Target B");
+      const fresh = await seedUnverified("Tombstone Target C");
+      await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: tombstone,
+        targetCigarId: survivor,
+      });
+      const error = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: fresh,
+        targetCigarId: tombstone,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields.some((f) => f.path === "targetCigarId")).toBe(true);
+    });
+  });
+
+
+  // --- unmergeCigars (#45) --------------------------------------------------
+
+  describe("unmergeCigars", () => {
+    // Merge `source` into `target` and hand back the ledger id — the handle every
+    // unmerge test takes.
+    async function merge(source: string, target: string): Promise<string> {
+      const result = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+      return result.mergeId;
+    }
+
+    async function mergeAuditFor(sourceId: string): Promise<string> {
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
+      return audits.find((a) => (a.after as { tombstonedSourceId?: string }).tombstonedSourceId === sourceId)!.id;
+    }
+
+    it("rejects a non-admin principal", async () => {
+      const error = await unmergeCigars(h.deps, user, {
+        clientRequestId: newRequestId(),
+        mergeId: "00000000-0000-0000-0000-000000000000",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("rejects an unknown mergeId", async () => {
+      const error = await unmergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        mergeId: "00000000-0000-0000-0000-000000000000",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields.some((f) => f.path === "mergeId")).toBe(true);
+    });
+
+    it("restores every ledger row, un-tombstones the source, and audits cigar.unmerge", async () => {
+      const source = await seedUnverified("Unmerge Full Source");
+      const target = await seedUnverified("Unmerge Full Target");
+
+      const smokeId = await addSmoke(source);
+      const purchaseId = await addPurchase(source);
+      const enrichmentId = await addEnrichment(source);
+      await addProductPhoto(source, `unmerge-${newRequestId().slice(0, 6)}`);
+      const [match] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `unmerge-${newRequestId()}`, cigarId: source, status: "auto" })
+        .returning({ id: listingMatches.id });
+      const [adHoc] = await h.deps.db
+        .insert(offers)
+        .values({ cigarId: source, sourceName: "Chat Shop", price: "11.00", currency: "USD" })
+        .returning({ id: offers.id });
+      await setWant(h.deps, user, { cigarId: source, wanted: true });
+      await setFavorite(h.deps, user, { cigarId: source, favorited: true });
+
+      // The survivor's OWN rows — these must not move.
+      const targetSmoke = await addSmoke(target);
+      const targetPurchase = await addPurchase(target);
+
+      const mergeId = await merge(source, target);
+      const mergeAuditId = await mergeAuditFor(source);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.replayed).toBe(false);
+      expect(result.restored).toEqual({
+        smokes: 1,
+        purchases: 1,
+        listingMatches: 1,
+        offers: 1,
+        productPhotos: 1,
+        enrichmentRequests: 1,
+        wants: 1,
+        favorites: 1,
+      });
+      expect(result.skipped).toEqual([]);
+      expect(result.restoredSourceStatus).toBe("active");
+
+      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId));
+      expect(smoke!.cigarId).toBe(source);
+      const [purchase] = await h.deps.db.select().from(purchases).where(eq(purchases.id, purchaseId));
+      expect(purchase!.cigarId).toBe(source);
+      const [matchRow] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, match!.id));
+      expect(matchRow!.cigarId).toBe(source);
+      const [offerRow] = await h.deps.db.select().from(offers).where(eq(offers.id, adHoc!.id));
+      expect(offerRow!.cigarId).toBe(source);
+      const [enrichment] = await h.deps.db
+        .select()
+        .from(enrichmentRequests)
+        .where(eq(enrichmentRequests.id, enrichmentId));
+      expect(enrichment!.cigarId).toBe(source);
+      expect(await h.deps.db.select().from(productPhotos).where(eq(productPhotos.cigarId, source))).toHaveLength(1);
+      expect(await h.deps.db.select().from(wants).where(eq(wants.cigarId, source))).toHaveLength(1);
+      expect(await h.deps.db.select().from(favorites).where(eq(favorites.cigarId, source))).toHaveLength(1);
+
+      // The survivor keeps its own rows and nothing else.
+      const [ownSmoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, targetSmoke));
+      expect(ownSmoke!.cigarId).toBe(target);
+      const [ownPurchase] = await h.deps.db.select().from(purchases).where(eq(purchases.id, targetPurchase));
+      expect(ownPurchase!.cigarId).toBe(target);
+      expect(await h.deps.db.select().from(smokes).where(eq(smokes.cigarId, target))).toHaveLength(1);
+
+      // Source is a live catalog row again.
+      const [sourceRow] = await h.deps.db.select().from(cigars).where(eq(cigars.id, source));
+      expect(sourceRow!.catalogStatus).toBe("active");
+      expect(sourceRow!.mergedInto).toBeNull();
+
+      // The audit reverts the merge, so a later Undo of that merge sees it done.
+      const [undo] = await h.deps.db.select().from(auditLog).where(eq(auditLog.id, result.undoAuditId));
+      expect(undo!.action).toBe("cigar.unmerge");
+      expect(undo!.actor).toBe("web");
+      expect(undo!.reverts).toBe(mergeAuditId);
+      expect((undo!.after as { mergeId: string }).mergeId).toBe(mergeId);
+
+      // The ledger is claimed exactly once and points at the undo audit.
+      const [ledgerRow] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, mergeId));
+      expect(ledgerRow!.undoneAt).not.toBeNull();
+      expect(ledgerRow!.undoAuditId).toBe(result.undoAuditId);
+    });
+
+    it("returns the source to its pre-merge status, not a hardcoded active", async () => {
+      const source = await h.seedCigar({ canonicalName: "Unmerge Excluded Source", catalogStatus: "excluded" });
+      const target = await seedUnverified("Unmerge Excluded Target");
+      const mergeId = await merge(source, target);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restoredSourceStatus).toBe("excluded");
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, source));
+      expect(row!.catalogStatus).toBe("excluded");
+    });
+
+    it("leaves rows created on the survivor after the merge exactly where they are", async () => {
+      const source = await seedUnverified("Unmerge Post Source");
+      const target = await seedUnverified("Unmerge Post Target");
+      const movedSmoke = await addSmoke(source);
+      const mergeId = await merge(source, target);
+
+      // Everything below lands on the survivor AFTER the merge — none of it is in
+      // the ledger, so none of it may move.
+      const laterSmoke = await addSmoke(target);
+      const laterPurchase = await addPurchase(target);
+      await setWant(h.deps, admin, { cigarId: target, wanted: true });
+      const [laterMatch] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `post-${newRequestId()}`, cigarId: target, status: "auto" })
+        .returning({ id: listingMatches.id });
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.smokes).toBe(1);
+      expect(result.restored.purchases).toBe(0);
+      expect(result.restored.wants).toBe(0);
+      expect(result.restored.listingMatches).toBe(0);
+
+      const [moved] = await h.deps.db.select().from(smokes).where(eq(smokes.id, movedSmoke));
+      expect(moved!.cigarId).toBe(source);
+      const [kept] = await h.deps.db.select().from(smokes).where(eq(smokes.id, laterSmoke));
+      expect(kept!.cigarId).toBe(target);
+      const [keptPurchase] = await h.deps.db.select().from(purchases).where(eq(purchases.id, laterPurchase));
+      expect(keptPurchase!.cigarId).toBe(target);
+      const [keptMatch] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, laterMatch!.id));
+      expect(keptMatch!.cigarId).toBe(target);
+      expect(await h.deps.db.select().from(wants).where(eq(wants.cigarId, target))).toHaveLength(1);
+    });
+
+    it("refuses while the survivor is itself merged, and succeeds LIFO", async () => {
+      const a = await seedUnverified("LIFO Chain A");
+      const b = await seedUnverified("LIFO Chain B");
+      const c = await seedUnverified("LIFO Chain C");
+      const smokeId = await addSmoke(a);
+      const abMerge = await merge(a, b);
+      const bcMerge = await merge(b, c);
+
+      const blocked = await unmergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        mergeId: abMerge,
+      }).catch((e: unknown) => e);
+      expect(blocked).toBeInstanceOf(ValidationError);
+      // The blocked attempt must not have consumed the ledger.
+      const [stillLive] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, abMerge));
+      expect(stillLive!.undoneAt).toBeNull();
+
+      // Undo the later merge first, then the earlier one goes through.
+      await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId: bcMerge });
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId: abMerge });
+      expect(result.restored.smokes).toBe(1);
+      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId));
+      expect(smoke!.cigarId).toBe(a);
+      for (const id of [a, b, c]) {
+        const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, id));
+        expect(row!.catalogStatus).toBe("active");
+      }
+    });
+
+    it("is a no-op for a merge-time photo loser — both photos stay put", async () => {
+      const source = await seedUnverified("Photo Loser Source");
+      const target = await seedUnverified("Photo Loser Target");
+      await addProductPhoto(source, `loser-src-${newRequestId().slice(0, 6)}`);
+      await addProductPhoto(target, `loser-tgt-${newRequestId().slice(0, 6)}`);
+      const mergeId = await merge(source, target);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.productPhotos).toBe(0);
+      expect(result.skipped.filter((s) => s.entity === "productPhotos")).toEqual([]);
+
+      const srcPhotos = await h.deps.db.select().from(productPhotos).where(eq(productPhotos.cigarId, source));
+      expect(srcPhotos).toHaveLength(1);
+      expect(srcPhotos[0]!.objectKey).toContain("loser-src");
+      const tgtPhotos = await h.deps.db.select().from(productPhotos).where(eq(productPhotos.cigarId, target));
+      expect(tgtPhotos).toHaveLength(1);
+      expect(tgtPhotos[0]!.objectKey).toContain("loser-tgt");
+    });
+
+    it("skips the photo move-back as source_occupied when the tombstone gained one", async () => {
+      const source = await seedUnverified("Photo Occupied Source");
+      const target = await seedUnverified("Photo Occupied Target");
+      await addProductPhoto(source, `occ-moved-${newRequestId().slice(0, 6)}`);
+      const mergeId = await merge(source, target);
+      // A curator attached a photo to the tombstone after the merge — the slot is
+      // taken (product_photos is UNIQUE(cigar_id)).
+      await addProductPhoto(source, `occ-new-${newRequestId().slice(0, 6)}`);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.productPhotos).toBe(0);
+      expect(result.skipped.filter((s) => s.entity === "productPhotos")).toEqual([
+        { entity: "productPhotos", rowId: expect.any(String), reason: "source_occupied" },
+      ]);
+      // Both rows survive, no unique violation, and the unmerge completed.
+      const srcPhotos = await h.deps.db.select().from(productPhotos).where(eq(productPhotos.cigarId, source));
+      expect(srcPhotos).toHaveLength(1);
+      expect(srcPhotos[0]!.objectKey).toContain("occ-new");
+      const tgtPhotos = await h.deps.db.select().from(productPhotos).where(eq(productPhotos.cigarId, target));
+      expect(tgtPhotos[0]!.objectKey).toContain("occ-moved");
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, source));
+      expect(row!.catalogStatus).toBe("active");
+    });
+
+    it("re-creates a de-duped want with its original id and note", async () => {
+      const source = await seedUnverified("Dedupe Restore Source");
+      const target = await seedUnverified("Dedupe Restore Target");
+      await setWant(h.deps, user, { cigarId: source, wanted: true, note: "restore me" });
+      await setWant(h.deps, user, { cigarId: target, wanted: true });
+      await setFavorite(h.deps, user, { cigarId: source, favorited: true });
+      await setFavorite(h.deps, user, { cigarId: target, favorited: true });
+      const [before] = await h.deps.db
+        .select()
+        .from(wants)
+        .where(and(eq(wants.cigarId, source), eq(wants.userId, user.userId)));
+      const droppedId = before!.id;
+
+      const mergeId = await merge(source, target);
+      expect(await h.deps.db.select().from(wants).where(eq(wants.id, droppedId))).toHaveLength(0);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.wants).toBe(1);
+      expect(result.restored.favorites).toBe(1);
+      const [restored] = await h.deps.db.select().from(wants).where(eq(wants.id, droppedId));
+      expect(restored!.cigarId).toBe(source);
+      expect(restored!.userId).toBe(user.userId);
+      expect(restored!.note).toBe("restore me");
+      // The survivor keeps its own mark.
+      expect(await h.deps.db.select().from(wants).where(eq(wants.cigarId, target))).toHaveLength(1);
+    });
+
+    it("skips a de-duped mark as conflict when the user re-marked the tombstone", async () => {
+      const source = await seedUnverified("Dedupe Conflict Source");
+      const target = await seedUnverified("Dedupe Conflict Target");
+      await setWant(h.deps, user, { cigarId: source, wanted: true, note: "old" });
+      await setWant(h.deps, user, { cigarId: target, wanted: true });
+      const mergeId = await merge(source, target);
+      // The user wants the tombstone again after the merge — the newer mark wins.
+      await setWant(h.deps, user, { cigarId: source, wanted: true, note: "new" });
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.wants).toBe(0);
+      expect(result.skipped.filter((s) => s.entity === "wants")).toEqual([
+        { entity: "wants", rowId: expect.any(String), reason: "conflict" },
+      ]);
+      const onSource = await h.deps.db.select().from(wants).where(eq(wants.cigarId, source));
+      expect(onSource).toHaveLength(1);
+      expect(onSource[0]!.note).toBe("new");
+    });
+
+    it("skips a row that moved on since the merge, and still completes", async () => {
+      const source = await seedUnverified("Moved On Source");
+      const target = await seedUnverified("Moved On Target");
+      const smokeId = await addSmoke(source);
+      const [match] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `movedon-${newRequestId()}`, cigarId: source, status: "auto" })
+        .returning({ id: listingMatches.id });
+      const mergeId = await merge(source, target);
+
+      // A curator unmatched the listing after the merge — its cigar_id is null now.
+      await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId: match!.id,
+        status: "unmatched",
+      });
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.listingMatches).toBe(0);
+      expect(result.restored.smokes).toBe(1);
+      expect(result.skipped).toEqual([{ entity: "listingMatches", rowId: match!.id, reason: "moved_on" }]);
+      const [matchRow] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, match!.id));
+      expect(matchRow!.cigarId).toBeNull();
+      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId));
+      expect(smoke!.cigarId).toBe(source);
+    });
+
+    it("leaves a lot the survivor's later smoke consumed, so the humidor count stays honest", async () => {
+      // The one skip a USER feels: getMyInventory builds holdings from purchases and
+      // counts consumption by smokes.cigar_id, so returning a lot whose consumptions
+      // stay on the survivor would resurrect smoked sticks AND drop the survivor out
+      // of the humidor. Own user, so the totals are this scenario's alone.
+      const owner = await h.createUser(`humidor-${newRequestId()}@example.com`);
+      const source = await seedUnverified("Cross Lot Source");
+      const target = await seedUnverified("Cross Lot Target");
+      const purchaseId = await addPurchase(source, owner, 10);
+      const mergeId = await merge(source, target);
+
+      // Three smokes recorded on the survivor after the merge, each drawing from the
+      // lot the ledger would otherwise send back to the source.
+      const laterSmokes: string[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const smokeId = await addSmoke(target, owner);
+        await h.deps.db.insert(smokeConsumptions).values({ smokeId, purchaseId });
+        laterSmokes.push(smokeId);
+      }
+      const before = await getMyInventory(h.deps, owner);
+      expect(before.totalSticksRemaining).toBe(7);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.purchases).toBe(0);
+      expect(result.crossCigarLots).toBe(1);
+      expect(result.skipped).toContainEqual({
+        entity: "purchases",
+        rowId: purchaseId,
+        reason: "consumed_elsewhere",
+      });
+
+      // The lot stayed with the survivor, and the humidor reads exactly as it did.
+      const [lot] = await h.deps.db.select().from(purchases).where(eq(purchases.id, purchaseId));
+      expect(lot!.cigarId).toBe(target);
+      const after = await getMyInventory(h.deps, owner);
+      expect(after.totalSticksRemaining).toBe(7);
+      expect(after.holdings.map((holding) => holding.cigar.cigarId)).toEqual([target]);
+      expect(after.holdings[0]!.consumedCount).toBe(3);
+      // The consumption rows are untouched — the lot moved around them, never they.
+      const consumptions = await h.deps.db
+        .select()
+        .from(smokeConsumptions)
+        .where(eq(smokeConsumptions.purchaseId, purchaseId));
+      expect(consumptions).toHaveLength(3);
+      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, laterSmokes[0]!));
+      expect(smoke!.cigarId).toBe(target);
+    });
+
+    it("returns a lot both cigars smoked from, to the cigar that was bought", async () => {
+      // A lot consumed by BOTH a returning smoke and a survivor smoke has no exact
+      // inverse: splitting a user's purchase row is an owner decision, not the
+      // unmerge's. Either placement strands one side's consumptions, so the lot
+      // goes back to the cigar the user actually bought — the only cigar
+      // assertLotOwned will let them draw from next. The residual error here is
+      // the survivor's one consumption (9 rather than 8).
+      const owner = await h.createUser(`humidor-${newRequestId()}@example.com`);
+      const source = await seedUnverified("Shared Lot Source");
+      const target = await seedUnverified("Shared Lot Target");
+      const purchaseId = await addPurchase(source, owner, 10);
+      const earlySmoke = await addSmoke(source, owner);
+      await h.deps.db.insert(smokeConsumptions).values({ smokeId: earlySmoke, purchaseId });
+      const mergeId = await merge(source, target);
+      const laterSmoke = await addSmoke(target, owner);
+      await h.deps.db.insert(smokeConsumptions).values({ smokeId: laterSmoke, purchaseId });
+
+      const before = await getMyInventory(h.deps, owner);
+      expect(before.totalSticksRemaining).toBe(8);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.purchases).toBe(1);
+      expect(result.crossCigarLots).toBe(0);
+      expect(result.skipped).toEqual([]);
+      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, earlySmoke));
+      expect(smoke!.cigarId).toBe(source);
+      const [lot] = await h.deps.db.select().from(purchases).where(eq(purchases.id, purchaseId));
+      expect(lot!.cigarId).toBe(source);
+
+      const after = await getMyInventory(h.deps, owner);
+      expect(after.holdings.map((holding) => holding.cigar.cigarId)).toEqual([source]);
+      expect(after.totalSticksRemaining).toBe(9);
+    });
+
+    it("does not strand a mostly-source lot on the survivor over one later smoke", async () => {
+      // The ordinary shape: the user logged the cigar for a while before the
+      // curator merged it, then recorded one more stick from the same box on the
+      // survivor. Holding the lot back would eat FIVE returning consumptions to
+      // save one, and would leave the box on a cigar the curator has since
+      // declared different — so the user could never attribute the next stick.
+      const owner = await h.createUser(`humidor-${newRequestId()}@example.com`);
+      const source = await seedUnverified("Mostly Source Lot");
+      const target = await seedUnverified("Mostly Source Survivor");
+      const purchaseId = await addPurchase(source, owner, 25);
+      for (let i = 0; i < 5; i += 1) {
+        const smokeId = await addSmoke(source, owner);
+        await h.deps.db.insert(smokeConsumptions).values({ smokeId, purchaseId });
+      }
+      const mergeId = await merge(source, target);
+      const laterSmoke = await addSmoke(target, owner);
+      await h.deps.db.insert(smokeConsumptions).values({ smokeId: laterSmoke, purchaseId });
+
+      const before = await getMyInventory(h.deps, owner);
+      expect(before.totalSticksRemaining).toBe(19);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.purchases).toBe(1);
+      expect(result.crossCigarLots).toBe(0);
+
+      const [lot] = await h.deps.db.select().from(purchases).where(eq(purchases.id, purchaseId));
+      expect(lot!.cigarId).toBe(source);
+      const after = await getMyInventory(h.deps, owner);
+      // 20, not the 24 a hold-back would report: the five returning consumptions
+      // meet their lot again, and only the survivor's one is stranded.
+      expect(after.totalSticksRemaining).toBe(20);
+      expect(after.holdings.map((holding) => holding.cigar.cigarId)).toEqual([source]);
+      expect(after.holdings[0]!.consumedCount).toBe(5);
+    });
+
+    it("returns a lot only the source's own returning smokes consumed", async () => {
+      // The mirror case: every consumption belongs to a smoke coming back, so the
+      // lot is not cross-cigar and the restore is exact.
+      const owner = await h.createUser(`humidor-${newRequestId()}@example.com`);
+      const source = await seedUnverified("Own Lot Source");
+      const target = await seedUnverified("Own Lot Target");
+      const purchaseId = await addPurchase(source, owner, 5);
+      const smokeId = await addSmoke(source, owner);
+      await h.deps.db.insert(smokeConsumptions).values({ smokeId, purchaseId });
+      const mergeId = await merge(source, target);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.purchases).toBe(1);
+      expect(result.crossCigarLots).toBe(0);
+      expect(result.skipped).toEqual([]);
+      const inventory = await getMyInventory(h.deps, owner);
+      expect(inventory.totalSticksRemaining).toBe(4);
+      expect(inventory.holdings.map((holding) => holding.cigar.cigarId)).toEqual([source]);
+    });
+
+    it("replays an identical retry and refuses a second, distinct request", async () => {
+      const source = await seedUnverified("Unmerge Replay Source");
+      const target = await seedUnverified("Unmerge Replay Target");
+      await addSmoke(source);
+      const mergeId = await merge(source, target);
+
+      const input = { clientRequestId: newRequestId(), mergeId };
+      const first = await unmergeCigars(h.deps, admin, input);
+      const second = await unmergeCigars(h.deps, admin, input);
+      expect(first.replayed).toBe(false);
+      expect(second.replayed).toBe(true);
+      expect(second.undoAuditId).toBe(first.undoAuditId);
+
+      // A different request id hits the ledger's single-use claim instead.
+      const again = await unmergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        mergeId,
+      }).catch((e: unknown) => e);
+      expect(again).toBeInstanceOf(ValidationError);
+
+      // Exactly one cigar.unmerge audit, and the ledger stamped once.
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.unmerge"));
+      expect(audits.filter((a) => (a.after as { mergeId?: string }).mergeId === mergeId)).toHaveLength(1);
+      const [ledgerRow] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, mergeId));
+      expect(ledgerRow!.undoAuditId).toBe(first.undoAuditId);
+    });
+
+    it("serializes two concurrent unmerges of the same merge", async () => {
+      // The claim is a conditional `UPDATE … SET undone_at WHERE undone_at IS NULL`
+      // inside the transaction, so the loser blocks on the ledger row until the
+      // winner commits and then matches zero rows. Two distinct clientRequestIds,
+      // so idempotency cannot be what separates them — this races the claim itself,
+      // on two pool connections.
+      const source = await seedUnverified("Unmerge Race Source");
+      const target = await seedUnverified("Unmerge Race Target");
+      const smokeId = await addSmoke(source);
+      const mergeId = await merge(source, target);
+
+      const settled = await Promise.allSettled([
+        unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId }),
+        unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId }),
+      ]);
+      const won = settled.filter((r) => r.status === "fulfilled");
+      const lost = settled.filter((r) => r.status === "rejected");
+      expect(won).toHaveLength(1);
+      expect(lost).toHaveLength(1);
+      const reason = (lost[0] as PromiseRejectedResult).reason as ValidationError;
+      expect(reason).toBeInstanceOf(ValidationError);
+      expect(reason.fields).toEqual([{ path: "mergeId", message: "This merge was already unmerged." }]);
+      expect((won[0] as PromiseFulfilledResult<UnmergeCigarsResult>).value.replayed).toBe(false);
+
+      // One restore, not two: one audit, one stamped ledger, the smoke moved once.
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.unmerge"));
+      expect(audits.filter((a) => (a.after as { mergeId?: string }).mergeId === mergeId)).toHaveLength(1);
+      const [ledger] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, mergeId));
+      expect(ledger!.undoneAt).not.toBeNull();
+      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId));
+      expect(smoke!.cigarId).toBe(source);
+    });
+
+    it("returns the pair to the duplicate queue", async () => {
+      const plain = await seedUnverified("Unmerge Requeue Padron Anniversario Especial");
+      const accented = await seedUnverified("Unmerge Requeue Padrón Anniversario Especial");
+      const mergeId = await merge(accented, plain);
+
+      const merged = await curationQueue(h.deps, admin);
+      expect(
+        merged.duplicates.find(
+          (p) =>
+            (p.a.cigarId === plain && p.b.cigarId === accented) ||
+            (p.a.cigarId === accented && p.b.cigarId === plain),
+        ),
+      ).toBeUndefined();
+
+      await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+
+      const after = await curationQueue(h.deps, admin);
+      expect(
+        after.duplicates.find(
+          (p) =>
+            (p.a.cigarId === plain && p.b.cigarId === accented) ||
+            (p.a.cigarId === accented && p.b.cigarId === plain),
+        ),
+      ).toBeDefined();
+    });
+
+    // The drift guard: every table with a foreign key to `cigars` is either a
+    // ledger slot or a documented exclusion. A new referencing table fails here
+    // rather than silently escaping the merge/unmerge bookkeeping.
+    it("covers every cigar-referencing table or documents why not", async () => {
+      const result = await h.deps.db.execute(sql`
+        SELECT DISTINCT c.conrelid::regclass::text AS table_name
+        FROM pg_constraint c
+        WHERE c.contype = 'f' AND c.confrelid = 'cigars'::regclass
+      `);
+      const referencing = (result.rows as unknown as { table_name: string }[]).map((r) => r.table_name);
+      const excluded = [
+        "cigars", // the merged_into self-FK — the tombstone pointer, restored explicitly
+        "duplicate_dismissals", // cascade-only; the pair verdict survives on the tombstone
+        "photo_upload_tokens", // short-lived and single-use; a merge outlives them
+        "cigar_merges", // the ledger itself
+      ];
+      const covered = MERGE_LEDGER_TABLES.map((t) => t.table as string);
+      expect([...referencing].sort()).toEqual([...covered, ...excluded].sort());
+    });
+  });
+
+
+  // --- recentMerges (the console's merge history) ---------------------------
+
+  describe("recentMerges", () => {
+    it("rejects a non-admin principal", async () => {
+      const error = await recentMerges(h.deps, user).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("lists newest first with moved counts, undone state and a reversible flag", async () => {
+      const source = await seedUnverified("Recent Merge Source");
+      const target = await seedUnverified("Recent Merge Target");
+      await addSmoke(source);
+      await addSmoke(source);
+      await setWant(h.deps, user, { cigarId: source, wanted: true });
+      await setWant(h.deps, user, { cigarId: target, wanted: true }); // de-duped away
+      const merged = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+
+      const { merges } = await recentMerges(h.deps, admin);
+      expect(merges[0]!.mergeId).toBe(merged.mergeId); // newest first
+      const row = merges.find((m) => m.mergeId === merged.mergeId)!;
+      expect(row.source).toEqual({ cigarId: source, canonicalName: "Recent Merge Source" });
+      expect(row.target).toEqual({ cigarId: target, canonicalName: "Recent Merge Target" });
+      expect(row.moved).toEqual([
+        { entity: "smokes", count: 2 },
+        // The de-duped mark counts too: an unmerge re-creates it.
+        { entity: "wants", count: 1 },
+      ]);
+      expect(row.undone).toBe(false);
+      expect(row.undoneAt).toBeNull();
+      expect(row.reversible).toBe(true);
+      expect(row.blockedByLaterMerge).toBe(false);
+
+      await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId: merged.mergeId });
+      const after = await recentMerges(h.deps, admin);
+      const undone = after.merges.find((m) => m.mergeId === merged.mergeId)!;
+      expect(undone.undone).toBe(true);
+      expect(undone.undoneAt).not.toBeNull();
+      expect(undone.reversible).toBe(false);
+    });
+
+    it("marks a merge blocked when the survivor was itself later merged", async () => {
+      const a = await seedUnverified("Recent Chain A");
+      const b = await seedUnverified("Recent Chain B");
+      const c = await seedUnverified("Recent Chain C");
+      const ab = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: a,
+        targetCigarId: b,
+      });
+      const bc = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: b,
+        targetCigarId: c,
+      });
+
+      const { merges } = await recentMerges(h.deps, admin);
+      const earlier = merges.find((m) => m.mergeId === ab.mergeId)!;
+      expect(earlier.blockedByLaterMerge).toBe(true);
+      expect(earlier.reversible).toBe(false);
+      const later = merges.find((m) => m.mergeId === bc.mergeId)!;
+      expect(later.blockedByLaterMerge).toBe(false);
+      expect(later.reversible).toBe(true);
     });
   });
 
@@ -1360,17 +2124,168 @@ describe("curation", () => {
       expect(row!.type).toBeNull();
     });
 
-    it("refuses to undo a non-reversible action (merge)", async () => {
+    it("undo of an agent rename writes the prior canonical name back", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Undo Rename Before" });
+      await renameCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        canonicalName: "Undo Rename After",
+        attribution: { actor: "agent", runId, confidence: 1 },
+      });
+
+      const listed = await agentRunRows(h.deps, admin, { runId });
+      expect(listed.rows[0]!.action).toBe("cigar.rename");
+      expect(listed.rows[0]!.targetName).toBe("Undo Rename After");
+      expect(listed.rows[0]!.summary).toBe("Undo Rename Before → Undo Rename After");
+      expect(listed.rows[0]!.reversible).toBe(true);
+
+      const auditId = await agentAudit(runId, "cigar.rename");
+      const result = await undoCurationAction(h.deps, admin, { clientRequestId: newRequestId(), auditId });
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.canonicalName).toBe("Undo Rename Before");
+      const [undo] = await h.deps.db.select().from(auditLog).where(eq(auditLog.id, result.undoAuditId));
+      expect(undo!.action).toBe("cigar.rename");
+      expect(undo!.actor).toBe("web");
+      expect(undo!.reverts).toBe(auditId);
+      expect((undo!.before as { canonicalName?: string }).canonicalName).toBe("Undo Rename After");
+      expect((undo!.after as { canonicalName?: string }).canonicalName).toBe("Undo Rename Before");
+
+      const after = await agentRunRows(h.deps, admin, { runId });
+      const original = after.rows.find((r) => r.auditId === auditId)!;
+      expect(original.reverted).toBe(true);
+      expect(original.reversible).toBe(false);
+      const again = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId,
+      }).catch((e: unknown) => e);
+      expect(again).toBeInstanceOf(ValidationError);
+    });
+
+    it("refuses to undo a rename the cigar has moved past, and keeps the newer name", async () => {
+      // canonicalName is identity and nothing versions it: writing an older audit's
+      // prior name back would discard a NEWER rename silently. The daily agent
+      // renaming the same cigar twice is the live shape.
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Q2 Original" });
+      for (const canonicalName of ["Q2 First Fix", "Q2 Second Fix"]) {
+        await renameCigar(h.deps, admin, {
+          clientRequestId: newRequestId(),
+          cigarId,
+          canonicalName,
+          attribution: { actor: "agent", runId, confidence: 1 },
+        });
+      }
+
+      const { rows } = await agentRunRows(h.deps, admin, { runId });
+      const stale = rows.find((r) => r.summary === "Q2 Original → Q2 First Fix")!;
+      const current = rows.find((r) => r.summary === "Q2 First Fix → Q2 Second Fix")!;
+      // The console offers Undo only on the rename that is still the cigar's name.
+      expect(stale.reversible).toBe(false);
+      expect(current.reversible).toBe(true);
+
+      const error = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: stale.auditId,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields).toEqual([
+        { path: "auditId", message: "This rename is no longer the cigar's current name." },
+      ]);
+      const [untouched] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(untouched!.canonicalName).toBe("Q2 Second Fix");
+
+      // The latest rename still undoes — one step back, not all the way to raw.
+      await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: current.auditId,
+      });
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.canonicalName).toBe("Q2 First Fix");
+    });
+
+    it("undo of a merge with a live ledger performs the full unmerge", async () => {
       const source = await h.seedCigar({ canonicalName: `Merge Undo Src ${newRequestId().slice(0, 6)}` });
       const target = await h.seedCigar({ canonicalName: `Merge Undo Tgt ${newRequestId().slice(0, 6)}` });
-      await mergeCigars(h.deps, admin, { clientRequestId: newRequestId(), sourceCigarId: source, targetCigarId: target });
+      const [smoke] = await h.deps.db
+        .insert(smokes)
+        .values({ userId: user.userId, cigarId: source, provenanceSource: "manual" })
+        .returning({ id: smokes.id });
+      const merged = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
       const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
       const mergeAudit = audits.find((a) => (a.after as { tombstonedSourceId?: string }).tombstonedSourceId === source)!;
+
+      const result = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: mergeAudit.id,
+      });
+      expect(result.action).toBe("cigar.merge");
+      const [undo] = await h.deps.db.select().from(auditLog).where(eq(auditLog.id, result.undoAuditId));
+      expect(undo!.action).toBe("cigar.unmerge");
+      expect(undo!.reverts).toBe(mergeAudit.id);
+
+      const [row] = await h.deps.db.select().from(smokes).where(eq(smokes.id, smoke!.id));
+      expect(row!.cigarId).toBe(source);
+      const [sourceRow] = await h.deps.db.select().from(cigars).where(eq(cigars.id, source));
+      expect(sourceRow!.catalogStatus).toBe("active");
+      const [ledgerRow] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, merged.mergeId));
+      expect(ledgerRow!.undoAuditId).toBe(result.undoAuditId);
+
+      // A second undo is refused by the `reverts` guard the unmerge audit installed.
+      const again = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: mergeAudit.id,
+      }).catch((e: unknown) => e);
+      expect(again).toBeInstanceOf(ValidationError);
+    });
+
+    it("reports a merge undone by the console's Unmerge as already undone", async () => {
+      const source = await h.seedCigar({ canonicalName: `Standalone Src ${newRequestId().slice(0, 6)}` });
+      const target = await h.seedCigar({ canonicalName: `Standalone Tgt ${newRequestId().slice(0, 6)}` });
+      const merged = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+      // Reversed through the "Recent merges" section, not the Undo button — the
+      // `cigar.unmerge` audit reverts-links the merge either way, so Undo sees it.
+      await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId: merged.mergeId });
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
+      const mergeAudit = audits.find((a) => (a.after as { tombstonedSourceId?: string }).tombstonedSourceId === source)!;
+
       const error = await undoCurationAction(h.deps, admin, {
         clientRequestId: newRequestId(),
         auditId: mergeAudit.id,
       }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]!.message).toContain("already undone");
+    });
+
+    it("refuses to undo a merge with no ledger (audited before migration 0020)", async () => {
+      const source = await h.seedCigar({ canonicalName: `Legacy Merge Src ${newRequestId().slice(0, 6)}` });
+      const target = await h.seedCigar({ canonicalName: `Legacy Merge Tgt ${newRequestId().slice(0, 6)}` });
+      const merged = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+      // Stand in for a merge audited before the ledger existed: the audit row
+      // survives, the bookkeeping does not.
+      await h.deps.db.delete(cigarMerges).where(eq(cigarMerges.id, merged.mergeId));
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.merge"));
+      const mergeAudit = audits.find((a) => (a.after as { tombstonedSourceId?: string }).tombstonedSourceId === source)!;
+
+      const error = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: mergeAudit.id,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      const [sourceRow] = await h.deps.db.select().from(cigars).where(eq(cigars.id, source));
+      expect(sourceRow!.catalogStatus).toBe("merged");
     });
 
     it("rejects a non-admin principal", async () => {

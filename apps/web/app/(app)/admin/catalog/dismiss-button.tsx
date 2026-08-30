@@ -3,6 +3,7 @@
 import { useRef } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/trpc/react";
+import { actionErrorMessage } from "@/lib/trpc/error";
 import { ui } from "@/lib/ui";
 
 // Record that a surfaced pair is distinct products, then refresh the queue —
@@ -22,7 +23,7 @@ export function DismissButton({ cigarAId, cigarBId }: { cigarAId: string; cigarB
       >
         Not duplicates
       </button>
-      {dismiss.error ? <span className={`text-sm ${ui.muted}`}>{dismiss.error.message}</span> : null}
+      {dismiss.error ? <span className={`text-sm ${ui.muted}`}>{actionErrorMessage(dismiss.error)}</span> : null}
     </span>
   );
 }

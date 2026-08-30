@@ -16,3 +16,11 @@ export function fieldMessages(error: TRPCClientErrorLike<AppRouter> | null | und
   const fields = (domain as { fields?: { path: string; message: string }[] }).fields ?? [];
   return fields.map((f) => f.message);
 }
+
+// The line to render beside an action button. A domain ValidationError's own
+// `message` is the generic "One or more fields are invalid." — the words a curator
+// needs ("Undo the later merge first.") live in its field list, so prefer those and
+// fall back to the thrown message for everything else.
+export function actionErrorMessage(error: TRPCClientErrorLike<AppRouter> | null | undefined): string {
+  return fieldMessages(error)[0] ?? error?.message ?? "";
+}

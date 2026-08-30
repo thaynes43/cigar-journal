@@ -3,6 +3,7 @@
 import { useRef } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/trpc/react";
+import { actionErrorMessage } from "@/lib/trpc/error";
 import { ui } from "@/lib/ui";
 
 // Flip an unverified catalog cigar to verified, then refresh the queue so the row
@@ -23,7 +24,7 @@ export function VerifyButton({ cigarId }: { cigarId: string }) {
       >
         Verify
       </button>
-      {verify.error ? <span className={`text-sm ${ui.muted}`}>{verify.error.message}</span> : null}
+      {verify.error ? <span className={`text-sm ${ui.muted}`}>{actionErrorMessage(verify.error)}</span> : null}
     </span>
   );
 }
