@@ -6,7 +6,7 @@ export default [
   { ignores: ["archive/**", "docs/**", ".agents/**"] },
   ...config,
   {
-    // ADR-010 containment, enforced. The mint is deliberately absent from
+    // ADR-011 containment, enforced. The mint is deliberately absent from
     // @cj/oauth's public entrypoint and the package's `exports` map blocks
     // subpath imports, but a relative path into packages/oauth/src/ walks around
     // both. Nothing outside @cj/oauth may reach the module that writes
@@ -22,7 +22,7 @@ export default [
             {
               group: ["**/oauth/src/service-tokens*", "**/oauth/src/cli*"],
               message:
-                "The service-token mint is not importable outside @cj/oauth (ADR-010): only the `token` role CLI may reach it.",
+                "The service-token mint is not importable outside @cj/oauth (ADR-011): only the `token` role CLI may reach it.",
             },
           ],
         },

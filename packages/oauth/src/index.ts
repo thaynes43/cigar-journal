@@ -55,3 +55,11 @@ export {
   type ValidateResult,
   type TokenErrorCode,
 } from "./validate.js";
+
+// NOT exported, deliberately: the operator-minted service-token mint
+// (./service-tokens.ts) and the `token` role CLI around it. This absence is the
+// first of ADR-011's three containment barriers — the other two are the
+// package's `exports` map, which admits only this file, and the ESLint
+// `no-restricted-imports` rule that refuses a relative path around both. Nothing
+// network-facing may reach the writer of a long-lived credential.
+
