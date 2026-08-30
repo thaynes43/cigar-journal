@@ -1,20 +1,21 @@
 # Vendor Sources — Crawl Posture and Catalog Databases
 
-Research summary, 2026-08-26. Caveat: the research pod's egress allowlist
-blocked direct fetches of every vendor site, so robots.txt/ToS rows are
-inferred from indexed sources and platform defaults — **verify live from the
-crawler's own environment before building any adapter.**
+Research summary, 2026-08-26; vendor rows updated from the in-cluster probes of
+2026-08-29. Caveat: the research pod's egress allowlist blocks direct fetches of
+every vendor site, so anything not marked "live-probed" is inferred from indexed
+sources and platform defaults — **verify live from the crawler's own environment
+before building or enabling any adapter.**
 
 ## Crawl posture per vendor
 
 | Vendor | Platform | Structured path | Verdict |
 |---|---|---|---|
 | Fox Cigar | WooCommerce | sitemap + JSON-LD Product | caution — softest target, crawl gently |
-| 2 Guys Cigars | WebSell/NitroSell | likely sitemap | caution — niche platform, verify |
+| 2 Guys Cigars | WebSell/NitroSell | sitemap (UNSTABLE content) | live-probed 2026-08-29: robots/ToS fine, products under `/store/`, but the SAME sitemap URL served 1,462 `/store/` locs on one fetch and 6,356 locs with none on the next — adapter unions 4 samples; still `crawl_enabled=false` pending a re-probe of the per-sample counts |
 | Cigars International | custom (STG) + reCAPTCHA/Cloudflare | sitemap likely | **avoid** — active bot defenses; sister STG sites' ToS explicitly ban scraping |
-| Small Batch Cigar | unknown (~20k URLs) | sitemap near-certain | caution — verify platform + ToS live |
+| Small Batch Cigar | unknown (~20k URLs) | sitemapindex | live-probed 2026-08-29: products are ROOT-LEVEL slugs with no shared prefix — adapter uses the exclusion gate (negative path pattern + 1-segment depth bound), written against an UNCONFIRMED platform; `crawl_enabled=false` until a re-probe confirms the pattern (a product-only child sitemap, if one exists, would be sharper) |
 | Holt's | Magento-style | sitemap + JSON-LD common | caution→avoid — large retailer, read ToS first |
-| Cuban Lou's | WooCommerce | sitemap + JSON-LD | technically soft; **flag: US-embargo exposure** for surfacing Habanos price data — admin decision via the registry toggle, risk noted in PRD |
+| Cuban Lou's | WooCommerce | Yoast product-only sitemap (985 locs) + JSON-LD | live-probed 2026-08-29 and ENABLED; **flag: US-embargo exposure** for surfacing Habanos price data — admin decision via the registry toggle, risk noted in PRD. Post-seed audit: most of its catalog is bundle/quantity SKUs the shared `excludeNamePattern` does not cover (#127) |
 
 Cross-cutting: **none is Shopify**, so no `/products.json` anywhere — build
 the crawler on sitemap enumeration + JSON-LD Product parsing, low rate,

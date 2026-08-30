@@ -1,4 +1,4 @@
-import type { VendorAdapter } from "./types.js";
+import type { PrefixVendorAdapter } from "./types.js";
 
 // Cuban Lou's (cubanlous.com) — a WooCommerce store like Fox (ADR-006 /
 // vendor-sources.md), crawled for CC inventory depth. Owner ruling 2026-08-29:
@@ -21,7 +21,7 @@ import type { VendorAdapter } from "./types.js";
 //   3. productPathPrefix: WooCommerce ships `/product/` by default, but Fox uses a
 //      custom `/shop/` base — confirm Cuban Lou's real prefix from one product URL.
 //   4. Product pages embed a schema.org Product in JSON-LD (WooCommerce norm).
-export const cubanLous: VendorAdapter = {
+export const cubanLous: PrefixVendorAdapter = {
   slug: "cuban-lous",
   name: "Cuban Lou's",
   url: "https://www.cubanlous.com",

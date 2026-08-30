@@ -14,7 +14,9 @@ import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { runIngest, type IngestDeps } from "./core/ingest.js";
 import { upsertListingMatch } from "./core/match.js";
 import { foxCigar } from "./adapters/fox-cigar.js";
+import { smallBatchCigar } from "./adapters/small-batch-cigar.js";
 import { createMockFetcher, urlsetXml, loadFixture, fakeProcessPhoto, type MockFetcher } from "./testing/fixtures.js";
+import type { VendorAdapter } from "./adapters/types.js";
 
 // End-to-end over a real embedded Postgres (migrated to head). The fetch layer is
 // mocked per the guardrail (NEVER live sites); the photo pipeline is stubbed so
@@ -319,6 +321,110 @@ describe("crawler ingest (embedded Postgres)", () => {
       .where(eq(crawlRuns.kind, "enrich"));
     expect(enrichRuns.length).toBe(3);
     expect(enrichRuns.every((r) => r.status === "succeeded")).toBe(true);
+  });
+
+  // --- sitemap sampling (adapters whose enumeration varies per fetch) --------
+
+  it("sampling unions varying sitemap fetches so the walk sees listings from every sample", async () => {
+    const adapter: VendorAdapter = { ...foxCigar, sitemapSampling: { samples: 3 } };
+    const fetcher = createMockFetcher({
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: {
+        sequence: [
+          { body: urlsetXml([PADRON_URL]) },
+          { body: urlsetXml([]) },
+          { body: urlsetXml([OLIVA_URL]) },
+        ],
+      },
+      [PADRON_URL]: { body: loadFixture("product-padron.html") },
+      [OLIVA_URL]: { body: loadFixture("product-oliva.html") },
+    });
+
+    const result = await runIngest(deps(fetcher, null), { adapter, vendorId, mode: "offers" });
+
+    expect(result.status).toBe("succeeded");
+    // Both products were walked — neither single fetch alone enumerated both.
+    expect(result.stats.listingsParsed).toBe(2);
+    expect(fetcher.requested).toContain(PADRON_URL);
+    expect(fetcher.requested).toContain(OLIVA_URL);
+    expect(result.stats.sitemapSampling).toEqual({
+      samples: 3,
+      locsPerSample: [1, 0, 1],
+      // Marginal contribution per sample — the number `samples` is tuned from.
+      // Recorded in crawl_runs.stats, not just computed and dropped.
+      newPerSample: [1, 0, 1],
+      unionLocs: 2,
+      productLocs: 2,
+      varied: true,
+    });
+  });
+
+  it("sampling that enumerates nothing FAILS the run rather than recording a silent zero", async () => {
+    const adapter: VendorAdapter = { ...foxCigar, sitemapSampling: { samples: 2 } };
+    const result = await runIngest(deps(createMockFetcher({
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([]) },
+    }), null), { adapter, vendorId, mode: "offers" });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatch(/sitemap sampling/);
+    expect(result.stats.sitemapSampling).toMatchObject({ samples: 2, unionLocs: 0, productLocs: 0 });
+
+    const run = await pg.db.select().from(crawlRuns).where(eq(crawlRuns.id, result.crawlRunId!));
+    expect(run[0]!.status).toBe("failed");
+    expect(run[0]!.error).toMatch(/sitemap sampling/);
+  });
+
+  it("a vendor WITHOUT sampling keeps the old behavior: one fetch, empty sitemap succeeds with zero", async () => {
+    const fetcher = createMockFetcher({
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([]) },
+    });
+    const result = await runIngest(deps(fetcher, null), { adapter: foxCigar, vendorId, mode: "offers" });
+
+    expect(result.status).toBe("succeeded");
+    expect(result.stats.listingsParsed).toBe(0);
+    expect(result.stats.sitemapSampling).toBeUndefined();
+    expect(fetcher.requested.filter((u) => u === SITEMAP)).toHaveLength(1);
+  });
+
+  // --- exclusion gate (root-level product slugs, no shared prefix) -----------
+
+  it("an exclusion-gate adapter walks only the root-level product slugs", async () => {
+    const inserted = await pg.db
+      .insert(vendors)
+      .values({ name: "Small Batch Cigar", url: smallBatchCigar.url, focus: "NC", approvalStatus: "owner-added" })
+      .returning({ id: vendors.id });
+    const sbVendorId = inserted[0]!.id;
+
+    const SB = "https://www.smallbatchcigar.com";
+    const NOELLA = `${SB}/tatuaje-brown-label-noella/`;
+    const CUTTER = `${SB}/xikar-xi3-cutter/`;
+    const fetcher = createMockFetcher({
+      [`${SB}/robots.txt`]: { body: loadFixture("robots.txt", "small-batch") },
+      [smallBatchCigar.sitemapUrl]: { body: loadFixture("sitemap.xml", "small-batch") },
+      [`${SB}/products-sitemap-1.xml`]: { body: loadFixture("products-sitemap-1.xml", "small-batch") },
+      [NOELLA]: { body: loadFixture("product.html", "small-batch") },
+      [CUTTER]: { body: loadFixture("product-cutter.html", "small-batch") },
+    });
+
+    const result = await runIngest(deps(fetcher, null), {
+      adapter: smallBatchCigar,
+      vendorId: sbVendorId,
+      mode: "offers",
+    });
+
+    expect(result.status).toBe("succeeded");
+    // The sitemap also lists /pages/about-us/ and /cart.php — neither is fetched.
+    expect(fetcher.requested).toEqual([
+      `${SB}/robots.txt`,
+      smallBatchCigar.sitemapUrl,
+      `${SB}/products-sitemap-1.xml`,
+      NOELLA,
+      CUTTER,
+    ]);
+    expect(result.stats.listingsParsed).toBe(2);
+    expect(result.stats.skippedNonCigar).toBe(1); // the cutter
   });
 
   it("robots disallow fails the run and records the reason in crawl_runs.error", async () => {

@@ -19,6 +19,10 @@ export interface MockRoute {
   body?: string;
   binary?: Buffer;
   contentType?: string;
+  // Per-URL response sequence for fetchText: entry i answers the i-th hit, the
+  // last entry repeating. The only way to express a sitemap whose content varies
+  // between fetches (2 Guys, live 2026-08-29) — a static url→body map cannot.
+  sequence?: Array<{ status?: number; body?: string }>;
 }
 
 export interface MockFetcher extends Fetcher {
@@ -30,6 +34,7 @@ export interface MockFetcher extends Fetcher {
 export function createMockFetcher(routes: Record<string, MockRoute>): MockFetcher {
   let pages = 0;
   const requested: string[] = [];
+  const hits = new Map<string, number>();
   return {
     requested,
     get pagesFetched() {
@@ -40,6 +45,12 @@ export function createMockFetcher(routes: Record<string, MockRoute>): MockFetche
       pages += 1;
       const route = routes[url];
       if (!route) return { status: 404, body: "" };
+      if (route.sequence && route.sequence.length > 0) {
+        const hit = hits.get(url) ?? 0;
+        hits.set(url, hit + 1);
+        const entry = route.sequence[Math.min(hit, route.sequence.length - 1)]!;
+        return { status: entry.status ?? 200, body: entry.body ?? "" };
+      }
       return { status: route.status ?? 200, body: route.body ?? "" };
     },
     async fetchBinary(url: string) {

@@ -3,7 +3,7 @@
 // cigars vs accessories. The generic core (fetch/sitemap/jsonld/normalize/match/
 // ingest) is driven entirely by these fields, so a new vendor is a new adapter
 // object plus a registry entry — no core changes.
-export interface VendorAdapter {
+export interface VendorAdapterBase {
   // Registry key, used on the CLI (`--vendor <slug>`) and as the adapter id.
   slug: string;
   // The vendors.name this adapter resolves/creates its registry row by.
@@ -35,8 +35,6 @@ export interface VendorAdapter {
   // owner ruling 2026-08-29). Cuban Lou's is the sole false today.
   purchaseLinkout: boolean;
   // --- crawl shape ---------------------------------------------------------
-  // A URL path whose prefix marks a product listing (Fox: `/shop/`).
-  productPathPrefix: string;
   // A breadcrumb path (joined) matching this is a cigar category…
   cigarCategoryPattern: RegExp;
   // …unless it also matches this (accessories, samplers, humidors, etc.).
@@ -44,6 +42,11 @@ export interface VendorAdapter {
   // Name-level exclusion for products whose CATEGORY is cigars but which are
   // not one catalog cigar (sets, kits, mixed cases) — dry-run finding 2026-08-28.
   excludeNamePattern?: RegExp;
+  // Opt-in defense against a vendor whose sitemap CONTENT varies between fetches
+  // (2 Guys, live 2026-08-29: one request returned 1,462 `/store/` product locs,
+  // the next 6,356 locs with none). Absent — the norm — means one fetch, exactly
+  // as before. Present, the enumeration is the union of N root fetches.
+  sitemapSampling?: SitemapSampling;
   // Per-vendor politeness overrides the CLI passes to the fetcher (the floor still
   // wins — createFetcher clamps to MIN_INTERVAL_FLOOR_MS). Set on large catalogs:
   // Small Batch (~20k URLs) crawls slower and caps pages so a misconfigured run
@@ -51,3 +54,51 @@ export interface VendorAdapter {
   minIntervalMs?: number;
   maxPages?: number;
 }
+
+export interface SitemapSampling {
+  // Root fetches to take. Clamped to [1, MAX_SITEMAP_SAMPLES] by the core so a
+  // typo cannot turn a probe into a hammer.
+  samples: number;
+  // Extra delay BETWEEN samples, on top of the fetcher's ≥2.5s global limiter.
+  // Unset (the default) relies on the limiter alone — we have no measurement of
+  // any vendor's cache TTL, so a specific interval would be invented. Raise it
+  // from live per-sample counts if the union still under-enumerates.
+  intervalMs?: number;
+}
+
+// --- product gate ------------------------------------------------------------
+// Two modes, mutually exclusive at compile time via `?: never`. An adapter that
+// mixes them fails to typecheck (the error reads `Type 'RegExp' is not assignable
+// to type 'undefined'` — that means "you put a Mode-B field on a Mode-A adapter").
+// `product-url.test.ts` asserts the same invariant at runtime over the registry.
+
+// Mode A — every product URL shares one path prefix (Fox `/shop/`), or the
+// sitemap is already product-only and the prefix is just `/` (Cuban Lou's).
+export interface PrefixProductGate {
+  productPathPrefix: string;
+  nonProductPathPattern?: never;
+  productPathSegments?: never;
+  robotsProbePath?: never;
+}
+
+// Mode B — products are ROOT-LEVEL slugs with no shared prefix (Small Batch,
+// live-probed 2026-08-29), so the gate is negative: reject the known non-product
+// paths, then constrain path depth.
+export interface ExclusionProductGate {
+  productPathPrefix?: never;
+  // Matched against URL.pathname (query strings are dropped — a sitemap should
+  // not enumerate `?variant=` URLs). MUST be anchored.
+  nonProductPathPattern: RegExp;
+  // Inclusive bounds on non-empty path segments. Carries most of the load for a
+  // root-level catalog: `/blogs/news/x` is out on shape alone.
+  productPathSegments?: { min?: number; max?: number };
+  // The coarse path the robots gate is asked about; defaults to "/".
+  robotsProbePath?: string;
+}
+
+// Each adapter file annotates itself with the mode it implements, so a mis-typed
+// field errors on the offending line rather than somewhere downstream — and so a
+// test can spread one without the union distributing over both modes.
+export type PrefixVendorAdapter = VendorAdapterBase & PrefixProductGate;
+export type ExclusionVendorAdapter = VendorAdapterBase & ExclusionProductGate;
+export type VendorAdapter = PrefixVendorAdapter | ExclusionVendorAdapter;
