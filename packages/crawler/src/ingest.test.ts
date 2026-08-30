@@ -282,12 +282,25 @@ describe("crawler ingest (embedded Postgres)", () => {
     await setFleet(enabled);
   }
 
-  async function makeVendor(name: string, focus: "NC" | "CC" | "both"): Promise<string> {
+  // A vendor gets a succeeded `enrich` run by default, because the exhaustion
+  // denominator is LIVENESS and not `crawl_enabled` — nothing in the crawler reads
+  // that flag (#156), so an enabled vendor whose CronJob is suspended counts
+  // against nothing. `enrichRun: false` is the prod Cuban Lou's shape and the
+  // cases that pass it are about exactly that.
+  async function makeVendor(
+    name: string,
+    focus: "NC" | "CC" | "both",
+    opts: { enrichRun?: boolean } = {},
+  ): Promise<string> {
     const rows = await pg.db
       .insert(vendors)
       .values({ name: `${name} ${randomUUID().slice(0, 8)}`, url: "https://foxcigar.com", focus, crawlEnabled: true })
       .returning({ id: vendors.id });
-    return rows[0]!.id;
+    const id = rows[0]!.id;
+    if (opts.enrichRun ?? true) {
+      await pg.db.insert(crawlRuns).values({ vendorId: id, kind: "enrich", status: "succeeded", startedAt: now() });
+    }
+    return id;
   }
 
   // `createdAt` is explicit where a case depends on drain ORDER (the queue is
@@ -452,7 +465,42 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(row.attempts).toBe(0);
   });
 
-  // An untyped cigar could belong to either market, so EVERY enabled vendor is in
+  // THE PROD SHAPE, and the blocker of the #158 review. Fox Cigar (NC) drains
+  // nightly; Cuban Lou's (CC) is crawl-enabled with a SUSPENDED enrich CronJob and
+  // only a `seed` run to its name. 890 of 977 catalog rows are untyped, so they
+  // need both markets — and holding them against a lane that has never run left
+  // every one of them permanently un-exhausted, which also put them permanently
+  // out of `retryExhausted`'s reach. A lane that has never run counts against
+  // nothing; it reopens what it has not looked at the night it does run.
+  it("a lane that has never run holds no untyped request open, and reopens it when it does run", async () => {
+    const fox = await makeVendor("Fox Prod Shape", "NC");
+    const cubanLous = await makeVendor("Cuban Lous Prod Shape", "CC", { enrichRun: false });
+    await arrange([fox, cubanLous]);
+
+    const rows = await pg.db
+      .insert(cigars)
+      .values({ canonicalName: `Untyped Prod Row ${randomUUID().slice(0, 8)}`, type: null, verification: "verified" })
+      .returning({ id: cigars.id });
+    const requestId = await seedRequest(rows[0]!.id);
+
+    await enrichRun(fox, missRoutes);
+    expect((await requestRow(requestId)).status).toBe("pending");
+    const retiring = await enrichRun(fox, missRoutes);
+    expect(retiring.stats.enrich).toMatchObject({ spent: 1, blocked: 0 });
+    expect((await requestRow(requestId)).status).toBe("exhausted");
+
+    // Cuban Lou's lane comes up. `exhausted` is in the drain's open set and it has
+    // no ledger row, so its first night picks the request straight up — no reopen
+    // job, no backfill — and the row is open again.
+    const first = await enrichRun(cubanLous, missRoutes);
+    expect(first.stats.enrich!.requests).toBe(1);
+    expect((await requestRow(requestId)).status).toBe("pending");
+    await enrichRun(cubanLous, missRoutes);
+    expect((await requestRow(requestId)).status).toBe("exhausted");
+    expect((await ledgerRows(requestId)).map((r) => r.vendorId).sort()).toEqual([fox, cubanLous].sort());
+  });
+
+  // An untyped cigar could belong to either market, so EVERY lane that runs is in
   // its denominator — the generalization of the backlog's both-markets rule.
   it("an untyped cigar is selectable by every vendor and retires only when all of them are spent", async () => {
     const nc = await makeVendor("Untyped NC", "NC");
@@ -559,20 +607,24 @@ describe("crawler ingest (embedded Postgres)", () => {
 
     await enrichRun(only, brokenRoutes);
     const third = await enrichRun(only, brokenRoutes);
-    expect(third.stats.enrich!.spent).toBe(1);
+    // BLOCKED, never `exhausted` (#158 review). The ledger holds zero completed
+    // looks, so "we looked and found nothing" would be a fabrication — the request
+    // is retired because nobody could finish looking, which is a different fact and
+    // is counted and reported as one.
+    expect(third.stats.enrich).toMatchObject({ spent: 0, blocked: 1 });
     row = await requestRow(requestId);
-    expect(row.status).toBe("exhausted");
+    expect(row.status).not.toBe("exhausted");
+    expect(row.resolvedAt).toBeNull();
     expect(row.attempts).toBe(0);
     ledger = await ledgerRows(requestId);
     expect(ledger[0]!.errors).toBe(3);
 
-    // Spent on errors alone: the fourth run does not select it.
+    // Retired all the same: the fourth run does not select it.
     expect((await enrichRun(only, brokenRoutes)).stats.enrich!.requests).toBe(0);
   });
 
   // An enumeration that yields NO product URLs is an adapter/gate failure, not a
-  // fact about the cigar — the exact shape the 2 Guys `/store/` prefix produces by
-  // matching gift-registry pages instead of products. It must not burn budget.
+  // fact about the cigar. It must not burn budget.
   it("an empty product enumeration is an error, never a miss", async () => {
     const only = await makeVendor("Bad Gate", "NC");
     await arrange([only]);
@@ -588,6 +640,66 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 0, errored: 1 });
     expect((await requestRow(requestId)).attempts).toBe(0);
     expect((await ledgerRows(requestId))[0]!.errors).toBe(1);
+  });
+
+  // THE 2 GUYS SHAPE, which the empty-enumeration case above does NOT cover and
+  // which the previous round misclassified (#158 review). An over-matching product
+  // gate does not enumerate nothing — it enumerates plenty. The live probe in
+  // ADR-006 had `/store/` pass 1,462 locs that were gift-registry pages: they
+  // ANSWER 200, they simply carry no schema.org Product, so `parsed = 0`. Calling
+  // that a miss burns real budget for a gate defect and then reports "2 Guys looked
+  // and does not carry it" — manufactured evidence about a vendor, which is exactly
+  // what the ADR amendment forbids.
+  it("candidates that answer 200 with no product JSON-LD are an error, never a miss", async () => {
+    const only = await makeVendor("Registry Pages", "NC");
+    await arrange([only]);
+
+    const cigarId = await seedCigar("Padron 1964 Anniversary Maduro Torpedo Gated", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    // The gate admits the URL and the page answers 200 — it is simply not a
+    // product. That is the ONLY difference from the case above, and it is the one
+    // that decides between `miss` and `error`.
+    const gateRoutes = {
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([PADRON_URL]) },
+      [PADRON_URL]: { status: 200, body: "<html><body><h1>Gift registry</h1></body></html>" },
+    };
+
+    const run = await enrichRun(only, gateRoutes);
+    expect(run.stats.listingsParsed).toBe(0);
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 0, matched: 0, errored: 1 });
+    const ledger = await ledgerRows(requestId);
+    expect(ledger[0]!.attempts).toBe(0);
+    expect(ledger[0]!.errors).toBe(1);
+    expect(ledger[0]!.lastOutcome).toBe("error");
+
+    // Two more nights and the request is BLOCKED, not `exhausted`: no vendor is
+    // ever reported as having looked at a cigar it was never actually shown.
+    await enrichRun(only, gateRoutes);
+    const third = await enrichRun(only, gateRoutes);
+    expect(third.stats.enrich).toMatchObject({ spent: 0, blocked: 1 });
+    expect((await requestRow(requestId)).status).not.toBe("exhausted");
+  });
+
+  // The other side of that line: a page that DOES parse as a product and simply is
+  // not this cigar is a completed look. We read the vendor's catalogue.
+  it("a parsed product that is not the cigar is a miss, and burns an attempt", async () => {
+    const only = await makeVendor("Parses Fine", "NC");
+    await arrange([only]);
+
+    // Shares a slug token with the Padron listing (so it ranks and IS fetched) and
+    // nothing else (so it falls under the similarity floor).
+    const cigarId = await seedCigar("Vega Fina Nicaragua Torpedo", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    const run = await enrichRun(only, missRoutes);
+    expect(run.stats.listingsParsed).toBe(1);
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
+    const ledger = await ledgerRows(requestId);
+    expect(ledger[0]!.attempts).toBe(1);
+    expect(ledger[0]!.errors).toBe(0);
+    expect(ledger[0]!.lastOutcome).toBe("miss");
   });
 
   // The tempting mis-read this guards against: "no candidate scored" is not an

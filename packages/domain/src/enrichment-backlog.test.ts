@@ -5,7 +5,8 @@ import { createHarness, newRequestId, type DomainHarness } from "./testing/harne
 import { queueEnrichmentBacklog, cigarsMissingPhotos, agentRunRows, ENRICHMENT_BACKLOG_MAX } from "./curation.js";
 import {
   ATTEMPTS_PER_VENDOR,
-  eligibleEnrichVendors,
+  ERROR_BUDGET,
+  enrichVendorFleet,
   recordEnrichmentAttempt,
 } from "./enrichment-coverage.js";
 import { IdempotencyConflictError, UnauthorizedError } from "./errors.js";
@@ -70,23 +71,31 @@ describe("queueEnrichmentBacklog", () => {
 
   // Since migration 0023 `exhausted` is DERIVED from the per-vendor ledger, not read
   // off enrichment_requests.status — so a test that wants a retired row has to
-  // retire it the way the crawler does: every eligible vendor spends its own budget.
+  // retire it the way the crawler does: every LANE THAT RUNS spends its own budget.
   // Writing `status: 'exhausted'` alone no longer makes a row dead, which is the
-  // point (see the cache-vs-authority case below).
-  async function retireEverywhere(requestId: string, type: "NC" | "CC" | null = "NC") {
-    const eligible = await eligibleEnrichVendors(h.deps.db, type);
-    expect(eligible.length).toBeGreaterThan(0);
-    for (const vendor of eligible) {
-      for (let i = 0; i < ATTEMPTS_PER_VENDOR; i += 1) {
+  // point (see the cache-vs-authority case below). Vendors that are crawl-enabled
+  // but have never completed an enrich run are not in the denominator and are not
+  // spent here — that is the #158-review fix, and the untyped case below is where
+  // it shows.
+  async function retireEverywhere(
+    requestId: string,
+    type: "NC" | "CC" | null = "NC",
+    outcome: "miss" | "error" = "miss",
+  ) {
+    const live = (await enrichVendorFleet(h.deps.db, type)).filter((v) => v.live);
+    expect(live.length).toBeGreaterThan(0);
+    const budget = outcome === "miss" ? ATTEMPTS_PER_VENDOR : ERROR_BUDGET;
+    for (const vendor of live) {
+      for (let i = 0; i < budget; i += 1) {
         await recordEnrichmentAttempt(h.deps.db, {
           requestId,
           vendorId: vendor.vendorId,
-          outcome: "miss",
+          outcome,
           at: new Date("2026-08-30T12:00:00.000Z"),
         });
       }
     }
-    return eligible.map((v) => v.name);
+    return live.map((v) => v.name);
   }
 
   async function requestRows(cigarId: string) {
@@ -243,13 +252,82 @@ describe("queueEnrichmentBacklog", () => {
     expect(await requestRows(cigarId)).toHaveLength(3);
   });
 
+  // THE BLOCKER OF THE #158 REVIEW, at the surface an operator actually sees.
+  // Prod: Fox Cigar (NC) drains nightly, Cuban Lou's (CC) is crawl-enabled with a
+  // suspended enrich CronJob and only a `seed` run, and 890 of 977 catalog rows are
+  // untyped so they need BOTH markets. Holding them against a lane that has never
+  // run meant they could never reach `exhausted` — and because `already_queued`
+  // short-circuits ahead of the exhausted branch, `retryExhausted` could never
+  // touch them either. The majority of the catalogue, open forever and invisible.
+  it("an untyped row retires at the lanes that run, instead of hanging on one that never does", async () => {
+    const admin = await curator();
+    const cigarId = await seedHeld(admin, "Backlog Untyped Prod Shape", 1, { type: null });
+    // Cuban Lou's: crawl-enabled, focus CC, no enrich run ever.
+    await seedVendor("CC", null);
+    const [request] = await h.deps.db
+      .insert(enrichmentRequests)
+      .values({ cigarId, status: "pending" })
+      .returning({ id: enrichmentRequests.id });
+    const tried = await retireEverywhere(request!.id, null);
+
+    const reported = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+    const entry = reported.entries.find((e) => e.cigarId === cigarId)!;
+    expect(entry).toMatchObject({ status: "exhausted", triedVendors: tried });
+    // The never-run vendor is still REPORTED — it is who COULD look — it simply
+    // counts against nothing. That pairing is the honest state: a name in
+    // `eligibleVendors` whose market is missing from `enrichedMarkets` is a lane
+    // that has never run.
+    expect(reported.eligibleVendors.length).toBeGreaterThan(tried.length);
+
+    // And the retry now reaches it and says what the real blocker is, rather than
+    // reporting `already_queued` at a row nothing will ever pick up.
+    const retried = await queueEnrichmentBacklog(h.deps, admin, {
+      clientRequestId: newRequestId(),
+      retryExhausted: true,
+    });
+    expect(retried.entries.find((e) => e.cigarId === cigarId)).toMatchObject({ status: "no_vendor_coverage" });
+    expect(await requestRows(cigarId)).toHaveLength(1);
+  });
+
+  // THE SECOND FINDING OF THAT REVIEW. A row every lane failed to REACH is retired,
+  // but its ledger holds zero completed looks — reporting it `exhausted` next to
+  // `triedVendors` reads as "these vendors looked and none carries it", a catalogue
+  // fact that was never established. It gets its own verdict, and the same escape
+  // hatch, because falling through to `already_queued` would hide it entirely.
+  it("reports a row nobody could finish looking at as vendor_unreachable, not exhausted", async () => {
+    const admin = await curator();
+    const cigarId = await seedHeld(admin, "Backlog Unreachable");
+    const [request] = await h.deps.db
+      .insert(enrichmentRequests)
+      .values({ cigarId, status: "pending" })
+      .returning({ id: enrichmentRequests.id });
+    const tried = await retireEverywhere(request!.id, "NC", "error");
+
+    const reported = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+    expect(reported.entries.find((e) => e.cigarId === cigarId)).toMatchObject({
+      cigarId,
+      status: "vendor_unreachable",
+      triedVendors: tried,
+    });
+    expect(reported).toMatchObject({ queued: 0, skipped: 1 });
+    expect(await requestRows(cigarId)).toHaveLength(1);
+
+    // `retryExhausted` clears both retirement verdicts: the fresh ask carries a
+    // fresh error budget, which is the whole point once the vendor is fixed.
+    const retried = await queueEnrichmentBacklog(h.deps, admin, {
+      clientRequestId: newRequestId(),
+      retryExhausted: true,
+    });
+    expect(retried.entries.find((e) => e.cigarId === cigarId)).toMatchObject({ status: "queued" });
+    expect(await requestRows(cigarId)).toHaveLength(2);
+  });
+
   // THE CACHE-VS-AUTHORITY TEST. `enrichment_requests.status` is a cache of a rollup
-  // whose denominator — the eligible vendor set — changes without the row being
-  // touched. This is the stale window between enabling a vendor and its first enrich
-  // run: the column still says `exhausted`, but the drain admits `exhausted` rows and
-  // the new vendor has no ledger entry, so the request is very much alive. Any future
-  // reader that trusts the column instead of the helper fails right here.
-  it("a cached-exhausted row with an unspent eligible vendor is already_queued, not dead", async () => {
+  // whose denominator — the lanes that run — changes without the row being touched.
+  // The column still says `exhausted`, but the drain admits `exhausted` rows and no
+  // vendor has a ledger entry, so the request is very much alive. Any future reader
+  // that trusts the column instead of the helper fails right here.
+  it("a cached-exhausted row no lane has spent is already_queued, not dead", async () => {
     const admin = await curator();
     const cigarId = await seedHeld(admin, "Backlog Stale Cache");
     // Written straight to the column, with an EMPTY ledger — no vendor ever looked.
@@ -261,8 +339,8 @@ describe("queueEnrichmentBacklog", () => {
     expect(entry.triedVendors).toBeUndefined();
     // Reported, never duplicated: the crawler will pick this exact row up.
     expect(await requestRows(cigarId)).toHaveLength(1);
-    // And the denominator is visible, which is the only surface that shows an
-    // eligible vendor with no enrich CronJob keeping every request open.
+    // And who could have looked is visible, which is what makes the report
+    // actionable rather than a bare verdict.
     expect(result.eligibleVendors.length).toBeGreaterThan(0);
   });
 

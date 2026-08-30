@@ -2133,7 +2133,7 @@ export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Pro
 // TWO PRECONDITIONS ARE ENFORCED, NOT DOCUMENTED. A queued request that cannot be
 // served is not inert: every drain that looks and misses spends one of that
 // VENDOR'S two attempts against the request (ATTEMPTS_PER_VENDOR, migration 0023),
-// and a request retires once every eligible vendor is spent. So a press only writes
+// and a request retires once every lane that runs is spent. So a press only writes
 // a row when both hold, and reports every other row with the reason:
 //
 //   1. `unverified_name` — drainEnrichment resolves BY canonical name twice over
@@ -2143,14 +2143,22 @@ export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Pro
 //      read this row" (only verifyCigar sets it), so it is the gate. Fix the name
 //      with rename_cigar, verify it, then press.
 //   2. `no_vendor_coverage` — a market with no enrich lane running cannot serve
-//      any request. See liveEnrichMarkets (enrichment-coverage.ts).
+//      any request. See liveEnrichMarkets (enrichment-coverage.ts). Note this is
+//      the SAME liveness the exhaustion denominator uses, read as markets rather
+//      than as vendors.
 //
-// The gate deliberately uses the LIVE predicate (crawl-enabled AND has completed an
-// enrich run) while exhaustion uses the ELIGIBLE one (crawl-enabled, focus covers
-// the market). They must not be merged: liveness as an exhaustion denominator is
-// circular — a brand-new lane has never run, so it could never take a request and
-// could never become live — and eligibility as the queue gate would re-open the
-// void this precondition closed, enqueuing into a market nothing reaches.
+// The gate and the exhaustion denominator are ONE predicate read at two
+// granularities: LIVE — crawl-enabled, focus covers the market, and the lane has
+// completed an `enrich` run — as markets here (one fleet-wide read) and as vendors
+// in the rollup (per row, because eligibility depends on the cigar's market).
+// `crawl_enabled` alone is not either of them: nothing in the crawler reads that
+// flag (#156), so a vendor with a suspended CronJob would gate nothing and retire
+// nothing while holding every matching request open forever.
+//
+// There is no circularity in using liveness as the denominator, because the drain
+// does NOT gate on it: its open set admits `exhausted` rows and its only
+// per-vendor filter is that vendor's own budget, so a lane that has never run
+// still picks work up on its first night and reopens what it has not looked at.
 //
 // Neither has an override argument. The way past them is to do the thing they
 // assert; a flag would just be the old footgun with a longer name.
@@ -2183,10 +2191,10 @@ function backlogStatus(
     return classified.status;
   }
   // A row the crawler retired is reported, not re-queued, unless asked for. Since
-  // migration 0023 "retired" means retired AT EVERY ELIGIBLE VENDOR, computed from
-  // the per-vendor ledger rather than read off enrichment_requests.status — so
-  // enabling a vendor reopens the row on its own and this verdict stops firing,
-  // with no reopen job and no backfill. The entry names the vendors that looked.
+  // migration 0023 "retired" means retired AT EVERY LANE THAT RUNS, computed from
+  // the per-vendor ledger rather than read off enrichment_requests.status — so a
+  // lane going live reopens the row on its own and this verdict stops firing, with
+  // no reopen job and no backfill. The entry names the vendors that looked.
   //
   // This deliberately outranks `recently_enriched`: ingest marks a request
   // `fulfilled` on a name match even when the photo capture threw, so
@@ -2194,7 +2202,14 @@ function backlogStatus(
   // the retry — keying the override off `status === "queued"` alone made it inert
   // there.
   if (classified.exhausted && !retryExhausted) return "exhausted";
-  if (!classified.exhausted && classified.status === "recently_enriched") return "recently_enriched";
+  // Retired without anybody finishing a look. Reported apart from `exhausted`
+  // (#158 review) because the two say opposite things about the catalogue, and
+  // reported at all because the alternative — letting it fall through to
+  // `already_queued` — is an invisible row no operator can act on.
+  if (classified.blocked && !retryExhausted) return "vendor_unreachable";
+  if (!classified.exhausted && !classified.blocked && classified.status === "recently_enriched") {
+    return "recently_enriched";
+  }
   // Preconditions for an actual insert.
   if (classified.cigar.verification !== "verified") return "unverified_name";
   if (!marketCovered(classified.cigar.type, markets)) return "no_vendor_coverage";
@@ -2247,9 +2262,15 @@ async function queueBacklogWithinTx(
     return { ...(existing.result as QueueEnrichmentBacklogResult), replayed: true };
   }
 
-  // One read for the whole press: market coverage is a property of the vendor
-  // fleet, not of a row. The per-row eligible/tried vendor sets come from each
-  // row's own classification, because eligibility depends on the cigar's market.
+  // Market coverage is fleet-wide, so it is read ONCE here rather than per row.
+  // The rest is not amortized and should not be read as if it were: each candidate
+  // runs its own classifyEnrichmentRequest, which is a vendor-fleet read, an
+  // enrichment_requests read and a ledger join, because both the vendor set and
+  // the rollup depend on that row's market. At ENRICHMENT_BACKLOG_MAX = 100 that
+  // is a few hundred round-trips inside one transaction — fine at prod's scale
+  // (63 photoless cigars) and the reason raising the cap means batching the reads,
+  // not just raising the number. The same three reads land on the add_cigar /
+  // record_purchase path through maybeQueueEnrichment.
   const markets = await liveEnrichMarkets(tx);
 
   const eligibleVendors = new Set<string>();
@@ -2281,10 +2302,11 @@ async function queueBacklogWithinTx(
       cigarId: candidate.cigarId,
       canonicalName: candidate.canonicalName,
       status,
-      // Only on `exhausted`: everywhere else the vendor list is either irrelevant
-      // (nothing was tried) or already implied by the verdict, and an always-present
-      // array would push noise through the MCP payload for 100 rows a press.
-      ...(status === "exhausted"
+      // Only on the two retirement verdicts: everywhere else the vendor list is
+      // either irrelevant (nothing was tried) or already implied by the verdict,
+      // and an always-present array would push noise through the MCP payload for
+      // 100 rows a press.
+      ...(status === "exhausted" || status === "vendor_unreachable"
         ? { triedVendors: classified.coverage.tried.map((v) => v.name) }
         : {}),
     });

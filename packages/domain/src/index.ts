@@ -152,20 +152,24 @@ export { resolveAndEnrich, maybeQueueEnrichment, type ResolveAndEnrichResult } f
 
 // Vendor coverage for the enrichment queue (ADR-006 amendment 2026-08-30, #158).
 // The crawler consumes this the way it already consumes recordPriceObservation:
-// ONE definition of eligibility, exhaustion and the per-vendor attempt ledger, so
-// the drain, the classifier and the bulk press cannot drift on what "exhausted"
-// means. A vendor's catalogue is partial — every verdict names a vendor.
+// ONE definition of the vendor fleet, of retirement and of the per-vendor attempt
+// ledger, so the drain, the classifier and the bulk press cannot drift on what
+// "exhausted" means. The two SQL builders are that single definition where the
+// drain needs the predicate with its operands the other way round. A vendor's
+// catalogue is partial — every verdict names a vendor.
 export {
   ATTEMPTS_PER_VENDOR,
   ERROR_BUDGET,
-  vendorCoversType,
-  eligibleEnrichVendors,
+  coversMarketSql,
+  vendorNotRetiredSql,
+  enrichVendorFleet,
   liveEnrichMarkets,
   recordEnrichmentAttempt,
   enrichmentCoverageForRequest,
   enrichmentCoverageForCigar,
   type EnrichmentOutcome,
   type EnrichmentCoverage,
+  type FleetVendor,
   type VendorBrief,
   type VendorAttemptSummary,
 } from "./enrichment-coverage.js";

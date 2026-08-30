@@ -1218,8 +1218,15 @@ export interface MissingPhotoCigar {
 // tool both land here, so the two surfaces cannot drift.
 
 // ADR-009's per-cigar verdict (enrichment.ts `EnrichmentRequestStatus`) plus the
-// three outcomes only a bulk press has. `exhausted` — the crawler tried and gave
-// up. `unverified_name` and `no_vendor_coverage` are the two PRECONDITIONS a press
+// four outcomes only a bulk press has.
+//
+// `exhausted` — every lane that runs completed its looks and none carried it.
+// `vendor_unreachable` — every lane that runs is retired on this row, but at least
+// one burned ERROR_BUDGET without finishing a look. Kept APART from `exhausted`
+// (#158 review): folding them together reports "we looked and found nothing" for a
+// row where the ledger holds zero completed looks, which is the one laundering the
+// ADR amendment names. Both are cleared by `retryExhausted`.
+// `unverified_name` and `no_vendor_coverage` are the two PRECONDITIONS a press
 // enforces rather than documents (#154 review): enrichment resolves a cigar by its
 // canonical name, and only a vendor that actually runs enrich passes can serve it,
 // so a row failing either is reported and never written. Restated as literals
@@ -1232,6 +1239,7 @@ export type EnrichmentBacklogStatus =
   | "recently_enriched"
   | "not_needed"
   | "exhausted"
+  | "vendor_unreachable"
   | "unverified_name"
   | "no_vendor_coverage";
 
@@ -1239,10 +1247,11 @@ export interface EnrichmentBacklogEntry {
   cigarId: string;
   canonicalName: string;
   status: EnrichmentBacklogStatus;
-  // Present only on `exhausted`: the vendors that actually looked and did not
-  // carry it. An `exhausted` verdict that does not name a vendor is meaningless
-  // (ADR-006 amendment 2026-08-30) — a vendor's catalogue is partial, so "no
-  // match" is evidence about that vendor and about nothing else.
+  // Present only on `exhausted` and `vendor_unreachable`: the vendors that spent
+  // themselves on this row. A retirement that does not name a vendor is
+  // meaningless (ADR-006 amendment 2026-08-30) — a vendor's catalogue is partial,
+  // so "no match" is evidence about that vendor and about nothing else, and
+  // "could not be reached" is not evidence about anything at all.
   triedVendors?: string[];
 }
 
@@ -1272,10 +1281,12 @@ export interface QueueEnrichmentBacklogResult {
   // nothing says WHY without a second read: an empty list means no enrich lane is
   // running at all.
   enrichedMarkets: CigarType[];
-  // Every crawl-enabled vendor whose focus covers at least one considered row —
-  // the exhaustion DENOMINATOR, which `enrichedMarkets` cannot express. An
-  // eligible vendor with no enrich CronJob scheduled keeps every request open
-  // forever (nobody asked it), and this list is the only surface that shows it.
+  // Every crawl-enabled vendor whose focus covers at least one considered row:
+  // who COULD look. NOT the exhaustion denominator — `crawl_enabled` is a
+  // registry flag no crawler consults (#156), so an enabled vendor whose enrich
+  // CronJob is suspended is listed here and is counted against nothing. Read it
+  // against `enrichedMarkets`: a vendor here whose market is absent there is a
+  // lane that has never run.
   eligibleVendors: string[];
   entries: EnrichmentBacklogEntry[];
   replayed: boolean;

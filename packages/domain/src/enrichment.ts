@@ -70,9 +70,10 @@ async function loadAssessment(tx: Tx, cigarId: string): Promise<{ cigar: CigarRo
 // since migration 0023: "open" is no longer a status-column test. A request whose
 // cached status reads `exhausted` but which a newly eligible vendor has not looked
 // at is STILL open — the drain admits `exhausted` rows — so a column-based dedupe
-// would file a duplicate ask for it. A request retired at every eligible vendor
-// still re-queues here, which is the long-standing behaviour and stays right: a
-// second add is a fresh reason to look.
+// would file a duplicate ask for it. A request retired at every counted lane
+// (exhausted or blocked) still re-queues here, which is the long-standing
+// behaviour and stays right: a second add is a fresh reason to look, and for a
+// blocked row it is also a fresh error budget.
 export async function maybeQueueEnrichment(
   tx: Tx,
   cigarId: string,
@@ -152,20 +153,27 @@ function normalizeNote(note: string | null | undefined): string | null {
 // must act on the flag (a whole worklist of dead rows is a different question from
 // one cigar a user just asked about).
 //
-// Since migration 0023 both `exhausted` AND `already_queued` are computed from the
-// per-vendor ledger, NOT from `enrichment_requests.status` — that column is a cache
-// of a rollup whose denominator (the eligible vendor set) changes underneath it.
-// Reading it directly misreports a request the moment a vendor is enabled: the
-// drain admits `status = 'exhausted'` rows and the new vendor has no ledger row, so
-// such a row is still queued and must classify as `already_queued`, not as a dead
-// row to be duplicated. `coverage` carries the vendor names so every surface can
-// say WHICH vendors looked (ADR-006 amendment 2026-08-30: an `exhausted` state that
-// does not name a vendor is meaningless).
+// Since migration 0023 `exhausted`, `blocked` AND `already_queued` are computed
+// from the per-vendor ledger, NOT from `enrichment_requests.status` — that column
+// is a cache of a rollup whose denominator (the lanes that actually run) changes
+// underneath it. Reading it directly misreports a request the moment a lane goes
+// live: the drain admits `status = 'exhausted'` rows and the new vendor has no
+// ledger row, so such a row is still queued and must classify as `already_queued`,
+// not as a dead row to be duplicated. `coverage` carries the vendor names so every
+// surface can say WHICH vendors looked (ADR-006 amendment 2026-08-30: an
+// `exhausted` state that does not name a vendor is meaningless).
+//
+// `blocked` rides alongside `exhausted` for the same reason `exhausted` rides
+// alongside `status`: it does not change the single-cigar answer (this tool has
+// always re-queued a row the crawler gave up on), and it must not be folded into
+// `exhausted`, which would report "we looked and found nothing" about a fleet
+// nobody could reach.
 export interface EnrichmentClassification {
   cigar: CigarRow;
   assessment: EnrichmentAssessment;
   status: EnrichmentRequestStatus;
   exhausted: boolean;
+  blocked: boolean;
   coverage: EnrichmentCoverage;
 }
 
@@ -185,7 +193,7 @@ export async function classifyEnrichmentRequest(tx: Tx, cigarId: string): Promis
   else if (seen.has("fulfilled")) status = "recently_enriched";
   else status = "queued";
 
-  return { cigar, assessment, status, exhausted: coverage.exhausted, coverage };
+  return { cigar, assessment, status, exhausted: coverage.exhausted, blocked: coverage.blocked, coverage };
 }
 
 export async function requestCigarEnrichment(

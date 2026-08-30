@@ -1,12 +1,12 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { Queryer } from "./deps.js";
 import type { CigarType } from "./types.js";
 
 // Vendor coverage for the enrichment queue (ADR-006 amendment 2026-08-30,
-// issue #158). ONE definition of eligibility, exhaustion and the attempt ledger,
-// shared by the crawler's drain, request_cigar_enrichment's classifier and the
-// bulk backlog press — three callers that previously could not have agreed,
-// because only the crawler had a notion of "vendor" at all.
+// issue #158). ONE definition of the vendor fleet, of retirement and of the
+// attempt ledger, shared by the crawler's drain, request_cigar_enrichment's
+// classifier and the bulk backlog press — three callers that previously could not
+// have agreed, because only the crawler had a notion of "vendor" at all.
 //
 // The ruling this module encodes: A VENDOR'S CATALOGUE IS PARTIAL. A vendor
 // carries some brands and not others; that is the normal case, not a crawl
@@ -16,6 +16,23 @@ import type { CigarType } from "./types.js";
 // brands within it). So "no match at vendor V" is evidence about V ONLY, and any
 // budget, staleness rule or `exhausted` state that does not NAME A VENDOR is
 // meaningless.
+//
+// THE ONE SENTENCE THIS MODULE HAS TO BE CHECKED AGAINST:
+//
+//   A request is EXHAUSTED when at least one lane counts against it and every
+//   counted lane has completed its full attempt budget on it — where a lane
+//   counts if it is crawl-enabled, its focus covers the cigar's market, and it
+//   has either finished an `enrich` run or already recorded a look at this very
+//   request.
+//
+// Two failures are deliberately NOT exhaustion, because "nobody could look" is a
+// different fact from "we looked and found nothing" and laundering one into the
+// other is exactly what the amendment forbids:
+//
+//   * no lane counts at all — the request stays open and self-heals;
+//   * every counted lane is retired but at least one of them burned ERROR_BUDGET
+//     without finishing a look — the request is BLOCKED, reported as such, and
+//     cleared by a `retryExhausted` press.
 
 // The per-vendor budget. The SAME number the pre-0023 code used per request — the
 // change is the denominator, not the constant. Enabling a fourth vendor must
@@ -43,60 +60,96 @@ export interface VendorAttemptSummary extends VendorBrief {
   lastAttemptAt: Date;
 }
 
+export interface FleetVendor extends VendorBrief {
+  // Has this lane ever FINISHED an `enrich` pass? A vendor that has not cannot
+  // have looked at anything, so it does not count against a request — see the
+  // rollup. Prod's shape is the reason the flag exists: Cuban Lou's is
+  // crawl-enabled with a suspended enrich CronJob and only a `seed` run to its
+  // name, and counting it would hold every untyped cigar open forever.
+  live: boolean;
+}
+
 export interface EnrichmentCoverage {
-  // Every vendor that COULD look, right now. The denominator of exhaustion and
-  // the honest answer to "who has not been asked?".
+  // Every crawl-enabled vendor whose focus covers the market: who COULD look.
+  // Reporting only — `crawl_enabled` is a registry flag no crawler consults
+  // (issue #156), so it says nothing about whether a lane will ever run and
+  // cannot be a denominator.
   eligible: VendorBrief[];
+  // Eligible AND the lane actually runs. THE EXHAUSTION DENOMINATOR, and the
+  // honest answer to "who has not been asked?".
+  live: VendorBrief[];
   // Every vendor that HAS looked — including vendors no longer eligible, because
   // "V did not carry this on 2026-08-30" stays true and is worth having when V
   // comes back.
   tried: VendorAttemptSummary[];
-  // At least one non-fulfilled request is retired at every eligible vendor.
+  // At least one non-fulfilled request has a completed look from every counted
+  // lane. "We looked and found nothing."
   exhausted: boolean;
-  // Non-fulfilled requests a drain would STILL select — the honest "already
-  // queued". A cached-`exhausted` row that a newly enabled vendor has not looked
-  // at counts here, because the drain admits `exhausted` and will pick it up.
+  // At least one non-fulfilled request is retired at every counted lane WITHOUT
+  // every one of them finishing a look — a lane ran out of ERROR_BUDGET first.
+  // "Nobody could finish looking", which is not a fact about any catalogue.
+  blocked: boolean;
+  // Non-fulfilled requests still awaiting a verdict from the lanes that run —
+  // the honest "already queued". A cached-`exhausted` row that a newly live
+  // vendor has not looked at counts here, because the drain admits `exhausted`
+  // and will pick it up.
   openRequests: number;
 }
 
-// The negative filter, and nothing more. It excludes only when BOTH sides are
-// known AND they disagree: an unknown vendor focus or an unknown cigar market
-// means we cannot rule the vendor out, so it must be asked. That is the same
-// reasoning the backlog's untyped-cigar rule already applies — enrichment is what
-// would tell us which market the cigar belongs to, and guessing is how a CC row
-// gets retired by an NC-only fleet.
-export function vendorCoversType(focus: string | null, type: CigarType | null): boolean {
-  if (focus == null || focus === "both") return true;
-  if (type == null) return true;
-  return focus === type;
+// THE negative filter, in SQL, in ONE place. Two readers need it with the
+// operands on opposite sides — the coverage rollup (vendor rows for one cigar)
+// and the crawler's drain (request rows for one vendor) — and two hand-written
+// copies of it is how a drain ends up selecting a request the rollup does not
+// count against that vendor, which is the #158 defect wearing a different hat.
+//
+// It excludes only when BOTH sides are known AND they disagree: an unknown vendor
+// focus or an unknown cigar market means we cannot rule the vendor out, so it
+// must be asked. That is the same reasoning the backlog's untyped-cigar rule
+// applies — enrichment is what would tell us which market the cigar belongs to,
+// and guessing is how a CC row gets retired by an NC-only fleet.
+export function coversMarketSql(focus: SQL, type: SQL): SQL {
+  return sql`(${focus} IS NULL OR ${focus} = 'both' OR ${type} IS NULL OR ${focus} = ${type})`;
 }
 
-// ELIGIBLE: `crawl_enabled` AND focus covers the market. Deliberately NOT "has
-// ever completed an enrich run" — using liveness here is circular, since a
-// brand-new lane has never run, so it could never take a request and could never
-// become live. Liveness gates the QUEUE (see liveEnrichMarkets); eligibility is
-// the exhaustion denominator.
-export async function eligibleEnrichVendors(q: Queryer, type: CigarType | null): Promise<VendorBrief[]> {
+// The per-(request, vendor) retirement test, in SQL, in ONE place, for the same
+// reason: the drain's "which requests has this vendor NOT spent?" has to be the
+// exact complement of `retired()` below, or the drain re-fetches every night a
+// request the rollup has already written off.
+export function vendorNotRetiredSql(attempts: SQL, errors: SQL): SQL {
+  return sql`(${attempts} < ${ATTEMPTS_PER_VENDOR} AND ${errors} < ${ERROR_BUDGET})`;
+}
+
+// The fleet for one cigar's market, with liveness in the SAME read — one query,
+// not two, because the classifier runs this per candidate row and a bulk press
+// considers up to ENRICHMENT_BACKLOG_MAX of them.
+export async function enrichVendorFleet(q: Queryer, type: CigarType | null): Promise<FleetVendor[]> {
   const result = await q.execute(sql`
-    SELECT v.id, v.name
+    SELECT v.id, v.name,
+           EXISTS (
+             SELECT 1 FROM crawl_runs cr
+             WHERE cr.vendor_id = v.id AND cr.kind = 'enrich' AND cr.status = 'succeeded'
+           ) AS live
     FROM vendors v
     WHERE v.crawl_enabled
-      AND (${type}::text IS NULL OR v.focus IS NULL OR v.focus = 'both' OR v.focus = ${type}::text)
+      AND ${coversMarketSql(sql`v.focus`, sql`${type}::text`)}
     ORDER BY v.name
   `);
-  return (result.rows as unknown as { id: string; name: string }[]).map((r) => ({
+  return (result.rows as unknown as { id: string; name: string; live: boolean }[]).map((r) => ({
     vendorId: r.id,
     name: r.name,
+    live: r.live === true,
   }));
 }
 
-// LIVE: the markets an enrich pass actually reaches — a crawl-enabled vendor
-// whose focus covers the market AND which has completed at least one `enrich`
-// run. Moved here verbatim from curation.ts so the crawler and curation cannot
-// drift on it. The run is the load-bearing half: Cuban Lou's is `crawl_enabled`
-// and has only ever run a `seed`, so `crawl_enabled` alone would claim CC is
-// covered while the only enrich CronJob is NC-only. Reading the runs table means
-// the gate opens by itself the first night a new enrich lane runs.
+// LIVE, read as MARKETS rather than as vendors — the backlog press's enqueue gate,
+// which is a fleet-wide question ("is there an enrich lane that reaches CC?") and
+// so is one read for a whole press rather than one per row. Moved here verbatim
+// from curation.ts so the crawler and curation cannot drift on it.
+//
+// It differs from `enrichVendorFleet` in one deliberate way: a NULL focus is
+// EXCLUDED here and INCLUDED there. A vendor whose market is unknown cannot be
+// used to claim a market is covered (this is a positive claim), but it also
+// cannot be ruled out of a cigar's denominator (that is the negative filter).
 export async function liveEnrichMarkets(q: Queryer): Promise<Set<CigarType>> {
   const result = await q.execute(sql`
     SELECT DISTINCT v.focus
@@ -120,10 +173,19 @@ export async function liveEnrichMarkets(q: Queryer): Promise<Set<CigarType>> {
   return markets;
 }
 
-// A vendor is SPENT on an ask once it has completed its looks, or failed to
-// complete too many in a row.
-function spent(row: { attempts: number; errors: number }): boolean {
-  return row.attempts >= ATTEMPTS_PER_VENDOR || row.errors >= ERROR_BUDGET;
+// A vendor has LOOKED once it completed its budget of looks. Only this makes its
+// silence evidence about its catalogue.
+function looked(row: { attempts: number }): boolean {
+  return row.attempts >= ATTEMPTS_PER_VENDOR;
+}
+
+// A vendor is RETIRED from an ask once it has looked, or failed to complete too
+// many looks in a row. The complement of vendorNotRetiredSql: this is what the
+// drain will no longer select, and it is deliberately NOT the same predicate as
+// `looked` — conflating them reports "we looked and found nothing" for a request
+// no vendor could ever reach.
+function retired(row: { attempts: number; errors: number }): boolean {
+  return looked(row) || row.errors >= ERROR_BUDGET;
 }
 
 interface LedgerRow {
@@ -163,25 +225,31 @@ async function ledgerRows(q: Queryer, where: ReturnType<typeof sql>): Promise<Le
   }));
 }
 
-// The rollup. A request is exhausted when EVERY eligible vendor has spent its own
-// budget on it — and there is at least one such vendor.
+interface Rollup {
+  exhausted: Set<string>;
+  blocked: Set<string>;
+}
+
+// The rollup, and the sentence at the top of this file in code.
 //
-// Zero eligible vendors is NOT exhausted, and the distinction is the whole point:
-// "nobody could look" is a different fact from "we looked and found nothing", and
-// laundering one into the other is precisely what the ADR forbids. Such a request
-// stays open and self-heals the moment a vendor becomes eligible.
+// THE DENOMINATOR IS LIVENESS, NOT `crawl_enabled`. `crawl_enabled` is a registry
+// flag nothing in the crawler reads (issue #156): the CronJob list is the real
+// crawl gate, so an enabled vendor with a suspended lane says nothing about
+// whether anyone will ever look. A denominator built on it is a denominator that
+// can never fill — in prod that is Cuban Lou's holding all 890 untyped cigars
+// open forever, past `exhausted` and so past `retryExhausted` too.
 //
-// Eligibility is evaluated HERE, at rollup time, never at write time. That is
-// what makes every state transition automatic: enabling a vendor adds an unspent
-// row to the denominator and reopens the request with no cron and no backfill;
-// disabling one drops it from both numerator and denominator while its verdict
-// stays on the books.
-function exhaustedRequestIds(
-  eligible: VendorBrief[],
-  rows: LedgerRow[],
-  requestIds: string[],
-): Set<string> {
-  if (eligible.length === 0) return new Set();
+// A lane also counts once it has recorded a look at THIS request, which is the
+// same demonstration one run earlier: a vendor's first enrich run is still
+// `running` while it drains, so without that clause its own first night would
+// read as a lag in the cached status.
+//
+// Eligibility and liveness are evaluated HERE, at rollup time, never at write
+// time. That is what makes every state transition automatic: a lane going live
+// adds an unspent row to the denominator and reopens the request with no cron and
+// no backfill; disabling a vendor drops it from both numerator and denominator
+// while its verdict stays on the books.
+function rollup(fleet: FleetVendor[], rows: LedgerRow[], requestIds: string[]): Rollup {
   const byRequest = new Map<string, Map<string, LedgerRow>>();
   for (const row of rows) {
     let perVendor = byRequest.get(row.requestId);
@@ -192,16 +260,17 @@ function exhaustedRequestIds(
     perVendor.set(row.vendorId, row);
   }
   const exhausted = new Set<string>();
+  const blocked = new Set<string>();
   for (const requestId of requestIds) {
-    const perVendor = byRequest.get(requestId);
-    if (!perVendor) continue;
-    const allSpent = eligible.every((vendor) => {
-      const row = perVendor.get(vendor.vendorId);
-      return row != null && spent(row);
-    });
-    if (allSpent) exhausted.add(requestId);
+    const perVendor = byRequest.get(requestId) ?? new Map<string, LedgerRow>();
+    const counted = fleet.filter((vendor) => vendor.live || perVendor.has(vendor.vendorId));
+    if (counted.length === 0) continue;
+    const ledgers = counted.map((vendor) => perVendor.get(vendor.vendorId));
+    if (!ledgers.every((row) => row != null && retired(row))) continue;
+    if (ledgers.every((row) => looked(row!))) exhausted.add(requestId);
+    else blocked.add(requestId);
   }
-  return exhausted;
+  return { exhausted, blocked };
 }
 
 // Sum a vendor's spend across however many requests were rolled up, so a cigar
@@ -227,20 +296,26 @@ function summarize(rows: LedgerRow[]): VendorAttemptSummary[] {
   return [...byVendor.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function brief(vendors: FleetVendor[]): VendorBrief[] {
+  return vendors.map(({ vendorId, name }) => ({ vendorId, name }));
+}
+
 // Coverage for ONE ask — the crawler's question after a look.
 export async function enrichmentCoverageForRequest(
   q: Queryer,
   requestId: string,
   type: CigarType | null,
 ): Promise<EnrichmentCoverage> {
-  const eligible = await eligibleEnrichVendors(q, type);
+  const fleet = await enrichVendorFleet(q, type);
   const rows = await ledgerRows(q, sql`a.request_id = ${requestId}`);
-  const exhausted = exhaustedRequestIds(eligible, rows, [requestId]);
+  const { exhausted, blocked } = rollup(fleet, rows, [requestId]);
   return {
-    eligible,
+    eligible: brief(fleet),
+    live: brief(fleet.filter((v) => v.live)),
     tried: summarize(rows),
     exhausted: exhausted.size > 0,
-    openRequests: 1 - exhausted.size,
+    blocked: blocked.size > 0,
+    openRequests: 1 - exhausted.size - blocked.size,
   };
 }
 
@@ -253,19 +328,25 @@ export async function enrichmentCoverageForCigar(
   cigarId: string,
   type: CigarType | null,
 ): Promise<EnrichmentCoverage> {
-  const eligible = await eligibleEnrichVendors(q, type);
+  const fleet = await enrichVendorFleet(q, type);
+  const eligible = brief(fleet);
+  const live = brief(fleet.filter((v) => v.live));
   const open = await q.execute(sql`
     SELECT id FROM enrichment_requests WHERE cigar_id = ${cigarId} AND status <> 'fulfilled'
   `);
   const requestIds = (open.rows as unknown as { id: string }[]).map((r) => r.id);
-  if (requestIds.length === 0) return { eligible, tried: [], exhausted: false, openRequests: 0 };
+  if (requestIds.length === 0) {
+    return { eligible, live, tried: [], exhausted: false, blocked: false, openRequests: 0 };
+  }
   const rows = await ledgerRows(q, sql`r.cigar_id = ${cigarId} AND r.status <> 'fulfilled'`);
-  const exhausted = exhaustedRequestIds(eligible, rows, requestIds);
+  const { exhausted, blocked } = rollup(fleet, rows, requestIds);
   return {
     eligible,
+    live,
     tried: summarize(rows),
     exhausted: exhausted.size > 0,
-    openRequests: requestIds.length - exhausted.size,
+    blocked: blocked.size > 0,
+    openRequests: requestIds.length - exhausted.size - blocked.size,
   };
 }
 
@@ -273,8 +354,10 @@ export async function enrichmentCoverageForCigar(
 // what makes two overlapping same-vendor runs record TWO real looks instead of
 // losing one to a read-modify-write — the pre-0023 drain read `attempts` and
 // wrote back `attempts + 1`, so concurrent runs silently dropped one (#157
-// defect 1). Here the worst case is a benign double-count of two looks that both
-// genuinely happened.
+// defect 1). The increment is expressed RELATIVE to the stored value
+// (`enrichment_attempts.attempts + 1`), never as an absolute the caller computed,
+// which is the property that makes that true. Here the worst case is a benign
+// double-count of two looks that both genuinely happened.
 //
 // `errors` is reset by any completed look because the budget is for CONSECUTIVE
 // failures: a vendor that answers once is not permanently broken.

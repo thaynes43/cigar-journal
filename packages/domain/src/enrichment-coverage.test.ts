@@ -6,12 +6,13 @@ import { maybeQueueEnrichment } from "./enrichment.js";
 import {
   ATTEMPTS_PER_VENDOR,
   ERROR_BUDGET,
-  eligibleEnrichVendors,
+  coversMarketSql,
+  enrichVendorFleet,
   enrichmentCoverageForCigar,
   enrichmentCoverageForRequest,
   liveEnrichMarkets,
   recordEnrichmentAttempt,
-  vendorCoversType,
+  vendorNotRetiredSql,
 } from "./enrichment-coverage.js";
 
 // The vendor dimension (#158, migration 0023). Every assertion here exists because
@@ -40,6 +41,10 @@ describe("enrichment coverage", () => {
     await h.deps.db.update(vendors).set({ crawlEnabled: false });
   }
 
+  // `enrichRun` defaults to TRUE because the exhaustion denominator is LIVENESS,
+  // not `crawl_enabled` — a vendor whose lane has never run counts against
+  // nothing. Cases that want the prod Cuban Lou's shape pass `enrichRun: false`
+  // explicitly, and they are the interesting ones.
   async function makeVendor(
     name: string,
     focus: "NC" | "CC" | "both" | null,
@@ -54,7 +59,7 @@ describe("enrichment coverage", () => {
       })
       .returning({ id: vendors.id });
     const vendorId = rows[0]!.id;
-    if (opts.enrichRun) {
+    if (opts.enrichRun ?? true) {
       await h.deps.db.insert(crawlRuns).values({ vendorId, kind: "enrich", status: "succeeded" });
     }
     return vendorId;
@@ -83,75 +88,205 @@ describe("enrichment coverage", () => {
     return rows[0];
   }
 
-  // --- the pure predicate ---------------------------------------------------
+  // --- the one shared predicate ------------------------------------------
 
   // A NEGATIVE filter only: it excludes when both sides are known and disagree,
   // and never claims a vendor DOES carry something. Unknown on either side means
   // the vendor must still be asked — guessing is how a CC row gets retired by an
   // NC-only fleet.
-  it("vendorCoversType excludes only a known mismatch", () => {
-    expect(vendorCoversType("NC", "NC")).toBe(true);
-    expect(vendorCoversType("NC", "CC")).toBe(false);
-    expect(vendorCoversType("CC", "NC")).toBe(false);
-    expect(vendorCoversType("both", "CC")).toBe(true);
-    expect(vendorCoversType("both", "NC")).toBe(true);
-    // Unknown cigar market: every vendor might carry it, so every vendor is asked.
-    expect(vendorCoversType("NC", null)).toBe(true);
-    expect(vendorCoversType("CC", null)).toBe(true);
-    // Unknown vendor focus: same reasoning from the other side.
-    expect(vendorCoversType(null, "CC")).toBe(true);
-    expect(vendorCoversType(null, null)).toBe(true);
+  //
+  // Asserted through the SQL builder rather than a TypeScript twin, because the
+  // SQL is what actually runs: the rollup and the crawler's drain both call
+  // coversMarketSql, with the operands on opposite sides, and a TS copy that no
+  // production caller uses can be "tightened" green while neither changes
+  // behaviour (#158 review).
+  it("coversMarketSql excludes only a known mismatch, whichever side is bound", async () => {
+    const cases: [string | null, string | null, boolean][] = [
+      ["NC", "NC", true],
+      ["NC", "CC", false],
+      ["CC", "NC", false],
+      ["both", "CC", true],
+      ["both", "NC", true],
+      // Unknown cigar market: every vendor might carry it, so every vendor is asked.
+      ["NC", null, true],
+      ["CC", null, true],
+      // Unknown vendor focus: same reasoning from the other side.
+      [null, "CC", true],
+      [null, null, true],
+    ];
+    for (const [focus, type, expected] of cases) {
+      const rows = await h.deps.db.execute(
+        sql`SELECT ${coversMarketSql(sql`${focus}::text`, sql`${type}::text`)} AS covers`,
+      );
+      expect([focus, type, (rows.rows[0] as { covers: boolean }).covers]).toEqual([focus, type, expected]);
+    }
+  });
+
+  // The drain's "which requests has this vendor NOT spent?" has to be the exact
+  // complement of the rollup's retirement test. Two hand-written copies is how a
+  // drain ends up re-fetching every night a request the rollup wrote off, so both
+  // come from vendorNotRetiredSql and this walks the boundary.
+  it("vendorNotRetiredSql is the exact complement of the rollup's retirement", async () => {
+    const cases: [number, number, boolean][] = [
+      [0, 0, true],
+      [ATTEMPTS_PER_VENDOR - 1, 0, true],
+      [ATTEMPTS_PER_VENDOR, 0, false],
+      [0, ERROR_BUDGET - 1, true],
+      [0, ERROR_BUDGET, false],
+      [ATTEMPTS_PER_VENDOR - 1, ERROR_BUDGET, false],
+    ];
+    for (const [attempts, errors, selectable] of cases) {
+      const rows = await h.deps.db.execute(
+        sql`SELECT ${vendorNotRetiredSql(sql`${attempts}::int`, sql`${errors}::int`)} AS open`,
+      );
+      expect([attempts, errors, (rows.rows[0] as { open: boolean }).open]).toEqual([attempts, errors, selectable]);
+    }
+
+    // ...and the rollup agrees, end to end: a vendor at the attempt boundary
+    // retires the request, one short of it does not.
+    await clearFleet();
+    const only = await makeVendor("Boundary", "NC");
+    const { requestId } = await makeRequest("NC");
+    await spend(requestId, only, ATTEMPTS_PER_VENDOR - 1);
+    expect((await enrichmentCoverageForRequest(h.deps.db, requestId, "NC")).exhausted).toBe(false);
+    await spend(requestId, only, 1);
+    expect((await enrichmentCoverageForRequest(h.deps.db, requestId, "NC")).exhausted).toBe(true);
   });
 
   // --- eligibility vs liveness ---------------------------------------------
 
-  it("eligibility is crawl_enabled x focus; liveness additionally needs a succeeded enrich run", async () => {
+  it("the fleet is crawl_enabled x focus; `live` additionally needs a succeeded enrich run", async () => {
     await clearFleet();
-    const nc = await makeVendor("Elig NC", "NC");
-    const cc = await makeVendor("Elig CC", "CC");
-    const both = await makeVendor("Elig Both", "both");
-    const unknownFocus = await makeVendor("Elig Unknown", null);
+    const nc = await makeVendor("Elig NC", "NC", { enrichRun: false });
+    const cc = await makeVendor("Elig CC", "CC", { enrichRun: false });
+    const both = await makeVendor("Elig Both", "both", { enrichRun: false });
+    const unknownFocus = await makeVendor("Elig Unknown", null, { enrichRun: false });
     const disabled = await makeVendor("Elig Off", "NC", { crawlEnabled: false });
 
     const ids = async (type: "NC" | "CC" | null) =>
-      (await eligibleEnrichVendors(h.deps.db, type)).map((v) => v.vendorId).sort();
+      (await enrichVendorFleet(h.deps.db, type)).map((v) => v.vendorId).sort();
 
     expect(await ids("NC")).toEqual([nc, both, unknownFocus].sort());
     expect(await ids("CC")).toEqual([cc, both, unknownFocus].sort());
     // An untyped cigar could be either market, so EVERY enabled vendor is in the
-    // denominator — it only retires once all of them have looked.
+    // fleet — the negative filter cannot rule any of them out.
     expect(await ids(null)).toEqual([nc, cc, both, unknownFocus].sort());
     expect(await ids("NC")).not.toContain(disabled);
 
-    // THE CASE THAT DECIDES THE DESIGN. None of these has run an enrich pass, so
-    // no market is live — yet they are all eligible and all count toward
-    // exhaustion. Using liveness as the denominator would be circular: a brand-new
-    // lane has never run, so it could never take a request and never become live.
+    // None of them has run an enrich pass, so none is live and no market is
+    // enriched. Nothing here counts toward exhaustion.
+    expect((await enrichVendorFleet(h.deps.db, null)).some((v) => v.live)).toBe(false);
     expect([...(await liveEnrichMarkets(h.deps.db))]).toEqual([]);
 
     await h.deps.db.insert(crawlRuns).values({ vendorId: nc, kind: "enrich", status: "succeeded" });
+    expect((await enrichVendorFleet(h.deps.db, "NC")).filter((v) => v.live).map((v) => v.vendorId)).toEqual([nc]);
     expect([...(await liveEnrichMarkets(h.deps.db))].sort()).toEqual(["NC"]);
     // A `seed` run is not an enrich lane — the prod shape this gate was written for.
     await h.deps.db.insert(crawlRuns).values({ vendorId: cc, kind: "seed", status: "succeeded" });
+    expect((await enrichVendorFleet(h.deps.db, "CC")).filter((v) => v.live).map((v) => v.vendorId)).toEqual([]);
     expect([...(await liveEnrichMarkets(h.deps.db))].sort()).toEqual(["NC"]);
+
+    // The one place a NULL focus is treated differently, and deliberately: it
+    // cannot be used to CLAIM a market is covered (a positive claim), but it
+    // cannot be ruled out of a cigar's fleet either (the negative filter).
+    await h.deps.db.insert(crawlRuns).values({ vendorId: unknownFocus, kind: "enrich", status: "succeeded" });
+    expect([...(await liveEnrichMarkets(h.deps.db))].sort()).toEqual(["NC"]);
+    expect(
+      (await enrichVendorFleet(h.deps.db, "CC")).filter((v) => v.live).map((v) => v.vendorId),
+    ).toEqual([unknownFocus]);
+  });
+
+  // THE BLOCKER THIS ROUND FIXED (#158 review, verified against prod). The
+  // denominator cannot be `crawl_enabled`: nothing in the crawler reads that flag
+  // (#156) — the CronJob list is the real crawl gate — so an enabled vendor with a
+  // suspended lane can never fill it. Prod is exactly this shape: Fox Cigar (NC)
+  // runs nightly, Cuban Lou's (CC) is crawl_enabled with a suspended enrich
+  // CronJob and only a `seed` run to its name, and 890 of 977 catalog rows are
+  // untyped — so they need BOTH markets and Cuban Lou's sat in every one of their
+  // denominators forever. Untouchable by `retryExhausted` too: never `exhausted`
+  // means `already_queued` for good.
+  it("a vendor whose enrich lane has never run holds nothing open", async () => {
+    await clearFleet();
+    const fox = await makeVendor("Fox Cigar", "NC");
+    const cubanLous = await makeVendor("Cuban Lou's", "CC", { enrichRun: false });
+    const { requestId } = await makeRequest(null, "Untyped Prod Shape");
+
+    // Both are in the untyped cigar's fleet — the negative filter rules out
+    // neither — but only the lane that runs counts against it.
+    const coverage0 = await enrichmentCoverageForRequest(h.deps.db, requestId, null);
+    expect(coverage0.eligible.map((v) => v.vendorId).sort()).toEqual([fox, cubanLous].sort());
+    expect(coverage0.live.map((v) => v.vendorId)).toEqual([fox]);
+
+    await spend(requestId, fox);
+    const coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, null);
+    expect(coverage.exhausted).toBe(true);
+    expect(coverage.blocked).toBe(false);
+    expect(coverage.openRequests).toBe(0);
+    expect(coverage.tried.map((v) => v.vendorId)).toEqual([fox]);
+
+    // ...and the consequence that makes it safe: the moment Cuban Lou's lane
+    // completes a run it joins the denominator, and the request it has not looked
+    // at reopens on its own. No reopen job, no backfill.
+    await h.deps.db.insert(crawlRuns).values({ vendorId: cubanLous, kind: "enrich", status: "succeeded" });
+    const reopened = await enrichmentCoverageForRequest(h.deps.db, requestId, null);
+    expect(reopened.exhausted).toBe(false);
+    expect(reopened.openRequests).toBe(1);
+    expect(reopened.live.map((v) => v.vendorId).sort()).toEqual([fox, cubanLous].sort());
+  });
+
+  // A lane's own first night must not read as a lag. During that run its crawl_run
+  // is still `running`, so the succeeded-run test alone would leave it out of its
+  // own denominator for one pass; a look it has ALREADY recorded on this request is
+  // the same demonstration, one run earlier.
+  it("a lane counts on a request it has already looked at, run row or not", async () => {
+    await clearFleet();
+    const running = await makeVendor("First Night", "NC", { enrichRun: false });
+    const { requestId } = await makeRequest("NC");
+
+    await spend(requestId, running, 1);
+    let coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(coverage.live).toHaveLength(0);
+    expect(coverage.exhausted).toBe(false);
+    expect(coverage.openRequests).toBe(1);
+
+    await spend(requestId, running, 1);
+    coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(coverage.exhausted).toBe(true);
   });
 
   // --- the atomic upsert ----------------------------------------------------
 
   // #157 defect 1 degraded. The pre-0023 drain read `attempts` and wrote back
   // `attempts + 1`, so two overlapping runs both read 0 and both wrote 1 — one real
-  // look silently lost. ON CONFLICT makes the worst case a HONEST count of two.
-  it("recordEnrichmentAttempt is an atomic upsert — concurrent increments cannot lose one", async () => {
+  // look silently lost.
+  //
+  // The property that fixes it is that the increment is RELATIVE to the stored
+  // value, so it names an existing row's counter and can never carry a stale one.
+  // Asserting `attempts === 2` after two calls does not show that (#158 review):
+  // two sequential calls produce the same 2, and a read-modify-write would too.
+  // Seeding a value the caller never saw is what distinguishes them.
+  it("recordEnrichmentAttempt increments the STORED counter, never a value it computed", async () => {
     await clearFleet();
     const vendorId = await makeVendor("Upsert", "NC");
     const { requestId } = await makeRequest("NC");
 
-    await Promise.all([
-      recordEnrichmentAttempt(h.deps.db, { requestId, vendorId, outcome: "miss", at }),
-      recordEnrichmentAttempt(h.deps.db, { requestId, vendorId, outcome: "miss", at }),
-    ]);
+    // A count this process never read. A read-modify-write that had cached the
+    // row's previous state would write 1 here; the SQL increment writes 8.
+    await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId, outcome: "miss", at });
+    await h.deps.db
+      .update(enrichmentAttempts)
+      .set({ attempts: 7 })
+      .where(sql`${enrichmentAttempts.requestId} = ${requestId} AND ${enrichmentAttempts.vendorId} = ${vendorId}`);
+    await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId, outcome: "miss", at });
+    expect((await ledger(requestId, vendorId))!.attempts).toBe(8);
 
-    const row = await ledger(requestId, vendorId);
+    // And two overlapping looks both land, which is the shape the drain produces.
+    const second = await makeRequest("NC");
+    await Promise.all([
+      recordEnrichmentAttempt(h.deps.db, { requestId: second.requestId, vendorId, outcome: "miss", at }),
+      recordEnrichmentAttempt(h.deps.db, { requestId: second.requestId, vendorId, outcome: "miss", at }),
+    ]);
+    const row = await ledger(second.requestId, vendorId);
     expect(row!.attempts).toBe(2);
     expect(row!.errors).toBe(0);
     expect(row!.lastOutcome).toBe("miss");
@@ -181,14 +316,69 @@ describe("enrichment coverage", () => {
     for (let i = 0; i < ERROR_BUDGET; i += 1) {
       await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId, outcome: "error", at });
     }
-    expect((await enrichmentCoverageForRequest(h.deps.db, requestId, "NC")).exhausted).toBe(true);
+    // Retired, and NOT exhausted: it never finished its second look, so nothing
+    // here is evidence about a catalogue. See the case below.
+    const errored = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(errored.exhausted).toBe(false);
+    expect(errored.blocked).toBe(true);
+  });
+
+  // THE SECOND FINDING THIS ROUND FIXED (#158 review). Burning ERROR_BUDGET is not
+  // a spent attempt budget: a request retired that way has ZERO completed looks,
+  // and reporting it `exhausted` launders "nobody could look" into "we looked and
+  // found nothing" — the one distinction this module exists to preserve, per the
+  // header above and the ADR amendment.
+  it("a vendor that only ever errored blocks the request, it does not exhaust it", async () => {
+    await clearFleet();
+    const only = await makeVendor("Sitemap 404", "NC");
+    const { cigarId, requestId } = await makeRequest("NC");
+
+    for (let i = 0; i < ERROR_BUDGET; i += 1) {
+      await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId: only, outcome: "error", at });
+    }
+
+    const coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(coverage.exhausted).toBe(false);
+    expect(coverage.blocked).toBe(true);
+    // Retired all the same — the drain will not select it again — so it is not
+    // left counting as open work either.
+    expect(coverage.openRequests).toBe(0);
+    expect(coverage.tried[0]!.attempts).toBe(0);
+    expect(coverage.tried[0]!.errors).toBe(ERROR_BUDGET);
+    expect((await enrichmentCoverageForCigar(h.deps.db, cigarId, "NC")).blocked).toBe(true);
+  });
+
+  // The mixed fleet: one lane looked and does not carry it, another could not be
+  // reached. Not exhaustion — the fleet did not finish — even though the request is
+  // retired everywhere.
+  it("one unreachable lane blocks a request the others exhausted", async () => {
+    await clearFleet();
+    const looked = await makeVendor("Answered", "NC");
+    const broken = await makeVendor("Unreachable", "NC");
+    const { requestId } = await makeRequest("NC");
+
+    await spend(requestId, looked);
+    expect((await enrichmentCoverageForRequest(h.deps.db, requestId, "NC")).exhausted).toBe(false);
+
+    for (let i = 0; i < ERROR_BUDGET; i += 1) {
+      await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId: broken, outcome: "error", at });
+    }
+    const coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(coverage.exhausted).toBe(false);
+    expect(coverage.blocked).toBe(true);
+
+    // A completed look clears the streak, and then the fleet really has finished.
+    await spend(requestId, broken);
+    const finished = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(finished.exhausted).toBe(true);
+    expect(finished.blocked).toBe(false);
   });
 
   // --- the rollup -----------------------------------------------------------
 
-  // THE #158 REGRESSION at the rollup level: one vendor spending its whole budget
-  // retires nothing while another vendor has never been asked.
-  it("exhausted requires EVERY eligible vendor to be spent", async () => {
+  // THE #158 REGRESSION at the rollup level: one lane spending its whole budget
+  // retires nothing while another lane that runs has never been asked.
+  it("exhausted requires EVERY lane that runs to be spent", async () => {
     await clearFleet();
     const a = await makeVendor("Roll A", "NC");
     const b = await makeVendor("Roll B", "NC");
@@ -198,7 +388,7 @@ describe("enrichment coverage", () => {
     let coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
     expect(coverage.exhausted).toBe(false);
     expect(coverage.openRequests).toBe(1);
-    expect(coverage.eligible.map((v) => v.vendorId).sort()).toEqual([a, b].sort());
+    expect(coverage.live.map((v) => v.vendorId).sort()).toEqual([a, b].sort());
     expect(coverage.tried).toHaveLength(1);
     expect(coverage.tried[0]!.attempts).toBe(ATTEMPTS_PER_VENDOR);
 
@@ -223,12 +413,13 @@ describe("enrichment coverage", () => {
     await spend(requestId, nc);
     const coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
     expect(coverage.eligible.map((v) => v.vendorId)).toEqual([nc]);
+    expect(coverage.live.map((v) => v.vendorId)).toEqual([nc]);
     expect(coverage.exhausted).toBe(true);
   });
 
   // "Nobody could look" is not "we looked and found nothing", and laundering one
   // into the other is what the ADR amendment forbids.
-  it("zero eligible vendors is NOT exhausted, and re-enabling restores the old ledger", async () => {
+  it("zero counted lanes is NOT exhausted, and re-enabling restores the old ledger", async () => {
     await clearFleet();
     const only = await makeVendor("Solo", "NC");
     const { requestId } = await makeRequest("NC");
@@ -238,7 +429,9 @@ describe("enrichment coverage", () => {
     await h.deps.db.update(vendors).set({ crawlEnabled: false }).where(eq(vendors.id, only));
     const dark = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
     expect(dark.eligible).toHaveLength(0);
+    expect(dark.live).toHaveLength(0);
     expect(dark.exhausted).toBe(false);
+    expect(dark.blocked).toBe(false);
     expect(dark.openRequests).toBe(1);
     // The verdict is KEPT, not deleted: "Solo did not carry this" stays true and is
     // worth having when Solo comes back.
@@ -266,6 +459,7 @@ describe("enrichment coverage", () => {
     // vendor still eligible has never been asked.
     let coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
     expect(coverage.eligible.map((v) => v.vendorId)).toEqual([live]);
+    expect(coverage.live.map((v) => v.vendorId)).toEqual([live]);
     expect(coverage.exhausted).toBe(false);
 
     // ...and the request that was open only because the now-dark vendor had not
