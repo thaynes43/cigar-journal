@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/trpc/react";
+import { actionErrorMessage } from "@/lib/trpc/error";
 import { ui } from "@/lib/ui";
 
 // Set a cigar's canonical name (#45) — the smallest honest affordance: a Rename
@@ -54,7 +55,7 @@ export function RenameButton({ cigarId, canonicalName }: { cigarId: string; cano
       >
         Cancel
       </button>
-      {rename.error ? <span className={`text-sm ${ui.muted}`}>{rename.error.message}</span> : null}
+      {rename.error ? <span className={`text-sm ${ui.muted}`}>{actionErrorMessage(rename.error)}</span> : null}
     </span>
   );
 }

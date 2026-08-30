@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { AgentRunRow, AgentRunSummary } from "@cj/domain";
 import { api } from "@/lib/trpc/react";
+import { actionErrorMessage } from "@/lib/trpc/error";
 import { ui } from "@/lib/ui";
 import { LocalDate } from "../../_components/local-date";
 
@@ -69,7 +70,7 @@ function RunRows({ runId }: { runId: string }) {
     return <p className="pt-4 text-sm text-muted">Loading rows…</p>;
   }
   if (rows.error) {
-    return <p className={`pt-4 text-sm ${ui.muted}`}>{rows.error.message}</p>;
+    return <p className={`pt-4 text-sm ${ui.muted}`}>{actionErrorMessage(rows.error)}</p>;
   }
   const data = rows.data;
   return (
@@ -121,7 +122,7 @@ function RowItem({ row }: { row: AgentRunRow }) {
           >
             Undo
           </button>
-          {undo.error ? <span className={`text-sm ${ui.muted}`}>{undo.error.message}</span> : null}
+          {undo.error ? <span className={`text-sm ${ui.muted}`}>{actionErrorMessage(undo.error)}</span> : null}
         </span>
       ) : null}
     </li>

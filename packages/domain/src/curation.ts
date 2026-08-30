@@ -539,18 +539,29 @@ async function restoreLedgerRows(
   return { restored, blocked, movedOn: missing.filter((id) => !blocked.includes(id)) };
 }
 
-// Purchase lots among `ids` that a smoke sitting on some OTHER cigar has already
-// consumed — read after the smokes slot restores, so a lot only the returning
-// smokes drew from is not in the set. Those lots stay with the survivor: lot and
+// Purchase lots among `ids` whose consumptions ALL belong to smokes that are not
+// coming back — read after the smokes slot restores, so a returning smoke already
+// reads `cigar_id = source`. Only those stay with the survivor: lot and
 // consumption must live on the same cigar or the humidor arithmetic breaks
 // (inventory.ts derives remaining = acquired − consumption links, keyed on
 // purchases.cigar_id and smokes.cigar_id respectively).
-async function lotsConsumedElsewhere(tx: Tx, ids: string[], sourceId: string): Promise<string[]> {
+//
+// A lot BOTH sides drew from is deliberately NOT held back. Either placement
+// strands one side's consumptions, and neither error is reliably the smaller: the
+// held-back error is the returning smokes' consumptions, which is the larger count
+// whenever the user had been logging the cigar for a while before the merge — the
+// ordinary shape. The tie goes to the cigar the user actually bought, because only
+// there does assertLotOwned (consumption.ts) let them attribute the next stick from
+// that box. Splitting the purchase row would be the exact inverse; that is an owner
+// decision, not the unmerge's to make.
+async function lotsConsumedOnlyElsewhere(tx: Tx, ids: string[], sourceId: string): Promise<string[]> {
   const rows = await tx.execute(sql`
-    SELECT DISTINCT sc.purchase_id AS id
+    SELECT sc.purchase_id AS id
     FROM smoke_consumptions sc
     JOIN smokes s ON s.id = sc.smoke_id
-    WHERE sc.purchase_id IN (${uuidList(ids)}) AND s.cigar_id <> ${sourceId}::uuid
+    WHERE sc.purchase_id IN (${uuidList(ids)})
+    GROUP BY sc.purchase_id
+    HAVING count(*) FILTER (WHERE s.cigar_id = ${sourceId}::uuid) = 0
   `);
   return (rows.rows as unknown as { id: string }[]).map((r) => r.id);
 }
@@ -715,17 +726,16 @@ async function unmergeWithinTx(
     if (ids.length === 0) continue;
     let movable = ids;
     if (slot.key === "purchases") {
-      // A lot a smoke that is NOT coming back has already drawn from stays with
-      // the survivor. getMyInventory builds a holding from `purchases` and counts
-      // consumption by `smokes.cigar_id` (inventory.ts), so returning the lot
-      // alone would resurrect sticks the user has smoked AND drop the survivor
-      // out of the humidor entirely — the one skip the user, not the curator,
-      // would feel. Smokes restore first (slot order), so this reads the
-      // post-restore attribution and only holds back genuinely cross-cigar lots.
-      // Bound of the inverse: a lot BOTH sides smoked from stays whole with the
-      // survivor — splitting a user's purchase row is not the unmerge's business —
-      // so the returning smokes' consumptions no longer meet a lot. Pinned by test.
-      const crossCigar = await lotsConsumedElsewhere(tx, ids, source.id);
+      // A lot whose every consumption belongs to a smoke that is NOT coming back
+      // stays with the survivor. getMyInventory builds a holding from `purchases`
+      // and counts consumption by `smokes.cigar_id` (inventory.ts), so returning
+      // such a lot would resurrect sticks the user has smoked AND drop the
+      // survivor out of the humidor entirely — the one skip the user, not the
+      // curator, would feel. Smokes restore first (slot order), so this reads the
+      // post-restore attribution. Bound of the inverse: a lot BOTH sides smoked
+      // from goes back with the source and the survivor's own consumptions no
+      // longer meet a lot — see lotsConsumedOnlyElsewhere for why that direction.
+      const crossCigar = await lotsConsumedOnlyElsewhere(tx, ids, source.id);
       crossCigarLots = crossCigar.length;
       movable = ids.filter((id) => !crossCigar.includes(id));
       for (const rowId of crossCigar) skipped.push({ entity: slot.key, rowId, reason: "consumed_elsewhere" });

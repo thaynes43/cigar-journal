@@ -40,7 +40,7 @@ import { getMyInventory } from "./inventory.js";
 import { getCigar, searchCigars, getCigarOffers } from "./reads.js";
 import { setWant } from "./wants.js";
 import { setFavorite } from "./favorites.js";
-import type { Principal, WorklistCigar, WorklistMatch } from "./index.js";
+import type { Principal, UnmergeCigarsResult, WorklistCigar, WorklistMatch } from "./index.js";
 import { UnauthorizedError, CigarNotFoundError, PhotoNotFoundError, ValidationError } from "./errors.js";
 
 describe("curation", () => {
@@ -842,12 +842,13 @@ describe("curation", () => {
       expect(smoke!.cigarId).toBe(target);
     });
 
-    it("holds back a lot both cigars smoked from, the known bound of the inverse", async () => {
+    it("returns a lot both cigars smoked from, to the cigar that was bought", async () => {
       // A lot consumed by BOTH a returning smoke and a survivor smoke has no exact
-      // inverse: splitting a user's purchase row is not the unmerge's business, so
-      // the lot stays whole with the survivor and the returning smoke's consumption
-      // no longer meets a lot. The count is off by the returning consumptions (1
-      // here) instead of by the survivor's — the smaller error, and a visible skip.
+      // inverse: splitting a user's purchase row is an owner decision, not the
+      // unmerge's. Either placement strands one side's consumptions, so the lot
+      // goes back to the cigar the user actually bought — the only cigar
+      // assertLotOwned will let them draw from next. The residual error here is
+      // the survivor's one consumption (9 rather than 8).
       const owner = await h.createUser(`humidor-${newRequestId()}@example.com`);
       const source = await seedUnverified("Shared Lot Source");
       const target = await seedUnverified("Shared Lot Target");
@@ -862,19 +863,52 @@ describe("curation", () => {
       expect(before.totalSticksRemaining).toBe(8);
 
       const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
-      expect(result.restored.purchases).toBe(0);
-      expect(result.crossCigarLots).toBe(1);
-      expect(result.skipped).toContainEqual({
-        entity: "purchases",
-        rowId: purchaseId,
-        reason: "consumed_elsewhere",
-      });
+      expect(result.restored.purchases).toBe(1);
+      expect(result.crossCigarLots).toBe(0);
+      expect(result.skipped).toEqual([]);
       const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, earlySmoke));
       expect(smoke!.cigarId).toBe(source);
+      const [lot] = await h.deps.db.select().from(purchases).where(eq(purchases.id, purchaseId));
+      expect(lot!.cigarId).toBe(source);
 
       const after = await getMyInventory(h.deps, owner);
-      expect(after.holdings.map((holding) => holding.cigar.cigarId)).toEqual([target]);
+      expect(after.holdings.map((holding) => holding.cigar.cigarId)).toEqual([source]);
       expect(after.totalSticksRemaining).toBe(9);
+    });
+
+    it("does not strand a mostly-source lot on the survivor over one later smoke", async () => {
+      // The ordinary shape: the user logged the cigar for a while before the
+      // curator merged it, then recorded one more stick from the same box on the
+      // survivor. Holding the lot back would eat FIVE returning consumptions to
+      // save one, and would leave the box on a cigar the curator has since
+      // declared different — so the user could never attribute the next stick.
+      const owner = await h.createUser(`humidor-${newRequestId()}@example.com`);
+      const source = await seedUnverified("Mostly Source Lot");
+      const target = await seedUnverified("Mostly Source Survivor");
+      const purchaseId = await addPurchase(source, owner, 25);
+      for (let i = 0; i < 5; i += 1) {
+        const smokeId = await addSmoke(source, owner);
+        await h.deps.db.insert(smokeConsumptions).values({ smokeId, purchaseId });
+      }
+      const mergeId = await merge(source, target);
+      const laterSmoke = await addSmoke(target, owner);
+      await h.deps.db.insert(smokeConsumptions).values({ smokeId: laterSmoke, purchaseId });
+
+      const before = await getMyInventory(h.deps, owner);
+      expect(before.totalSticksRemaining).toBe(19);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.purchases).toBe(1);
+      expect(result.crossCigarLots).toBe(0);
+
+      const [lot] = await h.deps.db.select().from(purchases).where(eq(purchases.id, purchaseId));
+      expect(lot!.cigarId).toBe(source);
+      const after = await getMyInventory(h.deps, owner);
+      // 20, not the 24 a hold-back would report: the five returning consumptions
+      // meet their lot again, and only the survivor's one is stranded.
+      expect(after.totalSticksRemaining).toBe(20);
+      expect(after.holdings.map((holding) => holding.cigar.cigarId)).toEqual([source]);
+      expect(after.holdings[0]!.consumedCount).toBe(5);
     });
 
     it("returns a lot only the source's own returning smokes consumed", async () => {
@@ -922,6 +956,39 @@ describe("curation", () => {
       expect(audits.filter((a) => (a.after as { mergeId?: string }).mergeId === mergeId)).toHaveLength(1);
       const [ledgerRow] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, mergeId));
       expect(ledgerRow!.undoAuditId).toBe(first.undoAuditId);
+    });
+
+    it("serializes two concurrent unmerges of the same merge", async () => {
+      // The claim is a conditional `UPDATE … SET undone_at WHERE undone_at IS NULL`
+      // inside the transaction, so the loser blocks on the ledger row until the
+      // winner commits and then matches zero rows. Two distinct clientRequestIds,
+      // so idempotency cannot be what separates them — this races the claim itself,
+      // on two pool connections.
+      const source = await seedUnverified("Unmerge Race Source");
+      const target = await seedUnverified("Unmerge Race Target");
+      const smokeId = await addSmoke(source);
+      const mergeId = await merge(source, target);
+
+      const settled = await Promise.allSettled([
+        unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId }),
+        unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId }),
+      ]);
+      const won = settled.filter((r) => r.status === "fulfilled");
+      const lost = settled.filter((r) => r.status === "rejected");
+      expect(won).toHaveLength(1);
+      expect(lost).toHaveLength(1);
+      const reason = (lost[0] as PromiseRejectedResult).reason as ValidationError;
+      expect(reason).toBeInstanceOf(ValidationError);
+      expect(reason.fields).toEqual([{ path: "mergeId", message: "This merge was already unmerged." }]);
+      expect((won[0] as PromiseFulfilledResult<UnmergeCigarsResult>).value.replayed).toBe(false);
+
+      // One restore, not two: one audit, one stamped ledger, the smoke moved once.
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.unmerge"));
+      expect(audits.filter((a) => (a.after as { mergeId?: string }).mergeId === mergeId)).toHaveLength(1);
+      const [ledger] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, mergeId));
+      expect(ledger!.undoneAt).not.toBeNull();
+      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId));
+      expect(smoke!.cigarId).toBe(source);
     });
 
     it("returns the pair to the duplicate queue", async () => {

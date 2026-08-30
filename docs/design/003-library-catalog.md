@@ -216,12 +216,16 @@ gamification — automation. The console inverts from "do the work" to
   (A→B, then B→C, then C→D), and a chain unwinds **LIFO**, newest merge
   first, because A→B's rows now sit at the far end of it; **(3)** unmerge
   is not forced to be byte-exact — a row a curator moved on, a photo slot
-  the tombstone re-took, a mark the user re-created, and a purchase lot a
-  smoke that is not returning has already drawn from (returning that lot
-  alone would inflate the user's humidor count) are each skipped with a
-  reason and counted in the audit and the console, never overwritten;
-  **(4)** a merge audited before the ledger existed reports non-reversible
-  rather than guessing. Merge and unmerge are actor
+  the tombstone re-took, a mark the user re-created, and a purchase lot
+  whose every consumption belongs to a smoke that is *not* returning
+  (sending that lot back alone would inflate the user's humidor count) are
+  each skipped with a reason and counted in the audit and the console,
+  never overwritten; a lot **both** sides drew from has no exact inverse
+  short of splitting the user's purchase row, which is an owner decision,
+  not the unmerge's — it goes back with the source, the cigar the user
+  actually bought and the only one they can attribute the next stick from,
+  leaving the survivor's own consumptions unmet; **(4)** a merge audited
+  before the ledger existed reports non-reversible rather than guessing. Merge and unmerge are actor
   `web` with no `run_id`, so they get their own **Recent merges** console
   section — they can never surface under "Recent agent runs".
 - **Humans stay in the loop only for:** merges, rights takedowns,
