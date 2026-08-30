@@ -69,7 +69,7 @@ such a row, replacing the hand-INSERT.
   `offline_access` is refused unconditionally (no refresh chain). `curation:*`
   is off by default and reachable only through the explicit elevation below.
   TTL defaults to 365 days **and caps there**, so `--ttl-days` can only
-  shorten.
+  shorten — 90 days for a curation-elevated mint, see the override below.
 - **One delivery path, and no other is possible.** `mint --yes` refuses to run
   unless stdout is an interactive terminal, and refuses before writing
   anything. A container's stdout is collected into Loki for the whole
@@ -131,19 +131,44 @@ The elevation is **narrow and explicit**, not a widening of the default set:
   only mean "some older code did not write one". The CLI prints a named
   `curation ELEVATED …` line in both the dry-run plan and the mint report, so
   the elevation is never something you discover by decoding a scope list.
+- **A shorter TTL ceiling, not the ordinary one.** An elevated mint is capped
+  at **90 days** and defaults to 90, where an ordinary one is capped at and
+  defaults to 365 (`CURATION_SERVICE_TOKEN_TTL_DAYS`). The widest credential
+  the system can issue must not also be the longest-lived: this one rewrites
+  the shared catalog, where the others reach one subject's own journal. It
+  costs nothing the elevation was bought for — the failure being replaced was
+  losing a *rotated* refresh token mid-run, and a re-mint is not rotation but
+  one `kubectl exec -it` at a moment the operator picks, with the old token
+  live until he revokes it. The expiry cliff is already watched: the daily
+  `cigar-journal-credential-expiry` CronJob selects by lifetime (> 24h), so a
+  90-day token is covered with no edit.
+- **Curation writes name the credential that made them.** `audit_log.client_id`
+  (migration 0023) records the OAuth client of the calling token on every
+  curation audit row, taken off the server-derived `Principal` and never from a
+  tool argument. Without it the "one client per consumer, so a leak is
+  attributable" control was untrue on the write side for exactly the scopes
+  this override opens: a stolen token calling `get_curation_queue` and walking
+  `set_listing_match_status` across the triage queue left history identical to
+  the lane's own. It is not a substitute for revoking — a thief using the
+  lane's own token still looks like the lane — but it separates credentials,
+  which is what per-consumer clients promise.
 - **Every other guarantee is untouched:** `offline_access` is still refused in
   every combination (and is now swept for first, so pairing it with a curation
-  scope cannot blame curation and imply a flag would help), the 365-day TTL
-  ceiling, the RFC 8707 audience binding, one service client per consumer,
-  stdout-only delivery gated on an interactive TTY, and no change whatsoever to
-  the `authorization_code` or `refresh_token` grants.
+  scope cannot blame curation and imply a flag would help), the RFC 8707
+  audience binding, one service client per consumer, stdout-only delivery gated
+  on an interactive TTY, and no change whatsoever to the `authorization_code`
+  or `refresh_token` grants.
 
-What we accept, on top of the year-long bearer already accepted below: for the
-curation lane's token specifically, that bearer can curate the shared catalog
-for its whole life without a consent screen. It is bounded by the same
-revocation, audience, per-consumer attribution and per-request validation as
-every other service token, and the curation tools' own `assertAdmin` still
-gates each call.
+What we accept, on top of the bearer already accepted below: for the curation
+lane's token specifically, that bearer can curate the shared catalog for its
+whole life without a consent screen. It is bounded by the same revocation,
+audience, per-consumer attribution and per-request validation as every other
+service token, by a 90-day rather than a 365-day life, and the curation tools'
+own `assertAdmin` still gates each call. The attribution is per *credential*,
+not per holder: a leak of the lane's own token is indistinguishable from the
+lane until it is revoked, and revoke-by-id is the response — **not** demoting
+the subject, which in this deployment is the owner himself and is undone by his
+next sign-in (`packages/auth/src/auth.ts` re-asserts admin on session create).
 
 ## Consequences
 
@@ -188,6 +213,19 @@ a production credential. Recommended: shown, read-only, admin-revocable.
 - Widening `MINTABLE_SERVICE_SCOPES` to include `curation:*` — one line, and
   every future mint silently reaches the shared catalog. The whole point of
   the flag is that the elevation is per-mint and recorded.
+- Letting an elevated mint keep the ordinary 365-day ceiling — the stated
+  benefit of the elevation is "no rotation to lose", and a shorter ceiling
+  preserves that benefit exactly (a re-mint is an operator action, not an
+  in-band token exchange that can be dropped). Keeping 365 would have made the
+  widest credential in the system the longest-lived for no gain beyond three
+  fewer interactive execs a year. Rejected; 90 days it is. The trade accepted:
+  a forgotten re-mint stalls the lane, which is why the expiry CronJob's
+  lifetime-based selector (haynes-ops#2681) is a precondition and not a
+  nice-to-have.
+- Recording the credential in the audit row's `after` JSONB instead of a
+  column — no migration, but the incident query ("what did this credential
+  write") becomes a JSONB probe over every row, and the field would be mixed
+  into a snapshot whose keys are the *entity's*, not the caller's.
 - A `client_credentials` grant at `/oauth/token` — a real network-reachable
   mint, new grant code on the AS, and a client secret that is itself a static
   bearer. Rejected as strictly more surface for the same capability.
