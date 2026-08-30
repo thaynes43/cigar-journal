@@ -98,7 +98,10 @@ be allowlisted and it can only ever happen on a virgin database.
 
 A crash between reserve and claim burns the invite: the invitee sees the invalid
 state and needs a fresh link. That is the fail-closed direction, chosen over a
-release-on-crash that would fail open.
+release-on-crash that would fail open. The stranded reservation it leaves behind
+would otherwise keep authorizing registration for that one address forever — the
+single fail-open edge in the design — so a reservation only authorizes for five
+minutes (`RESERVATION_WINDOW_SECONDS`). The invite stays spent either way.
 
 The invite token travels in the URL path (`/invite/<token>`), so it reaches
 ingress access logs and `Referer` headers — the same accepted trade-off as the

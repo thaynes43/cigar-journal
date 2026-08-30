@@ -4,6 +4,7 @@ import { auditLog, invites } from "@cj/db";
 import { createHarness, type DomainHarness } from "./testing/harness.js";
 import {
   INVITE_TTL_SECONDS,
+  RESERVATION_WINDOW_SECONDS,
   claimInvite,
   createInvite,
   describeOpenInvite,
@@ -139,9 +140,9 @@ describe("invites", () => {
     const first = await createInvite(h.deps, admin, { email: nextEmail() });
     const reserved = await reserveInvite(h.deps, { token: first.token });
 
-    expect(await hasReservedInvite(h.deps.db, reserved.email)).toBe(true);
+    expect(await hasReservedInvite(h.deps.db, reserved.email, h.deps.now())).toBe(true);
     await releaseInvite(h.deps, { inviteId: reserved.inviteId });
-    expect(await hasReservedInvite(h.deps.db, reserved.email)).toBe(false);
+    expect(await hasReservedInvite(h.deps.db, reserved.email, h.deps.now())).toBe(false);
 
     // Released means genuinely reusable.
     const again = await reserveInvite(h.deps, { token: first.token });
@@ -152,7 +153,7 @@ describe("invites", () => {
     const rows = await h.pg.db.select().from(invites).where(eq(invites.id, again.inviteId));
     expect(rows[0]!.redeemedAt).not.toBeNull();
     expect(rows[0]!.redeemedBy).toBe(member.userId);
-    expect(await hasReservedInvite(h.deps.db, again.email)).toBe(false);
+    expect(await hasReservedInvite(h.deps.db, again.email, h.deps.now())).toBe(false);
     await expect(reserveInvite(h.deps, { token: first.token })).rejects.toBeInstanceOf(InviteInvalidError);
   });
 
@@ -160,8 +161,25 @@ describe("invites", () => {
     const email = nextEmail();
     const minted = await createInvite(h.deps, admin, { email: email.toUpperCase() });
     await reserveInvite(h.deps, { token: minted.token });
-    expect(await hasReservedInvite(h.deps.db, email.toUpperCase())).toBe(true);
-    expect(await hasReservedInvite(h.deps.db, email)).toBe(true);
+    expect(await hasReservedInvite(h.deps.db, email.toUpperCase(), h.deps.now())).toBe(true);
+    expect(await hasReservedInvite(h.deps.db, email, h.deps.now())).toBe(true);
+  });
+
+  // A process death between reserve and claim leaves a reservation nobody will
+  // ever release. The invite stays spent (fail closed), but the address must not
+  // stay registerable forever — that would be the one fail-OPEN edge.
+  it("stops authorizing registration once a stranded reservation ages out", async () => {
+    const minted = await createInvite(h.deps, admin, { email: nextEmail() });
+    const reserved = await reserveInvite(h.deps, { token: minted.token });
+
+    const later = new Date(h.deps.now().getTime() + (RESERVATION_WINDOW_SECONDS + 1) * 1000);
+    expect(await hasReservedInvite(h.deps.db, reserved.email, h.deps.now())).toBe(true);
+    expect(await hasReservedInvite(h.deps.db, reserved.email, later)).toBe(false);
+
+    // And the token is still spent — ageing out never makes it reusable.
+    await expect(reserveInvite(h.deps, { token: minted.token })).rejects.toBeInstanceOf(
+      InviteInvalidError,
+    );
   });
 
   it("derives status for the admin list", async () => {

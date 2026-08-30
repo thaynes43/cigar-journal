@@ -242,11 +242,18 @@ export async function releaseInvite(deps: Deps, args: { inviteId: string }): Pro
     .where(and(eq(invites.id, args.inviteId), isNull(invites.redeemedBy)));
 }
 
-// Is there a burned-but-unclaimed invite for this address? This is the whole
-// registration gate the auth create-hook consults (ADR-010). It is a row, not a
-// request-scoped flag, so the redemption path and the e2e seed both authorize
-// through the real mechanism and nothing else can forge one.
-export async function hasReservedInvite(db: Queryer, email: string): Promise<boolean> {
+// How long a reservation authorizes registration for its address. A reservation
+// is normally claimed milliseconds later; the window exists only so that a
+// process death between reserve and claim cannot leave that address registerable
+// forever. The invite itself stays spent either way — this bounds the hole in the
+// fail-OPEN direction, while the token stays failed closed.
+export const RESERVATION_WINDOW_SECONDS = 300; // 5 minutes
+
+// Is there a live, burned-but-unclaimed invite for this address? This is the
+// whole registration gate the auth create-hook consults (ADR-010). It is a row,
+// not a request-scoped flag, so the redemption path and the e2e seed both
+// authorize through the real mechanism and nothing else can forge one.
+export async function hasReservedInvite(db: Queryer, email: string, now: Date): Promise<boolean> {
   const rows = await db
     .select({ id: invites.id })
     .from(invites)
@@ -254,6 +261,7 @@ export async function hasReservedInvite(db: Queryer, email: string): Promise<boo
       and(
         eq(invites.email, email.trim().toLowerCase()),
         isNotNull(invites.redeemedAt),
+        gt(invites.redeemedAt, new Date(now.getTime() - RESERVATION_WINDOW_SECONDS * 1000)),
         isNull(invites.redeemedBy),
         isNull(invites.revokedAt),
       ),

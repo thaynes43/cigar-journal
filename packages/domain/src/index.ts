@@ -156,6 +156,7 @@ export {
 // errors export.
 export {
   INVITE_TTL_SECONDS,
+  RESERVATION_WINDOW_SECONDS,
   createInvite,
   listInvites,
   revokeInvite,

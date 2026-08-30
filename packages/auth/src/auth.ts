@@ -138,7 +138,7 @@ export function createAuth(config: AuthConfig) {
             // `role` smuggled into the sign-up body cannot survive it (the field
             // is already `input: false`), and `invites` has no role column to
             // carry one in the first place.
-            if (await hasReservedInvite(config.db, user.email)) {
+            if (await hasReservedInvite(config.db, user.email, new Date())) {
               return { data: { role: "user" } };
             }
             // First-run bootstrap: an allowlisted address may register only into
