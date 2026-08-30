@@ -148,16 +148,29 @@ at all.
 **Still unresolved: does ChatGPT forward an in-chat image to the tool call?** The
 user had uploaded photos *earlier in the same conversation*, not in the invoking
 turn. The leading hypothesis is that only a file attached to the *current* turn is
-forwarded — but that is a hypothesis drawn from one transcript, not a verified fact,
-so it is deliberately **not** asserted in the shipped tool description. The
-`photo_intake_request` record (tool-contract.md, "Intake diagnostics") is what will
-settle it: it is written before input validation, on the raw JSON-RPC body, so it
-reports every key the host actually sent — including keys we do not currently read.
+forwarded — but that is a hypothesis drawn from one transcript, not a verified fact.
+
+**It is a hypothesis here and nowhere else.** No model-facing string asserts it: not
+the tool description, not the server `INSTRUCTIONS`, not the contract. An earlier
+draft did — it told the model, on `no_image_received`, to ask the user to re-send the
+photo with their next message — which states an unverified guess as fact and, if the
+guess is wrong, costs the user a pointless round trip before they are offered the
+link that actually works. So **the link leads** in every branch, and
+`delivery.status` is used to say something true about why, not to withhold it.
+
+The `photo_intake_request` record (tool-contract.md, "Intake diagnostics") is what
+will settle the hypothesis: it is written before input validation, on the raw
+JSON-RPC body, and it describes `params` itself as well as `arguments` and
+`params._meta` — so it reports the keys the host actually sent, including keys the
+server does not read. If the owner's next live test attaches a photo in the invoking
+turn and the record still shows nothing delivered, the hypothesis is wrong; if a key
+we never read turns up, that is the answer.
 
 **What shipped meanwhile.** Named intake outcomes in the log; a schema that no
 longer rejects an odd `image` before it can be recorded; acceptance of alternate URL
-keys, inline base64, and magic-byte type sniffing; an https-or-loopback scheme
-guard; fetch/decode failure falling back to the mode-B link instead of erroring; and
+keys and magic-byte type sniffing; an SSRF guard that decides on the parsed address
+rather than the spelling of the host; fetch/decode failure falling back to the mode-B
+link instead of erroring; and
 a `delivery.status` on the mode-B result so the model can tell the user something
 true. **This may not make in-chat attachment work at all.** If ChatGPT forwards
 nothing, the outcome is a precise diagnosis and honest model guidance — mode B stays

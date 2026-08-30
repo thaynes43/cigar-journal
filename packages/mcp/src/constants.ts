@@ -190,10 +190,11 @@ image yourself — it reaches the tool only if the host forwards a file with the
 call — so call add_smoke_photo with just the smoke id: a forwarded image is filed
 under the smoke (mode attached), otherwise you get a one-time link (mode
 upload_url) to hand the user for a phone upload. Never paste an image, a chat file
-link, or a file id into any field. On mode upload_url read delivery.status:
-no_image_received means nothing was forwarded — if the user shared the photo in an
-earlier message, ask them to re-send it with their next message, or give them the
-link. A photo never blocks saving the smoke.
+link, or a file id into any field. On mode upload_url, give the user the link —
+that is the path that works; delivery.status says why no photo was filed
+(no_image_received means nothing arrived with the call), so tell them the truth
+and hand over the link rather than withholding it. A photo never blocks saving the
+smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.

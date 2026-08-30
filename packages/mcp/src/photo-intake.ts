@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 // Photo intake for add_smoke_photo (ADR-007): describe what the host delivered,
 // and decide what — if anything — can be turned into image bytes.
 //
@@ -15,10 +17,13 @@
 // handle is ever logged. The record is deliberately reduced to key NAMES, the
 // JSON type of the value, and a per-key "is this a non-empty string" boolean.
 // That is enough to answer "what did the host actually send" without putting a
-// bearer-equivalent URL, a file id, or image bytes into Loki. The single
-// deliberate exception lives in the handler, not here: `fetch.host` (hostname
-// only) is logged because it is the only way to tell an egress block from a 403,
-// and a hostname is not the credential.
+// bearer-equivalent URL, a file id, or image bytes into Loki. There are exactly
+// TWO deliberate exceptions, both bounded, both documented in
+// security-and-observability.md: `fetch.host` (hostname only — the only way to
+// tell an egress block from a 403, and a hostname is not the credential) and
+// `declaredType` (the handle's `mime_type` or the response's content-type,
+// truncated to MAX_MIME_LENGTH here so a model-writable string cannot grow a log
+// line without bound — without it `sniffedType` has nothing to be compared to).
 
 // The internal marker `schemas.ts` wraps an unparsable `image` argument in, so
 // this module can classify and LOG its shape instead of the MCP SDK rejecting
@@ -28,9 +33,7 @@
 // is deliberately improbable so a genuine host key can never be misread as it.
 export const UNPARSED_IMAGE = "__cj_unparsed_image";
 
-// Shared with the handler's fetch cap: an inline payload is subject to the same
-// 20MB ceiling as a fetched one, enforced here BEFORE any base64 decode so an
-// oversized string can never be materialized.
+// The handler's fetch cap: the most image the server will pull from a signed URL.
 export const MAX_ATTACHED_BYTES = 20 * 1024 * 1024;
 
 // URL keys accepted on a file handle, in preference order. `download_url` is the
@@ -40,18 +43,34 @@ export const MAX_ATTACHED_BYTES = 20 * 1024 * 1024;
 // is why the scheme guard below ships in the same change, not after.
 const URL_KEYS = ["download_url", "url", "uri", "href", "file_url"] as const;
 
-// Keys that may carry the image inline as base64 (the SEP-1306 shape). Supporting
-// them now means a host that switches to inline delivery just works.
-const INLINE_KEYS = ["data", "blob"] as const;
-
 // Content-type keys, covering snake/camel drift between hosts.
 const MIME_KEYS = ["mime_type", "mimeType"] as const;
+
+// INLINE DELIVERY IS DELIBERATELY NOT SUPPORTED (removed 2026-08-30). An earlier
+// draft accepted base64 bytes in `data`/`blob` and `data:` URLs (the SEP-1306
+// shape) on the theory that a host might switch to inline delivery. It could not
+// work as shipped and it broke this module's own guarantee: the JSON-RPC body is
+// parsed by `express.json()`, whose 100KB limit rejects any real photo with a 413
+// raised BEFORE bearer auth, before the HTTP probe, and before the handler — a
+// silent, unlogged failure, which is precisely the class of failure this whole
+// change exists to eliminate. Accommodating a 20MB photo would mean buffering
+// ~27MB of base64 JSON per `/mcp` POST before the caller is even authenticated,
+// a real memory-amplification cost paid for a delivery shape no host is known to
+// send. So a `data:` URL is now refused by the scheme guard like any other
+// non-https reference, and lands as the named `bad_scheme` outcome. If a host
+// ever does inline a file, `photo_intake_request` will record the key it used and
+// we can add the path deliberately, with a body limit chosen for it.
 
 // Log-record caps. Key names are safe for credentials, but a hostile host could
 // key a handle by an identifier (`{"file-abc123": …}`), so the record can never
 // grow without bound: at most 20 keys, each at most 64 characters.
 const MAX_LOGGED_KEYS = 20;
 const MAX_KEY_LENGTH = 64;
+
+// `declaredType` is the second (and last) value copied into a log record. A
+// handle's `mime_type` is host- and model-writable, so it is truncated: a real
+// media type is well under this, and a hostile one cannot pad a Loki line.
+const MAX_MIME_LENGTH = 64;
 
 const OCTET_STREAM = "application/octet-stream";
 
@@ -75,16 +94,10 @@ export interface MetaShape extends Shape {
 
 export type Channel = "argument" | "request_meta" | "none";
 
-export type UnusableReason =
-  | "not_an_object"
-  | "no_url"
-  | "empty_url"
-  | "bad_scheme"
-  | "inline_too_large";
+export type UnusableReason = "not_an_object" | "no_url" | "empty_url" | "bad_scheme";
 
 export type Delivery =
   | { kind: "fetchable"; channel: Channel; urlKey: string; url: string; scheme: string; host: string; mimeType?: string }
-  | { kind: "inline"; channel: Channel; bytes: Buffer; mimeType?: string }
   | { kind: "unusable"; channel: Channel; reason: UnusableReason }
   | { kind: "absent" };
 
@@ -186,13 +199,199 @@ function firstString(record: Record<string, unknown>, keys: readonly string[]): 
   return undefined;
 }
 
-// Scheme guard. `image.download_url` is a MODEL-WRITABLE argument that the server
-// fetches from inside the cluster, so without this the model can point the server
-// at anything reachable on the pod network. https is the only real-world delivery;
-// http is allowed ONLY on loopback so the test fixtures (a local HTTP server
-// standing in for a signed URL) keep working. Everything else — file:, gopher:,
-// http to an RFC1918 address — is refused before a socket is opened.
-export function fetchTargetOf(raw: string): { scheme: string; host: string } | null {
+// ---- SSRF guard ------------------------------------------------------------
+//
+// `image.download_url` is a MODEL-WRITABLE argument that the server fetches from
+// inside the cluster, so this decides what a socket may be opened to.
+//
+// THE BUG THIS REPLACES (2026-08-30). The first version classified loopback by
+// STRING PREFIX — `host.startsWith("127.")` — which is not a test of the address
+// at all, only of its spelling. `http://127.evil.com/`,
+// `http://127.attacker.internal/` and `http://127.0.0.1.nip.io/` are all ordinary
+// DNS names that pass a prefix test, so an attacker-controlled name walked
+// straight through over plaintext http, and because `redirectTarget` revalidates
+// with this same function, the "https://host/ → http://169.254.169.254/" bypass
+// the guard was written to close was still open one DNS name away.
+//
+// So: never decide on characters. Ask `net.isIP` whether the hostname IS an IP
+// literal and, if it is, classify the PARSED value numerically. WHATWG `URL`
+// normalizes the exotic IPv4 spellings for us before we get here — `2130706433`,
+// `0x7f000001` and `127.1` all arrive as `127.0.0.1` — so the numeric rules below
+// are the whole decision.
+//
+// WHAT IS ALLOWED:
+//   https + a public IP literal            the real delivery path
+//   https + a DNS name                     the real delivery path (see the residual below)
+//   http  + a loopback IP literal          TEST FIXTURES ONLY (see loopbackFetchAllowed)
+// Everything else is refused before a socket is opened: any other scheme (file:,
+// gopher:, data:), any http to a non-loopback host, and — new — https to a
+// loopback, private, link-local, unique-local, CGNAT, multicast or unspecified
+// address, which the old guard allowed outright. `https://169.254.169.254/`
+// reached cloud metadata under the previous rules; it does not now.
+//
+// RESIDUAL, STATED PLAINLY: a DNS NAME that RESOLVES to a private address is NOT
+// blocked here, and this guard does not claim to block it. Deciding on resolution
+// would mean a DNS lookup — I/O this module deliberately does not do — and even
+// in the fetch path it would not close the hole: undici re-resolves when it
+// connects, so a rebinding record can answer public to our check and private to
+// the socket. Pinning the checked address into the connection is the only real
+// fix and it is not available through `fetch`. The containment that actually
+// holds is at the network layer (the cluster's default-deny egress policy), and
+// `fetch.host` is logged precisely so a name pointed somewhere it should not be
+// is visible after the fact. Treat this as the known limit of the guard, not as
+// coverage it has.
+export interface FetchTarget {
+  scheme: string;
+  host: string;
+}
+
+// Loopback over plaintext http exists ONLY so the integration fixtures — a local
+// HTTP server standing in for a signed URL — are fetchable. It is a liability in
+// production (a foothold for reaching anything bound to the pod's own loopback),
+// so it is gated to the test runner rather than shipped enabled. There is no
+// production opt-in on purpose: an escape hatch here is the hole itself.
+export function loopbackFetchAllowed(): boolean {
+  return process.env.NODE_ENV === "test" || process.env.VITEST !== undefined;
+}
+
+type HostVerdict = "loopback" | "internal" | "public_ip" | "name";
+
+function parseIpv4(text: string): number[] | null {
+  const parts = text.split(".");
+  if (parts.length !== 4) return null;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (part.length === 0 || part.length > 3) return null;
+    let value = 0;
+    for (const char of part) {
+      const digit = char.charCodeAt(0) - 48;
+      if (digit < 0 || digit > 9) return null;
+      value = value * 10 + digit;
+    }
+    if (value > 255) return null;
+    octets.push(value);
+  }
+  return octets;
+}
+
+// Text → 16 bytes. `net.isIP` has already accepted the syntax, so this only has
+// to place the groups: everything before `::` is left-aligned, everything after
+// is right-aligned, and a trailing dotted quad expands to the last two groups.
+function parseIpv6(text: string): Uint8Array | null {
+  const zone = text.indexOf("%");
+  const address = zone >= 0 ? text.slice(0, zone) : text;
+  const gap = address.indexOf("::");
+  const headText = gap < 0 ? address : address.slice(0, gap);
+  const tailText = gap < 0 ? "" : address.slice(gap + 2);
+
+  const expand = (source: string): number[] | null => {
+    if (source.length === 0) return [];
+    const groups: number[] = [];
+    for (const part of source.split(":")) {
+      if (part.includes(".")) {
+        const octets = parseIpv4(part);
+        if (!octets) return null;
+        groups.push((octets[0]! << 8) | octets[1]!, (octets[2]! << 8) | octets[3]!);
+        continue;
+      }
+      if (part.length === 0 || part.length > 4) return null;
+      const value = Number.parseInt(part, 16);
+      if (!Number.isInteger(value) || value < 0 || value > 0xffff) return null;
+      groups.push(value);
+    }
+    return groups;
+  };
+
+  const head = expand(headText);
+  const tail = expand(tailText);
+  if (!head || !tail) return null;
+  const total = head.length + tail.length;
+  if (gap < 0 ? total !== 8 : total > 8) return null;
+
+  const bytes = new Uint8Array(16);
+  head.forEach((group, index) => {
+    bytes[index * 2] = group >> 8;
+    bytes[index * 2 + 1] = group & 0xff;
+  });
+  const offset = 8 - tail.length;
+  tail.forEach((group, index) => {
+    bytes[(offset + index) * 2] = group >> 8;
+    bytes[(offset + index) * 2 + 1] = group & 0xff;
+  });
+  return bytes;
+}
+
+// RFC 1918 private space, RFC 3927 link-local (which is where the cloud metadata
+// address 169.254.169.254 lives), RFC 6598 CGNAT, loopback, "this network", and
+// everything from 224/4 up (multicast, reserved, broadcast).
+function classifyIpv4(octets: readonly number[]): HostVerdict {
+  const [a, b] = octets as [number, number, number, number];
+  if (a === 127) return "loopback";
+  if (a === 0) return "internal";
+  if (a === 10) return "internal";
+  if (a === 172 && b >= 16 && b <= 31) return "internal";
+  if (a === 192 && b === 168) return "internal";
+  if (a === 169 && b === 254) return "internal";
+  if (a === 100 && b >= 64 && b <= 127) return "internal";
+  if (a === 198 && (b === 18 || b === 19)) return "internal";
+  if (a >= 224) return "internal";
+  return "public_ip";
+}
+
+// Several IPv6 forms carry an IPv4 address in their low bytes. Classifying the
+// EMBEDDED address is what stops the entire IPv4 ruleset from being bypassed by
+// rewriting the target in v6 notation (`::ffff:169.254.169.254`).
+function embeddedIpv4(bytes: Uint8Array): number[] | null {
+  const low = [bytes[12]!, bytes[13]!, bytes[14]!, bytes[15]!];
+  // 2002::/16 — 6to4, address in bytes 2..5.
+  if (bytes[0] === 0x20 && bytes[1] === 0x02) return [bytes[2]!, bytes[3]!, bytes[4]!, bytes[5]!];
+  const zeroPrefix = bytes.subarray(0, 10).every((byte) => byte === 0);
+  // ::ffff:a.b.c.d — IPv4-mapped; ::a.b.c.d — deprecated IPv4-compatible.
+  if (zeroPrefix && bytes[10] === 0xff && bytes[11] === 0xff) return low;
+  if (zeroPrefix && bytes[10] === 0 && bytes[11] === 0) return low;
+  // 64:ff9b::/96 — the NAT64 well-known prefix.
+  if (
+    bytes[0] === 0x00 &&
+    bytes[1] === 0x64 &&
+    bytes[2] === 0xff &&
+    bytes[3] === 0x9b &&
+    bytes.subarray(4, 12).every((byte) => byte === 0)
+  )
+    return low;
+  return null;
+}
+
+function classifyIpv6(bytes: Uint8Array): HostVerdict {
+  if (bytes.every((byte) => byte === 0)) return "internal"; // ::
+  if (bytes.subarray(0, 15).every((byte) => byte === 0) && bytes[15] === 1) return "loopback"; // ::1
+  const embedded = embeddedIpv4(bytes);
+  if (embedded) return classifyIpv4(embedded);
+  if ((bytes[0]! & 0xfe) === 0xfc) return "internal"; // fc00::/7 unique-local
+  if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return "internal"; // fe80::/10 link-local
+  if (bytes[0] === 0xff) return "internal"; // ff00::/8 multicast
+  return "public_ip";
+}
+
+// What the hostname IS — an address of some class, or a name. Exported for the
+// tests that pin each bypass class; the fetch decision lives in fetchTargetOf.
+export function classifyHost(host: string): HostVerdict {
+  const family = isIP(host);
+  if (family === 4) {
+    const octets = parseIpv4(host);
+    return octets ? classifyIpv4(octets) : "internal";
+  }
+  if (family === 6) {
+    const bytes = parseIpv6(host);
+    return bytes ? classifyIpv6(bytes) : "internal";
+  }
+  // `localhost` is the one NAME treated as an address: every resolver in practice
+  // maps it to 127.0.0.1/::1, so refusing to acknowledge that would only make the
+  // fixture allowance inconsistent, not safer.
+  if (host.toLowerCase() === "localhost") return "loopback";
+  return "name";
+}
+
+export function fetchTargetOf(raw: string): FetchTarget | null {
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -201,89 +400,17 @@ export function fetchTargetOf(raw: string): { scheme: string; host: string } | n
     // the same reason: whatever it is, the server will not open it.
     return null;
   }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (parsed.protocol === "https:") return { scheme: "https", host };
-  const loopback = host === "localhost" || host === "::1" || host.startsWith("127.");
-  if (parsed.protocol === "http:" && loopback) return { scheme: "http", host };
-  return null;
-}
+  if (host.length === 0) return null;
+  const verdict = classifyHost(host);
 
-// A base64 payload's decoded size, computed from the ENCODED length so an
-// oversized string is rejected without ever being materialized in memory.
-function decodedSize(encoded: string): number {
-  const clean = encoded.replace(/[\r\n]/g, "");
-  const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
-  return Math.floor((clean.length * 3) / 4) - padding;
-}
-
-// Only treat a string as inline image data when it plausibly IS base64 — a short
-// or non-base64 value is far more likely to be a caption or an id, and decoding
-// it would turn a clean `no_url` diagnosis into a misleading `unreadable` one.
-function looksBase64(value: string): boolean {
-  return value.length >= 16 && /^[A-Za-z0-9+/_=\s-]+$/.test(value);
-}
-
-// `data:[<mediatype>][;base64],<payload>` — decodes directly, so no fetch and no
-// SSRF surface. Accepted at any URL key because a host that inlines the image is
-// answering the same question a download_url would.
-function inlineFromDataUrl(url: string, channel: Channel, declared?: string): Delivery {
-  const comma = url.indexOf(",");
-  if (comma < 0) return { kind: "unusable", channel, reason: "empty_url" };
-  const header = url.slice(5, comma);
-  const payload = url.slice(comma + 1);
-  if (payload.length === 0) return { kind: "unusable", channel, reason: "empty_url" };
-
-  const parts = header.split(";");
-  const base64 = parts
-    .slice(1)
-    .some((param) => param.trim().toLowerCase() === "base64");
-  const mediaType = parts[0]?.trim();
-  const mimeType = declared ?? (mediaType && mediaType.length > 0 ? mediaType : undefined);
-
-  if (!base64) {
-    // Percent-encoded (non-base64) data URLs are legal but never used for images;
-    // decode them anyway rather than lying about what arrived. A malformed escape
-    // makes decodeURIComponent throw, and nothing in this module may throw — the
-    // caller's contract is that every bad shape comes back as a named reason.
-    let decoded: Buffer;
-    try {
-      decoded = Buffer.from(decodeURIComponent(payload), "binary");
-    } catch {
-      return { kind: "unusable", channel, reason: "empty_url" };
-    }
-    if (decoded.byteLength === 0) return { kind: "unusable", channel, reason: "empty_url" };
-    if (decoded.byteLength > MAX_ATTACHED_BYTES)
-      return { kind: "unusable", channel, reason: "inline_too_large" };
-    return { kind: "inline", channel, bytes: decoded, mimeType };
+  if (parsed.protocol === "https:") {
+    // A DNS name is allowed because the real delivery path is a signed URL on a
+    // CDN domain we cannot enumerate; see the residual note above.
+    return verdict === "public_ip" || verdict === "name" ? { scheme: "https", host } : null;
   }
-
-  if (decodedSize(payload) > MAX_ATTACHED_BYTES)
-    return { kind: "unusable", channel, reason: "inline_too_large" };
-  const bytes = Buffer.from(payload, "base64");
-  if (bytes.byteLength === 0) return { kind: "unusable", channel, reason: "empty_url" };
-  return { kind: "inline", channel, bytes, mimeType };
-}
-
-// Base64 bytes carried in `data`/`blob` next to the handle (the SEP-1306 shape).
-// A missing mime_type is fine — the handler sniffs magic bytes before decoding.
-function inlineFromFields(
-  entry: Record<string, unknown>,
-  channel: Channel,
-  declared?: string,
-): Delivery | null {
-  for (const key of INLINE_KEYS) {
-    const value = entry[key];
-    if (typeof value !== "string" || value.trim().length === 0) continue;
-    const raw = value.trim();
-    if (raw.toLowerCase().startsWith("data:")) return inlineFromDataUrl(raw, channel, declared);
-    if (!looksBase64(raw)) continue;
-    if (decodedSize(raw) > MAX_ATTACHED_BYTES)
-      return { kind: "unusable", channel, reason: "inline_too_large" };
-    const bytes = Buffer.from(raw, "base64");
-    if (bytes.byteLength === 0) continue;
-    return { kind: "inline", channel, bytes, mimeType: declared };
-  }
-  return null;
+  return verdict === "loopback" && loopbackFetchAllowed() ? { scheme: "http", host } : null;
 }
 
 // Classify ONE file handle. Never throws, never returns null: an unusable shape
@@ -314,14 +441,12 @@ function classifyHandle(rawEntry: unknown, channel: Channel): Delivery {
   }
 
   if (url !== undefined && urlKey !== undefined) {
-    if (url.toLowerCase().startsWith("data:")) return inlineFromDataUrl(url, channel, mimeType);
+    // A `data:` URL lands here too and is refused by the guard as `bad_scheme` —
+    // see the inline-delivery note at the top of this file.
     const target = fetchTargetOf(url);
     if (!target) return { kind: "unusable", channel, reason: "bad_scheme" };
     return { kind: "fetchable", channel, urlKey, url, scheme: target.scheme, host: target.host, mimeType };
   }
-
-  const inline = inlineFromFields(entry, channel, mimeType);
-  if (inline) return inline;
 
   // The owner's reported failure lands here: a handle arrived (`file_id`,
   // `mime_type`) with nothing the server can fetch. The file lives in the user's
@@ -392,11 +517,22 @@ export function sniffImageType(bytes: Buffer): string | undefined {
 // can only turn a spurious failure into a success. A failed sniff leaves the
 // declared value untouched, so a genuinely unsupported body still lands as
 // `unreadable` rather than being forced through as an image.
+//
+// `declaredType` is the one part of this that reaches a log line, so it is capped
+// here (MAX_MIME_LENGTH): it is copied from a host- and model-writable
+// `mime_type`, and the shape-not-values rule allows it only as a BOUNDED
+// exception. `contentType` — the value handed to the decoder — is deliberately
+// left uncapped: truncating it would turn a long-but-valid media type into a
+// silent decode failure, and it never reaches Loki.
 export function resolveContentType(
   declared: string | undefined,
   bytes: Buffer,
 ): { contentType: string; declaredType: string; sniffedType?: string } {
-  const declaredType = declared && declared.trim().length > 0 ? declared.trim() : OCTET_STREAM;
+  const trimmed = declared && declared.trim().length > 0 ? declared.trim() : OCTET_STREAM;
   const sniffedType = sniffImageType(bytes);
-  return { contentType: sniffedType ?? declaredType, declaredType, sniffedType };
+  return {
+    contentType: sniffedType ?? trimmed,
+    declaredType: trimmed.slice(0, MAX_MIME_LENGTH),
+    sniffedType,
+  };
 }

@@ -1,14 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
   classify,
+  classifyHost,
   describeArgument,
   describeRequestMeta,
+  loopbackFetchAllowed,
   resolveContentType,
   shapeOf,
   sniffImageType,
   UNPARSED_IMAGE,
-  MAX_ATTACHED_BYTES,
-  type Delivery,
 } from "./photo-intake.js";
 
 // Pure unit tests for the intake classifier: no HTTP, no storage, no database.
@@ -197,50 +197,60 @@ describe("classify — alternate URL keys", () => {
   });
 });
 
-describe("classify — inline bytes", () => {
-  it("decodes base64 carried in `data` alongside the handle", () => {
-    const delivery = classify(
-      { file_id: "f", data: PNG.toString("base64"), mime_type: "image/png" },
-      undefined,
-    );
-    expect(delivery.kind).toBe("inline");
-    expect((delivery as Extract<Delivery, { kind: "inline" }>).bytes.equals(PNG)).toBe(true);
-  });
-
-  it("decodes a data: URL sitting at a URL key", () => {
-    const delivery = classify(
-      { download_url: `data:image/png;base64,${PNG.toString("base64")}` },
-      undefined,
-    );
-    expect(delivery.kind).toBe("inline");
-    expect((delivery as Extract<Delivery, { kind: "inline" }>).mimeType).toBe("image/png");
-  });
-
-  it("refuses an oversized inline payload before decoding it", () => {
-    // Sized from the ENCODED length so the string is never materialized as bytes.
-    const oversized = "A".repeat(Math.ceil((MAX_ATTACHED_BYTES + 1024) / 3) * 4);
-    expect(classify({ data: oversized, mime_type: "image/png" }, undefined)).toEqual({
+describe("classify — SSRF guard", () => {
+  // REGRESSION, 2026-08-30. The first guard classified loopback by string prefix
+  // (`host.startsWith("127.")`), which tests the SPELLING of a host, not the
+  // address. Every string below was ALLOWED by that version — an
+  // attacker-controlled DNS name walking through over plaintext http, with the
+  // redirect revalidation reusing the same function, so the
+  // "https://host/ -> http://169.254.169.254/" bypass the guard existed to close
+  // was still open one DNS name away. The old tests only tried literal IPs, which
+  // is exactly why they passed.
+  it.each([
+    ["http://127.evil.com/"],
+    ["http://127.attacker.internal/latest/meta-data"],
+    ["http://127.0.0.1.nip.io/"],
+  ])("refuses the prefix-lookalike host %s", (url) => {
+    expect(classify({ download_url: url }, undefined)).toEqual({
       kind: "unusable",
       channel: "argument",
-      reason: "inline_too_large",
+      reason: "bad_scheme",
     });
   });
 
-  it("ignores a short/non-base64 `data` value rather than inventing bytes", () => {
-    // A caption-like value must stay a clean `no_url`, not a misleading `unreadable`.
-    expect(classify({ file_id: "f", data: "the band" }, undefined)).toMatchObject({
-      reason: "no_url",
-    });
-  });
-});
-
-describe("classify — scheme guard (SSRF)", () => {
   it.each([
+    // Non-http(s) schemes, including the data: URL that inline delivery used to
+    // accept here.
     ["file:///etc/passwd"],
+    ["gopher://x/1"],
+    ["data:image/png;base64,iVBORw0KGgo="],
+    ["not a url at all"],
+    // Literal IPv4, in every spelling WHATWG URL normalizes for us.
     ["http://10.0.0.1/x"],
     ["http://169.254.169.254/latest/meta-data"],
-    ["gopher://x/1"],
-    ["not a url at all"],
+    ["http://192.168.1.1/x"],
+    ["http://172.16.0.1/x"],
+    ["http://100.64.0.1/x"],
+    ["http://0.0.0.0/x"],
+    // The exotic IPv4 spellings, over https so the fixture allowance cannot mask
+    // the result: WHATWG URL normalizes all three to 127.0.0.1 before the guard
+    // sees them, which is why the numeric rules are the whole decision.
+    ["https://2130706433/x"],
+    ["https://0x7f000001/x"],
+    ["https://127.1/x"],
+    // https to a private address: allowed outright by the old guard, which only
+    // ever looked at the scheme once it saw https.
+    ["https://169.254.169.254/latest/meta-data"],
+    ["https://10.0.0.1/x"],
+    ["https://127.0.0.1/x"],
+    ["https://[::1]/x"],
+    // IPv6, including the forms that carry an IPv4 address in their low bytes.
+    ["https://[fe80::1]/x"],
+    ["https://[fc00::1]/x"],
+    ["https://[::ffff:169.254.169.254]/x"],
+    ["https://[::ffff:10.0.0.1]/x"],
+    ["https://[64:ff9b::a9fe:a9fe]/x"],
+    ["https://[2002:a9fe:a9fe::]/x"],
   ])("refuses %s", (url) => {
     expect(classify({ download_url: url }, undefined)).toEqual({
       kind: "unusable",
@@ -249,10 +259,28 @@ describe("classify — scheme guard (SSRF)", () => {
     });
   });
 
-  it("allows https anywhere, and http only on loopback (the test fixtures)", () => {
+  it("classifies the host by its parsed address, not its characters", () => {
+    // The decision the guard actually makes, pinned directly.
+    expect(classifyHost("127.0.0.1")).toBe("loopback");
+    expect(classifyHost("::1")).toBe("loopback");
+    expect(classifyHost("localhost")).toBe("loopback");
+    expect(classifyHost("169.254.169.254")).toBe("internal");
+    expect(classifyHost("::ffff:7f00:1")).toBe("loopback");
+    expect(classifyHost("8.8.8.8")).toBe("public_ip");
+    // A name that merely LOOKS like an address is a name, and nothing more.
+    expect(classifyHost("127.evil.com")).toBe("name");
+    expect(classifyHost("127.0.0.1.nip.io")).toBe("name");
+    expect(classifyHost("files.oaiusercontent.com")).toBe("name");
+  });
+
+  it("allows https to a public host, and http only to a loopback ADDRESS", () => {
     expect(classify({ download_url: "https://files.oaiusercontent.com/x" }, undefined).kind).toBe(
       "fetchable",
     );
+    expect(classify({ download_url: "https://8.8.8.8/x" }, undefined).kind).toBe("fetchable");
+    // The fixture allowance. It is live here only because the test runner sets
+    // NODE_ENV=test / VITEST — see loopbackFetchAllowed.
+    expect(loopbackFetchAllowed()).toBe(true);
     expect(classify({ download_url: "http://127.0.0.1:8080/img.png" }, undefined)).toMatchObject({
       kind: "fetchable",
       scheme: "http",
@@ -261,6 +289,28 @@ describe("classify — scheme guard (SSRF)", () => {
     expect(classify({ download_url: "http://localhost:8080/img.png" }, undefined).kind).toBe(
       "fetchable",
     );
+  });
+
+  it("refuses http to loopback when the test gate is off (i.e. in production)", () => {
+    // The allowance exists for the fixtures alone, so it must not be a property of
+    // the shipped server. Same input, gate off, refused.
+    const nodeEnv = process.env.NODE_ENV;
+    const vitest = process.env.VITEST;
+    try {
+      delete process.env.NODE_ENV;
+      delete process.env.VITEST;
+      expect(loopbackFetchAllowed()).toBe(false);
+      expect(classify({ download_url: "http://127.0.0.1:8080/img.png" }, undefined)).toEqual({
+        kind: "unusable",
+        channel: "argument",
+        reason: "bad_scheme",
+      });
+    } finally {
+      if (nodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = nodeEnv;
+      if (vitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = vitest;
+    }
   });
 });
 
@@ -289,5 +339,18 @@ describe("sniffImageType / resolveContentType", () => {
       declaredType: "text/plain",
       sniffedType: undefined,
     });
+  });
+
+  it("caps the declared type that reaches the log, but not the one that reaches the decoder", () => {
+    // `declaredType` is the SECOND and last value the shape-not-values rule allows
+    // into a log record, and it is copied from a host/model-writable `mime_type`,
+    // so it is bounded (security-and-observability.md). `contentType` is not: it
+    // goes to the decoder, never to Loki, and truncating it would turn a valid
+    // long media type into a silent decode failure.
+    const long = `image/${"x".repeat(200)}`;
+    const resolved = resolveContentType(long, Buffer.from("not an image"));
+    expect(resolved.declaredType).toHaveLength(64);
+    expect(long.startsWith(resolved.declaredType)).toBe(true);
+    expect(resolved.contentType).toBe(long);
   });
 });

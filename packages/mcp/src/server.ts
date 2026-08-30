@@ -141,10 +141,11 @@ import { mcpEvent } from "./logger.js";
 //      the client fills in for the declared file param (the standard Apps SDK path).
 //   2. Request-level `_meta["openai/fileParams"]` — the same entry shape carried in
 //      request metadata (the earlier, production-proven delivery). Kept working.
-// A download_url is a SHORT-LIVED signed URL the server must fetch promptly; a
-// handle may also carry the image inline as base64 (SEP-1306). This is web-only —
-// mobile uploads are broken upstream and a chat file URL pasted as text (e.g.
-// chatgpt.com/...) is unreachable from outside ChatGPT — hence the mode-B link.
+// A download_url is a SHORT-LIVED signed URL the server must fetch promptly. This
+// is web-only — mobile uploads are broken upstream and a chat file URL pasted as
+// text (e.g. chatgpt.com/...) is unreachable from outside ChatGPT — hence the
+// mode-B link. Inline base64 delivery is deliberately NOT accepted; the reason is
+// in photo-intake.ts, and it is a body-size one, not a taste one.
 //
 // EVERY failure here falls back to mode B and is RECORDED, never raised. Classification
 // lives in photo-intake.ts; this file does the I/O and writes the `photo_intake` record.
@@ -159,9 +160,10 @@ const MAX_REDIRECTS = 3;
 //   not_an_object       `image` was a string/number/null, not a file handle
 //   no_url              a handle arrived (e.g. { file_id, mime_type }) with nothing fetchable
 //   empty_url           a URL key was present but blank
-//   bad_scheme          the reference was not https (or http on loopback)
-//   inline_too_large    inline base64 exceeded the 20MB cap before decoding
-//   fetch_failed        the URL was fetched and failed (non-2xx, timeout, transport)
+//   bad_scheme          the reference failed the SSRF guard (not https to a public
+//                       host), INCLUDING a redirect that tried to escape it
+//   fetch_failed        the URL was fetched and failed (non-2xx, timeout, transport,
+//                       a missing Location, or too many hops)
 //   too_large           the response exceeded 20MB
 //   unreadable          bytes arrived but are not a supported, decodable image
 //   attached            the image arrived and decoded (the storage write follows)
@@ -200,7 +202,6 @@ function deliveryFor(outcome: IntakeOutcome): { status: DeliveryStatus; detail: 
     case "no_url":
     case "empty_url":
     case "bad_scheme":
-    case "inline_too_large":
       return { status: "image_reference_unusable", detail: DELIVERY_DETAIL.image_reference_unusable };
     case "fetch_failed":
     case "too_large":
@@ -222,6 +223,11 @@ interface FetchRecord {
   ms: number;
   timedOut: boolean;
   redirects?: number;
+  // Why a redirect chain ended without a body. Without this, "the guard bit at a
+  // hop" was indistinguishable from "the host sent no Location" and "the chain
+  // was too long" — all three collapsed into a bare `fetch_failed`, and the first
+  // is a security event while the other two are upstream noise.
+  redirectFailure?: "scheme_refused" | "no_location" | "too_many_hops";
   declaredType?: string;
   sniffedType?: string;
   bytes?: number;
@@ -231,7 +237,7 @@ interface FetchResult {
   bytes?: Buffer;
   headerType?: string;
   record: FetchRecord;
-  failure?: "fetch_failed" | "too_large";
+  failure?: "fetch_failed" | "too_large" | "bad_scheme";
 }
 
 // Fetch the attached image server-side. NEVER throws: a failure is a FALLBACK
@@ -268,6 +274,18 @@ async function fetchAttachedImage(target: {
         if (!next || hop >= MAX_REDIRECTS) {
           record.ms = Date.now() - started;
           record.redirects = hop;
+          // A hop the guard refused is reported as `bad_scheme`, not `fetch_failed`:
+          // it is an attempted SSRF escape (https://host/ -> http://169.254.169.254/),
+          // and it must be greppable as one rather than buried among timeouts.
+          if (!location) {
+            record.redirectFailure = "no_location";
+            return { record, failure: "fetch_failed" };
+          }
+          if (!next) {
+            record.redirectFailure = "scheme_refused";
+            return { record, failure: "bad_scheme" };
+          }
+          record.redirectFailure = "too_many_hops";
           return { record, failure: "fetch_failed" };
         }
         url = next.url;
@@ -908,11 +926,19 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // right thing (called with { smokeId, kind } and invented no `image`), so that
       // text could only teach it that a correct call had failed. What the model CAN
       // act on is the result: `mode`, and on mode B the `delivery.status`.
+      //
+      // AND THE LINK LEADS. A draft of this text told the model, on
+      // `no_image_received`, to ask the user to re-send the photo with their next
+      // message. That asserts an UNVERIFIED hypothesis — that a host forwards only a
+      // file attached to the invoking turn (client-compatibility.md) — as fact, and
+      // if it is wrong it loops the user through a re-send before offering the link
+      // that actually works. Nothing model-facing states it. The hypothesis stays a
+      // hypothesis in the docs until `photo_intake_request` settles it.
       description:
         "Attach a photo to one of the user's smokes, or get a one-time upload link to hand them. You cannot attach the image yourself — it reaches the tool only if the host forwards a file with this call.\n" +
         "Call with just the smoke id. If an image was forwarded, the server strips location metadata and files it under the smoke (`mode: attached`); otherwise you get a one-time upload link (`mode: upload_url`) to hand the user — it opens on their phone, goes straight to their camera roll, and attaches to this smoke.\n" +
         "Never paste an image, a chat file link (e.g. a chatgpt.com/... URL), or a file id into any field; those are unreachable from the server and will fail.\n" +
-        "When `mode` is `upload_url`, read `delivery.status`: `no_image_received` means nothing was forwarded — if the user shared the photo in an earlier message, ask them to re-send it with their next message, or give them the link. Any other status means something arrived but could not be used; give them the link.\n" +
+        "When `mode` is `upload_url`, hand the user the link — that is the path that works. `delivery.status` says why no photo was filed (`no_image_received` = nothing arrived with the call; the others = something arrived the server could not use); use it to tell them the truth, not to withhold the link.\n" +
         "A photo NEVER blocks save_smoke — it is a separate action with its own result. `kind` classifies the shot (cigar, band, construction, burn, other; default other); add a `caption` only if the user gave one.",
       inputSchema: addSmokePhotoSchema,
       outputSchema: addSmokePhotoOutput,
@@ -947,7 +973,6 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           extras: {
             urlKey?: string;
             fetch?: FetchRecord;
-            inline?: Record<string, unknown>;
             decodeError?: string;
           } = {},
         ): void => {
@@ -993,11 +1018,6 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           case "unusable":
             outcome = delivery.reason;
             break;
-          case "inline":
-            bytes = delivery.bytes;
-            declaredType = delivery.mimeType;
-            outcome = "attached";
-            break;
           case "fetchable": {
             urlKey = delivery.urlKey;
             const fetched = await fetchAttachedImage(delivery);
@@ -1016,19 +1036,14 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
         }
 
         let processed: Awaited<ReturnType<typeof processPhoto>> | undefined;
-        let inlineRecord: Record<string, unknown> | undefined;
         let decodeError: string | undefined;
         if (bytes) {
+          // Bytes only ever come from a fetch, so the type resolution always has a
+          // fetch record to land in (inline delivery was removed — photo-intake.ts).
           const resolved = resolveContentType(declaredType, bytes);
           if (fetchRecord) {
             fetchRecord.declaredType = resolved.declaredType;
             fetchRecord.sniffedType = resolved.sniffedType;
-          } else {
-            inlineRecord = {
-              bytes: bytes.byteLength,
-              declaredType: resolved.declaredType,
-              sniffedType: resolved.sniffedType,
-            };
           }
           try {
             processed = await processPhoto(bytes, resolved.contentType);
@@ -1050,7 +1065,6 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
         const extras = {
           ...(urlKey !== undefined ? { urlKey } : {}),
           ...(fetchRecord ? { fetch: fetchRecord } : {}),
-          ...(inlineRecord ? { inline: inlineRecord } : {}),
           ...(decodeError !== undefined ? { decodeError } : {}),
         };
 

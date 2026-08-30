@@ -131,10 +131,11 @@ image yourself — it reaches the tool only if the host forwards a file with the
 call — so call add_smoke_photo with just the smoke id: a forwarded image is filed
 under the smoke (mode attached), otherwise you get a one-time link (mode
 upload_url) to hand the user for a phone upload. Never paste an image, a chat file
-link, or a file id into any field. On mode upload_url read delivery.status:
-no_image_received means nothing was forwarded — if the user shared the photo in an
-earlier message, ask them to re-send it with their next message, or give them the
-link. A photo never blocks saving the smoke.
+link, or a file id into any field. On mode upload_url, give the user the link —
+that is the path that works; delivery.status says why no photo was filed
+(no_image_received means nothing arrived with the call), so tell them the truth
+and hand over the link rather than withholding it. A photo never blocks saving the
+smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -802,9 +803,10 @@ result:
 - **Attached image (mode A).** ChatGPT Web attaches the user's image to the tool
   call; the server fetches it (15s timeout, 20MB cap), runs the shared pipeline
   (EXIF applied + all metadata/GPS stripped, normalized JPEG + thumb), and files
-  it under the smoke. The description steers the model to attach the image to the
-  **tool call itself** and never to paste a chat file URL (e.g. `chatgpt.com/...`)
-  as text — those links are unreachable outside ChatGPT and will 403.
+  it under the smoke. Only the HOST can forward a file; the description says so
+  rather than instructing the model to do something it cannot do, and tells it never
+  to paste a chat file URL (e.g. `chatgpt.com/...`) as text — those links are
+  unreachable outside ChatGPT and will 403.
 - **No usable image (mode B).** The tool mints a short-lived, single-use link bound
   to (user, smoke, kind?, caption?) and returns it. The model hands the URL to the
   user to open on their phone — the reliable path on mobile, where in-chat photo
@@ -825,13 +827,24 @@ quieter in the tool result, so a sustained non-`attached` rate deserves an alert
 
 | `delivery.status` | Meaning | What the model should do |
 |---|---|---|
-| `no_image_received` | Nothing was forwarded on either channel. | If the user shared the photo earlier in the conversation, ask them to re-send it with their next message; otherwise hand over the link. |
+| `no_image_received` | Nothing was forwarded on either channel. | Hand over the link. |
 | `image_reference_unusable` | A file handle arrived carrying nothing the server can read. | Hand over the link. |
 | `image_fetch_failed` | A reference arrived but the image could not be retrieved. | Hand over the link. |
 | `image_unreadable` | Bytes arrived but are not a readable photo. | Hand over the link. |
 
 `delivery` never names a URL, a host, a key, or a file id — it is model-visible and
 therefore user-visible. The precise diagnosis lives in the log, not the result.
+
+**The link leads, in every branch** (2026-08-30). Earlier drafts of this text and of
+the shipped tool description told the model, on `no_image_received`, to ask the user
+to re-send the photo with their next message. That instruction encodes an
+*unverified hypothesis* — that a host forwards only a file attached to the invoking
+turn (client-compatibility.md) — as if it were established behavior. If the
+hypothesis is wrong, it costs the user a pointless round trip before they are
+offered the link that actually works. So no model-facing string asserts it: the
+model hands over the link and uses `delivery.status` to say something true about
+why. The hypothesis stays a hypothesis, in client-compatibility.md, until
+`photo_intake_request` settles it.
 
 Errors are now a shorter set: `unavailable` when photo storage is unconfigured (the
 tool is genuinely non-functional — a minted link would 503 on upload),
@@ -890,18 +903,66 @@ SEP-1306**, so swapping to the ratified standard later is a mechanical rename, n
 a redesign.
 
 **What a handle may carry (widened 2026-08-30).** The server accepts the first
-non-empty string among `download_url`, `url`, `uri`, `href`, `file_url` (which key
-hit is logged), a `data:` URL at any of those, or base64 bytes in `data`/`blob` —
-the SEP-1306 inline shape, so a host that switches to inline delivery just works.
-If the declared content type is missing or `application/octet-stream`, magic bytes
-(JPEG/PNG/WEBP/HEIC) decide the type before the shared pipeline runs; a correct
-photo used to fail on a bad header alone.
+non-empty string among `download_url`, `url`, `uri`, `href`, `file_url` — which key
+hit is logged. If the declared content type is missing or `application/octet-stream`,
+magic bytes (JPEG/PNG/WEBP/HEIC) decide the type before the shared pipeline runs; a
+correct photo used to fail on a bad header alone.
 
-**Scheme guard.** `image.download_url` is a model-writable argument the server
-fetches from inside the cluster, so widening the accepted key set shipped *with*
-a guard, in the same change: **https only, plus http on loopback** (the test
-fixtures). Redirects are followed manually, at most three hops, revalidating the
-guard on each. Anything else is `bad_scheme` → mode B, with no socket opened.
+**Inline delivery is deliberately NOT accepted.** A draft of this change also took
+base64 bytes in `data`/`blob` and `data:` URLs (the SEP-1306 inline shape). It was
+speculative — no host is known to deliver that way to this server — and it could not
+work as shipped: the JSON-RPC body is parsed by `express.json()` under a **100KB**
+limit, so any real photo was rejected with a 413 raised *before* bearer auth, before
+the HTTP probe and before the handler, leaving no record at all. Fitting a 20MB photo
+would mean a ~27MB **pre-authentication** buffer on every `/mcp` POST. A speculative
+feature that reintroduces unlogged failures subtracts from a change whose whole
+purpose is to end them, so it was removed rather than expanded: a `data:` URL is now
+refused by the scheme guard and lands as the named `bad_scheme` outcome. If a host
+ever does inline a file, `photo_intake_request` records the key it used and the path
+can be added deliberately, with a body limit chosen for it.
+
+**SSRF guard.** `image.download_url` is a model-writable argument the server fetches
+from inside the cluster, so widening the accepted key set shipped *with* a guard, in
+the same change. The guard decides on the **parsed address**, never on the spelling
+of the host:
+
+- `https` to a public IP literal, or to a DNS name — the real delivery path.
+- `http` to a **loopback address** — test fixtures only, and gated to the test
+  runner (`NODE_ENV=test`/`VITEST`) rather than shipped enabled. There is no
+  production opt-in; an escape hatch here would be the hole itself.
+- everything else is `bad_scheme` → mode B, with no socket opened: any other scheme
+  (`file:`, `gopher:`, `data:`), any `http` to a non-loopback host, and `https` to a
+  loopback, private (RFC 1918), link-local (RFC 3927, which is where
+  `169.254.169.254` lives), unique-local, CGNAT, multicast or unspecified address.
+
+Hostnames are classified with `net.isIP` and, when they are addresses, by their
+numeric value — including IPv4-mapped/compatible IPv6, 6to4 and NAT64, whose low
+bytes carry an IPv4 address that would otherwise bypass the IPv4 rules. WHATWG `URL`
+normalizes the exotic IPv4 spellings (`2130706433`, `0x7f000001`, `127.1`) before the
+guard runs. Redirects are followed manually, at most three hops, revalidating the
+guard on each; a hop the guard refuses is reported as `bad_scheme` with
+`fetch.redirectFailure: scheme_refused`, distinct from a missing `Location` or an
+over-long chain.
+
+> **Bug fixed 2026-08-30, worth remembering.** The first version of this guard tested
+> `host.startsWith("127.")` — a test of the *spelling*, not the address. It allowed
+> `http://127.evil.com/`, `http://127.attacker.internal/` and
+> `http://127.0.0.1.nip.io/`, so an attacker-controlled DNS name walked through over
+> plaintext http; because the redirect check reused the same function, the
+> `https://host/` → `http://169.254.169.254/` bypass the guard existed to close was
+> open one DNS name away. It also allowed `https://169.254.169.254/` outright, since
+> it stopped looking once it saw https. The tests only tried literal IPs, which is
+> why they passed. Each of those strings is now a named regression test.
+
+**Known limit, stated plainly: a DNS name that RESOLVES to a private address is not
+blocked.** The guard does not resolve, and resolving would not close the hole —
+undici re-resolves when it connects, so a rebinding record can answer public to a
+check and private to the socket, and `fetch` offers no way to pin the checked address
+into the connection. `https` to an arbitrary DNS name has to stay allowed because the
+real delivery path is a signed URL on a CDN domain we cannot enumerate. The
+containment that actually holds is the cluster's default-deny egress policy;
+`fetch.host` is logged so a name pointed somewhere it should not be is visible after
+the fact.
 
 **`file_id` alone is not recoverable, and the server says so.** The file lives in
 the end user's ChatGPT workspace; the Apps SDK contract is that the *host* resolves
@@ -919,23 +980,33 @@ join on `(sessionId, rpcId)`:
 
 - **`photo_intake`** — one line per `add_smoke_photo` call, both modes, success and
   failure. Fields: `outcome` (`attached` | `no_delivery` | `not_an_object` |
-  `no_url` | `empty_url` | `bad_scheme` | `inline_too_large` | `fetch_failed` |
-  `too_large` | `unreadable` | `storage_unavailable`), `channel`
+  `no_url` | `empty_url` | `bad_scheme` | `fetch_failed` | `too_large` |
+  `unreadable` | `storage_unavailable`), `channel`
   (`argument` | `request_meta` | `none`), `mode`, the `argument` and `requestMeta`
   *shapes*, the `urlKey` that matched, and a `fetch` sub-record
-  (`host`, `scheme`, `status`, `ms`, `timedOut`, `redirects`, `declaredType`,
-  `sniffedType`, `bytes`) when a fetch ran. `outcome` describes **intake**: a later
-  `smoke_not_found`/`photo_limit` arrives as `tool_error` on the same
-  `correlationId`.
+  (`host`, `scheme`, `status`, `ms`, `timedOut`, `redirects`, `redirectFailure`,
+  `declaredType`, `sniffedType`, `bytes`) when a fetch ran. `outcome` describes
+  **intake**: a later `smoke_not_found`/`photo_limit` arrives as `tool_error` on the
+  same `correlationId`.
 - **`photo_intake_request`** — written at the HTTP layer, after bearer auth and
   **before** the SDK validates input, so a call the SDK rejects still leaves a
-  record. Fields: `argKeys`, `argImage` shape, `metaKeys`, `metaFileParams` shape +
-  `count`. This is the class of call that previously left no trace at all, and it
-  is what will settle whether the host puts the file somewhere the server never
-  looked.
+  record. Fields: `paramKeys` (the keys of `params` **itself**, so a file handed
+  over somewhere the server never reads it still shows up), `argKeys`, `argImage`
+  shape, `metaKeys`, `metaFileParams` shape + `count`. This is the class of call
+  that previously left no trace at all, and it is what will settle whether the host
+  puts the file somewhere the server never looked.
+- **`request_rejected`** — written when `express.json()` refuses the body (over the
+  100KB limit, or not JSON). Such a request never reaches auth, the probe or the
+  SDK, so without this line it is the one shape that fails with no record at all.
+  Fields: `path`, `reason` (the parser's error type), `status`, `contentLength` —
+  the body is untrusted and unparsed, so nothing from it is logged. The response is
+  a JSON-RPC error envelope rather than Express's default HTML page.
 
-Both obey the **shape-not-values** rule (security-and-observability.md): key names,
-JSON types, and a per-key "non-empty string" flag — never a handle's values.
+All three obey the **shape-not-values** rule (security-and-observability.md): key
+names, JSON types, and a per-key "non-empty string" flag — never a handle's values.
+There are exactly two bounded exceptions, both named there: `fetch.host` and
+`fetch.declaredType` (truncated to 64 characters, since `mime_type` is
+host-writable).
 
 ## set_want — write, idempotent
 

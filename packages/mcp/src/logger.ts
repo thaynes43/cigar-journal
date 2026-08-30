@@ -18,7 +18,11 @@ export type McpEventName =
   // (sessionId, rpcId). Both obey the shape-not-values rule: key names and JSON
   // types only, never a handle's values — a download_url IS a credential.
   | "photo_intake"
-  | "photo_intake_request";
+  | "photo_intake_request"
+  // A request express.json() refused (over the body limit, or not JSON). It never
+  // reaches auth, the probe, or the SDK, so without this line it is the one shape
+  // that fails with no server-side record at all.
+  | "request_rejected";
 
 function ts(): string {
   return new Date().toISOString();

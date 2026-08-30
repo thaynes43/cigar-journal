@@ -45,13 +45,26 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
   file handle is ever logged**. The record carries key NAMES, the JSON type of each
   value, and a per-key "is a non-empty string" flag, nothing else; key names are
   capped at 20 per record and truncated to 64 characters so a hostile handle keyed
-  by an identifier cannot smuggle data in or grow the line without bound. One
-  deliberate exception: `fetch.host` (hostname only, never path/query/fragment) is
-  recorded, because it is the only way to tell an egress block from an upstream
-  403 and a hostname is not the credential. `photo_intake_request` sits **after**
-  auth on purpose — before it, an unauthenticated caller could write arbitrary key
-  names into Loki — and is wrapped in try/catch so a diagnostic can never become an
-  outage.
+  by an identifier cannot smuggle data in or grow the line without bound. There are
+  exactly **two** deliberate exceptions, both bounded: `fetch.host` (hostname only,
+  never path/query/fragment), because it is the only way to tell an egress block
+  from an upstream 403 and a hostname is not the credential; and
+  `fetch.declaredType`, the handle's `mime_type` or the response's content-type,
+  **truncated to 64 characters** — it is host- and model-writable, so it is capped
+  like a key name, and without it the magic-byte `sniffedType` has nothing to be
+  compared against. `photo_intake_request` sits **after** auth on purpose — before
+  it, an unauthenticated caller could write arbitrary key names into Loki — and is
+  wrapped in try/catch so a diagnostic can never become an outage. Its `paramKeys`
+  field describes `params` itself, not only the two places the server reads, so a
+  host that puts the file somewhere unexpected is visible rather than silent.
+- **No request fails without a record.** `express.json()` guards `/mcp` with an
+  explicit **100KB** body limit — deliberately small, because the body is buffered
+  *before* bearer auth and the limit is therefore an unauthenticated memory budget
+  (this is why inline base64 photo delivery was removed rather than accommodated:
+  it would have meant a ~27MB pre-auth allocation per POST). A body the parser
+  refuses never reaches auth, the intake probe or the MCP SDK, so it emits
+  `request_rejected` (`path`, parser error `reason`, `status`, `contentLength` —
+  nothing from the unparsed body) and answers with a JSON-RPC error envelope.
 - **Probes:** `/api/health` (process-only, house pattern) for k8s; Gatus for
   the web origin and `/mcp` reachability; crawler CronJobs alert on repeated
   failure, not single misses.

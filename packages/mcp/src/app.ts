@@ -10,6 +10,11 @@ import { jsonResponseEnabled } from "./config.js";
 import { mcpEvent } from "./logger.js";
 import { describeRequestMeta, shapeOf } from "./photo-intake.js";
 
+// The JSON-RPC body limit for /mcp. See the note on the express.json() call below:
+// this is an UNAUTHENTICATED memory budget, because the body is buffered before
+// bearerAuth runs.
+const MAX_BODY_BYTES = "100kb";
+
 // The HTTP surface: GET /healthz and the Streamable HTTP MCP transport at /mcp
 // (ADR-005). One transport per MCP session, keyed by the mcp-session-id the SDK
 // assigns on initialize — the spike-proven shape. A fresh initialize with no
@@ -53,6 +58,12 @@ function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): vo
       tool: "add_smoke_photo",
       sessionId,
       rpcId: rpc.id,
+      // `paramKeys` is the whole point of the probe and was missing: without it the
+      // record only described the two places we ALREADY look (`arguments` and
+      // `params._meta`), so it could never answer "does the host put the file
+      // somewhere we never looked?" — a file handed over as `params.attachments`
+      // or `params.files` would have left exactly the same line as no file at all.
+      paramKeys: shapeOf(params).keys,
       argKeys: shapeOf(args).keys,
       argImage: shapeOf(image),
       metaKeys: shapeOf(call._meta).keys,
@@ -127,9 +138,17 @@ export function buildApp(
   // available for per-tool scope determination (see requiredScopesForBody).
   // The photo probe follows bearerAuth and precedes the transport, so an
   // add_smoke_photo call is recorded even when the SDK rejects its arguments.
+  //
+  // THE LIMIT IS EXPLICIT AND SMALL, ON PURPOSE. Every message this endpoint takes
+  // is JSON-RPC text — a tool call with a narrative and a file HANDLE, never file
+  // bytes — so 100KB is roomy. It stays small because express.json() buffers the
+  // whole body BEFORE bearerAuth runs, which makes the limit an unauthenticated
+  // memory budget: raising it to fit an inline-base64 photo (~27MB for a 20MB
+  // image) would have handed every caller a 27MB pre-auth allocation. That is the
+  // trade that removed inline delivery from this change (photo-intake.ts).
   app.post(
     "/mcp",
-    express.json(),
+    express.json({ limit: MAX_BODY_BYTES }),
     bearerAuth(deps.db),
     (req, _res, next) => {
       try {
@@ -143,6 +162,33 @@ export function buildApp(
   );
   app.get("/mcp", bearerAuth(deps.db), (req, res) => void handleSessionRequest(req, res));
   app.delete("/mcp", bearerAuth(deps.db), (req, res) => void handleSessionRequest(req, res));
+
+  // A body express.json() refuses — over the limit, or not JSON — never reaches
+  // bearerAuth, the probe, or the SDK, so before this it was the one request shape
+  // that failed with NO server-side record: exactly the silent-failure class this
+  // change exists to end. Express's default handler would also answer with an HTML
+  // error page on a JSON-RPC endpoint. Only the error TYPE, the status, and the
+  // declared content-length are recorded — the body is untrusted and unparsed, so
+  // nothing from it is logged.
+  app.use((error: unknown, req: Request, res: Response, next: (err?: unknown) => void) => {
+    if (res.headersSent) {
+      next(error);
+      return;
+    }
+    const failure = error as { type?: string; status?: number; statusCode?: number };
+    const status = failure.status ?? failure.statusCode ?? 400;
+    mcpEvent("request_rejected", {
+      path: req.path,
+      reason: typeof failure.type === "string" ? failure.type : "unknown",
+      status,
+      contentLength: Number(req.headers["content-length"]) || 0,
+    });
+    res.status(status).json({
+      jsonrpc: "2.0",
+      error: { code: -32700, message: "Bad Request: unreadable body" },
+      id: null,
+    });
+  });
 
   return app;
 }

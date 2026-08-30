@@ -411,6 +411,18 @@ describe("@cj/mcp adapter", () => {
       for (const [name, schema] of Object.entries(properties)) {
         expect(schema.type, `image.${name} must stay a plain string`).toBe("string");
       }
+      // The DESCRIPTION is pinned too, and it is the field most at risk: it is the
+      // only model-facing text on the file input, and it is the one part of the
+      // schema the `z.preprocess` wrapper could plausibly drop (a pipe's emitted
+      // metadata comes from the inner type, not the wrapper). A silent drop would
+      // leave ChatGPT reading an undescribed object property and telling the model
+      // nothing about who fills it.
+      expect(image.description).toBe(
+        "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. Omit it and the tool returns a one-time upload link instead.",
+      );
+      expect((properties.download_url as { description?: string }).description).toBe(
+        "Host-provided signed download URL for the file. Set by the client, never by you.",
+      );
       // No sub-field is required, and `image` itself stays out of `required`.
       expect(image.required).toBeUndefined();
       expect(inputSchema.required ?? []).not.toContain("image");
@@ -2161,12 +2173,17 @@ describe("@cj/mcp adapter", () => {
           );
           const data = payloadOf(blocked.value) as { mode: string; delivery: { status: string } };
           expect(data.mode).toBe("upload_url");
-          expect(data.delivery.status).toBe("image_fetch_failed");
+          expect(data.delivery.status).toBe("image_reference_unusable");
           const blockedRecord = eventPayload(blocked.lines, "photo_intake");
-          expect(blockedRecord.outcome).toBe("fetch_failed");
+          // A hop the GUARD refused is its own outcome, not a generic
+          // `fetch_failed`: it is an attempted SSRF escape and has to be greppable
+          // as one, apart from the timeouts and 404s it used to be buried among.
+          expect(blockedRecord.outcome).toBe("bad_scheme");
+          const blockedFetch = blockedRecord.fetch as { host: string; redirectFailure: string };
+          expect(blockedFetch.redirectFailure).toBe("scheme_refused");
           // The guard bit at the redirect, so the recorded host is still the origin
           // we were allowed to talk to — the link-local address was never contacted.
-          expect((blockedRecord.fetch as { host: string }).host).toBe("127.0.0.1");
+          expect(blockedFetch.host).toBe("127.0.0.1");
           expect(blocked.lines.join("\n")).not.toContain("169.254.169.254");
         });
       },
@@ -2190,11 +2207,12 @@ describe("@cj/mcp adapter", () => {
               arguments: { smokeId, image: { download_url: signed, file_id: "file_secret_id" } },
               _meta: { "openai/fileParams": [{ download_url: signed, file_id: "file_secret_id" }] },
             });
-            // A second call whose only delivery is inline base64, to prove the
-            // payload never lands in a log line either.
+            // A second call carrying a base64 `data:` URL. Inline delivery is not
+            // accepted (photo-intake.ts), so this is a `bad_scheme` fallback — and
+            // the payload must not reach a log line on the way there either.
             return (await call(client, "add_smoke_photo", {
               smokeId,
-              image: { data: PNG_FIXTURE.toString("base64"), mime_type: "image/png" },
+              image: { download_url: `data:image/png;base64,${PNG_FIXTURE.toString("base64")}` },
             })) as CallToolResult;
           });
 
@@ -2213,9 +2231,12 @@ describe("@cj/mcp adapter", () => {
           expect(blob).toContain('"download_url"');
           expect(blob).toContain('"file_id"');
 
-          // Inline base64 is a real delivery: it attaches, with no fetch at all.
-          const inline = payloadOf(value) as { mode: string };
-          expect(inline.mode).toBe("attached");
+          // The `data:` URL is refused by the guard, with no socket opened — and,
+          // crucially, without its payload appearing anywhere in the record.
+          const inline = payloadOf(value) as { mode: string; delivery: { status: string } };
+          expect(inline.mode).toBe("upload_url");
+          expect(inline.delivery.status).toBe("image_reference_unusable");
+          expect(blob).toContain('"bad_scheme"');
         });
       },
     );
@@ -2242,6 +2263,11 @@ describe("@cj/mcp adapter", () => {
 
       const probe = eventPayload(lines, "photo_intake_request");
       expect(probe.tool).toBe("add_smoke_photo");
+      // `params` ITSELF is described, not just `arguments` and `params._meta`. A
+      // host that puts the file somewhere we never looked would show up right here
+      // as an extra key — which is the probe's entire stated purpose, and was the
+      // one thing it did not record.
+      expect(probe.paramKeys).toEqual(["arguments", "name"]);
       expect(probe.argKeys).toEqual(["attachments", "smokeId"]);
       expect(probe.argImage).toEqual({ type: "absent", keys: [], filled: [] });
       expect(probe.metaFileParams).toEqual({ type: "absent", keys: [], filled: [], count: 0 });
@@ -2251,6 +2277,39 @@ describe("@cj/mcp adapter", () => {
       // Nothing from the rejected arguments leaks as a value.
       expect(lines.join("\n")).not.toContain("file_zzz");
     });
+  });
+
+  it("records a body express.json() refuses, instead of failing it silently", async () => {
+    // The gap that decided against inline base64 delivery. A body over the limit is
+    // rejected by the body parser BEFORE bearerAuth, before the probe and before the
+    // SDK — so it used to produce a 413 with zero server-side record and an HTML
+    // error page on a JSON-RPC endpoint. That is the exact silent-unlogged-failure
+    // class this change exists to remove, so the parser rejection is a record too.
+    const { value, lines } = await captureMcpLog(async () =>
+      fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${ownerFull}` },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "add_smoke_photo",
+            arguments: { smokeId: randomUUID(), caption: "x".repeat(200_000) },
+          },
+        }),
+      }),
+    );
+
+    expect(value.status).toBe(413);
+    expect(value.headers.get("content-type")).toContain("application/json");
+    const record = eventPayload(lines, "request_rejected");
+    expect(record.path).toBe("/mcp");
+    expect(record.status).toBe(413);
+    expect(record.reason).toBe("entity.too.large");
+    // Only the type, the status and the declared length — the body is untrusted and
+    // was never parsed, so nothing from it is logged.
+    expect(lines.join("\n")).not.toContain("xxxxxxxxxx");
   });
 
   it("emits a probe record carrying the request-_meta file-param shape", async () => {
@@ -2273,6 +2332,8 @@ describe("@cj/mcp adapter", () => {
         count: 2,
       });
       expect(probe.metaKeys).toEqual(["openai/fileParams"]);
+      // `_meta` is a key of `params`, so the params-level shape sees it as well.
+      expect(probe.paramKeys).toEqual(["_meta", "arguments", "name"]);
       // The probe and the handler record join on (sessionId, rpcId).
       const record = eventPayload(lines, "photo_intake");
       expect(record.rpcId).toEqual(probe.rpcId);
