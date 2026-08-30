@@ -34,12 +34,24 @@ test("a 93-character name wraps inside the page rather than overflowing it", asy
 
   const heading = page.getByRole("heading", { level: 1 });
   await expect(heading).toBeVisible();
-  // Measured rather than assumed: the heading's box has to end inside the
-  // viewport, and it only can by wrapping onto several lines.
+
+  // The document overflow is the assertion with teeth. The h1 is a block inside
+  // a `min-w-0` flex column, so its BORDER BOX is bounded by that column
+  // whatever the text does: with `white-space: nowrap` — the exact regression
+  // this test names — the bounding box is unchanged and only the document's
+  // scrollWidth blows out. Passed as a string because apps/web/e2e/tsconfig.json
+  // carries no DOM lib, so a closure touching `document` fails the e2e
+  // typecheck before any browser starts.
+  const overflow = await page.evaluate<number>(
+    "document.documentElement.scrollWidth - document.documentElement.clientWidth",
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+
+  // …and it stays inside the viewport by wrapping, not by clipping.
   const box = await heading.boundingBox();
   expect(box).not.toBeNull();
   expect(box!.x + box!.width).toBeLessThanOrEqual(width);
-  expect(box!.height).toBeGreaterThan(100); // wrapped, not one clipped line
+  expect(box!.height).toBeGreaterThan(100); // several lines, not one
 });
 
 test("kebab-cased descriptors read as words on the detail page", async ({ page }) => {

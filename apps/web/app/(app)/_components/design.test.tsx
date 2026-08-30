@@ -102,11 +102,19 @@ describe("RatingSeal", () => {
     expect(html).not.toContain("-bottom-1");
   });
 
-  it("keeps the md heart as an overlay", () => {
+  it("keeps the md heart as an overlay anchored to the seal itself", () => {
     // md only ever sits on --bg, where the backing plate matches the ground.
+    // The heart is absolutely positioned, so the ASSERTION THAT MATTERS is its
+    // containing block: the seal — `border-2`, inset 2px — must be the root
+    // element, not a wrapper around it. Hanging it off an unbordered wrapper
+    // renders the same classes and moves the glyph 2px on both axes.
     const html = renderToStaticMarkup(<RatingSeal rating={92} liked={true} size="md" />);
-    expect(html).toContain("bg-bg");
+    const rootClass = /^<span class="([^"]*)"/.exec(html)?.[1] ?? "";
+    expect(rootClass).toContain("size-14");
+    expect(rootClass).toContain("border-2");
+    expect(rootClass).toContain("relative");
     expect(html).toContain("-bottom-1");
+    expect(html).toContain("bg-bg");
   });
 
   it("forces lining figures so a 3-digit score keeps the baseline", () => {
@@ -289,18 +297,31 @@ describe("Chips", () => {
     expect(html).toContain(">sun-dried hay<");
   });
 
-  it("keys chips by the stored value, not the label", () => {
-    // Two stored values can share a label once hyphens go; keying by the label
-    // would collide.
-    const errors: unknown[] = [];
-    const original = console.error;
-    console.error = (...args: unknown[]) => errors.push(args[0]);
-    try {
-      renderToStaticMarkup(<Chips items={["dark-chocolate", "dark chocolate"]} />);
-    } finally {
-      console.error = original;
-    }
-    expect(errors).toEqual([]);
+  it("does not print the same words in both tiers", () => {
+    // Once hyphens read as spaces the two tiers can collide: prod has
+    // progression rows carrying descriptors={graham-cracker} alongside
+    // specific_descriptors={"graham cracker"}. Rendering both puts the identical
+    // words on the row twice — the two-tiers-collapse-into-one failure
+    // DESIGN-001's split exists to avoid.
+    const html = renderToStaticMarkup(
+      <Chips items={["graham-cracker", "cedar"]} specific={["graham cracker", "wet slate"]} />,
+    );
+    expect(html.match(/graham cracker/g)).toHaveLength(1);
+    expect(html).toContain(">wet slate<");
+    expect(html).toContain(">cedar<");
+  });
+
+  it("still renders a verbatim descriptor that only looks similar", () => {
+    // The drop is exact-match only: "graham crackers" is the user's own word.
+    const html = renderToStaticMarkup(
+      <Chips items={["graham-cracker"]} specific={["graham crackers"]} />,
+    );
+    expect(html).toContain(">graham cracker<");
+    expect(html).toContain(">graham crackers<");
+  });
+
+  it("renders nothing when the verbatim tier is fully absorbed", () => {
+    expect(renderToStaticMarkup(<Chips items={[]} specific={[]} />)).toBe("");
   });
 });
 

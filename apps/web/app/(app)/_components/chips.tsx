@@ -16,7 +16,15 @@ function label(descriptor: string): string {
 }
 
 export function Chips({ items, specific = [] }: { items: string[]; specific?: string[] }) {
-  if (items.length === 0 && specific.length === 0) return null;
+  // Once hyphens read as spaces, a verbatim descriptor can land on the exact
+  // words a normalized one now shows ({graham-cracker} + {"graham cracker"} —
+  // 61 live progression rows carry both tiers and two hit this today). Two
+  // chips reading the identical words is the collapse DESIGN-001's two tiers
+  // exist to avoid, so the verbatim tier drops what the filled tier already
+  // says. Stored values are untouched; this is the label pass only.
+  const shown = new Set(items.map(label));
+  const rest = specific.filter((item) => !shown.has(item));
+  if (items.length === 0 && rest.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-1.5">
       {items.map((item) => (
@@ -24,7 +32,7 @@ export function Chips({ items, specific = [] }: { items: string[]; specific?: st
           {label(item)}
         </span>
       ))}
-      {specific.map((item) => (
+      {rest.map((item) => (
         <span key={item} className={`${ui.chipOutline} italic`}>
           {item}
         </span>

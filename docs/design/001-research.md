@@ -251,41 +251,73 @@ live catalog before the walkthrough:
   `BandTile` painted no edge of its own at thumb or hero size.
 - Stops 4 and 5 carried their monogram ink at **3.94:1 and 4.43:1**, below
   text contrast, and the `vitola · type` footer is real information.
-- The eight stops' worst adjacent separation was **ΔE 8.8** (CIE76), all
-  seven adjacent pairs under 11 — eight stops reading as roughly four shades.
+- The eight stops' worst adjacent separation was **ΔE 8.8** (CIE76), and the
+  ramp was not ordered by lightness at all — stop 2 was lighter than stop 1 —
+  so eight stops read as roughly four shades.
 - `--chip` was `--paper-200` / `--espresso-800`: **1.12:1** against the card it
   sits on, and byte-identical to `--raised` on paper. The filled tier and the
   keyline tier were the same object; only the italic separated them.
 
 ### The criteria, and the arithmetic they force
 
-Every stop must clear **1.6:1 against both `--bg` and `--surface` in both
-themes** and **4.5:1 against its own monogram ink**. Those two floors are not
-independent: the first bounds a stop's luminance from both ends
-(Y ∈ [0.045, 0.513]), the second splits what remains into two disjoint bands —
-**L\* 56.8–76.9** for stops taking the dark ink and **L\* 25.2–44.2** for the
-light ink — with a dead zone between them no stop may occupy. Four stops per
-band is what fits, so the 1–4 / 5–8 ink split is that arithmetic's output, not
-a convention: each stop clears 4.5:1 against exactly one of the two inks, and
-`token-contrast.test.ts` asserts precisely that rather than the split itself.
+**A theme-constant stop's two ground contrasts are zero sum.** Warm paper is
+L\* 94 and espresso L\* 8; a stop's paper ratio is (Y_paper + .05)/(Y + .05) and
+its espresso ratio is (Y + .05)/(Y_espresso + .05), so raising one lowers the
+other, exactly. Two consequences the criteria are built on:
 
-1.6:1 is not a WCAG figure. No single ramp value can reach the 3:1
-non-text threshold against an espresso ground and warm paper at once while a
-tile keeps one theme-constant colour, so the floor buys "still an object, not a
-hole" and `BandTile` now paints its own hairline `border-line` edge when it owns
-its box. Tiles rendered `shape="fill"` stay edgeless — all four call sites frame
-them in `border border-line` already.
+- The most any single stop can reach against **both** grounds at once is
+  **3.90:1** — the geometric mean point. 1.6:1 is therefore not a WCAG figure;
+  no ramp value reaches the 3:1 non-text threshold on both grounds while a tile
+  keeps one theme-constant colour. The floor buys "still an object, not a hole",
+  and `BandTile` now paints its own hairline `border-line` edge when it owns its
+  box. Tiles rendered `shape="fill"` stay edgeless — all four call sites frame
+  them in `border border-line` already.
+- **"Better at every stop" is unreachable, so it is the wrong criterion.** What
+  a retune can move is each theme's *worst* stop. That, the worst ink and the
+  worst separation are what `token-contrast.test.ts` compares against the
+  previous palette, pinned byte-for-byte, so a future retune cannot buy one
+  theme with the other and report only the half that improved.
 
-**Adjacent separation lands at ΔE 11.1, not the 12 the fix was scoped at.** With
-~6 L\* units per step inside each band, reaching 12 needs roughly 10 units of
-extra a/b separation per step, and a muted tobacco chroma envelope yields about
-7. The two ways past that were both rejected on rendered evidence: alternating
-chroma ±8 hits ΔE 12.3 but makes every other stop read as a mistake rather than
-a step, and sweeping hue below ~35° hits 12.7 by turning the oscuro end
-burgundy. A monotone 110°→38° hue sweep at C\* 31–38 is the ceiling for a ramp
-that still reads as one ordered leaf family, so 11 is the recorded criterion.
-The remaining separation is carried by the edge and by the caption beneath the
-art — which is also the honest answer to sibling tiles, below.
+Against those, every stop must clear **≥2.1:1 on paper**, **≥1.6:1 on espresso**
+(both grounds, both themes) and **4.5:1 against its own monogram ink**. The ink
+criterion splits the usable luminance into two disjoint bands — **L\* ≥ 56.8**
+for stops taking the dark ink and **L\* ≤ 44.2** for the light ink — with a dead
+zone between them no stop may occupy. On the pre-amendment palette stops 4 and 5
+sat *in* that dead zone (L\* 53.0 and 44.6), which is precisely why their ink
+failed. Four stops per band is what fits, so the 1–4 / 5–8 ink split is that
+arithmetic's output, not a convention: each stop clears 4.5:1 against exactly one
+of the two inks, and the test asserts that rather than the split itself.
+
+| | before | after |
+|---|---|---|
+| worst stop on paper (`--surface`) | 1.90:1 | **2.12:1** |
+| worst stop on espresso (`--surface`) | 1.25:1 | **1.63:1** |
+| worst monogram ink | 3.94:1 | **4.51:1** |
+| worst adjacent separation | ΔE 8.8 | **ΔE 9.8** |
+
+Individual stops still trade, and the PR carries the full stop-by-stop table:
+six of eight lose paper contrast, stop 8 most (12.16 → 9.34), because lifting
+the oscuro end off the espresso ground is the same move as pushing it toward the
+paper. Every one of those values stays far above the floor; the worst case,
+which is what "a tile dissolves" means, improves in both themes.
+
+**Adjacent separation lands at ΔE 9.8, not the 12 the fix was scoped at, and not
+the 11 an earlier revision of this branch claimed.** Holding the paper floor caps
+the ramp at L\* 66.5, which leaves the dark-ink band about 10 L\* wide for four
+stops — roughly 3.5 units per step — so separation inside it has to come from a
+hue sweep rather than from lightness. That is why the candela end reads greener
+than before: an ordered four-stop band that narrow has nowhere else to find the
+distance. Three ways past ΔE 10 were built, rendered and rejected: alternating
+chroma ±8 reaches 12.3 but makes every other stop read as a mistake rather than
+a step; sweeping hue below ~35° reaches 12.7 by turning the oscuro end burgundy;
+and stretching the lightness range to reach 11.1 costs the paper floor — it puts
+the worst paper stop at 1.67:1, *below* the 1.90:1 this amendment set out to fix,
+and swings stops 7–8 to hue 38° at nearly double their chroma, which is the same
+burgundy artifact by another route. The oscuro end is therefore pinned to the
+chocolate family (stop 8 at hue 53° / C\* 16, against the previous 55° / 17) and
+9.5 is the recorded criterion. The remaining separation is carried by the edge
+and by the caption beneath the art — which is also the honest answer to sibling
+tiles, below.
 
 Chips take the tobacco tint the direction always specified
 (`--tobacco-wash-light` / `--tobacco-wash-dark`), at **≥1.5:1** against both
@@ -293,7 +325,13 @@ grounds with the label still at 4.5:1. That restores the two-tier read without
 touching the stored vocabulary: normalized descriptors are kebab-cased, so
 `Chips` now renders `dark-chocolate` as "dark chocolate" — a label transform
 only, lowercase so the normalized tier keeps the verbatim tier's voice.
-`normalizeDescriptor` and every query path and MCP payload are unchanged.
+`normalizeDescriptor` and every query path and MCP payload are unchanged. One
+consequence of reading hyphens as spaces: a verbatim descriptor can now land on
+the exact words a normalized one displays (`{graham-cracker}` beside
+`{"graham cracker"}` — 61 live progression rows carry both tiers, two of them
+this pair), which would print the same words twice and collapse the two tiers
+into one object again. The verbatim tier drops an exact duplicate of a label the
+filled tier already shows; stored values are untouched.
 
 `--wrapper-leaf` is a ramp stop, so the retune restyles the burn-line rail;
 the leaf's separation from both ends of the ash→ember gradient is asserted

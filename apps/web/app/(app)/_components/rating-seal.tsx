@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 // The 100-point rating as a band-seal mark. Absent rating renders no seal —
 // never a placeholder zero; a liked-only smoke still shows its heart.
 
@@ -28,7 +30,12 @@ export function RatingSeal({
   if (rating == null) return liked ? <Heart className={SEAL[size].heart} /> : null;
 
   const s = SEAL[size];
-  const seal = (
+  // The overlay heart is a CHILD of the seal, never a sibling in a wrapper: it
+  // is absolutely positioned, so the seal's own padding box has to be its
+  // containing block. Hanging it off a wrapper instead would resolve
+  // `-right-1 -bottom-1` against a box 2px wider on each side (`border-2` at
+  // md), silently moving the glyph.
+  const seal = (overlay?: ReactNode) => (
     <span
       className={`relative inline-flex shrink-0 items-center justify-center rounded-full border-accent/70 ${s.box}`}
     >
@@ -40,33 +47,31 @@ export function RatingSeal({
       <span className={`font-display font-semibold text-accent lining-nums tabular-nums ${s.num}`}>
         {rating}
       </span>
+      {overlay}
     </span>
   );
 
-  if (!liked) return seal;
+  if (!liked) return seal();
 
-  // At `md` the seal only ever sits on `--bg`, so the heart keeps its overlay and
-  // its backing plate matches the ground behind it. At `sm` every caller is a
-  // `bg-surface` card (journal card, public journal card, the cigar detail's
-  // "Your smokes" row), where that `bg-bg` plate is a mismatched notch cut into
-  // the ring — and the overhang pushes a 10px glyph into the card's padding. The
-  // heart becomes a sibling instead: the parents are already flex rows with a
-  // gap, so it reads as one more mark in the badge row at the row's own size.
+  // At `md` the seal only ever sits on `--bg`, so the heart keeps its overlay,
+  // unmoved, and its backing plate matches the ground behind it. At `sm` every
+  // caller is a `bg-surface` card (journal card, public journal card, the cigar
+  // detail's "Your smokes" row), where that `bg-bg` plate is a mismatched notch
+  // cut into the ring — and the overhang pushes a 10px glyph into the card's
+  // padding. The heart becomes a sibling instead: the parents are already flex
+  // rows with a gap, so it reads as one more mark in the badge row.
   if (size === "sm") {
     return (
       <span className="inline-flex shrink-0 items-center gap-1">
-        {seal}
+        {seal()}
         <Heart className={s.heart} />
       </span>
     );
   }
 
-  return (
-    <span className="relative inline-flex shrink-0 items-center justify-center">
-      {seal}
-      <span className="absolute -right-1 -bottom-1 flex items-center justify-center rounded-full bg-bg px-0.5">
-        <Heart className={s.heart} />
-      </span>
-    </span>
+  return seal(
+    <span className="absolute -right-1 -bottom-1 flex items-center justify-center rounded-full bg-bg px-0.5">
+      <Heart className={s.heart} />
+    </span>,
   );
 }

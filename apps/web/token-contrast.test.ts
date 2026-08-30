@@ -11,6 +11,14 @@ import { describe, expect, it } from "vitest";
 // Before the retune the live values failed three of these outright: stop 8 sat
 // at 1.25:1 on the dark card (a hole, not a tile), stops 4 and 5 carried 3.94:1
 // and 4.43:1 monogram ink, and the ramp's worst adjacent pair was ΔE 8.8.
+//
+// A theme-constant stop's paper contrast and its espresso contrast are zero sum,
+// so "every stop improves in both themes" is unreachable and the floors below
+// are deliberately asymmetric. `PREVIOUS` pins what the palette this one
+// replaced actually measured, and the regression suite asserts that each theme's
+// WORST stop, the worst ink and the worst separation all move the right way —
+// the check that was missing when an earlier revision of this branch raised the
+// espresso floor by dropping the paper floor from 1.90:1 to 1.67:1.
 
 const CSS = readFileSync(fileURLToPath(new URL("./app/globals.css", import.meta.url)), "utf8");
 
@@ -77,24 +85,40 @@ function deltaE(a: string, b: string): number {
   return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
 }
 
+// Polar Lab — chroma and hue are how the ramp's "one ordered leaf family" reads,
+// and hue is what turns an oscuro brown into burgundy.
+function lch(hex: string): [number, number, number] {
+  const [l, a, b] = lab(hex);
+  return [l, Math.hypot(a, b), ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360];
+}
+
 const THEMES: Theme[] = ["light", "dark"];
 const STOPS = [1, 2, 3, 4, 5, 6, 7, 8];
 const GROUNDS = ["--bg", "--surface"];
 
-// The floor for a decorative art box that must still read as an object on the
-// page ground. It is not a WCAG figure — no ramp stop can reach 3:1 against both
-// an espresso ground and warm paper at once — so BandTile also paints its own
-// hairline edge; this keeps the art from dissolving between the edges.
-const GROUND_FLOOR = 1.6;
+// Floors for a decorative art box that must still read as an object on the page
+// ground. Not WCAG figures — the arithmetic ceiling for a theme-constant stop
+// against BOTH grounds at once is 3.90:1, and a ramp that spans a usable range
+// sits far below it — so BandTile also paints its own hairline edge; this keeps
+// the art from dissolving between the edges. The two floors differ because the
+// grounds do: warm paper is L* 94 and espresso L* 8, so the same stop is never
+// equally safe on both, and each floor is set at what this ramp actually
+// reaches. Raising either one lowers the other.
+const PAPER_FLOOR = 2.1;
+const ESPRESSO_FLOOR = 1.6;
+const GROUND_FLOOR: Record<Theme, number> = { light: PAPER_FLOOR, dark: ESPRESSO_FLOOR };
 // Monogram and the `vitola · type` footer are read as text: full text contrast.
 const INK_FLOOR = 4.5;
-// What a muted wrapper-shade family admits. The two floors above carve the ramp
-// into two disjoint luminance bands (L* 56.8–76.9 and 25.2–44.2) with four stops
-// each, which caps adjacent separation near ΔE 11; reaching 12 needs either a
-// chroma zig-zag that breaks the ramp's ordered reading or a hue sweep into
-// maroon. Measured evidence is on the PR for issue #49.
-const ADJACENT_DELTA_E = 11;
-const ALL_PAIRS_DELTA_E = 11;
+// What a muted wrapper-shade family admits once the floors above are held. The
+// ink criterion carves the ramp into two disjoint bands (L* ≥ 56.8 dark-ink,
+// L* ≤ 44.2 light-ink) and the paper floor caps the top at L* 66.5, leaving the
+// dark-ink band ~10 L* wide for four stops — so separation there is carried by
+// hue, and ΔE tops out near 10 for a ramp that still reads as one ordered leaf
+// family. ΔE 11 is reachable only by widening past the paper floor and swinging
+// the oscuro end to burgundy; both were built, measured and rejected. Evidence
+// is on the PR for issue #49.
+const ADJACENT_DELTA_E = 9.5;
+const ALL_PAIRS_DELTA_E = 9.5;
 const CHIP_FLOOR = 1.5;
 const MATERIAL_DELTA_E = 20;
 
@@ -105,7 +129,9 @@ describe("tobacco ramp", () => {
       const behind = resolve(ground, theme);
       for (const stop of STOPS) {
         const ratio = contrast(resolve(`--tobacco-${stop}`, theme), behind);
-        expect(ratio, `--tobacco-${stop} on ${ground}`).toBeGreaterThanOrEqual(GROUND_FLOOR);
+        expect(ratio, `--tobacco-${stop} on ${ground}`).toBeGreaterThanOrEqual(
+          GROUND_FLOOR[theme],
+        );
       }
     },
   );
@@ -187,5 +213,62 @@ describe("burn-line materials", () => {
     expect(deltaE(leaf, resolve("--ember", theme)), "leaf vs ember").toBeGreaterThanOrEqual(
       MATERIAL_DELTA_E,
     );
+  });
+});
+
+// --- no-regression guard ---------------------------------------------------
+// The palette this ramp replaced, byte-for-byte off `main` at 122d8fa. A retune
+// is allowed to trade individual stops — it has to, the two themes are zero sum
+// — but it may not make any theme's worst stop, the worst ink, or the worst
+// separation worse than what it replaced. Without this, "the dark theme got
+// better" hides "the light theme got worse".
+const PREVIOUS = [
+  "#98995f",
+  "#c9aa70",
+  "#b78f5c",
+  "#a1764a",
+  "#8a613b",
+  "#6f4a2c",
+  "#573722",
+  "#3e2517",
+];
+
+const worstGround = (ramp: string[], theme: Theme): number =>
+  Math.min(...ramp.flatMap((hex) => GROUNDS.map((g) => contrast(hex, resolve(g, theme)))));
+const worstInk = (ramp: string[]): number =>
+  Math.min(
+    ...ramp.map((hex, i) =>
+      contrast(hex, resolve(i < 4 ? "--tobacco-ink-dark" : "--tobacco-ink-light", "dark")),
+    ),
+  );
+const worstAdjacent = (ramp: string[]): number =>
+  Math.min(...ramp.slice(0, -1).map((hex, i) => deltaE(hex, ramp[i + 1]!)));
+
+describe("tobacco ramp vs the palette it replaced", () => {
+  const current = STOPS.map((stop) => resolve(`--tobacco-${stop}`, "dark"));
+
+  it.each(THEMES)("does not lower %s's worst stop against its grounds", (theme) => {
+    expect(worstGround(current, theme)).toBeGreaterThanOrEqual(worstGround(PREVIOUS, theme));
+  });
+
+  it("does not lower the worst monogram-ink contrast", () => {
+    expect(worstInk(current)).toBeGreaterThanOrEqual(worstInk(PREVIOUS));
+  });
+
+  it("does not lower the worst adjacent separation", () => {
+    expect(worstAdjacent(current)).toBeGreaterThanOrEqual(worstAdjacent(PREVIOUS));
+  });
+
+  it("keeps the oscuro end in the chocolate family", () => {
+    // Deviation 1 rejected a hue sweep for turning stops 7–8 burgundy, and an
+    // earlier revision of this branch shipped that artifact anyway at hue 38°
+    // with chroma 31. Pin the family: no more than a few degrees off what the
+    // previous palette read, at no more chroma.
+    for (const stop of [7, 8]) {
+      const [, chroma, hue] = lch(resolve(`--tobacco-${stop}`, "dark"));
+      const [, wasChroma, wasHue] = lch(PREVIOUS[stop - 1]!);
+      expect(hue, `--tobacco-${stop} hue`).toBeGreaterThan(wasHue - 6);
+      expect(chroma, `--tobacco-${stop} chroma`).toBeLessThanOrEqual(wasChroma + 2);
+    }
   });
 });
