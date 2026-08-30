@@ -842,6 +842,41 @@ describe("curation", () => {
       expect(smoke!.cigarId).toBe(target);
     });
 
+    it("holds back a lot both cigars smoked from, the known bound of the inverse", async () => {
+      // A lot consumed by BOTH a returning smoke and a survivor smoke has no exact
+      // inverse: splitting a user's purchase row is not the unmerge's business, so
+      // the lot stays whole with the survivor and the returning smoke's consumption
+      // no longer meets a lot. The count is off by the returning consumptions (1
+      // here) instead of by the survivor's — the smaller error, and a visible skip.
+      const owner = await h.createUser(`humidor-${newRequestId()}@example.com`);
+      const source = await seedUnverified("Shared Lot Source");
+      const target = await seedUnverified("Shared Lot Target");
+      const purchaseId = await addPurchase(source, owner, 10);
+      const earlySmoke = await addSmoke(source, owner);
+      await h.deps.db.insert(smokeConsumptions).values({ smokeId: earlySmoke, purchaseId });
+      const mergeId = await merge(source, target);
+      const laterSmoke = await addSmoke(target, owner);
+      await h.deps.db.insert(smokeConsumptions).values({ smokeId: laterSmoke, purchaseId });
+
+      const before = await getMyInventory(h.deps, owner);
+      expect(before.totalSticksRemaining).toBe(8);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.purchases).toBe(0);
+      expect(result.crossCigarLots).toBe(1);
+      expect(result.skipped).toContainEqual({
+        entity: "purchases",
+        rowId: purchaseId,
+        reason: "consumed_elsewhere",
+      });
+      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, earlySmoke));
+      expect(smoke!.cigarId).toBe(source);
+
+      const after = await getMyInventory(h.deps, owner);
+      expect(after.holdings.map((holding) => holding.cigar.cigarId)).toEqual([target]);
+      expect(after.totalSticksRemaining).toBe(9);
+    });
+
     it("returns a lot only the source's own returning smokes consumed", async () => {
       // The mirror case: every consumption belongs to a smoke coming back, so the
       // lot is not cross-cigar and the restore is exact.

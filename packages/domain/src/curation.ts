@@ -722,6 +722,9 @@ async function unmergeWithinTx(
       // out of the humidor entirely — the one skip the user, not the curator,
       // would feel. Smokes restore first (slot order), so this reads the
       // post-restore attribution and only holds back genuinely cross-cigar lots.
+      // Bound of the inverse: a lot BOTH sides smoked from stays whole with the
+      // survivor — splitting a user's purchase row is not the unmerge's business —
+      // so the returning smokes' consumptions no longer meet a lot. Pinned by test.
       const crossCigar = await lotsConsumedElsewhere(tx, ids, source.id);
       crossCigarLots = crossCigar.length;
       movable = ids.filter((id) => !crossCigar.includes(id));
