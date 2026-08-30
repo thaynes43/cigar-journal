@@ -33,7 +33,6 @@ import {
   UnauthenticatedError,
   UnauthorizedError,
   UnavailableError,
-  ValidationError,
   type Deps,
   type Principal,
   type SaveSmokeInput,
@@ -44,7 +43,7 @@ import {
   type RecordPriceInput,
   type CurationAttribution,
 } from "@cj/domain";
-import { processPhoto, UnsupportedImageTypeError, type PhotoStorage } from "@cj/photos";
+import { processPhoto, type PhotoStorage } from "@cj/photos";
 import {
   SERVER_INFO,
   INSTRUCTIONS,
@@ -112,6 +111,16 @@ import {
   type UpdateCigarArgs,
   type RecordPriceArgs,
 } from "./schemas.js";
+import {
+  classify,
+  describeArgument,
+  describeRequestMeta,
+  fetchTargetOf,
+  resolveContentType,
+  MAX_ATTACHED_BYTES,
+  type Channel,
+  type UnusableReason,
+} from "./photo-intake.js";
 import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./results.js";
 import { smokeUrl, uploadUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
@@ -127,86 +136,222 @@ import { mcpEvent } from "./logger.js";
 // requires DECLARING the file input: the `image` property (schemas.ts) listed in
 // the tool-level `_meta["openai/fileParams"]` published in tools/list
 // (ADD_SMOKE_PHOTO_META) — without the declaration ChatGPT forwards nothing.
-// Two delivery shapes are accepted and normalized into one fetch path:
+// Two delivery shapes are accepted and normalized into one intake path:
 //   1. `image` ARGUMENT value — `{ download_url, file_id, mime_type?, file_name? }`
 //      the client fills in for the declared file param (the standard Apps SDK path).
 //   2. Request-level `_meta["openai/fileParams"]` — the same entry shape carried in
 //      request metadata (the earlier, production-proven delivery). Kept working.
-// In both, download_url is a SHORT-LIVED signed URL the server must fetch promptly.
-// This is web-only — mobile uploads are broken upstream and a chat file URL pasted
-// as text (e.g. chatgpt.com/...) is unreachable from outside ChatGPT — hence the
-// mode-B upload link. Handle names track the MCP file-upload drafts SEP-2356/1306.
+// A download_url is a SHORT-LIVED signed URL the server must fetch promptly. This
+// is web-only — mobile uploads are broken upstream and a chat file URL pasted as
+// text (e.g. chatgpt.com/...) is unreachable from outside ChatGPT — hence the
+// mode-B link. Inline base64 delivery is deliberately NOT accepted; the reason is
+// in photo-intake.ts, and it is a body-size one, not a taste one.
+//
+// EVERY failure here falls back to mode B and is RECORDED, never raised. Classification
+// lives in photo-intake.ts; this file does the I/O and writes the `photo_intake` record.
 
 const ATTACHED_FETCH_TIMEOUT_MS = 15_000;
-const MAX_ATTACHED_BYTES = 20 * 1024 * 1024; // 20 MB
+const MAX_REDIRECTS = 3;
 
-interface AttachedFile {
-  downloadUrl: string;
-  mimeType?: string;
-}
+// Why the attached image did not get filed — the diagnostic vocabulary the owner
+// asked for, one value per distinguishable cause. Before this, "no image sent" and
+// "a handle arrived with no download_url" were byte-identical in the logs.
+//   no_delivery         nothing arrived on either channel
+//   not_an_object       `image` was a string/number/null, not a file handle
+//   no_url              a handle arrived (e.g. { file_id, mime_type }) with nothing fetchable
+//   empty_url           a URL key was present but blank
+//   bad_scheme          the reference failed the SSRF guard (not https to a public
+//                       host), INCLUDING a redirect that tried to escape it
+//   fetch_failed        the URL was fetched and failed (non-2xx, timeout, transport,
+//                       a missing Location, or too many hops)
+//   too_large           the response exceeded 20MB
+//   unreadable          bytes arrived but are not a supported, decodable image
+//   attached            the image arrived and decoded (the storage write follows)
+//   storage_unavailable photos are unconfigured cluster-wide; the tool is non-functional
+type IntakeOutcome =
+  | "attached"
+  | "no_delivery"
+  | UnusableReason
+  | "fetch_failed"
+  | "too_large"
+  | "unreadable"
+  | "storage_unavailable";
 
-// Parse `_meta["openai/fileParams"]` defensively: array or single object, unknown
-// shapes treated as ABSENT (fall back to mode B — a weird shape never errors).
-// Returns the first usable entry, or null when no image was attached.
-function firstFileParam(meta: Record<string, unknown> | undefined): AttachedFile | null {
-  if (!meta || typeof meta !== "object") return null;
-  const raw = meta["openai/fileParams"];
-  if (raw == null) return null;
-  const first = Array.isArray(raw) ? raw[0] : raw;
-  if (!first || typeof first !== "object") return null;
-  const entry = first as Record<string, unknown>;
-  const downloadUrl = entry.download_url;
-  if (typeof downloadUrl !== "string" || downloadUrl.length === 0) return null;
-  const mimeType = typeof entry.mime_type === "string" ? entry.mime_type : undefined;
-  return { downloadUrl, mimeType };
-}
+// The MODEL-VISIBLE half of the diagnosis, deliberately coarser than the log
+// vocabulary: it must never name a URL, a host, a key, or a file id, because
+// everything here can be read back to the user. Four statuses, because that is the
+// number of distinct things a model can usefully DO about it.
+type DeliveryStatus =
+  | "no_image_received"
+  | "image_reference_unusable"
+  | "image_fetch_failed"
+  | "image_unreadable";
 
-// Parse the declared `image` ARGUMENT (the Apps SDK file-param path) with the same
-// defensiveness as firstFileParam: any shape without a usable download_url is
-// treated as ABSENT so a partial/odd object falls back to mode B, never errors.
-// The file object may name its type as `mime_type`; other handle fields
-// (file_id/file_name/name) are unused server-side — only the URL is fetched.
-function fileFromArgument(image: unknown): AttachedFile | null {
-  if (!image || typeof image !== "object") return null;
-  const entry = image as Record<string, unknown>;
-  const downloadUrl = entry.download_url;
-  if (typeof downloadUrl !== "string" || downloadUrl.length === 0) return null;
-  const mimeType = typeof entry.mime_type === "string" ? entry.mime_type : undefined;
-  return { downloadUrl, mimeType };
-}
+const DELIVERY_DETAIL: Record<DeliveryStatus, string> = {
+  no_image_received: "No image arrived with this call.",
+  image_reference_unusable: "An image reference arrived, but it carried nothing the server can read.",
+  image_fetch_failed: "An image reference arrived, but the image could not be retrieved.",
+  image_unreadable: "An image arrived, but it is not a readable photo.",
+};
 
-// Fetch the attached image server-side: 15s timeout, 20MB cap enforced by both
-// the content-length header and a streamed byte count (a lying/absent header can
-// never blow past the cap). contentType prefers the entry's mime_type, then the
-// response header. Any failure throws — mapped to the contract `unavailable` by
-// the run() wrapper.
-async function fetchAttachedImage(file: AttachedFile): Promise<{ bytes: Buffer; contentType: string }> {
-  const res = await fetch(file.downloadUrl, {
-    signal: AbortSignal.timeout(ATTACHED_FETCH_TIMEOUT_MS),
-    redirect: "follow",
-  });
-  if (!res.ok || !res.body) throw new UnavailableError();
-
-  const declared = Number(res.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_ATTACHED_BYTES) throw new UnavailableError();
-
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > MAX_ATTACHED_BYTES) {
-      await reader.cancel();
-      throw new UnavailableError();
-    }
-    chunks.push(value);
+function deliveryFor(outcome: IntakeOutcome): { status: DeliveryStatus; detail: string } | undefined {
+  switch (outcome) {
+    case "no_delivery":
+      return { status: "no_image_received", detail: DELIVERY_DETAIL.no_image_received };
+    case "not_an_object":
+    case "no_url":
+    case "empty_url":
+    case "bad_scheme":
+      return { status: "image_reference_unusable", detail: DELIVERY_DETAIL.image_reference_unusable };
+    case "fetch_failed":
+    case "too_large":
+      return { status: "image_fetch_failed", detail: DELIVERY_DETAIL.image_fetch_failed };
+    case "unreadable":
+      return { status: "image_unreadable", detail: DELIVERY_DETAIL.image_unreadable };
+    default:
+      return undefined;
   }
+}
 
-  const contentType =
-    file.mimeType ?? res.headers.get("content-type") ?? "application/octet-stream";
-  return { bytes: Buffer.concat(chunks), contentType };
+// The fetch half of the `photo_intake` record. `host` is the ONE place the record
+// touches a value from a handle: the hostname is not the credential (the path and
+// query are) and it is the only way to tell an egress block from an upstream 403.
+interface FetchRecord {
+  host: string;
+  scheme: string;
+  status?: number;
+  ms: number;
+  timedOut: boolean;
+  redirects?: number;
+  // Why a redirect chain ended without a body. Without this, "the guard bit at a
+  // hop" was indistinguishable from "the host sent no Location" and "the chain
+  // was too long" — all three collapsed into a bare `fetch_failed`, and the first
+  // is a security event while the other two are upstream noise.
+  redirectFailure?: "scheme_refused" | "no_location" | "too_many_hops";
+  declaredType?: string;
+  sniffedType?: string;
+  bytes?: number;
+}
+
+interface FetchResult {
+  bytes?: Buffer;
+  headerType?: string;
+  record: FetchRecord;
+  failure?: "fetch_failed" | "too_large" | "bad_scheme";
+}
+
+// Fetch the attached image server-side. NEVER throws: a failure is a FALLBACK
+// (mode B still works) plus a diagnostic record, not a tool error the user never
+// sees. 15s timeout; the 20MB cap is enforced by both the content-length header
+// and a streamed byte count, so a lying/absent header cannot blow past it.
+//
+// Redirects are followed MANUALLY, at most three hops, revalidating the scheme
+// guard on every hop: `download_url` is a model-writable argument, so an
+// auto-followed redirect would otherwise be a free bypass of that guard
+// (https://attacker/ → http://10.0.0.1/).
+async function fetchAttachedImage(target: {
+  url: string;
+  scheme: string;
+  host: string;
+}): Promise<FetchResult> {
+  const started = Date.now();
+  const record: FetchRecord = { host: target.host, scheme: target.scheme, ms: 0, timedOut: false };
+  let url = target.url;
+  // ONE signal for the whole exchange, redirects included — a per-hop timeout
+  // would let a redirect chain stretch the 15s budget to four times that.
+  const signal = AbortSignal.timeout(ATTACHED_FETCH_TIMEOUT_MS);
+
+  try {
+    for (let hop = 0; ; hop += 1) {
+      const res = await fetch(url, { signal, redirect: "manual" });
+      record.status = res.status;
+
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location");
+        const next = location ? redirectTarget(url, location) : null;
+        // Release the redirect's own body rather than leaving the socket held.
+        await res.body?.cancel();
+        if (!next || hop >= MAX_REDIRECTS) {
+          record.ms = Date.now() - started;
+          record.redirects = hop;
+          // A hop the guard refused is reported as `bad_scheme`, not `fetch_failed`:
+          // it is an attempted SSRF escape (https://host/ -> http://169.254.169.254/),
+          // and it must be greppable as one rather than buried among timeouts.
+          if (!location) {
+            record.redirectFailure = "no_location";
+            return { record, failure: "fetch_failed" };
+          }
+          if (!next) {
+            record.redirectFailure = "scheme_refused";
+            return { record, failure: "bad_scheme" };
+          }
+          record.redirectFailure = "too_many_hops";
+          return { record, failure: "fetch_failed" };
+        }
+        url = next.url;
+        record.host = next.host;
+        record.scheme = next.scheme;
+        record.redirects = hop + 1;
+        continue;
+      }
+
+      if (!res.ok || !res.body) {
+        await res.body?.cancel();
+        record.ms = Date.now() - started;
+        return { record, failure: "fetch_failed" };
+      }
+
+      const declared = Number(res.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > MAX_ATTACHED_BYTES) {
+        record.ms = Date.now() - started;
+        record.bytes = declared;
+        return { record, failure: "too_large" };
+      }
+
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_ATTACHED_BYTES) {
+          await reader.cancel();
+          record.ms = Date.now() - started;
+          record.bytes = total;
+          return { record, failure: "too_large" };
+        }
+        chunks.push(value);
+      }
+
+      record.ms = Date.now() - started;
+      record.bytes = total;
+      return {
+        bytes: Buffer.concat(chunks),
+        headerType: res.headers.get("content-type") ?? undefined,
+        record,
+      };
+    }
+  } catch (error) {
+    record.ms = Date.now() - started;
+    // undici raises the AbortSignal.timeout as a TimeoutError; distinguishing it
+    // from a connection refusal is the difference between "the signed URL expired
+    // slowly" and "egress is blocked".
+    record.timedOut = error instanceof Error && error.name === "TimeoutError";
+    return { record, failure: "fetch_failed" };
+  }
+}
+
+// Resolve one redirect hop against the same scheme guard the first request passed.
+function redirectTarget(from: string, location: string): { url: string; scheme: string; host: string } | null {
+  let resolved: URL;
+  try {
+    resolved = new URL(location, from);
+  } catch {
+    return null;
+  }
+  const target = fetchTargetOf(resolved.toString());
+  return target ? { url: resolved.toString(), ...target } : null;
 }
 
 interface AuthContext {
@@ -774,11 +919,27 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     "add_smoke_photo",
     {
       title: "Add smoke photo",
+      // The model CANNOT attach the image itself — only the host can forward one
+      // with the call — so the description no longer instructs it to. The previous
+      // wording ("ATTACH THE IMAGE TO THIS TOOL CALL") described host behavior as a
+      // model action: in the owner's 2026-08-30 transcript the model did exactly the
+      // right thing (called with { smokeId, kind } and invented no `image`), so that
+      // text could only teach it that a correct call had failed. What the model CAN
+      // act on is the result: `mode`, and on mode B the `delivery.status`.
+      //
+      // AND THE LINK LEADS. A draft of this text told the model, on
+      // `no_image_received`, to ask the user to re-send the photo with their next
+      // message. That asserts an UNVERIFIED hypothesis — that a host forwards only a
+      // file attached to the invoking turn (client-compatibility.md) — as fact, and
+      // if it is wrong it loops the user through a re-send before offering the link
+      // that actually works. Nothing model-facing states it. The hypothesis stays a
+      // hypothesis in the docs until `photo_intake_request` settles it.
       description:
-        "Attach a photo to one of the user's smokes. The image is never a text argument — provide it one of two ways and the tool auto-detects which:\n" +
-        "1. ATTACH THE IMAGE TO THIS TOOL CALL. When the user has shared a photo, attach that image directly to this call so the host carries it as file data; the server fetches it, strips location metadata, and files it under the smoke. Do NOT paste an image or a chat file link (e.g. a chatgpt.com/... URL) into any field — those links are unreachable outside the chat and will fail.\n" +
-        "2. NO IMAGE? Call with just the smoke id; the tool returns a one-time upload link. Hand it to the user: open it on your phone, it goes straight to your camera roll and attaches to this smoke. This is the reliable path on mobile, where in-chat photo attachment does not work.\n" +
-        "A photo NEVER blocks save_smoke — it is a separate action with its own result, so a photo failure never affects saving the smoke. `kind` classifies the shot (cigar, band, construction, burn, other; default other); add a `caption` only if the user gave one.",
+        "Attach a photo to one of the user's smokes, or get a one-time upload link to hand them. You cannot attach the image yourself — it reaches the tool only if the host forwards a file with this call.\n" +
+        "Call with just the smoke id. If an image was forwarded, the server strips location metadata and files it under the smoke (`mode: attached`); otherwise you get a one-time upload link (`mode: upload_url`) to hand the user — it opens on their phone, goes straight to their camera roll, and attaches to this smoke.\n" +
+        "Never paste an image, a chat file link (e.g. a chatgpt.com/... URL), or a file id into any field; those are unreachable from the server and will fail.\n" +
+        "When `mode` is `upload_url`, hand the user the link — that is the path that works. `delivery.status` says why no photo was filed (`no_image_received` = nothing arrived with the call; the others = something arrived the server could not use); use it to tell them the truth, not to withhold the link.\n" +
+        "A photo NEVER blocks save_smoke — it is a separate action with its own result. `kind` classifies the shot (cigar, band, construction, burn, other; default other); add a `caption` only if the user gave one.",
       inputSchema: addSmokePhotoSchema,
       outputSchema: addSmokePhotoOutput,
       // Declare `image` as a file input so ChatGPT forwards the attached photo.
@@ -792,33 +953,127 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     },
     (args, extra) =>
       run("add_smoke_photo", extra.authInfo, async ({ principal }, correlationId) => {
+        const startedAt = Date.now();
+        const requestMeta = extra._meta as Record<string, unknown> | undefined;
+
+        // Describe BOTH channels before deciding anything. Whatever else this call
+        // does, the record must be able to say what arrived — that is the whole
+        // point of the change: "nothing was sent" and "a handle arrived carrying
+        // { file_id, mime_type }" used to be indistinguishable from outside.
+        const argument = describeArgument(args.image);
+        const requestMetaShape = describeRequestMeta(requestMeta);
+
+        // Exactly one `photo_intake` line per call, joined to the HTTP-layer
+        // `photo_intake_request` line on (sessionId, rpcId), and to `tool_called`
+        // /`tool_error` on correlationId.
+        const record = (
+          outcome: IntakeOutcome,
+          mode: "attached" | "upload_url" | "unavailable",
+          channel: Channel,
+          extras: {
+            urlKey?: string;
+            fetch?: FetchRecord;
+            decodeError?: string;
+          } = {},
+        ): void => {
+          mcpEvent("photo_intake", {
+            tool: "add_smoke_photo",
+            correlationId,
+            sessionId: extra.sessionId,
+            rpcId: extra.requestId,
+            outcome,
+            channel,
+            mode,
+            argument,
+            requestMeta: requestMetaShape,
+            ...extras,
+            latencyMs: Date.now() - startedAt,
+          });
+        };
+
         // Photos disabled cluster-wide → the whole tool is non-functional; report
-        // `unavailable` rather than mint a link that would 503 on upload.
-        if (!storage) throw new UnavailableError();
+        // `unavailable` rather than mint a link that would 503 on upload. Recorded
+        // first so this stays distinguishable from a delivery problem.
+        if (!storage) {
+          record("storage_unavailable", "unavailable", "none");
+          throw new UnavailableError();
+        }
 
-        // Two accepted deliveries → one fetch path: the declared `image` argument
-        // (Apps SDK file param) and the production-proven request-level
-        // `_meta["openai/fileParams"]`. Either yields an AttachedFile or null
-        // (→ mode B); a malformed shape in either is treated as absent, never errors.
-        const meta = extra._meta as Record<string, unknown> | undefined;
-        const attached = firstFileParam(meta) ?? fileFromArgument(args.image);
+        const delivery = classify(args.image, requestMeta);
+        const channel: Channel = delivery.kind === "absent" ? "none" : delivery.channel;
 
-        if (attached) {
-          // Mode A — image attached: fetch it, run the shared pipeline, store it.
-          const { bytes, contentType } = await fetchAttachedImage(attached);
-          let processed;
-          try {
-            processed = await processPhoto(bytes, contentType);
-          } catch (error) {
-            // A present-but-undecodable image is the model's to fix by attaching a
-            // supported one — surface it as a structured validation_error.
-            if (error instanceof UnsupportedImageTypeError) {
-              throw new ValidationError([
-                { path: "image", message: "Unsupported or unreadable image." },
-              ]);
+        // Turn the classified delivery into bytes, or into the reason there are
+        // none. Nothing below throws for a delivery problem: mode B is the
+        // guaranteed path, so a failure becomes a link plus a record.
+        let outcome: IntakeOutcome;
+        let bytes: Buffer | undefined;
+        let declaredType: string | undefined;
+        let fetchRecord: FetchRecord | undefined;
+        let urlKey: string | undefined;
+
+        switch (delivery.kind) {
+          case "absent":
+            outcome = "no_delivery";
+            break;
+          case "unusable":
+            outcome = delivery.reason;
+            break;
+          case "fetchable": {
+            urlKey = delivery.urlKey;
+            const fetched = await fetchAttachedImage(delivery);
+            fetchRecord = fetched.record;
+            if (fetched.failure || !fetched.bytes) {
+              outcome = fetched.failure ?? "fetch_failed";
+            } else {
+              bytes = fetched.bytes;
+              // The handle's own mime_type wins over the response header — the
+              // host knows what the user attached; the origin often says nothing.
+              declaredType = delivery.mimeType ?? fetched.headerType;
+              outcome = "attached";
             }
-            throw error;
+            break;
           }
+        }
+
+        let processed: Awaited<ReturnType<typeof processPhoto>> | undefined;
+        let decodeError: string | undefined;
+        if (bytes) {
+          // Bytes only ever come from a fetch, so the type resolution always has a
+          // fetch record to land in (inline delivery was removed — photo-intake.ts).
+          const resolved = resolveContentType(declaredType, bytes);
+          if (fetchRecord) {
+            fetchRecord.declaredType = resolved.declaredType;
+            fetchRecord.sniffedType = resolved.sniffedType;
+          }
+          try {
+            processed = await processPhoto(bytes, resolved.contentType);
+          } catch (error) {
+            // The error CLASS only — never its message, which can echo input.
+            // UnsupportedImageTypeError means the type was refused up front; any
+            // other name means the decoder itself gave up on the bytes.
+            decodeError = error instanceof Error ? error.name : "unknown";
+            // Bytes that will not decode are a FALLBACK, not an error: the user
+            // gets a working upload link and the reason lives in the record. This
+            // deliberately replaces the old `validation_error`/`unavailable` — a
+            // model-visible error the user never sees, for a failure they cannot
+            // fix. UnsupportedImageTypeError and a decoder fault are one outcome
+            // here because they are one thing to the user: unusable bytes.
+            outcome = "unreadable";
+          }
+        }
+
+        const extras = {
+          ...(urlKey !== undefined ? { urlKey } : {}),
+          ...(fetchRecord ? { fetch: fetchRecord } : {}),
+          ...(decodeError !== undefined ? { decodeError } : {}),
+        };
+
+        if (processed) {
+          // `outcome: attached` describes INTAKE, not the storage write: it is
+          // recorded before addSmokePhoto so the intake story is complete even when
+          // the write then fails (smoke_not_found, photo_limit) — that failure
+          // arrives as `tool_error` under the same correlationId.
+          record("attached", "attached", channel, extras);
           const photo = await addSmokePhoto(deps, storage, principal, {
             smokeId: args.smokeId,
             kind: args.kind,
@@ -837,8 +1092,10 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           return jsonResult({ mode: "attached", photo });
         }
 
-        // Mode B — no image: mint a short-lived, single-use upload link bound to
-        // (user, smoke, kind?, caption?) for the user to open on their phone.
+        // Mode B — no usable image: mint a short-lived, single-use upload link
+        // bound to (user, smoke, kind?, caption?) for the user to open on their
+        // phone, and tell the model plainly why it got a link.
+        record(outcome, "upload_url", channel, extras);
         const minted = await mintPhotoUploadToken(deps, principal, {
           smokeId: args.smokeId,
           kind: args.kind,
@@ -849,6 +1106,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           mode: "upload_url",
           uploadUrl: uploadUrl(minted.token),
           expiresAt: minted.expiresAt,
+          delivery: deliveryFor(outcome),
         });
       }),
   );

@@ -10,7 +10,19 @@ export type McpEventName =
   | "session_closed"
   | "auth_rejected"
   | "tool_called"
-  | "tool_error";
+  | "tool_error"
+  // add_smoke_photo intake diagnostics (photo-intake.ts). `photo_intake_request`
+  // is written from the HTTP layer BEFORE the SDK validates input, so a call the
+  // SDK rejects still leaves a record; `photo_intake` is written from the handler
+  // once the delivery has been classified, fetched, and decoded. They join on
+  // (sessionId, rpcId). Both obey the shape-not-values rule: key names and JSON
+  // types only, never a handle's values — a download_url IS a credential.
+  | "photo_intake"
+  | "photo_intake_request"
+  // A request express.json() refused (over the body limit, or not JSON). It never
+  // reaches auth, the probe, or the SDK, so without this line it is the one shape
+  // that fails with no server-side record at all.
+  | "request_rejected";
 
 function ts(): string {
   return new Date().toISOString();

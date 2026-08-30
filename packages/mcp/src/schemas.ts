@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ENRICHMENT_BACKLOG_MAX } from "@cj/domain";
+import { UNPARSED_IMAGE } from "./photo-intake.js";
 
 // Zod input schemas mirroring docs/mcp/tool-contract.md. Design rules:
 //
@@ -539,7 +540,7 @@ export const recordPurchaseSchema = z
 // so a partial/odd file object is NOT rejected at input validation but reaches the
 // handler, which fetches a usable one or falls back to the mode-B upload link —
 // never an error (contract "unknown/malformed → mode B"). It is out of `required`.
-const fileParamImage = z
+const fileParamHandle = z
   .object({
     download_url: z
       .string()
@@ -553,6 +554,35 @@ const fileParamImage = z
     file_name: z.string().optional().describe("Original file name, if the host provided one."),
   })
   .passthrough();
+
+// …but only permissive UP TO A POINT, and the gap was hiding the very failures we
+// need to see. `passthrough()` forgives unknown KEYS, not a wrong TYPE: probed
+// against the installed zod 4.4.3 + SDK 1.30.0, `image: "http://x"`, `image: null`,
+// `image: 5` and `image: { download_url: 12 }` all FAIL validation, and the SDK
+// raises that as McpError(InvalidParams) BEFORE the handler runs — so those calls
+// never reach `mcpEvent` and leave ZERO lines in Loki. `image: null` in particular
+// is a plausible "no file attached" host shape that hard-errors the whole call.
+//
+// So wrap rather than loosen: anything the handle schema rejects is preserved
+// VERBATIM under an internal marker key, and the handler classifies and logs its
+// shape (photo-intake.ts) instead of the call dying as a protocol error. The
+// marker is stripped before the handle is used and never reaches a fetch, a log
+// value, or the result.
+//
+// Do NOT reach for `.catch()` here: `.catch(fn)` throws "Dynamic catch values are
+// not supported in JSON Schema" at emission time in zod 4.4.3, which would break
+// `tools/list` for the WHOLE server, and `.catch(undefined)` discards the raw
+// value — silently converting a malformed delivery into a false "no image was
+// sent", precisely the confusion this change exists to end.
+//
+// The published manifest is UNCHANGED by this wrapper (verified byte-identical
+// through the SDK's own converter, `image` still absent from `required`,
+// `additionalProperties: {}` preserved); mcp.test.ts pins that so a zod/SDK
+// upgrade cannot drift it.
+const fileParamImage = z.preprocess(
+  (value) => (value === undefined || fileParamHandle.safeParse(value).success ? value : { [UNPARSED_IMAGE]: value }),
+  fileParamHandle.optional(),
+);
 
 export const addSmokePhotoSchema = z
   .object({
@@ -569,8 +599,9 @@ export const addSmokePhotoSchema = z
       .string()
       .optional()
       .describe("A short caption in the user's words, only if they gave one. Sparse is correct — omit rather than invent."),
+    // `.optional()` already lives inside the preprocess wrapper above — applying
+    // it again here would wrap the pipe and change the emitted schema.
     image: fileParamImage
-      .optional()
       .describe(
         "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. Omit it and the tool returns a one-time upload link instead.",
       ),
@@ -965,12 +996,21 @@ export const recordPriceOutput = z
 
 // Dual-mode: mode A returns { mode, photo }, mode B returns { mode, uploadUrl,
 // expiresAt } — both branches optional so either validates.
+//
+// `delivery` rides mode B only and tells the model the TRUTH about why no image
+// was filed — `no_image_received` (nothing was forwarded) vs
+// `image_reference_unusable` / `image_fetch_failed` / `image_unreadable`. Without
+// it the model cannot tell "the user never attached anything" from "the host sent
+// something the server could not use", and so cannot give the user useful advice.
+// It is deliberately opaque: it names no URL, host, key, or file id, because
+// anything here is model-visible and therefore user-visible.
 export const addSmokePhotoOutput = z
   .object({
     mode: z.string(),
     photo: looseObject.optional(),
     uploadUrl: z.string().optional(),
     expiresAt: z.string().optional(),
+    delivery: looseObject.optional(),
   })
   .passthrough();
 
