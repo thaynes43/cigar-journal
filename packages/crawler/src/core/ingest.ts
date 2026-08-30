@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { asc, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { crawlRuns, enrichmentRequests, productPhotos, vendors, type Database } from "@cj/db";
 import {
-  cigars,
-  crawlRuns,
-  enrichmentRequests,
-  productPhotos,
-  type Database,
-  type EnrichmentRequestRow,
-} from "@cj/db";
-import { recordPriceObservation } from "@cj/domain";
+  recordPriceObservation,
+  recordEnrichmentAttempt,
+  enrichmentCoverageForRequest,
+  coversMarketSql,
+  vendorNotRetiredSql,
+  type EnrichmentOutcome,
+} from "@cj/domain";
 import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedPhoto } from "@cj/photos";
 import type { VendorAdapter } from "../adapters/types.js";
 import { collectSitemapSamples, collectSitemapUrls } from "./sitemap.js";
@@ -27,9 +27,12 @@ import { CRAWLER_UA_TOKEN, type Fetcher } from "./fetcher.js";
 
 const ENRICH_DEFAULT_LIMIT = 10;
 const MAX_ENRICH_CANDIDATES = 8;
-const EXHAUST_ATTEMPTS = 2;
 
 export type CrawlMode = "seed" | "offers" | "enrich";
+
+// How a look left the request. `blocked` is kept apart from `exhausted` because
+// "nobody could finish looking" is not a fact about a catalogue (#158).
+type Retirement = "open" | "exhausted" | "blocked";
 
 export interface IngestStats {
   pagesFetched: number;
@@ -52,6 +55,33 @@ export interface IngestStats {
     unionLocs: number;
     productLocs: number;
     varied: boolean;
+  };
+  // Present only on an `enrich` run, so the JSONB stays byte-identical for the
+  // other two modes. A nightly drain has to be able to say WHAT it retired and
+  // WHERE: under per-vendor budgets (#158) "spent" is a verdict about this vendor
+  // and this vendor only, and a summary that omits it is the vendor-blind report
+  // the ADR amendment forbids.
+  enrich?: {
+    // Open requests this vendor selected — already filtered by its own budget.
+    requests: number;
+    // Looks that COMPLETED (miss + match): the vendor's catalogue was enumerated
+    // and some ranked candidate parsed as a product. These are the ones that burn
+    // budget — a page that answers 200 with nothing parseable does not count.
+    looked: number;
+    matched: number;
+    // Looks that could not complete: an empty enumeration, no candidate that
+    // answered 200, or none that yielded a parseable product. Never
+    // budget-burning, separately bounded by ERROR_BUDGET.
+    errored: number;
+    // Requests this run retired as EXHAUSTED — every counted lane has now
+    // completed its looks and none carried the cigar.
+    spent: number;
+    // Requests this run retired as BLOCKED — every counted lane is retired but at
+    // least one burned ERROR_BUDGET without finishing a look. Reported apart from
+    // `spent` because it is not a fact about any catalogue (#158): a nightly
+    // summary that folded the two together would say "we looked and found
+    // nothing" about a vendor nobody could reach.
+    blocked: number;
   };
 }
 
@@ -389,29 +419,63 @@ async function drainEnrichment(
   const urls = await productUrls(deps, adapter, stats);
   const candidates = urls.map((url) => ({ url, tokens: slugTokens(lastSegment(pathOf(url))) }));
 
+  // This vendor's market, read from the REGISTRY rather than from the adapter.
+  // The adapter carries the same field, but the exhaustion rollup reads
+  // `vendors.focus`, and a drain filtered on a different copy of that fact could
+  // look at a request it is not counted against — a whole class of drift removed
+  // for one indexed read per run. NULL focus means unknown, which covers
+  // everything: the filter is a NEGATIVE one, and both this clause and the
+  // rollup's come from coversMarketSql so the two cannot drift.
+  const vendorRows = await deps.db
+    .select({ focus: vendors.focus })
+    .from(vendors)
+    .where(eq(vendors.id, options.vendorId))
+    .limit(1);
+  const focus = vendorRows[0]?.focus ?? null;
+
   const limit = options.limit ?? ENRICH_DEFAULT_LIMIT;
-  const pending = await deps.db
-    .select()
-    .from(enrichmentRequests)
-    .where(eq(enrichmentRequests.status, "pending"))
-    .orderBy(asc(enrichmentRequests.createdAt))
-    .limit(limit);
+
+  // The per-vendor open set (ADR-006 amendment 2026-08-30, migration 0023). Three
+  // things changed from the pre-0023 `WHERE status = 'pending'`:
+  //
+  //   * The budget test is against THIS VENDOR'S ledger row, not the request's
+  //     shared counter. A request Fox has spent is still open to 2 Guys.
+  //   * `exhausted` is IN the open set. That is the entire reopen mechanism: a
+  //     newly enabled vendor has no ledger row, so `COALESCE(attempts, 0) = 0`
+  //     and the first run picks the row straight up — no reopen job, no cron, no
+  //     backfill. "Exhausted" only ever meant "exhausted at the vendors that
+  //     looked", and a vendor that might carry the brand is new evidence.
+  //   * `in_progress` is in it too. The drain no longer WRITES that state, but a
+  //     row stranded by an older image (or a crash mid-rollout) must still be
+  //     reachable — nothing else re-selects it (#157 defect 2).
+  //
+  // `fulfilled` is deliberately absent: one catalogue photo per cigar (ADR-007)
+  // means the ask is answered. The join to `cigars` also kills the per-request
+  // SELECT the old loop did, so the canonical name and market arrive in one read.
+  const open = await deps.db.execute(sql`
+    SELECT r.id AS request_id, c.id AS cigar_id, c.canonical_name, c.type
+    FROM enrichment_requests r
+    JOIN cigars c ON c.id = r.cigar_id
+    LEFT JOIN enrichment_attempts a
+           ON a.request_id = r.id AND a.vendor_id = ${options.vendorId}
+    WHERE r.status IN ('pending', 'in_progress', 'exhausted')
+      AND ${coversMarketSql(sql`${focus}::text`, sql`c.type`)}
+      AND ${vendorNotRetiredSql(sql`COALESCE(a.attempts, 0)`, sql`COALESCE(a.errors, 0)`)}
+    ORDER BY r.created_at
+    LIMIT ${limit}
+  `);
+  const pending = open.rows as unknown as {
+    request_id: string;
+    cigar_id: string;
+    canonical_name: string;
+    type: "NC" | "CC" | null;
+  }[];
+
+  const enrich = { requests: pending.length, looked: 0, matched: 0, errored: 0, spent: 0, blocked: 0 };
+  stats.enrich = enrich;
 
   for (const request of pending) {
-    const cigarRows = await deps.db
-      .select({ id: cigars.id, canonicalName: cigars.canonicalName })
-      .from(cigars)
-      .where(eq(cigars.id, request.cigarId))
-      .limit(1);
-    const cigar = cigarRows[0];
-    if (!cigar) continue;
-
-    if (!options.dryRun) {
-      await deps.db
-        .update(enrichmentRequests)
-        .set({ status: "in_progress" })
-        .where(eq(enrichmentRequests.id, request.id));
-    }
+    const cigar = { id: request.cigar_id, canonicalName: request.canonical_name };
 
     const wanted = slugTokens(cigar.canonicalName);
     const ranked = candidates
@@ -420,22 +484,71 @@ async function drainEnrichment(
       .sort((a, b) => b.score - a.score)
       .slice(0, MAX_ENRICH_CANDIDATES);
 
-    const matched = await tryEnrichCandidates(deps, options, cigar, ranked, stats, report);
+    const outcome = await tryEnrichCandidates(deps, options, cigar, ranked, candidates.length, stats, report);
+    if (outcome === "error") enrich.errored += 1;
+    else enrich.looked += 1;
+    if (outcome === "match") enrich.matched += 1;
+
     if (options.dryRun) continue;
 
-    await finalizeEnrichment(deps, request, matched);
+    const retired = await finalizeEnrichment(deps, options, request.request_id, request.type, outcome);
+    if (retired === "exhausted") enrich.spent += 1;
+    else if (retired === "blocked") enrich.blocked += 1;
   }
 }
 
+// What one vendor's look CONCLUDED — three outcomes, not a boolean, because "no
+// match at V is evidence about V only" makes the difference between a failed look
+// and a completed one load-bearing (ADR-006 amendment 2026-08-30).
+//
+//   match — a listing cleared the similarity floor.
+//   miss  — we READ this vendor's catalogue and it does not carry the cigar.
+//           Honest evidence; it burns one of this vendor's two attempts. NOTE that
+//           "nothing scored above zero" is a miss, not an absence of evidence: the
+//           enumeration IS the vendor's product list and nothing in it resembled
+//           the cigar, which is exactly the Red Anchor/Fox result. That rests on
+//           the enumeration being real products, which nothing at drain time can
+//           check — zero candidates means zero fetches. It is the ADR's mandatory
+//           pre-enable `--probe` (and its path-shape census, #179) that
+//           establishes it, and the reason a gate correction is never allowed to
+//           ride a ledger change.
+//   error — the look could not COMPLETE, so it says nothing about any catalogue:
+//           it never burns an attempt, and ERROR_BUDGET bounds it so a permanently
+//           broken vendor cannot pin the request open and re-fetch the same
+//           failures every night.
+//
+// THE LINE BETWEEN THE LAST TWO IS A PARSED PRODUCT, NOT A 200. An over-matching
+// product gate answers 200 all day and parses nothing: the live probe recorded in
+// this PR's ADR-006 amendment had 2 Guys' `/store/` prefix enumerate 1,462 locs
+// that were gift-registry pages carrying no schema.org Product, and `parsed=0` was
+// the true signal (the probe's own `needs-attention` misattributed it to the
+// vendor). Counting that as a miss would burn real budget for a gate defect and
+// then report "2 Guys looked and does not carry it" — manufactured evidence about
+// a vendor, which is precisely what the amendment forbids. So a look is COMPLETE
+// only once some ranked candidate yielded a parseable product listing — the same
+// `parsed` count `--probe` reports. Three shapes therefore land on `error`: an
+// empty enumeration, no candidate that answered 200, and candidates that answered
+// 200 with nothing a product parser could read.
+//
+// A parsed product that is an accessory, or that misses the similarity floor, is a
+// MISS and not an error: we did read the vendor's catalogue, and what it holds is
+// not this cigar.
 async function tryEnrichCandidates(
   deps: IngestDeps,
   options: IngestOptions,
   cigar: { id: string; canonicalName: string },
   ranked: { url: string }[],
+  enumerated: number,
   stats: IngestStats,
   report: string[],
-): Promise<boolean> {
+): Promise<EnrichmentOutcome> {
   const { adapter } = options;
+  if (enumerated === 0) return "error";
+  if (ranked.length === 0) return "miss";
+
+  // Did we actually READ this vendor's catalogue? A 200 is not enough — see the
+  // header: a gate that admits non-product pages answers 200 and parses nothing.
+  let parsed = false;
   for (const candidate of ranked) {
     const { status, body } = await deps.fetcher.fetchText(candidate.url);
     if (status !== 200) {
@@ -446,6 +559,7 @@ async function tryEnrichCandidates(
     if (!product) continue;
     const listing = normalizeListing(product, breadcrumbs);
     if (!listing) continue;
+    parsed = true;
     stats.listingsParsed += 1;
     if (!isCigarListing(listing, adapter)) {
       stats.skippedNonCigar += 1;
@@ -457,7 +571,7 @@ async function tryEnrichCandidates(
 
     if (options.dryRun) {
       report.push(`enrich ${pathOf(candidate.url)}  ${listing.name}  (sim=${sim.toFixed(2)}) → ${cigar.canonicalName}`);
-      return true;
+      return "match";
     }
 
     const now = deps.now();
@@ -489,39 +603,102 @@ async function tryEnrichCandidates(
       if (observation.inserted) stats.offersWritten += 1;
     });
 
+    // KNOWN MISREPORT, deliberately unchanged by #158 and stated rather than
+    // silently carried: a capture that throws still returns `match`, so a request
+    // whose whole point was the catalogue photo is marked `fulfilled` with no photo
+    // — and `fulfilled` is terminal in the drain's open set, as it was before 0023.
+    // The ADR-006 amendment making the catalogue photo the point of the request
+    // makes this worse, not better. It is NOT reclassified here because the right
+    // verdict is arguable (the vendor does carry the cigar, so it is not a `miss`;
+    // treating it as an `error` would retry it against ERROR_BUDGET) and it is a
+    // product call, not a ledger one. The row stays visible: it reports as
+    // exhausted-AND-fulfilled on the backlog press, which `retryExhausted` clears.
     try {
       await capturePhoto(deps, options.vendorId, cigar.id, listing, stats);
     } catch {
       stats.errors += 1;
     }
-    return true;
+    return "match";
   }
-  return false;
+  return parsed ? "miss" : "error";
 }
 
-// pending → fulfilled on a hit; on a miss increment attempts and either fall back
-// to pending (retryable next run) or mark exhausted once every attempt is spent.
-async function finalizeEnrichment(deps: IngestDeps, request: EnrichmentRequestRow, matched: boolean): Promise<void> {
+// Write this vendor's verdict to the ledger, then RECOMPUTE the request's cached
+// status from it. Returns HOW this look retired the request, if it did.
+//
+// The ledger is the authority and `enrichment_requests.status` is a cache of the
+// rollup over it, because the rollup's denominator — the vendors eligible for this
+// cigar — changes without any request being touched. Recomputing on every finalize
+// is what makes enabling a vendor reopen a row and disabling one retire it, with
+// no reopen job anywhere in the system.
+//
+// The drain no longer claims the request with `status = 'in_progress'` first. That
+// was a request-level lock on a per-vendor operation: with two lanes it let one
+// vendor skip a row another was looking at, and a crash between the claim and the
+// finalize stranded the row where nothing re-selected it (#157 defect 2). The
+// increment is an atomic upsert instead, so a crash mid-drain simply leaves the row
+// open and two overlapping same-vendor runs record two real looks rather than
+// losing one to a read-modify-write (#157 defect 1 degraded to a benign
+// double-count, with no FOR UPDATE SKIP LOCKED and no reaper).
+async function finalizeEnrichment(
+  deps: IngestDeps,
+  options: IngestOptions,
+  requestId: string,
+  type: "NC" | "CC" | null,
+  outcome: EnrichmentOutcome,
+): Promise<Retirement> {
   const now = deps.now();
-  if (matched) {
-    await deps.db
+  return deps.db.transaction<Retirement>(async (tx) => {
+    await recordEnrichmentAttempt(tx, { requestId, vendorId: options.vendorId, outcome, at: now });
+
+    // `enrichment_requests.attempts` is now a REPORTING total of completed looks
+    // across every vendor — never a budget again. Incremented in SQL rather than
+    // read-modify-written, and on every COMPLETED look (miss or match, never an
+    // error), so it stays a true count and legacy pre-0023 values — which counted
+    // real looks too — keep their meaning.
+    if (outcome !== "error") {
+      await tx
+        .update(enrichmentRequests)
+        .set({ attempts: sql`${enrichmentRequests.attempts} + 1` })
+        .where(eq(enrichmentRequests.id, requestId));
+    }
+
+    if (outcome === "match") {
+      await tx
+        .update(enrichmentRequests)
+        .set({ status: "fulfilled", resolvedAt: now })
+        .where(eq(enrichmentRequests.id, requestId));
+      return "open";
+    }
+
+    const coverage = await enrichmentCoverageForRequest(tx, requestId, type);
+    if (coverage.exhausted) {
+      await tx
+        .update(enrichmentRequests)
+        .set({ status: "exhausted", resolvedAt: now })
+        .where(eq(enrichmentRequests.id, requestId));
+      return "exhausted";
+    }
+    // Everything else stays `pending`, and the two reasons are different facts.
+    //
+    // BLOCKED — every counted lane is retired, but at least one burned
+    // ERROR_BUDGET without finishing a look. `exhausted` would be a lie here:
+    // nobody could finish looking, and the ledger would carry `attempts = 0`
+    // under a verdict that reads "we looked and found nothing". It is not written
+    // as `exhausted` and it does not set resolved_at; the honest surface is the
+    // rollup, which reports it as blocked, and `retryExhausted` clears it by
+    // filing a fresh ask with a fresh error budget.
+    //
+    // OPEN — no lane counts at all, or one still owes a look. Same reasoning one
+    // step earlier, and it self-heals the moment a lane goes live. Clearing
+    // resolved_at matters on the reopen path, where a row that had been retired is
+    // live again.
+    await tx
       .update(enrichmentRequests)
-      .set({ status: "fulfilled", resolvedAt: now })
-      .where(eq(enrichmentRequests.id, request.id));
-    return;
-  }
-  const attempts = request.attempts + 1;
-  if (attempts >= EXHAUST_ATTEMPTS) {
-    await deps.db
-      .update(enrichmentRequests)
-      .set({ status: "exhausted", attempts, resolvedAt: now })
-      .where(eq(enrichmentRequests.id, request.id));
-  } else {
-    await deps.db
-      .update(enrichmentRequests)
-      .set({ status: "pending", attempts })
-      .where(eq(enrichmentRequests.id, request.id));
-  }
+      .set({ status: "pending", resolvedAt: null })
+      .where(eq(enrichmentRequests.id, requestId));
+    return coverage.blocked ? "blocked" : "open";
+  });
 }
 
 // --- entry -------------------------------------------------------------------

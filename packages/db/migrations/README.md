@@ -53,6 +53,29 @@ init container at startup (ADR-003).
   as its authorization). No role column, deliberately: an invite has no role
   field to escalate. A partial unique index keeps at most one open invite per
   address.
+- `0023_enrichment_attempts.sql` — `enrichment_attempts`, one row per
+  (enrichment_request, vendor) (ADR-006 amendment 2026-08-30, issue #158). A
+  vendor's catalogue is PARTIAL, so "no match at Fox" is evidence about Fox and
+  nothing else; the pre-0023 budget was one counter per REQUEST shared across the
+  whole fleet, which retired a request after a single look from each vendor. Each
+  vendor now gets its own `attempts` (completed looks) and `errors` (looks that
+  could not complete, reset by any completed look), and the rollup over this
+  table plus the lanes that actually run (crawl-enabled, focus covers the market,
+  has completed an `enrich` run) — not `enrichment_requests.status` — is the
+  authority on `exhausted`. Burning the error budget retires a (request, vendor)
+  without exhausting the request: zero completed looks is not a catalogue fact. The UNIQUE
+  `(request_id, vendor_id)` doubles as the ON CONFLICT target that makes the
+  increment atomic. **The ledger starts empty and that is deliberate:** the old
+  counter is vendor-blind, so splitting it would mean inventing which vendor
+  spent it, and the only inference available (overlapping succeeded `enrich`
+  runs) credits a run that may have drained a different request entirely. It
+  costs at most `ATTEMPTS_PER_VENDOR` extra looks per open request per live
+  vendor, once. `enrichment_requests.attempts` is left as-is (a still-true count
+  of looks); existing `exhausted` rows are not reset — they read as not-exhausted
+  against an empty ledger and re-retire per vendor, which is the intended
+  semantics, since the original retirement was vendor-blind. The backfill only
+  normalizes legacy `in_progress` rows to `pending`: the drain no longer writes
+  that state and nothing would re-select them.
 - `0024_audit_log_client_id.sql` — `audit_log.client_id` (nullable text, plus a
   partial index on `(client_id, created_at desc)`): which OAuth client's
   credential drove the write (ADR-011). The table already answered who

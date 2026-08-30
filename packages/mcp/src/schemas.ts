@@ -1207,6 +1207,7 @@ export const queueEnrichmentBacklogOutput = z
     queued: z.number(),
     skipped: z.number(),
     enrichedMarkets: z.array(z.string()),
+    eligibleVendors: z.array(z.string()),
     entries: z.array(looseObject),
     replayed: z.boolean(),
   })

@@ -204,3 +204,128 @@ LLM-created cigars accumulate until curated.
     census would have named `/store/go` on the first probe, and where a gate
     admits nothing it names where the products actually live instead of
     requiring another run to find out.
+
+- **2026-08-30 — a vendor's catalogue is PARTIAL (owner ruling; issue #158).**
+  A vendor carries some brands and not others. That is the normal case, not a
+  defect and not a crawl failure. Concretely: Red Anchor is stocked by 2 Guys
+  and not by Fox, and both are NC US retailers in good standing. Everything
+  downstream of this ADR had been built as if any enabled vendor could satisfy
+  any cigar, which is how the enrichment attempt budget ended up vendor-blind.
+  Five consequences, each load-bearing for the code:
+  - **`focus` is a coarse MARKET signal, never a coverage guarantee.** It is
+    sound as a *negative* filter — a CC-only vendor will not carry an NC cigar,
+    so never spend a look there — and unsound as a positive one. `focus` says
+    which market a vendor trades in; it says nothing about which brands within
+    it. The registry has no brand-coverage field and deliberately gains none:
+    it would be hand-maintained fiction, and it would rot the first time a
+    vendor changed stock.
+  - **"No match at vendor V" is evidence about V only.** Never about the cigar,
+    never about the canonical name, never about any other vendor. This is the
+    sentence the code has to obey, and the one every rule below is derived from.
+  - **Therefore an attempt budget, a staleness rule, or an `exhausted` state
+    that does not NAME A VENDOR is meaningless.** A single `EXHAUST_ATTEMPTS = 2`
+    shared across a growing fleet is a request retired after one look from each
+    vendor — a cigar Fox will stock next week, permanently retired on Tuesday
+    because Cuban Lou's looked first. Retirement is per (request, vendor), never
+    per request; the request-level state is a rollup over those, and it must be
+    RECOMPUTABLE rather than merely stored, because its denominator changes
+    without any request being touched. Migration 0023 adds `enrichment_attempts`
+    for this; `enrichment_requests.status` becomes a cache of the rollup.
+  - **THE DENOMINATOR IS LIVENESS, NOT `crawl_enabled`.** One sentence, to be
+    checked against the code: *a request is `exhausted` when at least one lane
+    counts against it and every counted lane has completed its full attempt
+    budget on it — where a lane counts if it is crawl-enabled, its focus covers
+    the cigar's market, and it has either finished an `enrich` run or already
+    recorded a look at this very request.* `crawl_enabled` cannot be the
+    denominator: no crawler consults that flag (issue #156 — the CronJob list is
+    the real crawl gate), so flipping it true schedules nothing and a vendor
+    enabled in the registry with a suspended lane can never fill it. Note this
+    amendment makes the coverage rollup the column's FIRST reader, and only as a
+    negative filter: turning it off drops a vendor from the fleet, turning it on
+    still does not make one run. That asymmetry is the point — it is exactly why
+    the flag can gate who is *listed* and never who has *looked*. Prod is exactly
+    that shape: Cuban Lou's is crawl-enabled with a suspended enrich CronJob and
+    only a `seed` run, and it sat in the denominator of every untyped cigar —
+    890 of 977 catalog rows. Never `exhausted`, therefore permanently
+    `already_queued`, therefore permanently out of `retryExhausted`'s reach.
+    The earlier draft of this amendment called liveness-as-denominator circular.
+    It is not: **the drain does not gate on liveness** — its open set admits
+    `exhausted` rows and its only per-vendor filter is that vendor's own budget
+    — so a lane that has never run still picks work up on its first night, and
+    reopens what it has not looked at. The second clause (a look already recorded here) exists because a
+    lane's own first run is still `running` while it drains, and without it that
+    first night would read as a lag in the cached status. **Live** read as
+    MARKETS stays the queue gate, unchanged; it is the same predicate at a
+    different granularity, not a second one.
+  - **Zero counted lanes is NOT exhaustion, and neither is a burnt error
+    budget.** "Nobody could look" is a different fact from "we looked and found
+    nothing", and laundering one into the other is exactly what this amendment
+    forbids. Two distinct states, neither of them `exhausted`:
+    **open** — no lane counts at all; the request stays open and self-heals when
+    a lane goes live.
+    **blocked** — every counted lane is retired, but at least one burned
+    `ERROR_BUDGET` without finishing a look. Its ledger holds zero completed
+    looks, so `exhausted` next to a `triedVendors` list would read as a catalogue
+    fact that was never established. It surfaces as `vendor_unreachable` on the
+    backlog press and is cleared by the same `retryExhausted`, which files a
+    fresh ask with a fresh error budget. A single eligible vendor whose sitemap
+    404s for three nights is this state, not exhaustion.
+  - **Two photo tiers, never conflated (owner, 2026-08-30).**
+    **Catalogue photo** — `product_photos`, `cigar_id` UNIQUE + `vendor_id` +
+    `source_url`: exactly ONE per catalog cigar, vendor-sourced at crawl,
+    third-party bytes under the `rights` gate (`pending`/`approved`/`suppressed`)
+    and the per-vendor rights posture this ADR already sets. It is the product's
+    identity shot, not a picture of anyone's cigar.
+    **Review photos** — `smoke_photos`, `smoke_id` + `user_id` + `kind` +
+    `caption`: MANY per smoke, and many smokes per cigar. Owner-authored, no
+    third-party rights story, never a display substitute for the catalogue photo
+    and never promoted into `product_photos`.
+    So one generic catalogue entry with one vendor photo sits under an unbounded
+    fan of owner review photos. **Enrichment fills the first tier only:** a cigar
+    with forty review photos is still `productPhoto`-missing and still a
+    legitimate enrichment request. The rights asymmetry is why the tiers cannot
+    share a table — suppressing a vendor's bytes must never touch a user's
+    photographs — and it is why a partial catalogue matters at all: the photo a
+    request exists to fetch can only come from a vendor that stocks the cigar.
+  - **The live probe that motivated this** (2026-08-30, in-cluster Job on the
+    v0.27.0 crawl image, against 2 Guys Cigars). Two facts, both recorded
+    because they are the concrete instance of the ruling above:
+    **(1) The sitemap variance is gone.** Four samples returned an identical
+    6,356 locs with `varied=no`; the 1,462-vs-0 alternation recorded on
+    2026-08-29 did not reproduce. The sampling added for that alternation works
+    and is no longer what blocks this vendor.
+    **(2) The `/store/` product gate is wrong.** The prefix also matches
+    `/store/go/registry/<n>/` — gift-registry pages with no `schema.org/Product`
+    — so the spread sampler drew three of them and the probe returned a FALSE
+    `needs-attention` on the product check over a TRUE failure of the gate. The
+    adapter had been tuned as if enumerating a vendor's URLs were the same as
+    enumerating its products. Correcting the gate was its own change (PR #179,
+    the Mode-A exclusion amendment above); it did not ride the ledger work, and
+    enabling 2 Guys is deliberately NOT how the per-vendor design is validated —
+    the reopen path lands it automatically when 2 Guys does come up.
+  - **What that shape means for the miss/error line, and it is not what the first
+    draft of this amendment said.** 1,462 locs passed the gate and every one of
+    them ANSWERED 200; they simply carried no Product, so `parsed = 0`. An
+    over-matching gate therefore produces a large enumeration of reachable pages,
+    not an empty one — so a rule that only calls an empty enumeration an `error`
+    scores this as a `miss`, burns two real attempts, and then reports "2 Guys
+    looked and does not carry it": manufactured evidence about a vendor, which is
+    the thing this amendment exists to forbid. **The line between a completed
+    look and a failed one is a PARSED PRODUCT, not a 200** — the same `parsed`
+    count `--probe` reports, and the signal that was true on the live probe while
+    the `needs-attention` beside it was misattributed. Three shapes are `error`:
+    an empty enumeration, no candidate that answered 200, and candidates that
+    answered 200 with nothing a product parser could read. A parsed product that
+    is an accessory, or that misses the similarity floor, is a MISS: we did read
+    the vendor's catalogue, and what it holds is not this cigar. "No candidate
+    scored above zero" is a miss too — the enumeration IS the vendor's product
+    list, and nothing in it resembled the cigar. **The residual, stated rather
+    than papered over:** that last rule assumes the enumeration really is
+    products, and a broken gate can defeat it, because zero ranked candidates
+    means zero fetches and so nothing for the parsed-product test to run on. No
+    drain-time check can close that; the pre-enable `--probe` and its path-shape
+    census are what close it, which is why this ADR requires live verification
+    before a vendor is enabled and why a gate correction never rides a ledger
+    change. Widening the rule instead — calling "nothing scored" an error —
+    would mean a vendor that simply does not stock a brand could never retire
+    the request, which is the hang this amendment exists to remove.

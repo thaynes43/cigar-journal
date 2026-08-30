@@ -292,10 +292,10 @@ nothing needs re-consenting, and the agent never has to be handed
 `record_purchase` and `set_want` over the owner's journal).
 
 **Two preconditions, enforced by the service rather than documented.** A queued
-request the crawler cannot serve is not inert: `attempts` is counted per
-*request*, by whichever vendor drains it, and `EXHAUST_ATTEMPTS = 2` retires the
-row permanently. So a press writes a row only when both hold, and reports every
-other row with the reason:
+request the crawler cannot serve is not inert: every drain that looks and misses
+spends one of that vendor's two attempts (`ATTEMPTS_PER_VENDOR`, migration 0023),
+and the row retires once every lane that runs is spent. So a press writes a row
+only when both hold, and reports every other row with the reason:
 
 1. **The name has been reviewed** (`verification = 'verified'`, the signal
    `verify_cigar` sets). Enrichment resolves a cigar by its canonical name twice
@@ -316,6 +316,30 @@ other row with the reason:
    `no_vendor_coverage`, and the gate opens by itself the first night that
    market's enrich lane runs. There is no override argument for either gate: the
    way past them is to do the thing they assert.
+
+Both gates are now **per-vendor** underneath (ADR-006 amendment 2026-08-30,
+migration 0023). A vendor's catalogue is partial, so "no match at Fox" is
+evidence about Fox and nothing else: each vendor carries its own attempt budget
+against a request, and the row retires only once every one of them is spent.
+
+The denominator is **liveness** — crawl-enabled, focus covers the market, and the
+lane has completed an `enrich` run (or has already looked at this very request).
+It is the same predicate as the queue gate above, read as vendors rather than as
+markets. It is deliberately NOT `crawl_enabled` alone: no crawler consults
+that flag (#156), so enabling a vendor schedules nothing and one with a suspended
+CronJob would hold every matching row open forever — which, with 890 untyped rows needing both
+markets and Cuban Lou's lane suspended, is the whole catalogue. Enabling a vendor
+does not by itself retire anything; its lane RUNNING does, and that lane's first
+night also reopens every row it has not looked at, with no reopen job.
+
+Two outcomes are reported apart from `exhausted` because they are different
+facts. A row no lane counts against stays open. A row every counted lane failed
+to REACH (`ERROR_BUDGET` burnt, zero completed looks) reports
+`vendor_unreachable` — calling it `exhausted` would assert a catalogue fact
+nobody established. `retryExhausted` clears both. The console's report says which
+vendors spent themselves (`triedVendors`) and which could have looked
+(`eligibleVendors`), because a retirement that does not name a vendor tells an
+operator nothing they can act on.
 
 ## Build waves (each a dispatchable lane; docs-first satisfied by this doc)
 

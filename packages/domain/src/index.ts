@@ -149,6 +149,30 @@ export { resolveCigar, type ResolvedCigar } from "./cigar-resolution.js";
 // The conversational gap-fill resolve-or-create + enrichment queue. add_cigar
 // and record_purchase share this so the described-cigar path never forks.
 export { resolveAndEnrich, maybeQueueEnrichment, type ResolveAndEnrichResult } from "./enrichment.js";
+
+// Vendor coverage for the enrichment queue (ADR-006 amendment 2026-08-30, #158).
+// The crawler consumes this the way it already consumes recordPriceObservation:
+// ONE definition of the vendor fleet, of retirement and of the per-vendor attempt
+// ledger, so the drain, the classifier and the bulk press cannot drift on what
+// "exhausted" means. The two SQL builders are that single definition where the
+// drain needs the predicate with its operands the other way round. A vendor's
+// catalogue is partial — every verdict names a vendor.
+export {
+  ATTEMPTS_PER_VENDOR,
+  ERROR_BUDGET,
+  coversMarketSql,
+  vendorNotRetiredSql,
+  enrichVendorFleet,
+  liveEnrichMarkets,
+  recordEnrichmentAttempt,
+  enrichmentCoverageForRequest,
+  enrichmentCoverageForCigar,
+  type EnrichmentOutcome,
+  type EnrichmentCoverage,
+  type FleetVendor,
+  type VendorBrief,
+  type VendorAttemptSummary,
+} from "./enrichment-coverage.js";
 // Product photos (ADR-007). Catalog-scoped (not owner-scoped); the serving route
 // authorizes any signed-in user. Written by the crawler or a curator upload
 // (attachProductPhoto, DESIGN-003 §Images — rights 'approved', source_url null),

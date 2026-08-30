@@ -1046,30 +1046,54 @@ result:
   queued: 7
   skipped: 48
   enrichedMarkets: [NC]           # markets an enrich lane actually reaches right now
+  eligibleVendors: [Fox Cigar]    # vendors that COULD look — the exhaustion denominator
   entries:
     - cigarId: cg_01j9x2
       canonicalName: Trinidad Reyes
       status: queued              # see the taxonomy below
+    - cigarId: cg_01j9x3
+      canonicalName: Red Anchor Captain
+      status: exhausted
+      triedVendors: [Fox Cigar]   # on `exhausted` / `vendor_unreachable`: who spent themselves here
   replayed: false
 ```
 
+`enrichedMarkets` and `eligibleVendors` answer different questions and are both
+reported. A market is **enriched** when some crawl-enabled vendor covering it has
+completed an `enrich` run — that is the enqueue gate, and the same liveness the
+exhaustion denominator uses, read as markets rather than as vendors. A vendor is
+**eligible** when it is crawl-enabled and its focus covers the row's market: who
+COULD look. Eligibility is NOT the denominator — `crawl_enabled` is a registry
+flag no crawler consults, so a vendor with a suspended enrich CronJob is listed
+in `eligibleVendors` and counts against nothing. Read the two together: a vendor
+named there whose market is missing from `enrichedMarkets` is a lane that has
+never run.
+
 The per-row `status` is `request_cigar_enrichment`'s taxonomy (`queued`,
-`already_queued`, `recently_enriched`, `not_needed`) plus three verdicts only a
+`already_queued`, `recently_enriched`, `not_needed`) plus four verdicts only a
 bulk press has:
 
 | status | meaning | how to clear it |
 | --- | --- | --- |
-| `exhausted` | the crawler retired the row (`EXHAUST_ATTEMPTS = 2`) | fix the cause, then press with `retryExhausted: true` |
+| `exhausted` | **every lane that runs** spent its own budget on this row (2 completed looks each) and none carried it; `triedVendors` names them | bring up a lane that stocks the brand — the row reopens on its own the night it runs — or press with `retryExhausted: true` |
+| `vendor_unreachable` | every lane that runs is retired on this row, but at least one burned its error budget without finishing a look — nobody could look, so nothing was learned about any catalogue; `triedVendors` names them | fix the vendor (sitemap, adapter, product gate), then press with `retryExhausted: true` for a fresh error budget |
 | `unverified_name` | nobody has reviewed this canonical name | `rename_cigar` if it is wrong, then `verify_cigar` |
 | `no_vendor_coverage` | no crawl-enabled vendor covering that market has completed an `enrich` run | bring that market's enrich lane up |
 
+**A vendor's catalogue is PARTIAL** (ADR-006 amendment 2026-08-30). "No match at
+Fox" is evidence about Fox and about nothing else, so the budget is per
+*(request, vendor)*: each lane gets its own two completed looks, and a request
+retires only once all of them are spent. A request no lane counts against is NOT
+exhausted — nobody could look, which is a different fact from "we looked and
+found nothing" — and it reopens by itself the moment a lane runs, with no reopen
+call and no `retryExhausted` press.
+
 **Both preconditions are enforced, not advised, and neither has an override.** A
-queued request that cannot be served is not inert: `attempts` is counted per
-*request* by whichever vendor drains it, so two passes by a vendor that cannot
-carry the cigar retire it permanently. Enrichment resolves by canonical name
-(slug-token ranking, then a pg_trgm similarity floor), which is why an unreviewed
-name is refused; and an untyped cigar needs BOTH markets covered, because
-enrichment is what would tell us which one it belongs to.
+queued request that cannot be served is not inert: every drain that looks and
+misses spends one of that vendor's two attempts. Enrichment resolves by canonical
+name (slug-token ranking, then a pg_trgm similarity floor), which is why an
+unreviewed name is refused; and an untyped cigar needs BOTH markets covered,
+because enrichment is what would tell us which one it belongs to.
 
 ## Errors
 

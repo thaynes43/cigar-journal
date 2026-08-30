@@ -29,6 +29,7 @@ export * from "./product-photos.js";
 export * from "./brand-images.js";
 export * from "./crawl-runs.js";
 export * from "./enrichment-requests.js";
+export * from "./enrichment-attempts.js";
 export * from "./oauth-client.js";
 export * from "./oauth-authorization.js";
 export * from "./oauth-authorization-code.js";

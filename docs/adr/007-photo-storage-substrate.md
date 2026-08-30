@@ -116,3 +116,17 @@ runs a ready Ceph RGW object store with ObjectBucketClaim provisioning
     would push them to every cached viewer at once. A re-check that finds the
     same image leaves the approval standing; `suppressed` is untouched either
     way.
+- **2026-08-30 — cardinality and the rights asymmetry between the two photo
+  bindings (owner ruling, recorded in ADR-006).** This ADR already names
+  ProductPhoto and SmokePhoto as separate bindings; the ruling that makes the
+  separation load-bearing lives in ADR-006's 2026-08-30 amendment. In short:
+  **one catalogue photo : N smokes : N photos per smoke.** `product_photos` holds
+  exactly one vendor-sourced identity shot per cigar (`cigar_id` UNIQUE);
+  `smoke_photos` holds an unbounded fan of owner-authored review photos beneath
+  it. They never substitute for one another in display, and a review photo is
+  never promoted into `product_photos`. The asymmetry is what forbids sharing a
+  table: catalogue bytes are third-party and carry the `rights` gate, review
+  photos are the owner's own and carry no third-party rights story — so a
+  takedown that suppresses a vendor's bytes must never be able to reach a user's
+  photographs. It also follows that a cigar with forty review photos is still
+  missing its catalogue photo, and still a legitimate enrichment request.

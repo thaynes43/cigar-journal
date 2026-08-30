@@ -1,8 +1,9 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { auditLog, cigars, enrichmentRequests, productPhotos, type CigarRow } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
 import type { CigarRef, ProvenanceInput, Verification } from "./types.js";
 import { resolveCigar, type ResolvedCigar } from "./cigar-resolution.js";
+import { enrichmentCoverageForCigar, type EnrichmentCoverage } from "./enrichment-coverage.js";
 import { CigarNotFoundError } from "./errors.js";
 import { provenanceToActor } from "./mapping.js";
 
@@ -60,29 +61,26 @@ async function loadAssessment(tx: Tx, cigarId: string): Promise<{ cigar: CigarRo
 }
 
 // Queue an enrichment_request for a cigar unless nothing is gained. Skipped when
-// a fulfilled or still-pending request already exists (append-once — no dupes on
-// a second add), or when the entry is already complete (photo + full dims —
-// nothing left to fill). Returns whether a row was inserted.
+// a fulfilled or still-open request already exists (append-once — no dupes on a
+// second add), or when the entry is already complete (photo + full dims — nothing
+// left to fill). Returns whether a row was inserted.
+//
+// The verdict comes from classifyEnrichmentRequest so this path and the two
+// reporting paths cannot disagree about what "already queued" means. That matters
+// since migration 0023: "open" is no longer a status-column test. A request whose
+// cached status reads `exhausted` but which a newly live vendor has not looked
+// at is STILL open — the drain admits `exhausted` rows — so a column-based dedupe
+// would file a duplicate ask for it. A request retired at every counted lane
+// (exhausted or blocked) still re-queues here, which is the long-standing
+// behaviour and stays right: a second add is a fresh reason to look, and for a
+// blocked row it is also a fresh error budget.
 export async function maybeQueueEnrichment(
   tx: Tx,
   cigarId: string,
   requestedBy: string,
 ): Promise<boolean> {
-  const open = await tx
-    .select({ id: enrichmentRequests.id })
-    .from(enrichmentRequests)
-    .where(
-      and(
-        eq(enrichmentRequests.cigarId, cigarId),
-        inArray(enrichmentRequests.status, ["pending", "fulfilled"]),
-      ),
-    )
-    .limit(1);
-  if (open.length > 0) return false;
-
-  const { assessment } = await loadAssessment(tx, cigarId);
-  // Already complete → the targeted lookup adds nothing; don't enqueue.
-  if (assessment.complete) return false;
+  const { status } = await classifyEnrichmentRequest(tx, cigarId);
+  if (status !== "queued") return false;
 
   await tx.insert(enrichmentRequests).values({ cigarId, requestedBy });
   return true;
@@ -154,11 +152,29 @@ function normalizeNote(note: string | null | undefined): string | null {
 // row the crawler gave up on, and that stays true. The bulk path is the caller that
 // must act on the flag (a whole worklist of dead rows is a different question from
 // one cigar a user just asked about).
+//
+// Since migration 0023 `exhausted`, `blocked` AND `already_queued` are computed
+// from the per-vendor ledger, NOT from `enrichment_requests.status` — that column
+// is a cache of a rollup whose denominator (the lanes that actually run) changes
+// underneath it. Reading it directly misreports a request the moment a lane goes
+// live: the drain admits `status = 'exhausted'` rows and the new vendor has no
+// ledger row, so such a row is still queued and must classify as `already_queued`,
+// not as a dead row to be duplicated. `coverage` carries the vendor names so every
+// surface can say WHICH vendors looked (ADR-006 amendment 2026-08-30: an
+// `exhausted` state that does not name a vendor is meaningless).
+//
+// `blocked` rides alongside `exhausted` for the same reason `exhausted` rides
+// alongside `status`: it does not change the single-cigar answer (this tool has
+// always re-queued a row the crawler gave up on), and it must not be folded into
+// `exhausted`, which would report "we looked and found nothing" about a fleet
+// nobody could reach.
 export interface EnrichmentClassification {
   cigar: CigarRow;
   assessment: EnrichmentAssessment;
   status: EnrichmentRequestStatus;
   exhausted: boolean;
+  blocked: boolean;
+  coverage: EnrichmentCoverage;
 }
 
 export async function classifyEnrichmentRequest(tx: Tx, cigarId: string): Promise<EnrichmentClassification> {
@@ -169,14 +185,15 @@ export async function classifyEnrichmentRequest(tx: Tx, cigarId: string): Promis
     .from(enrichmentRequests)
     .where(eq(enrichmentRequests.cigarId, cigarId));
   const seen = new Set(statusRows.map((r) => r.status));
+  const coverage = await enrichmentCoverageForCigar(tx, cigarId, cigar.type);
 
   let status: EnrichmentRequestStatus;
   if (assessment.complete) status = "not_needed";
-  else if (seen.has("pending") || seen.has("in_progress")) status = "already_queued";
+  else if (coverage.openRequests > 0) status = "already_queued";
   else if (seen.has("fulfilled")) status = "recently_enriched";
   else status = "queued";
 
-  return { cigar, assessment, status, exhausted: seen.has("exhausted") };
+  return { cigar, assessment, status, exhausted: coverage.exhausted, blocked: coverage.blocked, coverage };
 }
 
 export async function requestCigarEnrichment(

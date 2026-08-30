@@ -199,6 +199,18 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
         `union=${sampling.unionLocs} product=${sampling.productLocs} varied=${sampling.varied ? "yes" : "no"}`,
     );
   }
+  const enrich = s.enrich;
+  if (enrich) {
+    // A nightly drain has to say what it retired and where: `spent` is a verdict
+    // about THIS vendor's budget, and `looked` vs `errors` is the difference
+    // between "this vendor does not carry it" and "we never reached the vendor".
+    // `blocked` is the second of those two rolled up to the request — retired with
+    // nobody having finished a look, which is never a fact about a catalogue.
+    lines.push(
+      `  enrich: requests=${enrich.requests} looked=${enrich.looked} matched=${enrich.matched} ` +
+        `errors=${enrich.errored} spent=${enrich.spent} blocked=${enrich.blocked}`,
+    );
+  }
   if (result.error) lines.push(`  error: ${result.error}`);
   if (result.report.length > 0) {
     lines.push("would write:");

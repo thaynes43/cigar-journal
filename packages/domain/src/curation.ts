@@ -74,6 +74,7 @@ import type {
 import { fingerprint } from "./fingerprint.js";
 import { strongLinkCompatible } from "./cigar-resolution.js";
 import { classifyEnrichmentRequest, type EnrichmentClassification } from "./enrichment.js";
+import { liveEnrichMarkets } from "./enrichment-coverage.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 
@@ -2130,19 +2131,35 @@ export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Pro
 // request) has no user-visible value, so the run shows with no Undo by design.
 //
 // TWO PRECONDITIONS ARE ENFORCED, NOT DOCUMENTED. A queued request that cannot be
-// served is not inert: the crawler counts `attempts` per REQUEST across whichever
-// vendor drains it and marks the row `exhausted` at EXHAUST_ATTEMPTS = 2, which is
-// permanent. So a press only writes a row when both hold, and reports every other
-// row with the reason:
+// served is not inert: every drain that looks and misses spends one of that
+// VENDOR'S two attempts against the request (ATTEMPTS_PER_VENDOR, migration 0023),
+// and a request retires once every lane that runs is spent. So a press only writes
+// a row when both hold, and reports every other row with the reason:
 //
 //   1. `unverified_name` — drainEnrichment resolves BY canonical name twice over
 //      (slug-token ranking, then a pg_trgm similarity floor), so a name nobody has
-//      reviewed is a request that misses and burns its two attempts. `verified` is
-//      the existing curator signal for "a human or agent read this row" (only
-//      verifyCigar sets it), so it is the gate. Fix the name with rename_cigar,
-//      verify it, then press.
+//      reviewed is a request that misses and burns an attempt AT EVERY VENDOR that
+//      looks at it. `verified` is the existing curator signal for "a human or agent
+//      read this row" (only verifyCigar sets it), so it is the gate. Fix the name
+//      with rename_cigar, verify it, then press.
 //   2. `no_vendor_coverage` — a market with no enrich lane running cannot serve
-//      any request, but the drain still consumes its attempts. See enrichedMarkets.
+//      any request. See liveEnrichMarkets (enrichment-coverage.ts). Note this is
+//      the SAME liveness the exhaustion denominator uses, read as markets rather
+//      than as vendors.
+//
+// The gate and the exhaustion denominator are ONE predicate read at two
+// granularities: LIVE — crawl-enabled, focus covers the market, and the lane has
+// completed an `enrich` run — as markets here (one fleet-wide read) and as vendors
+// in the rollup (per row, because eligibility depends on the cigar's market).
+// `crawl_enabled` alone is not either of them: no crawler consults that flag
+// (#156), so enabling a vendor schedules nothing — one with a suspended CronJob
+// would gate nothing and retire nothing while holding every matching request open
+// forever.
+//
+// There is no circularity in using liveness as the denominator, because the drain
+// does NOT gate on it: its open set admits `exhausted` rows and its only
+// per-vendor filter is that vendor's own budget, so a lane that has never run
+// still picks work up on its first night and reopens what it has not looked at.
 //
 // Neither has an override argument. The way past them is to do the thing they
 // assert; a flag would just be the old footgun with a longer name.
@@ -2154,35 +2171,6 @@ export const ENRICHMENT_BACKLOG_MAX = 100;
 function clampBacklogLimit(limit: number | undefined): number {
   if (limit == null || !Number.isFinite(limit)) return ENRICHMENT_BACKLOG_MAX;
   return Math.min(Math.max(Math.trunc(limit), 1), ENRICHMENT_BACKLOG_MAX);
-}
-
-// The markets an enrich pass actually reaches: a crawl-enabled vendor whose focus
-// covers the market AND which has completed at least one `enrich` run. The run is
-// the load-bearing half — in prod today Cuban Lou's is `crawl_enabled` and has only
-// ever run a `seed`, so `crawl_enabled` alone would claim CC is covered while the
-// only enrich CronJob is NC-only. Reading the runs table means the gate opens by
-// itself the first night a new enrich lane runs, with no code or flag change.
-async function enrichedMarkets(tx: Tx): Promise<Set<CigarType>> {
-  const result = await tx.execute(sql`
-    SELECT DISTINCT v.focus
-    FROM vendors v
-    WHERE v.crawl_enabled
-      AND v.focus IS NOT NULL
-      AND EXISTS (
-        SELECT 1 FROM crawl_runs cr
-        WHERE cr.vendor_id = v.id AND cr.kind = 'enrich' AND cr.status = 'succeeded'
-      )
-  `);
-  const markets = new Set<CigarType>();
-  for (const row of result.rows as unknown as { focus: string }[]) {
-    if (row.focus === "both") {
-      markets.add("NC");
-      markets.add("CC");
-    } else if (row.focus === "NC" || row.focus === "CC") {
-      markets.add(row.focus);
-    }
-  }
-  return markets;
 }
 
 // An untyped cigar could be either market, so it needs BOTH covered — enrichment is
@@ -2203,13 +2191,26 @@ function backlogStatus(
   if (classified.status === "not_needed" || classified.status === "already_queued") {
     return classified.status;
   }
-  // A row the crawler retired is reported, not re-queued, unless asked for. This
-  // deliberately outranks `recently_enriched`: ingest marks a request `fulfilled`
-  // on a name match even when the photo capture threw, so exhausted-AND-fulfilled
-  // is reachable for exactly the rows most likely to need the retry — keying the
-  // override off `status === "queued"` alone made it inert there.
+  // A row the crawler retired is reported, not re-queued, unless asked for. Since
+  // migration 0023 "retired" means retired AT EVERY LANE THAT RUNS, computed from
+  // the per-vendor ledger rather than read off enrichment_requests.status — so a
+  // lane going live reopens the row on its own and this verdict stops firing, with
+  // no reopen job and no backfill. The entry names the vendors that looked.
+  //
+  // This deliberately outranks `recently_enriched`: ingest marks a request
+  // `fulfilled` on a name match even when the photo capture threw, so
+  // exhausted-AND-fulfilled is reachable for exactly the rows most likely to need
+  // the retry — keying the override off `status === "queued"` alone made it inert
+  // there.
   if (classified.exhausted && !retryExhausted) return "exhausted";
-  if (!classified.exhausted && classified.status === "recently_enriched") return "recently_enriched";
+  // Retired without anybody finishing a look. Reported apart from `exhausted`
+  // (#158 review) because the two say opposite things about the catalogue, and
+  // reported at all because the alternative — letting it fall through to
+  // `already_queued` — is an invisible row no operator can act on.
+  if (classified.blocked && !retryExhausted) return "vendor_unreachable";
+  if (!classified.exhausted && !classified.blocked && classified.status === "recently_enriched") {
+    return "recently_enriched";
+  }
   // Preconditions for an actual insert.
   if (classified.cigar.verification !== "verified") return "unverified_name";
   if (!marketCovered(classified.cigar.type, markets)) return "no_vendor_coverage";
@@ -2262,14 +2263,23 @@ async function queueBacklogWithinTx(
     return { ...(existing.result as QueueEnrichmentBacklogResult), replayed: true };
   }
 
-  // One read for the whole press: coverage is a property of the vendor fleet, not
-  // of a row.
-  const markets = await enrichedMarkets(tx);
+  // Market coverage is fleet-wide, so it is read ONCE here rather than per row.
+  // The rest is not amortized and should not be read as if it were: each candidate
+  // runs its own classifyEnrichmentRequest, which is a vendor-fleet read, an
+  // enrichment_requests read and a ledger join, because both the vendor set and
+  // the rollup depend on that row's market. At ENRICHMENT_BACKLOG_MAX = 100 that
+  // is a few hundred round-trips inside one transaction — fine at prod's scale
+  // (63 photoless cigars) and the reason raising the cap means batching the reads,
+  // not just raising the number. The same three reads land on the add_cigar /
+  // record_purchase path through maybeQueueEnrichment.
+  const markets = await liveEnrichMarkets(tx);
 
+  const eligibleVendors = new Set<string>();
   const entries: EnrichmentBacklogEntry[] = [];
   for (const candidate of candidates) {
     const classified = await classifyEnrichmentRequest(tx, candidate.cigarId);
     const status = backlogStatus(classified, markets, input.retryExhausted === true);
+    for (const vendor of classified.coverage.eligible) eligibleVendors.add(vendor.name);
 
     if (status === "queued") {
       await tx.insert(enrichmentRequests).values({
@@ -2289,7 +2299,18 @@ async function queueBacklogWithinTx(
       });
     }
 
-    entries.push({ cigarId: candidate.cigarId, canonicalName: candidate.canonicalName, status });
+    entries.push({
+      cigarId: candidate.cigarId,
+      canonicalName: candidate.canonicalName,
+      status,
+      // Only on the two retirement verdicts: everywhere else the vendor list is
+      // either irrelevant (nothing was tried) or already implied by the verdict,
+      // and an always-present array would push noise through the MCP payload for
+      // 100 rows a press.
+      ...(status === "exhausted" || status === "vendor_unreachable"
+        ? { triedVendors: classified.coverage.tried.map((v) => v.name) }
+        : {}),
+    });
   }
 
   const queued = entries.filter((e) => e.status === "queued").length;
@@ -2299,6 +2320,7 @@ async function queueBacklogWithinTx(
     queued,
     skipped: entries.length - queued,
     enrichedMarkets: [...markets].sort(),
+    eligibleVendors: [...eligibleVendors].sort(),
     entries,
     replayed: false,
   };
