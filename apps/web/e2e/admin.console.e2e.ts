@@ -3,9 +3,9 @@ import { readHandoff } from "./support";
 import type { Handoff } from "./seed.js";
 
 // The admin catalog console. An admin reaches /admin/catalog, the legacy
-// /curation path 307-redirects to it (a temporary redirect the config owns), and
-// the merge → Recent merges → Unmerge round trip returns a pair to Duplicates.
-
+// /curation path 307-redirects to it (a temporary redirect the config owns), the
+// merge → Recent merges → Unmerge round trip returns a pair to Duplicates, and the
+// "Missing photos" worklist can be bulk-enqueued for the crawler's enrich runs.
 let h: Handoff;
 test.beforeAll(() => {
   h = readHandoff();
@@ -79,4 +79,25 @@ test.describe("merge round trip", () => {
     await expect(mergeRow.getByText("Unmerged")).toBeVisible();
     await expect(pair.getByRole("button", { name: "Merge into this" }).first()).toBeVisible();
   });
+});
+
+test("Queue enrichment enqueues the Missing photos worklist, and a second press finds nothing to do", async ({
+  page,
+}) => {
+  await page.goto("/admin/catalog");
+
+  // The section renders because the seeded admin holds a photoless cigar.
+  await expect(page.getByRole("heading", { name: "Missing photos" })).toBeVisible();
+  await expect(page.getByRole("link", { name: h.cigars.heldPhotoless.name })).toBeVisible();
+
+  const queue = page.getByRole("button", { name: "Queue enrichment" });
+  await queue.click();
+  await expect(page.getByText(/Queued [1-9]\d* · skipped 0/)).toBeVisible();
+
+  // The queue dedupes: every row now reports already_queued, so nothing is
+  // enqueued twice. A fresh load mints a new request id, so this is the real
+  // second press rather than an envelope replay.
+  await page.reload();
+  await page.getByRole("button", { name: "Queue enrichment" }).click();
+  await expect(page.getByText(/Queued 0 · skipped [1-9]\d*/)).toBeVisible();
 });

@@ -51,6 +51,8 @@ test("the Brands and Ledger presentations render", async ({ page }) => {
 
   await page.goto("/cigars?view=ledger");
   await expect(page).toHaveURL(/view=ledger/);
-  // The seeded admin holds no inventory — the honest empty state, not a skeleton.
-  await expect(page.getByText("No inventory yet.")).toBeVisible();
+  // The admin holds one seeded lot (the photoless holding the console's Missing
+  // photos worklist needs), so the ledger renders its row rather than the empty state.
+  await expect(page.getByText("No inventory yet.")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: h.cigars.heldPhotoless.name })).toBeVisible();
 });

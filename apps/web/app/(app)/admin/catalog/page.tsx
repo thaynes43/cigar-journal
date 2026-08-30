@@ -9,6 +9,7 @@ import { DismissButton } from "./dismiss-button";
 import { MergeButton } from "./merge-button";
 import { VerifyButton } from "./verify-button";
 import { RenameButton } from "./rename-button";
+import { QueueEnrichmentButton } from "./queue-enrichment-button";
 import { RecentAgentRuns } from "./recent-agent-runs";
 import { UnmergeButton } from "./unmerge-button";
 import { BrandImagery } from "./brand-imagery";
@@ -53,7 +54,10 @@ export default async function CatalogReviewPage() {
           (DESIGN-003 §Images). Absent when empty. */}
       {missingPhotos.length > 0 ? (
         <section className="flex flex-col gap-4">
-          <h2 className="label-caps">Missing photos</h2>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="label-caps">Missing photos</h2>
+            <QueueEnrichmentButton />
+          </div>
           <ul className="rounded-card border border-line bg-surface">
             {missingPhotos.map((cigar) => (
               <li key={cigar.cigarId} className="border-b border-line/60 last:border-b-0">

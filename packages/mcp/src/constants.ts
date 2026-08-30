@@ -28,7 +28,7 @@ export const TOOL_NAMES = [
   "request_cigar_enrichment",
   "update_cigar",
   "record_price",
-  // Curation surface (admin-only) — one paged read + seven curator writes.
+  // Curation surface (admin-only) — one paged read + eight curator writes.
   "get_curation_queue",
   "set_listing_match_status",
   "set_cigar_facts",
@@ -37,6 +37,7 @@ export const TOOL_NAMES = [
   "restore_cigar",
   "set_product_photo_rights",
   "rename_cigar",
+  "queue_enrichment_backlog",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -74,7 +75,7 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   request_cigar_enrichment: ["journal:write"],
   update_cigar: ["journal:write"],
   record_price: ["journal:write"],
-  // Curation surface (DESIGN-003 wave 4a). The read takes curation:read, the six
+  // Curation surface (DESIGN-003 wave 4a). The read takes curation:read, the eight
   // writes curation:write — a separate scope pair from journal/catalog, so a
   // journal:write token can never reach a curation tool. Scope is necessary but
   // NOT sufficient: every curation handler also requires an admin principal (the
@@ -89,6 +90,14 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   restore_cigar: ["curation:write"],
   set_product_photo_rights: ["curation:write"],
   rename_cigar: ["curation:write"],
+  // #154 rides curation:write, NOT journal:write like the ADR-009 repair tools:
+  // it is curator-gated, worklist-scoped and run-attributed, so it is the curation
+  // surface by every existing criterion. The consequence is the point — the curate
+  // agent's live token already holds curation:write, so no token's reach widens.
+  // Granting that agent journal:write instead (to loop request_cigar_enrichment)
+  // would hand a catalog agent the owner's journal — save_smoke, record_purchase,
+  // set_want — for one enqueue action.
+  queue_enrichment_backlog: ["curation:write"],
 };
 
 // Personal fields on catalog tools require this additional scope.
@@ -190,7 +199,7 @@ Field conventions:
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - Combine related corrections into one update_smoke call rather than several.
 
-Catalog curation (admin only). The get_curation_queue read and the seven curation
+Catalog curation (admin only). The get_curation_queue read and the eight curation
 write tools are for an operations agent maintaining the catalog — not for
 conversational journaling; a normal chat session never uses them. get_curation_queue
 pages the work by kind (unverified, duplicates, match_triage, unbranded, untyped,
@@ -201,6 +210,10 @@ verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
 non-cigar pollution, restore_cigar to undo; set_product_photo_rights
 approved/suppressed); low-confidence cases are skipped and
 reported, never guessed — leave an uncertain brand or type null rather than invent
-one. Pass runId (the batch id) and confidence (0-1) on every write so the run is
-auditable and reversible. Merges stay human-only in the web console — there is no
-merge tool here.`;
+one. queue_enrichment_backlog enqueues the caller's photoless holdings for the
+crawler's enrich runs in one call — press it once per run, not once per cigar; it
+reports every row as queued, or why it was skipped. Enrichment matches on the
+canonical name, so fix a wrong one with rename_cigar BEFORE queuing it. Pass runId
+(the batch id) and confidence (0-1) on every write so the run is auditable and
+reversible. Merges stay human-only in the web console — there is no merge tool
+here.`;

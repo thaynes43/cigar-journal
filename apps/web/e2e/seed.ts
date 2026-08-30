@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createDatabase, cigars, users, type NewCigarRow } from "@cj/db";
+import { createDatabase, cigars, purchases, users, type NewCigarRow } from "@cj/db";
 import {
   claimInvite,
   createInvite,
@@ -70,6 +70,9 @@ export interface Handoff {
     smoked: { id: string; name: string };
     wanted: { id: string; name: string };
     sampleNC: { id: string; name: string };
+    // A held cigar with no product photo — the "Missing photos" worklist row the
+    // admin console's Queue enrichment button acts on (#154).
+    heldPhotoless: { id: string; name: string };
   };
   // A deterministic near-duplicate pair for the admin console's merge/unmerge
   // round trip. Distinct from every other seeded name so the pair is the only one
@@ -230,6 +233,14 @@ export async function seed(opts: {
       ringGauge: 49,
     });
 
+    // Deliberately sparse — no dimensions, no photo — so it is genuinely
+    // enrichable rather than reported `not_needed`.
+    const photoless = await insertCigar(deps, {
+      canonicalName: "Tatuaje Black Label Corona Gorda",
+      brand: "Tatuaje",
+      type: "NC",
+    });
+
     // A near-duplicate pair (accent variant, well above the 0.6 trigram bar) so the
     // console's Duplicates → merge → Recent merges → Unmerge round trip has real
     // data. Unverified so they also sit in the verification backlog, like any
@@ -284,6 +295,13 @@ export async function seed(opts: {
       assessment: { rating: 100, liked: true, strength: "full", body: "full", impression: null },
       journal: { narrative: "No title on this one — the cigar name has to carry the page." },
     });
+
+    // A holding with no product photo, so /admin/catalog renders the "Missing
+    // photos" worklist and its Queue enrichment button has something to queue.
+    // Inserted directly rather than through recordPurchase: that path queues an
+    // enrichment request of its own, which would pre-empt the very thing the
+    // button is meant to do.
+    await deps.db.insert(purchases).values({ userId: adminId, cigarId: photoless, quantity: 4 });
 
     // --- Non-admin account (minted and redeemed through a real invite) ------
     // The invite path is the only way to create a user now, so the fixture uses
@@ -370,6 +388,7 @@ export async function seed(opts: {
         smoked: { id: monte2, name: "Montecristo No. 2" },
         wanted: { id: hemingway, name: "Arturo Fuente Hemingway Short Story" },
         sampleNC: { id: padron64, name: "Padrón 1964 Anniversary Maduro" },
+        heldPhotoless: { id: photoless, name: "Tatuaje Black Label Corona Gorda" },
       },
       duplicatePair: {
         survivor: { id: dupePlain, name: "Ramon Allones Especialmente Seleccionados" },

@@ -65,9 +65,14 @@ import type {
   WorklistMatch,
   DuplicateCandidatePair,
   MissingPhotoCigar,
+  QueueEnrichmentBacklogInput,
+  QueueEnrichmentBacklogResult,
+  EnrichmentBacklogEntry,
+  EnrichmentBacklogStatus,
 } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { strongLinkCompatible } from "./cigar-resolution.js";
+import { classifyEnrichmentRequest } from "./enrichment.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 
@@ -2074,6 +2079,139 @@ export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Pro
 }
 
 // --------------------------------------------------------------------------
+// queueEnrichmentBacklog — bulk-enqueue the photoless-holdings worklist (#154).
+// --------------------------------------------------------------------------
+
+// A press drains the "Missing photos" section into enrichment_requests, which the
+// crawler's enrich runs consume. It replaces calling request_cigar_enrichment 55
+// times by hand; the console button and the curate agent's MCP tool both land here.
+//
+// Selection is cigarsMissingPhotos itself — the SAME read the section renders — so
+// the number on screen is the number queued. That matters beyond tidiness: the
+// worklist gates on `rights <> 'suppressed'` while curationWorklist's missing_photos
+// kind uses a bare NOT EXISTS, so the two diverge the first time a rights takedown
+// lands, and a taken-down photo must re-queue rather than silently vanish.
+//
+// The per-row verdict comes from classifyEnrichmentRequest (enrichment.ts), so this
+// report and request_cigar_enrichment speak one vocabulary. It is deliberately NOT
+// maybeQueueEnrichment: that returns a bare boolean (it cannot say WHY a row was
+// skipped) and its dedupe misses `in_progress`.
+//
+// Enveloped (ADR-003) where request_cigar_enrichment is deliberately bare: a bulk
+// press is a batch effect worth replaying identically, and a button can be
+// double-clicked. Not in REVERSIBLE_ACTIONS — the inverse (deleting a pending
+// request) has no user-visible value, so the run shows with no Undo by design.
+export const ENRICHMENT_BACKLOG_MAX = 100;
+
+// The cap covers today's backlog with headroom and refuses to become a 900-row
+// self-inflicted crawl. One transaction over up to this many rows stays short-lived;
+// raising the ceiling means batching the writes, not just raising the number.
+function clampBacklogLimit(limit: number | undefined): number {
+  if (limit == null || !Number.isFinite(limit)) return ENRICHMENT_BACKLOG_MAX;
+  return Math.min(Math.max(Math.trunc(limit), 1), ENRICHMENT_BACKLOG_MAX);
+}
+
+export async function queueEnrichmentBacklog(
+  deps: Deps,
+  principal: Principal,
+  input: QueueEnrichmentBacklogInput,
+): Promise<QueueEnrichmentBacklogResult> {
+  assertCurator(principal);
+  const requestFingerprint = fingerprint(input);
+  const limit = clampBacklogLimit(input.limit);
+
+  // The worklist read runs before the write transaction opens (it is the console's
+  // own read, which takes Deps). Every candidate is re-classified INSIDE the tx, so
+  // a row that gained a photo or a queue entry in between is reported, not
+  // double-queued.
+  const worklist = await cigarsMissingPhotos(deps, principal);
+  const candidates = worklist.slice(0, limit);
+
+  try {
+    return await deps.db.transaction((tx) =>
+      queueBacklogWithinTx(tx, principal, input, requestFingerprint, worklist.length, candidates),
+    );
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as QueueEnrichmentBacklogResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function queueBacklogWithinTx(
+  tx: Tx,
+  principal: Principal,
+  input: QueueEnrichmentBacklogInput,
+  requestFingerprint: string,
+  eligible: number,
+  candidates: MissingPhotoCigar[],
+): Promise<QueueEnrichmentBacklogResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as QueueEnrichmentBacklogResult), replayed: true };
+  }
+
+  const entries: EnrichmentBacklogEntry[] = [];
+  for (const candidate of candidates) {
+    const classified = await classifyEnrichmentRequest(tx, candidate.cigarId);
+    // The assignment is the compile-time check that ADR-009's taxonomy stays a
+    // subset of the bulk one. `exhausted` overrides only a would-be queue: a row
+    // the crawler gave up on is reported, not re-queued, unless asked for.
+    const status: EnrichmentBacklogStatus =
+      classified.status === "queued" && classified.exhausted && input.retryExhausted !== true
+        ? "exhausted"
+        : classified.status;
+
+    if (status === "queued") {
+      await tx.insert(enrichmentRequests).values({
+        cigarId: candidate.cigarId,
+        requestedBy: principal.userId,
+      });
+      // One audit row per INSERT (never for a skip), so "Recent agent runs" shows
+      // exactly what the press changed, attributed to the run.
+      await tx.insert(auditLog).values({
+        userId: principal.userId,
+        ...auditAttribution(input.attribution),
+        action: "cigar.enrichment_request",
+        smokeId: null,
+        before: null,
+        after: { cigarId: candidate.cigarId, missingFields: classified.assessment.missingFields },
+        correlationId: input.correlationId ?? input.clientRequestId,
+      });
+    }
+
+    entries.push({ cigarId: candidate.cigarId, canonicalName: candidate.canonicalName, status });
+  }
+
+  const queued = entries.filter((e) => e.status === "queued").length;
+  const result: QueueEnrichmentBacklogResult = {
+    eligible,
+    considered: candidates.length,
+    queued,
+    skipped: entries.length - queued,
+    entries,
+    replayed: false,
+  };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "queue_enrichment_backlog",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// --------------------------------------------------------------------------
 // Recent agent runs + Undo (DESIGN-003 §Curation review console, #126). Two
 // reads (grouped runs, a run's rows) and one write (undo an action by its inverse).
 // --------------------------------------------------------------------------
@@ -2136,6 +2274,12 @@ function summarizeAudit(action: string, before: Record<string, unknown>, after: 
       const source = (before.source ?? {}) as Record<string, unknown>;
       const target = (before.target ?? {}) as Record<string, unknown>;
       return `${fmtValue(source.canonicalName)} → ${fmtValue(target.canonicalName)}`;
+    }
+    // A bulk enqueue lands one row per cigar (#154); without this case every row of
+    // a press renders blank.
+    case "cigar.enrichment_request": {
+      const missing = Array.isArray(after.missingFields) ? after.missingFields.map(fmtValue) : [];
+      return missing.length > 0 ? `queued · missing ${missing.join(", ")}` : "queued";
     }
     case "cigar.set_facts": {
       const parts = Object.keys(after)

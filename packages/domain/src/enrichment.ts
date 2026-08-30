@@ -144,35 +144,48 @@ function normalizeNote(note: string | null | undefined): string | null {
   return trimmed.length > MAX_NOTE_LENGTH ? trimmed.slice(0, MAX_NOTE_LENGTH) : trimmed;
 }
 
+// The single enrichment verdict, shared by the conversational repair tool and the
+// bulk backlog enqueue (curation.ts, #154) so the two can never disagree about what
+// "already queued" means. One pass over the cigar's request history rather than a
+// SELECT per status — the predicate needs three of the four values.
+//
+// `exhausted` rides ALONGSIDE `status` rather than inside it, because it does not
+// change the single-cigar answer: request_cigar_enrichment has always re-queued a
+// row the crawler gave up on, and that stays true. The bulk path is the caller that
+// must act on the flag (a whole worklist of dead rows is a different question from
+// one cigar a user just asked about).
+export interface EnrichmentClassification {
+  cigar: CigarRow;
+  assessment: EnrichmentAssessment;
+  status: EnrichmentRequestStatus;
+  exhausted: boolean;
+}
+
+export async function classifyEnrichmentRequest(tx: Tx, cigarId: string): Promise<EnrichmentClassification> {
+  const { cigar, assessment } = await loadAssessment(tx, cigarId);
+
+  const statusRows = await tx
+    .selectDistinct({ status: enrichmentRequests.status })
+    .from(enrichmentRequests)
+    .where(eq(enrichmentRequests.cigarId, cigarId));
+  const seen = new Set(statusRows.map((r) => r.status));
+
+  let status: EnrichmentRequestStatus;
+  if (assessment.complete) status = "not_needed";
+  else if (seen.has("pending") || seen.has("in_progress")) status = "already_queued";
+  else if (seen.has("fulfilled")) status = "recently_enriched";
+  else status = "queued";
+
+  return { cigar, assessment, status, exhausted: seen.has("exhausted") };
+}
+
 export async function requestCigarEnrichment(
   deps: Deps,
   principal: Principal,
   input: RequestCigarEnrichmentInput,
 ): Promise<RequestCigarEnrichmentResult> {
   return deps.db.transaction(async (tx) => {
-    const { cigar, assessment } = await loadAssessment(tx, input.cigarId);
-
-    const open = await tx
-      .select({ id: enrichmentRequests.id })
-      .from(enrichmentRequests)
-      .where(
-        and(
-          eq(enrichmentRequests.cigarId, input.cigarId),
-          inArray(enrichmentRequests.status, ["pending", "in_progress"]),
-        ),
-      )
-      .limit(1);
-    const fulfilled = await tx
-      .select({ id: enrichmentRequests.id })
-      .from(enrichmentRequests)
-      .where(and(eq(enrichmentRequests.cigarId, input.cigarId), eq(enrichmentRequests.status, "fulfilled")))
-      .limit(1);
-
-    let status: EnrichmentRequestStatus;
-    if (assessment.complete) status = "not_needed";
-    else if (open.length > 0) status = "already_queued";
-    else if (fulfilled.length > 0) status = "recently_enriched";
-    else status = "queued";
+    const { cigar, assessment, status } = await classifyEnrichmentRequest(tx, input.cigarId);
 
     if (status === "queued") {
       await tx.insert(enrichmentRequests).values({

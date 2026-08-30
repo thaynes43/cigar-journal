@@ -19,7 +19,7 @@ import { createHarness, type DomainHarness } from "@cj/domain/testing";
 import type { Principal } from "@cj/domain";
 import { purchases, vendors, enrichmentRequests, offers, listingMatches, productPhotos, auditLog, cigars } from "@cj/db";
 import { buildApp } from "./app.js";
-import { INSTRUCTIONS } from "./constants.js";
+import { INSTRUCTIONS, TOOL_SCOPES } from "./constants.js";
 
 // End-to-end over the real HTTP surface: an embedded Postgres (domain harness),
 // the app's own OAuth authorization server to mint genuine audience-bound tokens,
@@ -265,7 +265,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the twenty-five tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
+  it("lists exactly the twenty-six tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -299,6 +299,7 @@ describe("@cj/mcp adapter", () => {
           "restore_cigar",
           "set_product_photo_rights",
           "rename_cigar",
+          "queue_enrichment_backlog",
         ].sort(),
       );
 
@@ -333,6 +334,7 @@ describe("@cj/mcp adapter", () => {
         "restore_cigar",
         "set_product_photo_rights",
         "rename_cigar",
+        "queue_enrichment_backlog",
       ])
         expect(readOnly(w)).not.toBe(true);
     });
@@ -2070,5 +2072,93 @@ describe("@cj/mcp adapter", () => {
       expect(res.canonicalName).toBe("Padrón 1926 No. 9 Maduro");
     });
     expect((await cigarById(cigarId))!.canonicalName).toBe("Padrón 1926 No. 9 Maduro");
+  });
+
+  // ---- queue_enrichment_backlog (#154) --------------------------------------
+
+  it("queue_enrichment_backlog rides curation:write and refuses a journal:write token: 403", async () => {
+    expect(TOOL_SCOPES.queue_enrichment_backlog).toEqual(["curation:write"]);
+
+    // ownerFull carries every journal/catalog scope but no curation scope. This is
+    // the whole point of the scope choice: the curate agent's existing curation
+    // token reaches the tool, and no journal token ever can.
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerFull}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "queue_enrichment_backlog", arguments: { clientRequestId: randomUUID() } },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+  });
+
+  it("queue_enrichment_backlog refuses a curation-scoped NON-admin and writes nothing", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: `Backlog Gate ${randomUUID().slice(0, 8)}` });
+    await h.pg.db.insert(purchases).values({ userId: owner.userId, cigarId, quantity: 1 });
+
+    await withClient(ownerCuration, async (client) => {
+      const res = await call(client, "queue_enrichment_backlog", { clientRequestId: randomUUID() });
+      expect(errorOf(res).code).toBe("unauthorized");
+    });
+
+    const rows = await h.pg.db.select().from(enrichmentRequests);
+    expect(rows.filter((r) => r.cigarId === cigarId)).toHaveLength(0);
+  });
+
+  it("queue_enrichment_backlog queues the admin's photoless holdings under the run id (agent surface)", async () => {
+    const deep = await h.seedCigar({ canonicalName: `Backlog Deep ${randomUUID().slice(0, 8)}` });
+    const shallow = await h.seedCigar({ canonicalName: `Backlog Shallow ${randomUUID().slice(0, 8)}` });
+    await h.pg.db.insert(purchases).values([
+      { userId: adminUser.userId, cigarId: deep, quantity: 5 },
+      { userId: adminUser.userId, cigarId: shallow, quantity: 1 },
+    ]);
+    const runId = `wo-cigar-curate-${randomUUID().slice(0, 8)}`;
+
+    await withClient(adminCuration, async (client) => {
+      const res = payloadOf(
+        await call(client, "queue_enrichment_backlog", {
+          clientRequestId: randomUUID(),
+          runId,
+          confidence: 0.9,
+        }),
+      ) as { queued: number; skipped: number; entries: { cigarId: string; status: string }[] };
+
+      expect(res.queued).toBe(2);
+      expect(res.skipped).toBe(0);
+      // Worklist order: deepest hole in the humidor first.
+      expect(res.entries.map((e) => e.cigarId)).toEqual([deep, shallow]);
+      expect(res.entries.every((e) => e.status === "queued")).toBe(true);
+    });
+
+    const requests = await h.pg.db.select().from(enrichmentRequests);
+    expect(requests.filter((r) => r.cigarId === deep)).toHaveLength(1);
+    expect(requests.filter((r) => r.cigarId === shallow)).toHaveLength(1);
+
+    // The adapter stamps actor `agent` server-side and carries the run id, so the
+    // press shows in "Recent agent runs" as one grouped run.
+    const audits = (await h.pg.db.select().from(auditLog)).filter((r) => r.runId === runId);
+    expect(audits).toHaveLength(2);
+    expect(audits.every((r) => r.actor === "agent" && r.action === "cigar.enrichment_request")).toBe(true);
+  });
+
+  it("queue_enrichment_backlog honours limit and reports the uncapped eligible count", async () => {
+    // The admin already holds the two rows above; add a third and cap at one.
+    const extra = await h.seedCigar({ canonicalName: `Backlog Capped ${randomUUID().slice(0, 8)}` });
+    await h.pg.db.insert(purchases).values({ userId: adminUser.userId, cigarId: extra, quantity: 9 });
+
+    await withClient(adminCuration, async (client) => {
+      const res = payloadOf(
+        await call(client, "queue_enrichment_backlog", { clientRequestId: randomUUID(), limit: 1 }),
+      ) as { eligible: number; considered: number; queued: number; entries: { cigarId: string }[] };
+
+      expect(res.eligible).toBe(3);
+      expect(res.considered).toBe(1);
+      expect(res.queued).toBe(1);
+      expect(res.entries.map((e) => e.cigarId)).toEqual([extra]); // quantity 9 leads
+    });
   });
 });

@@ -76,6 +76,10 @@ export {
   unmergeCigars,
   recentMerges,
   MERGE_LEDGER_TABLES,
+  // #154: bulk-enqueue the photoless-holdings worklist into the enrichment queue —
+  // the console button and the curate agent's MCP tool share this one service.
+  queueEnrichmentBacklog,
+  ENRICHMENT_BACKLOG_MAX,
 } from "./curation.js";
 // Brand imagery (ADR-007 third binding, issue #127): the Wikidata/Commons wall
 // cover used only where no member cigar has a product photo. The read path is

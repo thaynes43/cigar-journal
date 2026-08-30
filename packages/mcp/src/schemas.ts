@@ -1114,6 +1114,33 @@ export const renameCigarSchema = z
 
 export type RenameCigarArgs = z.infer<typeof renameCigarSchema>;
 
+// queue_enrichment_backlog (#154): enqueue the caller's photoless holdings for the
+// crawler's enrich runs in ONE call, instead of looping request_cigar_enrichment.
+// `limit` is bounded here AND clamped in the domain (ENRICHMENT_BACKLOG_MAX) — the
+// ceiling is what stops one press becoming an unbounded crawl.
+export const queueEnrichmentBacklogSchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .nullish()
+      .describe("How many worklist rows to enqueue, highest remaining stock first. 1-100; defaults to 100."),
+    retryExhausted: z
+      .boolean()
+      .nullish()
+      .describe(
+        "Re-queue rows the crawler already gave up on (status exhausted). Defaults false — those rows are reported, not re-crawled. Set true only after the vendor coverage or the cigar's name has changed.",
+      ),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type QueueEnrichmentBacklogArgs = z.infer<typeof queueEnrichmentBacklogSchema>;
+
 // ---- curation output schemas (permissive, like the rest) -------------------
 
 // One page of the worklist: exactly one payload array populated per kind, mirrored
@@ -1164,6 +1191,17 @@ export const renameCigarOutput = z
     cigarId: z.string(),
     canonicalName: z.string(),
     changed: z.boolean(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const queueEnrichmentBacklogOutput = z
+  .object({
+    eligible: z.number(),
+    considered: z.number(),
+    queued: z.number(),
+    skipped: z.number(),
+    entries: z.array(looseObject),
     replayed: z.boolean(),
   })
   .passthrough();

@@ -1210,6 +1210,54 @@ export interface MissingPhotoCigar {
   remaining: number;
 }
 
+// ---- queueEnrichmentBacklog (#154) ----------------------------------------
+//
+// Bulk-enqueue the "Missing photos" worklist into the enrichment queue the
+// crawler's enrich runs drain. One press replaces 55 one-at-a-time
+// request_cigar_enrichment calls; the console button and the curate agent's MCP
+// tool both land here, so the two surfaces cannot drift.
+
+// ADR-009's per-cigar verdict (enrichment.ts `EnrichmentRequestStatus`) plus the
+// one outcome only a bulk press has: `exhausted` — the crawler tried every enabled
+// vendor and gave up. Restated as literals rather than imported so this stays a
+// pure type module; curation.ts assigns an EnrichmentRequestStatus into this union,
+// which is the compile-time check that the two vocabularies stay in step.
+export type EnrichmentBacklogStatus =
+  | "queued"
+  | "already_queued"
+  | "recently_enriched"
+  | "not_needed"
+  | "exhausted";
+
+export interface EnrichmentBacklogEntry {
+  cigarId: string;
+  canonicalName: string;
+  status: EnrichmentBacklogStatus;
+}
+
+// `limit` is clamped to [1, ENRICHMENT_BACKLOG_MAX] (curation.ts) — the ceiling is
+// what stops one press becoming an unbounded crawl as the catalog grows.
+// `retryExhausted` re-queues rows the crawler gave up on; it defaults FALSE because
+// neither dedupe predicate blocks on `exhausted`, so without it every press would
+// re-queue every dead row. Those rows still REPORT as `exhausted`, so the curator
+// sees them without having to re-crawl them.
+export interface QueueEnrichmentBacklogInput {
+  clientRequestId: string;
+  limit?: number;
+  retryExhausted?: boolean;
+  attribution?: CurationAttribution;
+  correlationId?: string;
+}
+
+export interface QueueEnrichmentBacklogResult {
+  eligible: number; // worklist rows before the cap
+  considered: number; // rows the cap admitted
+  queued: number;
+  skipped: number;
+  entries: EnrichmentBacklogEntry[];
+  replayed: boolean;
+}
+
 // The catalog lifecycle values (DESIGN-003 §Curation, migration 0013): `active`
 // shows everywhere; `excluded` hides from browse/search/queue but stays reachable
 // by direct id; `merged` is a tombstone folded into a survivor by mergeCigars.

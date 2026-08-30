@@ -269,6 +269,38 @@ sequence (rights-honest, fastest visible fix first):
    fallback where no member cigar has a photo — a logo beats a monogram.
 6. `#97` items (unsuspend crawl CronJobs) stay owner-gated and unchanged.
 
+### Who owns the enqueue (#154)
+
+The worklist above lists the photoless holdings and offers a manual upload;
+`queue_enrichment_backlog` is the other half — one press turns the whole list
+into `enrichment_requests` rows for the crawler's enrich runs. Two surfaces,
+one domain service, so they cannot drift:
+
+- **The recurring enqueue is agent work** (§Curation rules: users never do
+  catalog data entry). The curate agent calls the MCP tool at the top of its
+  daily run under its existing `curation:write` token, passing that run's id.
+- **The console button is the operator kickstart**, in the "Missing photos"
+  section header. Not data entry — the same one action, pressed by hand.
+
+It rides `curation:write`, not the `journal:write` the ADR-009 repair tools
+use: it is curator-gated, worklist-scoped and run-attributed. That choice is
+load-bearing — the curate agent's token already holds `curation:write`, so
+nothing needs re-consenting, and the agent never has to be handed
+`journal:write` (which would give a catalog agent `save_smoke`,
+`record_purchase` and `set_want` over the owner's journal).
+
+**The rename gate.** Enrichment resolves a cigar by its canonical name twice
+over — slug-token ranking of candidate URLs, then a pg_trgm
+`similarity(canonical_name, listing.name) > 0.55` floor before it will link.
+The photoless holdings carry reversed, doubled and misspelled names
+(`Choix Supreme Rey Del Mundo`, `Trinidad Trinidad Reyes`,
+`Rockey Patel Rocky Patel Edge`), and none of them has a listing match, so
+enrichment is their only automated route to a photo. Queue them before a
+rename pass and every pass returns no match, twice, after which
+`EXHAUST_ATTEMPTS = 2` marks them `exhausted` for good. `rename_cigar` has
+existed since v0.26.0; what is missing is the **use** of it. The mechanism
+ships; the press waits on that pass and on CC vendor coverage.
+
 ## Build waves (each a dispatchable lane; docs-first satisfied by this doc)
 
 1. **Frame (web):** shell width + per-route measures; auto-fill grids;

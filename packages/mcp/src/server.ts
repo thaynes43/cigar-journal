@@ -29,6 +29,7 @@ import {
   restoreCigar,
   setProductPhotoRights,
   renameCigar,
+  queueEnrichmentBacklog,
   UnauthenticatedError,
   UnauthorizedError,
   UnavailableError,
@@ -92,6 +93,8 @@ import {
   setProductPhotoRightsOutput,
   renameCigarSchema,
   renameCigarOutput,
+  queueEnrichmentBacklogSchema,
+  queueEnrichmentBacklogOutput,
   searchCigarsOutput,
   getCigarOutput,
   getMySmokesOutput,
@@ -1161,6 +1164,35 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           clientRequestId: args.clientRequestId,
           cigarId: args.cigarId,
           canonicalName: args.canonicalName,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "queue_enrichment_backlog",
+    {
+      title: "Queue enrichment backlog",
+      description:
+        "Enqueue the caller's photoless holdings — the cigars they hold with no servable product photo — for the crawler's enrich runs, in one call instead of looping request_cigar_enrichment. Selects highest remaining stock first, capped by limit (1-100, default 100). Returns every considered row as queued or with the reason it was skipped (already_queued, recently_enriched, not_needed, exhausted). Enrichment matches on the canonical name, so fix a wrong one with rename_cigar first. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
+      inputSchema: queueEnrichmentBacklogSchema,
+      outputSchema: queueEnrichmentBacklogOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Queue enrichment backlog",
+      },
+    },
+    (args, extra) =>
+      run("queue_enrichment_backlog", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await queueEnrichmentBacklog(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          limit: args.limit ?? undefined,
+          retryExhausted: args.retryExhausted ?? undefined,
           attribution: curationAttribution(args),
           correlationId,
         });
