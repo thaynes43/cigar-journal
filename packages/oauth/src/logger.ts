@@ -16,19 +16,39 @@ export type AuthEventName =
   | "refresh_replayed"
   | "token_revoked"
   | "audience_mismatch"
-  | "token_rejected";
+  | "token_rejected"
+  // Operator-minted service credentials (ADR-010) — never issued by a grant.
+  | "service_client_created"
+  | "service_token_minted"
+  | "service_token_revoked";
+
+/** Where an event line goes. `console.log`-shaped, so `console.error` fits. */
+export type AuthEventWriter = (message: string, ...rest: unknown[]) => void;
 
 function ts(): string {
   return new Date().toISOString();
 }
 
-export function authEvent(event: AuthEventName, data?: Record<string, unknown>): void {
+/**
+ * Emit an auth event to an explicit sink. The service-token CLI needs this:
+ * `mint`'s stdout carries the token and NOTHING else, so its narration goes to
+ * `console.error` while the server paths keep writing to stdout.
+ */
+export function authEventTo(
+  write: AuthEventWriter,
+  event: AuthEventName,
+  data?: Record<string, unknown>,
+): void {
   const line = `${ts()} [auth] ${event}`;
   if (data && Object.keys(data).length > 0) {
-    console.log(line, JSON.stringify(data));
+    write(line, JSON.stringify(data));
   } else {
-    console.log(line);
+    write(line);
   }
+}
+
+export function authEvent(event: AuthEventName, data?: Record<string, unknown>): void {
+  authEventTo((message, ...rest) => console.log(message, ...rest), event, data);
 }
 
 /** Never log a whole token; a short fingerprint is enough to correlate. */

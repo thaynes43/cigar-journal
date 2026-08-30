@@ -551,7 +551,14 @@ export async function exchangeAuthorizationCode(
   });
 }
 
-async function revokeFamily(db: Db, familyId: string): Promise<void> {
+/**
+ * Revoke a whole refresh chain: the family's refresh tokens and every access
+ * token minted from it. Exported for the operator service-token CLI, which must
+ * be able to kill a flow-issued token's chain (revoking only the access token
+ * would let the refresh grant mint a replacement an hour later). Deliberately
+ * NOT re-exported from index.ts — it is not part of the package's HTTP surface.
+ */
+export async function revokeFamily(db: Db, familyId: string): Promise<void> {
   const now = new Date();
   await db
     .update(oauthRefreshToken)

@@ -7,12 +7,14 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "service-token": "tsx src/cli.ts"
   },
   "dependencies": {
     "@cj/db": "workspace:*",
     "@cj/domain": "workspace:*",
-    "drizzle-orm": "^0.44.0"
+    "drizzle-orm": "^0.44.0",
+    "tsx": "^4.19.0"
   },
   "devDependencies": {
     "@cj/config": "workspace:*",
