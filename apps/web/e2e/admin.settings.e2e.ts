@@ -35,3 +35,15 @@ test("journal visibility flip persists", async ({ page }) => {
   await page.reload();
   await expect(visibilityButton(page, "Private")).toHaveAttribute("aria-pressed", "true");
 });
+
+// The Sign-in section (ADR-010). Password is always listed and never removable —
+// losing it is the lockout. With no OIDC env in the harness the Authentik row is
+// absent entirely rather than rendering a disabled control or a config blurb.
+test("the Sign-in section lists Password only, with SSO unconfigured", async ({ page }) => {
+  await page.goto("/settings");
+  const signIn = page.locator("section").filter({ has: page.getByRole("heading", { name: "Sign-in" }) });
+
+  await expect(signIn.getByText("Password")).toBeVisible();
+  await expect(signIn.getByText("Authentik")).toHaveCount(0);
+  await expect(signIn.getByRole("button")).toHaveCount(0);
+});
