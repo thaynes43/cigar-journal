@@ -4,6 +4,7 @@ import { useRef } from "react";
 import { useRouter } from "next/navigation";
 import type { BrandImageAdminRow, BrandImageQueueResult } from "@cj/domain";
 import { api } from "@/lib/trpc/react";
+import { actionErrorMessage } from "@/lib/trpc/error";
 import { ui } from "@/lib/ui";
 
 // Brand imagery (issue 127): the Wikidata/Commons wall covers a curator still
@@ -109,7 +110,7 @@ function ChooseButton({ brandSlug, qid }: { brandSlug: string; qid: string }) {
       >
         Choose
       </button>
-      {choose.error ? <span className={`text-sm ${ui.muted}`}>{choose.error.message}</span> : null}
+      {choose.error ? <span className={`text-sm ${ui.muted}`}>{actionErrorMessage(choose.error)}</span> : null}
     </span>
   );
 }
@@ -137,7 +138,7 @@ function RightsButton({
       >
         {label}
       </button>
-      {set.error ? <span className={`text-sm ${ui.muted}`}>{set.error.message}</span> : null}
+      {set.error ? <span className={`text-sm ${ui.muted}`}>{actionErrorMessage(set.error)}</span> : null}
     </span>
   );
 }
