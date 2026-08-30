@@ -11,6 +11,7 @@ import {
   productPhotos,
   enrichmentRequests,
   vendors,
+  enrichmentAttempts,
   wants,
   auditLog,
   favorites,
@@ -35,6 +36,7 @@ import {
   agentRunRows,
   undoCurationAction,
 } from "./curation.js";
+import { enrichmentCoverageForCigar, recordEnrichmentAttempt } from "./enrichment-coverage.js";
 import { getProductPhoto } from "./product-photos.js";
 import { getMyInventory } from "./inventory.js";
 import { getCigar, searchCigars, getCigarOffers } from "./reads.js";
@@ -194,6 +196,64 @@ describe("curation", () => {
       expect((audit!.before as { source: { id: string } }).source.id).toBe(source);
       expect((audit!.before as { target: { id: string } }).target.id).toBe(target);
       expect((audit!.after as { repointed: { smokes: number } }).repointed.smokes).toBe(1);
+    });
+
+    // The per-vendor attempt ledger (migration 0023) hangs off request_id, NOT
+    // cigar_id — which is exactly why the shape was chosen. A merge re-points
+    // enrichment_requests.cigar_id and the evidence follows the ask with no extra
+    // table to move, no extra ledger row to record, and nothing for unmerge to
+    // orphan. The survivor then classifies against the merged history.
+    it("carries the enrichment attempt ledger through a merge and an unmerge untouched", async () => {
+      const source = await seedUnverified("Ledger Merge Source");
+      const target = await seedUnverified("Ledger Merge Target");
+      const enrichmentId = await addEnrichment(source);
+
+      const [vendor] = await h.deps.db
+        .insert(vendors)
+        .values({ name: `Ledger Merge Vendor ${newRequestId().slice(0, 8)}`, focus: "NC", crawlEnabled: true })
+        .returning({ id: vendors.id });
+      await recordEnrichmentAttempt(h.deps.db, {
+        requestId: enrichmentId,
+        vendorId: vendor!.id,
+        outcome: "miss",
+        at: new Date("2026-08-30T12:00:00.000Z"),
+      });
+
+      const merge = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+
+      const [request] = await h.deps.db
+        .select()
+        .from(enrichmentRequests)
+        .where(eq(enrichmentRequests.id, enrichmentId));
+      expect(request!.cigarId).toBe(target);
+      // The ledger row never moved and never had to.
+      const afterMerge = await h.deps.db
+        .select()
+        .from(enrichmentAttempts)
+        .where(eq(enrichmentAttempts.requestId, enrichmentId));
+      expect(afterMerge).toHaveLength(1);
+      expect(afterMerge[0]!.attempts).toBe(1);
+      // The survivor's coverage sees the merged history — that look really happened
+      // against this ask, whichever cigar row now owns it.
+      const coverage = await enrichmentCoverageForCigar(h.deps.db, target, "NC");
+      expect(coverage.tried.map((v) => v.vendorId)).toContain(vendor!.id);
+
+      await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId: merge.mergeId });
+      const [restored] = await h.deps.db
+        .select()
+        .from(enrichmentRequests)
+        .where(eq(enrichmentRequests.id, enrichmentId));
+      expect(restored!.cigarId).toBe(source);
+      const afterUnmerge = await h.deps.db
+        .select()
+        .from(enrichmentAttempts)
+        .where(eq(enrichmentAttempts.requestId, enrichmentId));
+      expect(afterUnmerge).toHaveLength(1);
+      expect(afterUnmerge[0]!.vendorId).toBe(vendor!.id);
     });
 
     it("re-points an ad-hoc price observation (offers.cigar_id) so merge keeps its history", async () => {

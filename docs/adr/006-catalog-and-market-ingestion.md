@@ -204,3 +204,73 @@ LLM-created cigars accumulate until curated.
     census would have named `/store/go` on the first probe, and where a gate
     admits nothing it names where the products actually live instead of
     requiring another run to find out.
+
+- **2026-08-30 — a vendor's catalogue is PARTIAL (owner ruling; issue #158).**
+  A vendor carries some brands and not others. That is the normal case, not a
+  defect and not a crawl failure. Concretely: Red Anchor is stocked by 2 Guys
+  and not by Fox, and both are NC US retailers in good standing. Everything
+  downstream of this ADR had been built as if any enabled vendor could satisfy
+  any cigar, which is how the enrichment attempt budget ended up vendor-blind.
+  Five consequences, each load-bearing for the code:
+  - **`focus` is a coarse MARKET signal, never a coverage guarantee.** It is
+    sound as a *negative* filter — a CC-only vendor will not carry an NC cigar,
+    so never spend a look there — and unsound as a positive one. `focus` says
+    which market a vendor trades in; it says nothing about which brands within
+    it. The registry has no brand-coverage field and deliberately gains none:
+    it would be hand-maintained fiction, and it would rot the first time a
+    vendor changed stock.
+  - **"No match at vendor V" is evidence about V only.** Never about the cigar,
+    never about the canonical name, never about any other vendor. This is the
+    sentence the code has to obey, and the one every rule below is derived from.
+  - **Therefore an attempt budget, a staleness rule, or an `exhausted` state
+    that does not NAME A VENDOR is meaningless.** A single `EXHAUST_ATTEMPTS = 2`
+    shared across a growing fleet is a request retired after one look from each
+    vendor — a cigar Fox will stock next week, permanently retired on Tuesday
+    because Cuban Lou's looked first. Retirement is per (request, vendor), never
+    per request; the request-level state is a rollup over those, and it must be
+    RECOMPUTABLE rather than merely stored, because its denominator (the set of
+    eligible vendors) changes without any request being touched. Migration 0023
+    adds `enrichment_attempts` for this; `enrichment_requests.status` becomes a
+    cache of the rollup. Two predicates stay deliberately distinct: **eligible**
+    (crawl-enabled, focus covers the market) is the exhaustion denominator, and
+    **live** (eligible AND has completed an `enrich` run) remains the queue gate.
+    Merging them would be circular in one direction — a brand-new lane has never
+    run, so it could never take a request and never become live — and would
+    re-open the enqueue-into-a-void gap in the other.
+  - **Zero eligible vendors is NOT exhaustion.** "Nobody could look" is a
+    different fact from "we looked and found nothing", and laundering one into
+    the other is exactly what this amendment forbids. Such a request stays open
+    and self-heals when a vendor becomes eligible.
+  - **Two photo tiers, never conflated (owner, 2026-08-30).**
+    **Catalogue photo** — `product_photos`, `cigar_id` UNIQUE + `vendor_id` +
+    `source_url`: exactly ONE per catalog cigar, vendor-sourced at crawl,
+    third-party bytes under the `rights` gate (`pending`/`approved`/`suppressed`)
+    and the per-vendor rights posture this ADR already sets. It is the product's
+    identity shot, not a picture of anyone's cigar.
+    **Review photos** — `smoke_photos`, `smoke_id` + `user_id` + `kind` +
+    `caption`: MANY per smoke, and many smokes per cigar. Owner-authored, no
+    third-party rights story, never a display substitute for the catalogue photo
+    and never promoted into `product_photos`.
+    So one generic catalogue entry with one vendor photo sits under an unbounded
+    fan of owner review photos. **Enrichment fills the first tier only:** a cigar
+    with forty review photos is still `productPhoto`-missing and still a
+    legitimate enrichment request. The rights asymmetry is why the tiers cannot
+    share a table — suppressing a vendor's bytes must never touch a user's
+    photographs — and it is why a partial catalogue matters at all: the photo a
+    request exists to fetch can only come from a vendor that stocks the cigar.
+  - **The live probe that motivated this** (2026-08-30, in-cluster Job on the
+    v0.27.0 crawl image, against 2 Guys Cigars). Two facts, both recorded
+    because they are the concrete instance of the ruling above:
+    **(1) The sitemap variance is gone.** Four samples returned an identical
+    6,356 locs with `varied=no`; the 1,462-vs-0 alternation recorded on
+    2026-08-29 did not reproduce. The sampling added for that alternation works
+    and is no longer what blocks this vendor.
+    **(2) The `/store/` product gate is wrong.** The prefix also matches
+    `/store/go/registry/<n>/` — gift-registry pages with no `schema.org/Product`
+    — so the spread sampler drew three of them and the probe returned a FALSE
+    `needs-attention` on the product check over a TRUE failure of the gate. The
+    adapter had been tuned as if enumerating a vendor's URLs were the same as
+    enumerating its products. Correcting the gate is its own change; it does not
+    ride the ledger work, and enabling 2 Guys is deliberately NOT how the
+    per-vendor design is validated — the reopen path lands it automatically when
+    2 Guys does come up.

@@ -1239,6 +1239,11 @@ export interface EnrichmentBacklogEntry {
   cigarId: string;
   canonicalName: string;
   status: EnrichmentBacklogStatus;
+  // Present only on `exhausted`: the vendors that actually looked and did not
+  // carry it. An `exhausted` verdict that does not name a vendor is meaningless
+  // (ADR-006 amendment 2026-08-30) — a vendor's catalogue is partial, so "no
+  // match" is evidence about that vendor and about nothing else.
+  triedVendors?: string[];
 }
 
 // `limit` is clamped to [1, ENRICHMENT_BACKLOG_MAX] (curation.ts) — the ceiling is
@@ -1267,6 +1272,11 @@ export interface QueueEnrichmentBacklogResult {
   // nothing says WHY without a second read: an empty list means no enrich lane is
   // running at all.
   enrichedMarkets: CigarType[];
+  // Every crawl-enabled vendor whose focus covers at least one considered row —
+  // the exhaustion DENOMINATOR, which `enrichedMarkets` cannot express. An
+  // eligible vendor with no enrich CronJob scheduled keeps every request open
+  // forever (nobody asked it), and this list is the only surface that shows it.
+  eligibleVendors: string[];
   entries: EnrichmentBacklogEntry[];
   replayed: boolean;
 }

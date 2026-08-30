@@ -1046,12 +1046,26 @@ result:
   queued: 7
   skipped: 48
   enrichedMarkets: [NC]           # markets an enrich lane actually reaches right now
+  eligibleVendors: [Fox Cigar]    # vendors that COULD look — the exhaustion denominator
   entries:
     - cigarId: cg_01j9x2
       canonicalName: Trinidad Reyes
       status: queued              # see the taxonomy below
+    - cigarId: cg_01j9x3
+      canonicalName: Red Anchor Captain
+      status: exhausted
+      triedVendors: [Fox Cigar]   # only on `exhausted`: who looked and did not carry it
   replayed: false
 ```
+
+`enrichedMarkets` and `eligibleVendors` answer different questions and are both
+reported. A market is **enriched** when some crawl-enabled vendor covering it has
+completed an `enrich` run — that is the enqueue gate. A vendor is **eligible**
+when it is crawl-enabled and its focus covers the row's market — that is the set
+that has to be exhausted before a request retires. A vendor enabled in the
+registry with no enrich CronJob scheduled is eligible but not live, and keeps
+every matching request open forever; `eligibleVendors` is the only surface that
+shows it.
 
 The per-row `status` is `request_cigar_enrichment`'s taxonomy (`queued`,
 `already_queued`, `recently_enriched`, `not_needed`) plus three verdicts only a
@@ -1059,17 +1073,24 @@ bulk press has:
 
 | status | meaning | how to clear it |
 | --- | --- | --- |
-| `exhausted` | the crawler retired the row (`EXHAUST_ATTEMPTS = 2`) | fix the cause, then press with `retryExhausted: true` |
+| `exhausted` | **every eligible vendor** spent its own budget on this row (2 completed looks each) and none carried it; `triedVendors` names them | enable a vendor that stocks the brand — the row reopens on its own — or press with `retryExhausted: true` |
 | `unverified_name` | nobody has reviewed this canonical name | `rename_cigar` if it is wrong, then `verify_cigar` |
 | `no_vendor_coverage` | no crawl-enabled vendor covering that market has completed an `enrich` run | bring that market's enrich lane up |
 
+**A vendor's catalogue is PARTIAL** (ADR-006 amendment 2026-08-30). "No match at
+Fox" is evidence about Fox and about nothing else, so the budget is per
+*(request, vendor)*: each eligible vendor gets its own two completed looks, and a
+request retires only once all of them are spent. A request with no eligible
+vendor at all is NOT exhausted — nobody could look, which is a different fact
+from "we looked and found nothing" — and it reopens by itself the moment a vendor
+becomes eligible, with no reopen call and no `retryExhausted` press.
+
 **Both preconditions are enforced, not advised, and neither has an override.** A
-queued request that cannot be served is not inert: `attempts` is counted per
-*request* by whichever vendor drains it, so two passes by a vendor that cannot
-carry the cigar retire it permanently. Enrichment resolves by canonical name
-(slug-token ranking, then a pg_trgm similarity floor), which is why an unreviewed
-name is refused; and an untyped cigar needs BOTH markets covered, because
-enrichment is what would tell us which one it belongs to.
+queued request that cannot be served is not inert: every drain that looks and
+misses spends one of that vendor's two attempts. Enrichment resolves by canonical
+name (slug-token ranking, then a pg_trgm similarity floor), which is why an
+unreviewed name is refused; and an untyped cigar needs BOTH markets covered,
+because enrichment is what would tell us which one it belongs to.
 
 ## Errors
 

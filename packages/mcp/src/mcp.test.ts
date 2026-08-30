@@ -2202,19 +2202,30 @@ describe("@cj/mcp adapter", () => {
     await withClient(adminCuration, async (client) => {
       const blocked = payloadOf(
         await call(client, "queue_enrichment_backlog", { clientRequestId: randomUUID(), runId, confidence: 0.9 }),
-      ) as { queued: number; skipped: number; entries: { status: string }[]; enrichedMarkets: string[] };
+      ) as {
+        queued: number;
+        skipped: number;
+        entries: { status: string }[];
+        enrichedMarkets: string[];
+        eligibleVendors: string[];
+      };
 
       expect(blocked.queued).toBe(0);
       expect(blocked.skipped).toBe(2);
       expect(blocked.enrichedMarkets).toEqual([]);
+      // No vendor has run an enrich pass, so no market is LIVE — and with no vendor
+      // eligible either, nothing could look. The two predicates are reported
+      // separately on purpose: they answer different questions.
+      expect(blocked.eligibleVendors).toEqual([]);
       expect(blocked.entries.every((e) => e.status === "no_vendor_coverage")).toBe(true);
     });
     expect((await h.pg.db.select().from(enrichmentRequests)).filter((r) => r.cigarId === deep)).toHaveLength(0);
 
     // The ops prerequisite lands: a crawl-enabled vendor completes an enrich run.
+    const enricherName = `Enricher ${randomUUID().slice(0, 8)}`;
     const [enricher] = await h.pg.db
       .insert(vendors)
-      .values({ name: `Enricher ${randomUUID().slice(0, 8)}`, focus: "both", crawlEnabled: true })
+      .values({ name: enricherName, focus: "both", crawlEnabled: true })
       .returning({ id: vendors.id });
     await h.pg.db.insert(crawlRuns).values({ vendorId: enricher!.id, kind: "enrich", status: "succeeded" });
 
@@ -2225,13 +2236,24 @@ describe("@cj/mcp adapter", () => {
           runId,
           confidence: 0.9,
         }),
-      ) as { queued: number; skipped: number; entries: { cigarId: string; status: string }[] };
+      ) as {
+        queued: number;
+        skipped: number;
+        eligibleVendors: string[];
+        entries: { cigarId: string; status: string; triedVendors?: string[] }[];
+      };
 
       expect(res.queued).toBe(2);
       expect(res.skipped).toBe(0);
       // Worklist order: deepest hole in the humidor first.
       expect(res.entries.map((e) => e.cigarId)).toEqual([deep, shallow]);
       expect(res.entries.every((e) => e.status === "queued")).toBe(true);
+      // #158: the payload carries the exhaustion DENOMINATOR, which enrichedMarkets
+      // cannot express — an eligible vendor with no enrich lane scheduled keeps every
+      // request open forever, and this is the only surface that shows it.
+      expect(res.eligibleVendors).toContain(enricherName);
+      // triedVendors rides only on `exhausted` rows; nothing has been tried here.
+      expect(res.entries.every((e) => e.triedVendors === undefined)).toBe(true);
     });
 
     const requests = await h.pg.db.select().from(enrichmentRequests);

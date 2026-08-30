@@ -3,6 +3,11 @@ import { eq } from "drizzle-orm";
 import { auditLog, cigars, crawlRuns, enrichmentRequests, productPhotos, purchases, vendors } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { queueEnrichmentBacklog, cigarsMissingPhotos, agentRunRows, ENRICHMENT_BACKLOG_MAX } from "./curation.js";
+import {
+  ATTEMPTS_PER_VENDOR,
+  eligibleEnrichVendors,
+  recordEnrichmentAttempt,
+} from "./enrichment-coverage.js";
 import { IdempotencyConflictError, UnauthorizedError } from "./errors.js";
 import type { Principal } from "./deps.js";
 
@@ -61,6 +66,27 @@ describe("queueEnrichmentBacklog", () => {
     });
     await h.deps.db.insert(purchases).values({ userId: owner.userId, cigarId, quantity });
     return cigarId;
+  }
+
+  // Since migration 0023 `exhausted` is DERIVED from the per-vendor ledger, not read
+  // off enrichment_requests.status — so a test that wants a retired row has to
+  // retire it the way the crawler does: every eligible vendor spends its own budget.
+  // Writing `status: 'exhausted'` alone no longer makes a row dead, which is the
+  // point (see the cache-vs-authority case below).
+  async function retireEverywhere(requestId: string, type: "NC" | "CC" | null = "NC") {
+    const eligible = await eligibleEnrichVendors(h.deps.db, type);
+    expect(eligible.length).toBeGreaterThan(0);
+    for (const vendor of eligible) {
+      for (let i = 0; i < ATTEMPTS_PER_VENDOR; i += 1) {
+        await recordEnrichmentAttempt(h.deps.db, {
+          requestId,
+          vendorId: vendor.vendorId,
+          outcome: "miss",
+          at: new Date("2026-08-30T12:00:00.000Z"),
+        });
+      }
+    }
+    return eligible.map((v) => v.name);
   }
 
   async function requestRows(cigarId: string) {
@@ -166,10 +192,17 @@ describe("queueEnrichmentBacklog", () => {
   it("reports exhausted rows without re-queueing them, and queues them only on retryExhausted", async () => {
     const admin = await curator();
     const cigarId = await seedHeld(admin, "Backlog Exhausted");
-    await h.deps.db.insert(enrichmentRequests).values({ cigarId, status: "exhausted" });
+    const [request] = await h.deps.db
+      .insert(enrichmentRequests)
+      .values({ cigarId, status: "exhausted" })
+      .returning({ id: enrichmentRequests.id });
+    const tried = await retireEverywhere(request!.id);
 
     const skipped = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
-    expect(skipped.entries[0]).toMatchObject({ cigarId, status: "exhausted" });
+    // The verdict NAMES the vendors that looked — an `exhausted` state that does not
+    // is meaningless, because a vendor's catalogue is partial (ADR-006, 2026-08-30).
+    expect(skipped.entries[0]).toMatchObject({ cigarId, status: "exhausted", triedVendors: tried });
+    expect(skipped.eligibleVendors).toEqual(tried);
     expect(skipped).toMatchObject({ queued: 0, skipped: 1 });
     expect(await requestRows(cigarId)).toHaveLength(1);
 
@@ -189,10 +222,14 @@ describe("queueEnrichmentBacklog", () => {
     // while the cigar stays photoless and stays on this worklist. Keying the retry
     // off `status === "queued"` alone left the escape hatch inert here — exactly the
     // rows most likely to need it.
-    await h.deps.db.insert(enrichmentRequests).values([
-      { cigarId, status: "exhausted" },
-      { cigarId, status: "fulfilled" },
-    ]);
+    const inserted = await h.deps.db
+      .insert(enrichmentRequests)
+      .values([
+        { cigarId, status: "exhausted" },
+        { cigarId, status: "fulfilled" },
+      ])
+      .returning({ id: enrichmentRequests.id, status: enrichmentRequests.status });
+    await retireEverywhere(inserted.find((r) => r.status === "exhausted")!.id);
 
     const reported = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
     expect(reported.entries[0]).toMatchObject({ cigarId, status: "exhausted" });
@@ -204,6 +241,29 @@ describe("queueEnrichmentBacklog", () => {
     });
     expect(retried.entries[0]).toMatchObject({ cigarId, status: "queued" });
     expect(await requestRows(cigarId)).toHaveLength(3);
+  });
+
+  // THE CACHE-VS-AUTHORITY TEST. `enrichment_requests.status` is a cache of a rollup
+  // whose denominator — the eligible vendor set — changes without the row being
+  // touched. This is the stale window between enabling a vendor and its first enrich
+  // run: the column still says `exhausted`, but the drain admits `exhausted` rows and
+  // the new vendor has no ledger entry, so the request is very much alive. Any future
+  // reader that trusts the column instead of the helper fails right here.
+  it("a cached-exhausted row with an unspent eligible vendor is already_queued, not dead", async () => {
+    const admin = await curator();
+    const cigarId = await seedHeld(admin, "Backlog Stale Cache");
+    // Written straight to the column, with an EMPTY ledger — no vendor ever looked.
+    await h.deps.db.insert(enrichmentRequests).values({ cigarId, status: "exhausted" });
+
+    const result = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+    const entry = result.entries.find((e) => e.cigarId === cigarId)!;
+    expect(entry.status).toBe("already_queued");
+    expect(entry.triedVendors).toBeUndefined();
+    // Reported, never duplicated: the crawler will pick this exact row up.
+    expect(await requestRows(cigarId)).toHaveLength(1);
+    // And the denominator is visible, which is the only surface that shows an
+    // eligible vendor with no enrich CronJob keeping every request open.
+    expect(result.eligibleVendors.length).toBeGreaterThan(0);
   });
 
   it("caps at `limit`, reports the uncapped eligible count, and takes the highest-remaining rows in worklist order", async () => {

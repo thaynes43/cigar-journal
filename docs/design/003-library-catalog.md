@@ -317,6 +317,18 @@ other row with the reason:
    market's enrich lane runs. There is no override argument for either gate: the
    way past them is to do the thing they assert.
 
+Both gates are now **per-vendor** underneath (ADR-006 amendment 2026-08-30,
+migration 0023). A vendor's catalogue is partial, so "no match at Fox" is
+evidence about Fox and nothing else: each eligible vendor carries its own attempt
+budget against a request, and the row retires only once every one of them is
+spent. Two vendor predicates, kept apart on purpose — **live** (crawl-enabled AND
+has completed an `enrich` run) is the queue gate above; **eligible**
+(crawl-enabled AND focus covers the market) is the exhaustion denominator. The
+console's report says which vendors looked: a retired row names them
+(`triedVendors`), and the press receipt carries the whole eligible set, because a
+retirement that does not name a vendor tells an operator nothing they can act on.
+Enabling a vendor reopens every row it has not looked at, with no reopen job.
+
 ## Build waves (each a dispatchable lane; docs-first satisfied by this doc)
 
 1. **Frame (web):** shell width + per-route measures; auto-fill grids;

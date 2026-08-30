@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
@@ -9,6 +10,7 @@ import {
   crawlRuns,
   listingMatches,
   enrichmentRequests,
+  enrichmentAttempts,
 } from "@cj/db";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { runIngest, type IngestDeps } from "./core/ingest.js";
@@ -43,10 +45,13 @@ describe("crawler ingest (embedded Postgres)", () => {
     return { db: pg.db, fetcher, storage, now, processPhoto: fakeProcessPhoto };
   }
 
-  const seedCigar = async (canonicalName: string): Promise<string> => {
+  // `type` is explicit for the enrich cases: the drain filters on the cigar's
+  // market, and an untyped row is selectable by EVERY vendor (see the untyped case
+  // below), which would quietly defeat a focus assertion.
+  const seedCigar = async (canonicalName: string, type: "NC" | "CC" | null = null): Promise<string> => {
     const rows = await pg.db
       .insert(cigars)
-      .values({ canonicalName, verification: "verified" })
+      .values({ canonicalName, type, verification: "verified" })
       .returning({ id: cigars.id });
     return rows[0]!.id;
   };
@@ -254,73 +259,416 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(recrawl.decidedBy).toBe("agent");
   });
 
-  it("enrich fulfills a pending request on a name hit and exhausts after repeated misses", async () => {
-    const storage = createMemoryPhotoStorage();
+  // --- mode: enrich, per-vendor budgets (#158, migration 0023) ---------------
+  //
+  // The ruling these tests encode: a vendor's catalogue is PARTIAL, so "no match
+  // at Fox" is evidence about Fox and about nothing else. Every case below is one
+  // consequence of that sentence. The fleet is a fleet-wide fact, so each case
+  // sets it explicitly rather than inheriting whatever a neighbour left enabled.
 
-    // --- hit case -----------------------------------------------------------
-    const olivaId = await seedCigar(OLIVA_NAME);
-    const hitReq = await pg.db
+  // The drain reads the WHOLE open queue, and eligibility is a fleet-wide fact, so
+  // a request or an enabled vendor left over from a neighbouring case would change
+  // this one's denominator. `arrange` declares both at the top of a case; `setFleet`
+  // alone is the mid-case registry change several cases are actually about.
+  async function setFleet(enabled: string[]): Promise<void> {
+    await pg.db.update(vendors).set({ crawlEnabled: false });
+    for (const id of enabled) {
+      await pg.db.update(vendors).set({ crawlEnabled: true }).where(eq(vendors.id, id));
+    }
+  }
+
+  async function arrange(enabled: string[]): Promise<void> {
+    await pg.db.delete(enrichmentRequests);
+    await setFleet(enabled);
+  }
+
+  async function makeVendor(name: string, focus: "NC" | "CC" | "both"): Promise<string> {
+    const rows = await pg.db
+      .insert(vendors)
+      .values({ name: `${name} ${randomUUID().slice(0, 8)}`, url: "https://foxcigar.com", focus, crawlEnabled: true })
+      .returning({ id: vendors.id });
+    return rows[0]!.id;
+  }
+
+  // `createdAt` is explicit where a case depends on drain ORDER (the queue is
+  // drained oldest-first), so the assertion does not ride on insert timing.
+  async function seedRequest(cigarId: string, createdAt?: Date): Promise<string> {
+    const rows = await pg.db
       .insert(enrichmentRequests)
-      .values({ cigarId: olivaId, status: "pending" })
+      .values({ cigarId, status: "pending", ...(createdAt ? { createdAt } : {}) })
       .returning({ id: enrichmentRequests.id });
-    const hitReqId = hitReq[0]!.id;
+    return rows[0]!.id;
+  }
 
-    const hitRoutes = {
-      [ROBOTS]: { body: loadFixture("robots.txt") },
-      [SITEMAP]: { body: urlsetXml([OLIVA_URL]) },
-      [OLIVA_URL]: { body: loadFixture("product-oliva.html") },
-      [OLIVA_IMG]: { binary: Buffer.from("oliva-image"), contentType: "image/jpeg" },
-    };
+  const requestRow = async (id: string) =>
+    (await pg.db.select().from(enrichmentRequests).where(eq(enrichmentRequests.id, id)))[0]!;
 
-    const hit = await runIngest(deps(createMockFetcher(hitRoutes), storage), {
+  const ledgerRows = async (requestId: string) =>
+    pg.db.select().from(enrichmentAttempts).where(eq(enrichmentAttempts.requestId, requestId));
+
+  // A sitemap that enumerates products, none of which resemble the requested
+  // cigar: the shape of a real "this vendor does not carry that brand" drain.
+  const missRoutes = {
+    [ROBOTS]: { body: loadFixture("robots.txt") },
+    [SITEMAP]: { body: urlsetXml([PADRON_URL]) },
+    [PADRON_URL]: { body: loadFixture("product-padron.html") },
+  };
+
+  const hitRoutes = {
+    [ROBOTS]: { body: loadFixture("robots.txt") },
+    [SITEMAP]: { body: urlsetXml([OLIVA_URL]) },
+    [OLIVA_URL]: { body: loadFixture("product-oliva.html") },
+    [OLIVA_IMG]: { binary: Buffer.from("oliva-image"), contentType: "image/jpeg" },
+  };
+
+  const enrichRun = (vendor: string, routes: Record<string, unknown>, storage: PhotoStorage | null = null) =>
+    runIngest(deps(createMockFetcher(routes as Parameters<typeof createMockFetcher>[0]), storage), {
       adapter: foxCigar,
-      vendorId,
+      vendorId: vendor,
       mode: "enrich",
     });
+
+  it("enrich fulfills a pending request on a name hit, and a miss burns exactly one attempt at that vendor", async () => {
+    await arrange([vendorId]);
+    const storage = createMemoryPhotoStorage();
+
+    const olivaId = await seedCigar(OLIVA_NAME, "NC");
+    const hitReqId = await seedRequest(olivaId);
+
+    const hit = await enrichRun(vendorId, hitRoutes, storage);
     expect(hit.status).toBe("succeeded");
     expect(hit.stats.offersWritten).toBe(1);
     expect(hit.stats.matchesAuto).toBe(1);
+    expect(hit.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 1, errored: 0, spent: 0 });
 
-    const fulfilled = await pg.db.select().from(enrichmentRequests).where(eq(enrichmentRequests.id, hitReqId));
-    expect(fulfilled[0]!.status).toBe("fulfilled");
-    expect(fulfilled[0]!.resolvedAt).not.toBeNull();
-    // An offer was linked to the requested cigar.
+    const fulfilled = await requestRow(hitReqId);
+    expect(fulfilled.status).toBe("fulfilled");
+    expect(fulfilled.resolvedAt).not.toBeNull();
     const olivaOffers = await pg.db.select().from(offers).where(eq(offers.listingUrl, OLIVA_URL));
     expect(olivaOffers).toHaveLength(1);
 
-    // --- miss case ----------------------------------------------------------
-    const phantomId = await seedCigar("Nonexistent Phantom Cigar Zeta");
-    const missReq = await pg.db
-      .insert(enrichmentRequests)
-      .values({ cigarId: phantomId, status: "pending" })
-      .returning({ id: enrichmentRequests.id });
-    const missReqId = missReq[0]!.id;
+    // A fulfilled ask is terminal — the next drain must not re-select it.
+    const again = await enrichRun(vendorId, hitRoutes, storage);
+    expect(again.stats.enrich!.requests).toBe(0);
+  });
 
-    // A sitemap sharing no slug tokens with the phantom name → no candidates.
-    const missRoutes = {
+  // THE #158 REGRESSION. Before migration 0023 the budget was one counter on the
+  // REQUEST, shared by the whole fleet: vendor A's two looks retired the row and
+  // vendor B — which might well stock the brand — was never asked. This is the
+  // owner's Red Anchor case in miniature (Fox does not carry it; 2 Guys does).
+  it("one vendor spending its whole budget does not retire a request another vendor has not looked at", async () => {
+    const a = await makeVendor("Lane A", "NC");
+    const b = await makeVendor("Lane B", "NC");
+    await arrange([a, b]);
+
+    const cigarId = await seedCigar("Red Anchor Captain Robusto", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    await enrichRun(a, missRoutes);
+    await enrichRun(a, missRoutes);
+
+    // A is spent. Pre-0023 this row would read `exhausted` right here.
+    let row = await requestRow(requestId);
+    expect(row.status).toBe("pending");
+    expect(row.resolvedAt).toBeNull();
+    let ledger = await ledgerRows(requestId);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]!.vendorId).toBe(a);
+    expect(ledger[0]!.attempts).toBe(2);
+
+    // A's third run does not even select it — its own budget is spent.
+    const skipped = await enrichRun(a, missRoutes);
+    expect(skipped.stats.enrich!.requests).toBe(0);
+
+    await enrichRun(b, missRoutes);
+    expect((await requestRow(requestId)).status).toBe("pending");
+    const spending = await enrichRun(b, missRoutes);
+    expect(spending.stats.enrich).toMatchObject({ requests: 1, looked: 1, spent: 1 });
+
+    row = await requestRow(requestId);
+    expect(row.status).toBe("exhausted");
+    expect(row.resolvedAt).not.toBeNull();
+    // `attempts` on the request is now a REPORTING total of completed looks across
+    // vendors — four real looks happened.
+    expect(row.attempts).toBe(4);
+
+    // And the verdict NAMES the vendors. An `exhausted` state that does not is
+    // meaningless (ADR-006 amendment 2026-08-30).
+    ledger = await ledgerRows(requestId);
+    expect(ledger.map((r) => r.vendorId).sort()).toEqual([a, b].sort());
+    expect(ledger.every((r) => r.attempts === 2 && r.errors === 0)).toBe(true);
+  });
+
+  // The live shape: one enabled NC vendor, one NC cigar it does not stock.
+  // Exhaustion is legitimate here — but it is unreachable without a ledger row
+  // saying WHO looked.
+  it("a single-vendor fleet exhausts after its own two looks, and never without a ledger row", async () => {
+    const only = await makeVendor("Sole Lane", "NC");
+    await arrange([only]);
+
+    const cigarId = await seedCigar("Nonexistent Phantom Cigar Zeta", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    await enrichRun(only, missRoutes);
+    let row = await requestRow(requestId);
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(1);
+    expect((await ledgerRows(requestId))[0]!.attempts).toBe(1);
+
+    await enrichRun(only, missRoutes);
+    row = await requestRow(requestId);
+    expect(row.status).toBe("exhausted");
+    expect(row.attempts).toBe(2);
+
+    const ledger = await ledgerRows(requestId);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]!.vendorId).toBe(only);
+    expect(ledger[0]!.attempts).toBe(2);
+
+    // No exhausted row anywhere in the table lacks its evidence.
+    const retired = await pg.db
+      .select()
+      .from(enrichmentRequests)
+      .where(eq(enrichmentRequests.status, "exhausted"));
+    for (const r of retired) expect((await ledgerRows(r.id)).length).toBeGreaterThan(0);
+  });
+
+  // `focus` as a NEGATIVE filter: a CC-only lane will not carry an NC cigar, so it
+  // must never spend a look there — not even to learn what it already knows.
+  it("a CC-only vendor never selects an NC cigar's request and spends nothing", async () => {
+    const cc = await makeVendor("Havana Only", "CC");
+    await arrange([cc]);
+
+    const cigarId = await seedCigar("Padron Family Reserve No 45 NC Only", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    const run = await enrichRun(cc, missRoutes);
+    expect(run.stats.enrich!.requests).toBe(0);
+    expect(await ledgerRows(requestId)).toHaveLength(0);
+    const row = await requestRow(requestId);
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+  });
+
+  // An untyped cigar could belong to either market, so EVERY enabled vendor is in
+  // its denominator — the generalization of the backlog's both-markets rule.
+  it("an untyped cigar is selectable by every vendor and retires only when all of them are spent", async () => {
+    const nc = await makeVendor("Untyped NC", "NC");
+    const cc = await makeVendor("Untyped CC", "CC");
+    await arrange([nc, cc]);
+
+    const rows = await pg.db
+      .insert(cigars)
+      .values({ canonicalName: `Unknown Market Mystery ${randomUUID().slice(0, 8)}`, type: null, verification: "verified" })
+      .returning({ id: cigars.id });
+    const requestId = await seedRequest(rows[0]!.id);
+
+    await enrichRun(nc, missRoutes);
+    await enrichRun(nc, missRoutes);
+    expect((await requestRow(requestId)).status).toBe("pending");
+
+    // The CC lane really does select it — an unknown market cannot rule it out.
+    const ccRun = await enrichRun(cc, missRoutes);
+    expect(ccRun.stats.enrich!.requests).toBe(1);
+    await enrichRun(cc, missRoutes);
+    expect((await requestRow(requestId)).status).toBe("exhausted");
+    expect((await ledgerRows(requestId)).map((r) => r.vendorId).sort()).toEqual([nc, cc].sort());
+  });
+
+  // THE REOPEN PATH, and the reason this design needs no reopen job. `exhausted`
+  // only ever meant "exhausted at the vendors that looked"; a newly enabled vendor
+  // is new evidence, not a retry of old evidence. No cron, no backfill, no manual
+  // reset appears anywhere in this test.
+  it("enabling a vendor reopens an exhausted request, which its first run can fulfil", async () => {
+    const a = await makeVendor("Reopen A", "NC");
+    await arrange([a]);
+
+    const olivaId = await seedCigar(OLIVA_NAME, "NC");
+    const requestId = await seedRequest(olivaId);
+
+    await enrichRun(a, missRoutes);
+    await enrichRun(a, missRoutes);
+    expect((await requestRow(requestId)).status).toBe("exhausted");
+
+    // The registry gains a lane that might stock the brand.
+    const b = await makeVendor("Reopen B", "NC");
+    await setFleet([a, b]);
+
+    const reopened = await enrichRun(b, hitRoutes, createMemoryPhotoStorage());
+    expect(reopened.stats.enrich).toMatchObject({ requests: 1, matched: 1 });
+    const row = await requestRow(requestId);
+    expect(row.status).toBe("fulfilled");
+    expect(row.resolvedAt).not.toBeNull();
+  });
+
+  it("a reopened request that the new vendor also misses returns to exhausted, naming both vendors", async () => {
+    const a = await makeVendor("Reopen Miss A", "NC");
+    await arrange([a]);
+
+    const cigarId = await seedCigar("Nonexistent Phantom Cigar Omega", "NC");
+    const requestId = await seedRequest(cigarId);
+    await enrichRun(a, missRoutes);
+    await enrichRun(a, missRoutes);
+    expect((await requestRow(requestId)).status).toBe("exhausted");
+
+    const b = await makeVendor("Reopen Miss B", "NC");
+    await setFleet([a, b]);
+
+    // The moment B is eligible the row is open again, and its cached status falls
+    // back to `pending` with resolved_at cleared at the first finalize.
+    await enrichRun(b, missRoutes);
+    let row = await requestRow(requestId);
+    expect(row.status).toBe("pending");
+    expect(row.resolvedAt).toBeNull();
+
+    await enrichRun(b, missRoutes);
+    row = await requestRow(requestId);
+    expect(row.status).toBe("exhausted");
+    expect((await ledgerRows(requestId)).map((r) => r.vendorId).sort()).toEqual([a, b].sort());
+  });
+
+  // A look that could not COMPLETE is not evidence about a catalogue. A 503 says
+  // nothing about whether the vendor stocks the brand, so it must not burn budget —
+  // but it is bounded, or a permanently broken vendor pins the request open and
+  // re-fetches the same failures every night forever.
+  it("a look that could not complete records an error, not an attempt, and retires the vendor at ERROR_BUDGET", async () => {
+    const only = await makeVendor("Broken Lane", "NC");
+    await arrange([only]);
+
+    const cigarId = await seedCigar("Padron 1964 Anniversary Maduro Torpedo Unreachable", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    // The candidate ranks (the slug shares tokens) but answers 500 every time.
+    const brokenRoutes = {
       [ROBOTS]: { body: loadFixture("robots.txt") },
       [SITEMAP]: { body: urlsetXml([PADRON_URL]) },
-      [PADRON_URL]: { body: loadFixture("product-padron.html") },
+      [PADRON_URL]: { status: 500, body: "" },
     };
 
-    await runIngest(deps(createMockFetcher(missRoutes), storage), { adapter: foxCigar, vendorId, mode: "enrich" });
-    let miss = await pg.db.select().from(enrichmentRequests).where(eq(enrichmentRequests.id, missReqId));
-    expect(miss[0]!.status).toBe("pending");
-    expect(miss[0]!.attempts).toBe(1);
+    const first = await enrichRun(only, brokenRoutes);
+    expect(first.stats.enrich).toMatchObject({ requests: 1, looked: 0, matched: 0, errored: 1, spent: 0 });
+    let row = await requestRow(requestId);
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(0);
+    let ledger = await ledgerRows(requestId);
+    expect(ledger[0]!.errors).toBe(1);
+    expect(ledger[0]!.attempts).toBe(0);
+    expect(ledger[0]!.lastOutcome).toBe("error");
 
-    await runIngest(deps(createMockFetcher(missRoutes), storage), { adapter: foxCigar, vendorId, mode: "enrich" });
-    miss = await pg.db.select().from(enrichmentRequests).where(eq(enrichmentRequests.id, missReqId));
-    expect(miss[0]!.status).toBe("exhausted");
-    expect(miss[0]!.attempts).toBe(2);
-    expect(miss[0]!.resolvedAt).not.toBeNull();
+    await enrichRun(only, brokenRoutes);
+    const third = await enrichRun(only, brokenRoutes);
+    expect(third.stats.enrich!.spent).toBe(1);
+    row = await requestRow(requestId);
+    expect(row.status).toBe("exhausted");
+    expect(row.attempts).toBe(0);
+    ledger = await ledgerRows(requestId);
+    expect(ledger[0]!.errors).toBe(3);
 
-    // Every enrich run recorded a crawl_runs row.
-    const enrichRuns = await pg.db
+    // Spent on errors alone: the fourth run does not select it.
+    expect((await enrichRun(only, brokenRoutes)).stats.enrich!.requests).toBe(0);
+  });
+
+  // An enumeration that yields NO product URLs is an adapter/gate failure, not a
+  // fact about the cigar — the exact shape the 2 Guys `/store/` prefix produces by
+  // matching gift-registry pages instead of products. It must not burn budget.
+  it("an empty product enumeration is an error, never a miss", async () => {
+    const only = await makeVendor("Bad Gate", "NC");
+    await arrange([only]);
+
+    const cigarId = await seedCigar("Nonexistent Phantom Cigar Iota", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    // Every URL the sitemap enumerates fails the product gate.
+    const run = await enrichRun(only, {
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml(["https://foxcigar.com/about/", "https://foxcigar.com/contact/"]) },
+    });
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 0, errored: 1 });
+    expect((await requestRow(requestId)).attempts).toBe(0);
+    expect((await ledgerRows(requestId))[0]!.errors).toBe(1);
+  });
+
+  // The tempting mis-read this guards against: "no candidate scored" is not an
+  // absence of evidence. The vendor's product list WAS read and nothing in it
+  // resembled the cigar — the Red Anchor/Fox drain (10 pages, 8 listings, 0
+  // matches) is exactly this, and it is honest evidence about Fox.
+  it("'no candidate scored above zero' is a completed look and burns an attempt", async () => {
+    const only = await makeVendor("Scoreless", "NC");
+    await arrange([only]);
+
+    const cigarId = await seedCigar("Nonexistent Phantom Cigar Kappa", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    const run = await enrichRun(only, missRoutes);
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, errored: 0 });
+    const ledger = await ledgerRows(requestId);
+    expect(ledger[0]!.attempts).toBe(1);
+    expect(ledger[0]!.errors).toBe(0);
+    expect(ledger[0]!.lastOutcome).toBe("miss");
+  });
+
+  // #157 defect 2 cannot form. The drain no longer claims a request with
+  // `status = 'in_progress'` — that was a request-level lock on a per-vendor
+  // operation — so a run that dies mid-drain leaves the row exactly as it found it,
+  // with no reaper anywhere in the system.
+  it("a run that throws mid-drain strands nothing: the row stays pending, never in_progress", async () => {
+    const only = await makeVendor("Crashing", "NC");
+    await arrange([only]);
+
+    const firstId = await seedRequest(await seedCigar("Nonexistent Phantom Cigar Mu", "NC"), new Date("2026-08-30T09:00:00.000Z"));
+    const secondId = await seedRequest(
+      await seedCigar("Padron 1964 Anniversary Maduro Torpedo Exploding", "NC"),
+      new Date("2026-08-30T10:00:00.000Z"),
+    );
+
+    // The second request's candidate blows up the whole run.
+    const base = createMockFetcher(missRoutes);
+    const exploding: MockFetcher = {
+      requested: base.requested,
+      get pagesFetched() {
+        return base.pagesFetched;
+      },
+      fetchText: async (url: string) => {
+        if (url === PADRON_URL) throw new Error("connection reset");
+        return base.fetchText(url);
+      },
+      fetchBinary: (url: string) => base.fetchBinary(url),
+    };
+
+    const crashed = await runIngest(deps(exploding, null), { adapter: foxCigar, vendorId: only, mode: "enrich" });
+    expect(crashed.status).toBe("failed");
+
+    // The first request completed its look and was written before the crash.
+    const first = await requestRow(firstId);
+    expect(first.status).toBe("pending");
+    expect(first.attempts).toBe(1);
+    // The second was selected and never finalized — and is simply retried, because
+    // nothing marked it claimed.
+    const second = await requestRow(secondId);
+    expect(second.status).toBe("pending");
+    expect(await ledgerRows(secondId)).toHaveLength(0);
+
+    // Nothing anywhere in the table is in_progress: the drain never writes it.
+    const stranded = await pg.db
       .select()
-      .from(crawlRuns)
-      .where(eq(crawlRuns.kind, "enrich"));
-    expect(enrichRuns.length).toBe(3);
-    expect(enrichRuns.every((r) => r.status === "succeeded")).toBe(true);
+      .from(enrichmentRequests)
+      .where(eq(enrichmentRequests.status, "in_progress"));
+    expect(stranded).toHaveLength(0);
+  });
+
+  // A robots refusal fails the whole run before any request is touched — no ledger
+  // writes at all, which is right: we never asked the vendor anything.
+  it("a robots refusal spends nothing", async () => {
+    const only = await makeVendor("Refused", "NC");
+    await arrange([only]);
+    const requestId = await seedRequest(await seedCigar("Nonexistent Phantom Cigar Nu", "NC"));
+
+    const refused = await enrichRun(only, {
+      [ROBOTS]: { body: "User-agent: *\nDisallow: /\n" },
+    });
+    expect(refused.status).toBe("failed");
+    expect(await ledgerRows(requestId)).toHaveLength(0);
+    expect((await requestRow(requestId)).attempts).toBe(0);
   });
 
   // --- sitemap sampling (adapters whose enumeration varies per fetch) --------
