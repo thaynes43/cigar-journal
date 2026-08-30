@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.28.0](https://github.com/thaynes43/cigar-journal/compare/v0.27.1...v0.28.0) (2026-08-30)
+
+
+### Features
+
+* **crawler:** per-vendor enrichment budgets — a vendor's catalogue is partial ([#158](https://github.com/thaynes43/cigar-journal/issues/158)) ([#181](https://github.com/thaynes43/cigar-journal/issues/181)) ([25358e5](https://github.com/thaynes43/cigar-journal/commit/25358e548a63e8ffb2977e04fdb6a0e61076a5fd))
+* **oauth:** mint curation-scoped service tokens behind --allow-curation ([#178](https://github.com/thaynes43/cigar-journal/issues/178)) ([6467b25](https://github.com/thaynes43/cigar-journal/commit/6467b259ffc4c39c04628e8596b35517b591b30a))
+
+
+### Bug Fixes
+
+* **crawler:** 2 Guys product gate matches gift-registry pages ([#179](https://github.com/thaynes43/cigar-journal/issues/179)) ([c09dba8](https://github.com/thaynes43/cigar-journal/commit/c09dba8f138eed3c1972ea8a153234f280cb52c4))
+* **db:** swallow the embedded-Postgres teardown race that failed green runs ([#180](https://github.com/thaynes43/cigar-journal/issues/180)) ([6b07b22](https://github.com/thaynes43/cigar-journal/commit/6b07b22fbb725ddc24ed130f66866e3874dc66bf))
+* **mcp:** diagnose add_smoke_photo delivery instead of silently falling back ([#184](https://github.com/thaynes43/cigar-journal/issues/184)) ([a0d8390](https://github.com/thaynes43/cigar-journal/commit/a0d8390587903e0888c1602d327d30f7009ec81f))
+
 ## [0.27.1](https://github.com/thaynes43/cigar-journal/compare/v0.27.0...v0.27.1) (2026-08-30)
 
 
