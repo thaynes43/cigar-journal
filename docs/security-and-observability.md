@@ -33,6 +33,12 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
 - **Probes:** `/api/health` (process-only, house pattern) for k8s; Gatus for
   the web origin and `/mcp` reachability; crawler CronJobs alert on repeated
   failure, not single misses.
+- **Credential expiry:** the `dev-env-cli` OAuth access token (lead 7 days) and
+  `RELEASE_PLEASE_TOKEN` (lead 14 days) are counted down daily from haynes-ops
+  (`kubernetes/main/apps/frontend/cigar-journal/app/credential-expiry-cronjob.yaml`).
+  Both expiries are read from their source of truth — `oauth_access_token` and
+  GitHub's token-expiration response header — never from a copied constant. The
+  job's terminal failure pages via `severity=critical`.
 - **Diagnosable by design:** every failure class in the PRD (connection,
   auth, validation, save, resolution) is distinguishable from metrics + one
   log line without reading journal content.

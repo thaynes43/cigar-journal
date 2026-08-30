@@ -57,3 +57,5 @@ journal should follow these patterns unless an ADR says otherwise.
 - Design multi-tenant/role scoping into DB triggers up front (todos'
   min-admin trigger wasn't scoped and complicated e2e).
 - Docs drift: keep the agent guide's claims small enough to stay true.
+- GitHub occasionally drops workflow-trigger events; the remedy differs per
+  hop — see [`ship-chain.md`](ship-chain.md).

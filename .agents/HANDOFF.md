@@ -128,12 +128,10 @@ archive cutover (53 reviews) · owner's Micallef photo.
 - **CI/local flake:** `migrations.test.ts` (embedded-PG startup under
   parallel load) fails ~1 in 3 full runs — different file each time, always
   green on re-run/retrigger (max 3 empty-commit retriggers per house rule).
-- Ship chain: release-please PR (regular merge) → tag fires publish-image →
-  haynes-ops bump PR (helmrelease.yaml &mainImage ~line 44 AND both image
-  pins in crawler-cronjobs.yaml) → `flux reconcile source git haynes-ops -n
-  flux-system` (the source is named haynes-ops, NOT flux-system) → kustomization
-  cigar-journal + helmrelease (ns frontend) → pod verify. Declare the rollout
-  with declare-activity (scope frontend,cigar-journal).
+- Ship chain: the six hops, the exact haynes-ops bump points, and what to do
+  when GitHub drops a workflow-trigger event (the remedies differ per hop — an
+  empty commit fixes release-please and does nothing for publish-image) are in
+  [`reference/ship-chain.md`](reference/ship-chain.md).
 - UI lanes must run the local preview rig + screenshots (memory:
   local-preview-rig); the wave-2 lane caught a real popover-clipping bug only
   via screenshots — keep requiring them.
