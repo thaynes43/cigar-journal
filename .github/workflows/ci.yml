@@ -35,10 +35,15 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Log downloads are unreachable from the ops pod (egress allowlist), so a
-      # failure's tail goes to the job summary, which the API can serve.
       - run: pnpm test 2>&1 | tee /tmp/test-output.txt
         shell: bash
+      # Making a failure legible from the ops pod (cigar-journal#174, scope 1).
+      # Actions log downloads are egress-blocked there, and a job SUMMARY is not
+      # served by any REST endpoint — which is why every past failure read only
+      # as "Process completed with exit code 1". An ::error:: annotation IS
+      # served, by /check-runs/{id}/annotations on api.github.com, so the tail
+      # goes to both: the summary for a human in the browser, an annotation for
+      # anything reading over the API.
       - if: failure()
         run: |
           {
@@ -47,6 +52,17 @@ jobs:
             tail -c 6000 /tmp/test-output.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          # Annotation messages are a single line: encode newlines as %0A, and
+          # escape a literal % first or the encoding eats it. Two annotations —
+          # the failing test names are the answer most of the time, and the tail
+          # carries the assertion when they are not.
+          # `run:` is bash -e, so a non-matching grep would abort the step and
+          # lose the tail: every extraction is `|| true`.
+          encode() { sed -e 's/%/%25/g' | awk '{ printf "%s%%0A", $0 }'; }
+          NAMES=$(grep -aE '(FAIL|×|✗)' /tmp/test-output.txt | head -40 | encode || true)
+          if [ -n "$NAMES" ]; then echo "::error title=failing tests::${NAMES}"; fi
+          TAIL=$(tail -c 3000 /tmp/test-output.txt | encode || true)
+          echo "::error title=test failure tail::${TAIL}"
 
   build:
     runs-on: ubuntu-latest
