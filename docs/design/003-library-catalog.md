@@ -310,7 +310,7 @@ other row with the reason:
 2. **Some crawl-enabled vendor covering the cigar's market has completed an
    `enrich` run.** Not `crawl_enabled` alone: Cuban Lou's is crawl-enabled today
    and has only ever run a `seed`, while the one enrich CronJob is NC-only — so
-   41 of the 55 photoless holdings are CC rows that a press would feed to a
+   41 of the 58 photoless holdings are CC rows that a press would feed to a
    crawler that cannot carry them. An untyped cigar needs both markets covered,
    because enrichment is what would say which it is. Rows that fail this report
    `no_vendor_coverage`, and the gate opens by itself the first night that

@@ -286,7 +286,7 @@ describe("queueEnrichmentBacklog", () => {
     const result = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
     const byId = new Map(result.entries.map((e) => [e.cigarId, e.status]));
 
-    // Prod's exact shape: 41 of the 55 photoless holdings are CC and the only enrich
+    // Prod's exact shape: 41 of the 58 photoless holdings are CC and the only enrich
     // CronJob is NC-only, while `attempts` counts per REQUEST — so queuing them is
     // how they get marked exhausted for good. An untyped row could be either market,
     // so it needs both covered.
