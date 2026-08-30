@@ -1,4 +1,4 @@
-# ADR-010: Operator-minted service tokens for non-interactive MCP clients
+# ADR-011: Operator-minted service tokens for non-interactive MCP clients
 
 - **Status:** accepted
 - **Date:** 2026-08-29

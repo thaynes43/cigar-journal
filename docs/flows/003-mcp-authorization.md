@@ -44,7 +44,7 @@ sequenceDiagram
 
 ### Service tokens (out-of-band)
 
-A client with no browser cannot run this flow. ADR-010 issues it a long-lived
+A client with no browser cannot run this flow. ADR-011 issues it a long-lived
 access token out of band, from the `token` role on the app image — never over
 the network. Such a token skips this diagram entirely: no consent row, no
 authorization code, no refresh token. Every invariant above still holds — the

@@ -3,7 +3,7 @@
 # Multi-stage build for the Cigar Journal image (node:22-alpine, non-root, tini
 # for signals). One image serves multiple roles (ADR-001): `web` (default),
 # `migrate`, `import`/`ledger` (one-shot legacy archive import, flow 006), `mcp`
-# (ADR-005), `crawl` (ADR-006), and `token` (operator service tokens, ADR-010).
+# (ADR-005), `crawl` (ADR-006), and `token` (operator service tokens, ADR-011).
 # The role is chosen by overriding the container command in k8s — see the ROLE
 # DISPATCH marker at the runtime stage for the exact command arrays.
 
@@ -91,7 +91,7 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm deploy --legacy --filter=@cj/crawler --prod --config.node-linker=hoisted /app/crawler
 
 # --- token: prune @cj/oauth to the production subtree the token role runs ------
-# The operator service-token CLI (ADR-010, mint | list | revoke). @cj/oauth is a
+# The operator service-token CLI (ADR-011, mint | list | revoke). @cj/oauth is a
 # library package that also carries a privileged, DB-only, one-shot entrypoint —
 # the same animal as @cj/db's migrate role, and the reason the minting logic sits
 # beside the authorization-server invariants it depends on (hashToken,
@@ -190,7 +190,7 @@ ENTRYPOINT ["/sbin/tini", "--"]
 #     Resolves/creates the vendor registry row, refuses to crawl a path robots.txt
 #     disallows, rate-limits every fetch (≥2.5s), and brackets the run in a
 #     crawl_runs row. Exits 0 on success, 1 on a run failure.
-#   token (operator service tokens, ADR-010 — `kubectl exec`, NOT a Job):
+#   token (operator service tokens, ADR-011 — `kubectl exec`, NOT a Job):
 #     kubectl -n frontend exec -it deploy/cigar-journal-main -c app -- \
 #       sh -c 'cd /app/token && node --import tsx src/cli.ts mint \
 #         --client-name dev-env-pod --user-email <owner-email> \

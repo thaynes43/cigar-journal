@@ -1,6 +1,6 @@
 # Service tokens — operator runbook
 
-Long-lived MCP credentials for clients that have no browser (ADR-010). The
+Long-lived MCP credentials for clients that have no browser (ADR-011). The
 mint is the `token` role on the app image; it is never reachable over HTTP.
 
 ```
@@ -18,7 +18,7 @@ refused delivery.
 ## Precondition
 
 The `token` role ships in the app image, so it exists only from the release
-that contains ADR-010 onward. Check before anything else:
+that contains ADR-011 onward. Check before anything else:
 
 ```sh
 kubectl -n frontend exec deploy/cigar-journal-main -c app -- ls /app
