@@ -74,6 +74,14 @@ requested "priceObservations" store exists; it is incomplete, not absent.
   (CHECK constraint: vendor_id or source_name).
 - Chat can now repair the catalog it reads — bounded by fill-nulls-only, so
   curation keeps authority over corrections and verification.
+- The crawler does **not** yet honour "a multipack is the same cigar with its
+  packaging recorded": it has only two dispositions for a listing, create a
+  `cigars` row or drop it by name pattern, so packaging SKUs land as catalog
+  rows (44 of them from the 2026-08-29 Cuban Lou's seed). The interim remedy is
+  exclusion, recorded with its manifest and rollback in
+  [`.agents/reference/catalog-exclusions.md`](../../.agents/reference/catalog-exclusions.md);
+  the third disposition — ingest the SKU as an offer against the base cigar — is
+  issue #164.
 
 ## Alternatives considered
 
