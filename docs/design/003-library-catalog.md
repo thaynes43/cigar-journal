@@ -292,10 +292,10 @@ nothing needs re-consenting, and the agent never has to be handed
 `record_purchase` and `set_want` over the owner's journal).
 
 **Two preconditions, enforced by the service rather than documented.** A queued
-request the crawler cannot serve is not inert: `attempts` is counted per
-*request*, by whichever vendor drains it, and `EXHAUST_ATTEMPTS = 2` retires the
-row permanently. So a press writes a row only when both hold, and reports every
-other row with the reason:
+request the crawler cannot serve is not inert: every drain that looks and misses
+spends one of that vendor's two attempts (`ATTEMPTS_PER_VENDOR`, migration 0023),
+and the row retires once every eligible vendor is spent. So a press writes a row
+only when both hold, and reports every other row with the reason:
 
 1. **The name has been reviewed** (`verification = 'verified'`, the signal
    `verify_cigar` sets). Enrichment resolves a cigar by its canonical name twice
