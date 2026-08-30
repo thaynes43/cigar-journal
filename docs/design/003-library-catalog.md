@@ -169,7 +169,10 @@ wordmark (→ Journal) · Catalog. Anonymous header unchanged.
 **`/settings` v1** (the surface three backlog items were waiting on):
 display name; journal visibility (public/private — the #97 flip finally
 gets a UI instead of raw SQL); timezone (fixes #49's UTC dates). Invites
-and SSO linking land here later (#46).
+and SSO linking shipped here in #46 (ADR-010): a `Sign-in` section listing
+linked identities (Password, plus Authentik when SSO is configured), and an
+admin-only `Invites` section. Registration itself lives outside the shell,
+at `/invite/<token>`.
 
 ## Curation → Catalog review + the curate agent
 
@@ -297,7 +300,11 @@ sequence (rights-honest, fastest visible fix first):
 | Price-sort break | `No current offer` |
 | User menu | `Settings` · `Ledger` · `Catalog review` · `Sign out` |
 | Menu trigger | initials circle, `aria-label` = `Account menu` |
-| Settings page | `Settings`; sections `Profile` · `Journal` · `Time` |
+| Settings page | `Settings`; sections `Profile` · `Journal` · `Time` · `Sign-in` · admin-only `Invites` |
+| Sign-in methods | `Password` (no action) · `Authentik` with `Link` / `Unlink` |
+| Invite form | `Email` + `Create invite`; minted link row `Copy link` |
+| Invite table | `Email` · `Status` · `Expires` · `Revoke`; statuses `Open` · `Redeemed` · `Expired` · `Revoked` |
+| Invite page | `Email` (read-only) · `Display name` · `Password` · `Create account` |
 | Journal visibility control | `Public` / `Private` |
 | Admin page | `Catalog review` |
 | Merge section | `Recent merges`; action `Unmerge`; states `Unmerged` · `Blocked by a later merge`; moved-row chips `Smokes` · `Purchases` · `Listing matches` · `Offers` · `Photos` · `Gap-fill requests` · `Wants` · `Favorites` |
