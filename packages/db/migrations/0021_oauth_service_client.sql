@@ -1,5 +1,5 @@
 -- 0021_oauth_service_client — mark an oauth_client as an OPERATOR-MINTED service
--- client (ADR-010). A service token is an ordinary long-lived
+-- client (ADR-011). A service token is an ordinary long-lived
 -- `oauth_access_token` row; nothing about validation or the grants changes. What
 -- this column buys is the ability to answer "which clients exist because an
 -- operator minted a credential, not because a browser flow registered one?" —

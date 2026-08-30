@@ -112,13 +112,29 @@ function assertCurator(principal: Principal): void {
 // admin MCP curation surface (the ops agent) passes actor `agent` + the batch
 // runId + confidence, so "Recent agent runs" can group and score the write. Actor
 // is always server-derived from the calling surface — never a tool argument.
+//
+// `clientId` comes off the PRINCIPAL (migration 0023, ADR-011), so it is
+// server-derived twice over: `validateAccessToken` reads it from the token row,
+// and no tool argument can reach it. It is what makes an operator-minted
+// curation token attributable: without it every credential a subject holds
+// writes identical history, and a leaked curation token walking
+// `set_listing_match_status` across the triage queue would be indistinguishable
+// afterwards from the daily lane doing its job. A session-driven web call has no
+// client and stays null.
 function auditAttribution(
+  principal: Principal,
   attribution: CurationAttribution | undefined,
-): { actor: "web" | "agent"; runId: string | null; confidence: number | null } {
+): {
+  actor: "web" | "agent";
+  runId: string | null;
+  confidence: number | null;
+  clientId: string | null;
+} {
   return {
     actor: attribution?.actor ?? "web",
     runId: attribution?.runId ?? null,
     confidence: attribution?.confidence ?? null,
+    clientId: principal.clientId ?? null,
   };
 }
 
@@ -404,7 +420,12 @@ async function mergeWithinTx(
     .insert(auditLog)
     .values({
       userId: principal.userId,
-      actor: "web",
+      // Through the same funnel as every other curation write, so "a curation
+      // audit row names the credential behind it" is structural rather than
+      // incidental. Resolves to actor "web" with a null clientId today — merge
+      // and dismiss are console-only, with no MCP tool and so no OAuth client —
+      // and stays correct the day one gains a tool.
+      ...auditAttribution(principal, undefined),
       action: "cigar.merge",
       smokeId: null,
       before,
@@ -781,7 +802,7 @@ async function unmergeWithinTx(
       userId: principal.userId,
       // A human curator drove this, whether from the merges list or the Undo
       // button: actor 'web', no runId — so it never enters "Recent agent runs".
-      ...auditAttribution(undefined),
+      ...auditAttribution(principal, undefined),
       action: "cigar.unmerge",
       smokeId: null,
       before: { source: cigarSnapshot(source), target: cigarSnapshot(target) },
@@ -934,7 +955,7 @@ async function verifyWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    ...auditAttribution(input.attribution),
+    ...auditAttribution(principal, input.attribution),
     action: "cigar.verify",
     smokeId: null,
     before,
@@ -1032,7 +1053,12 @@ async function dismissWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: "web",
+    // Through the same funnel as every other curation write, so "a curation
+    // audit row names the credential behind it" is structural rather than
+    // incidental. Resolves to actor "web" with a null clientId today — merge
+    // and dismiss are console-only, with no MCP tool and so no OAuth client —
+    // and stays correct the day one gains a tool.
+    ...auditAttribution(principal, undefined),
     action: "cigar.dismiss_duplicate",
     smokeId: null,
     before: { a: cigarSnapshot(a), b: cigarSnapshot(b) },
@@ -1132,7 +1158,7 @@ async function setListingMatchStatusWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    ...auditAttribution(input.attribution),
+    ...auditAttribution(principal, input.attribution),
     action: "listing_match.set_status",
     smokeId: null,
     before,
@@ -1240,7 +1266,7 @@ async function excludeWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    ...auditAttribution(input.attribution),
+    ...auditAttribution(principal, input.attribution),
     action: "cigar.exclude",
     smokeId: null,
     before,
@@ -1328,7 +1354,7 @@ async function restoreWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    ...auditAttribution(input.attribution),
+    ...auditAttribution(principal, input.attribution),
     action: "cigar.restore",
     smokeId: null,
     before,
@@ -1406,7 +1432,7 @@ async function setProductPhotoRightsWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    ...auditAttribution(input.attribution),
+    ...auditAttribution(principal, input.attribution),
     action: "product_photo.set_rights",
     smokeId: null,
     before,
@@ -1525,7 +1551,7 @@ async function setCigarFactsWithinTx(
     // the changed-field keys are unchanged.
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      ...auditAttribution(input.attribution),
+      ...auditAttribution(principal, input.attribution),
       action: "cigar.set_facts",
       smokeId: null,
       before: { id: current.id, ...before },
@@ -1610,7 +1636,7 @@ async function renameWithinTx(
     await tx.update(cigars).set({ canonicalName: name, updatedAt: deps.now() }).where(eq(cigars.id, current.id));
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      ...auditAttribution(input.attribution),
+      ...auditAttribution(principal, input.attribution),
       action: "cigar.rename",
       smokeId: null,
       before: { id: current.id, canonicalName: current.canonicalName },
@@ -2254,7 +2280,7 @@ async function queueBacklogWithinTx(
       // exactly what the press changed, attributed to the run.
       await tx.insert(auditLog).values({
         userId: principal.userId,
-        ...auditAttribution(input.attribution),
+        ...auditAttribution(principal, input.attribution),
         action: "cigar.enrichment_request",
         smokeId: null,
         before: null,
@@ -2634,7 +2660,7 @@ async function applyInverse(
 ): Promise<string> {
   // A human curator drove the undo: actor 'web', no runId/confidence — so it never
   // re-enters a "Recent agent runs" list.
-  const attribution = auditAttribution(undefined);
+  const attribution = auditAttribution(principal, undefined);
   const correlationId = input.correlationId ?? input.clientRequestId;
 
   async function writeUndo(values: {

@@ -5,15 +5,15 @@ mint is the `token` role on the app image; it is never reachable over HTTP.
 
 ```
 service-token mint   --client-name <name> --user-email <email> --scope <s>... --reason <text>
-                     [--ttl-days N] [--resource <url>] [--yes]
+                     [--allow-curation] [--ttl-days N] [--resource <url>] [--yes]
 service-token list   [--include-expired] [--include-revoked] [--all-clients]
 service-token revoke --id <uuid> [--reason <text>] [--yes]
 ```
 
 `mint` and `revoke` are dry-run without `--yes`; both dry runs read the
 database and run the same validators as the apply. Exit codes: `0` ok, `1`
-operational failure (unknown user, unknown token id), `2` usage, env, or a
-refused delivery.
+operational failure (unknown user, unknown token id, a non-admin subject asked
+to carry curation scopes), `2` usage, env, or a refused delivery.
 
 ## Precondition
 
@@ -73,12 +73,101 @@ them.
 The token is printed once and is not recoverable. Capture it before the
 terminal scrolls.
 
-Only `catalog:read`, `journal:read` and `journal:write` are mintable.
-`offline_access` is refused (there is no refresh chain) and so is
-`curation:*` — it would let a browserless holder mutate the shared catalog
-under the subject's admin role for the token's whole life. Both refusals are
-enforced in the mint, not left to the caller's arguments. `--ttl-days` caps at
-365 and can only shorten.
+`catalog:read`, `journal:read` and `journal:write` are mintable with no extra
+flag. `offline_access` is refused unconditionally — there is no refresh chain,
+so no flag admits it. `curation:*` is off by default and needs the explicit
+elevation below. Every refusal is enforced in the mint, not left to the
+caller's arguments. `--ttl-days` caps at 365 — 90 for a curation-elevated
+mint — and can only shorten.
+
+## Mint the curation lane's token (`--allow-curation`)
+
+The daily curation lane needs `curation:*`, which the mint refuses by default
+because it lets a browserless holder mutate the **shared** catalog under the
+subject's admin role for the token's whole life. The owner overrode that
+refusal on 2026-08-30 (ADR-011, "Curation scopes: the owner override") after
+the lane's rotating refresh token failed once too often — each failure costing
+a manual browser re-consent. A minted token has no rotation to lose.
+
+Two gates, both required: the `--allow-curation` flag, and an **admin
+subject** checked at mint time (exit 1 if not — the curation tools re-check
+the role on every call, so a non-admin token would be inert).
+
+Dry run first — it reads the database, resolves the subject, and checks the
+role, so a clean plan means the apply will not fail on any of it:
+
+```sh
+kubectl -n frontend exec -it deploy/cigar-journal-main -c app -- \
+  sh -c 'cd /app/token && node --import tsx src/cli.ts mint \
+    --client-name dev-env-curate \
+    --user-email <owner> \
+    --scope curation:read --scope curation:write \
+    --scope catalog:read \
+    --allow-curation \
+    --reason "daily curation lane (ADR-011 override 2026-08-30)"'
+```
+
+No `--ttl-days`: an elevated mint defaults to its own ceiling, **90 days**, not
+the ordinary 365. Passing `--ttl-days 365` here is refused (`invalid_request`),
+which is the point — the widest credential in the system is not also the
+longest-lived. `--ttl-days` still shortens it further if you want a probe token.
+Re-minting is one interactive exec at a moment you choose, with the old token
+live until you revoke it; that is not the rotation this whole change exists to
+stop losing.
+
+The plan prints a line the ordinary mint does not:
+
+```
+  curation   ELEVATED — this token may curate the SHARED catalog for its whole life
+```
+
+Re-run the same command with `--yes` appended to mint. The report repeats that
+line, then prints the token once. Capture it into 1Password before the terminal
+scrolls.
+
+`--scope catalog:read` is there because the lane also reads the catalog outside
+the curation surface; drop it if the lane only ever triages. `get_cigar`
+accepts `curation:read` on its own.
+
+The mint records `curationElevated: true` and the subject's role at mint time
+on its `oauth.service_token.mint` audit row, so the elevation is auditable
+without decoding a scope list:
+
+```sql
+select created_at, correlation_id, after->>'clientName', after->>'subjectRole', after->'scopes'
+from audit_log
+where action = 'oauth.service_token.mint' and (after->>'curationElevated')::boolean
+order by created_at desc;
+```
+
+And every write the credential subsequently makes names the client that made it
+(`audit_log.client_id`, migration 0023), which is what turns "one client per
+consumer" into an answerable question after the fact:
+
+```sql
+-- what did this credential do, and when
+select created_at, action, run_id, after->>'id'
+from audit_log
+where client_id = '<client_id from the mint report>'
+order by created_at desc
+limit 100;
+
+-- which credentials have touched the catalog at all
+select client_id, count(*), min(created_at), max(created_at)
+from audit_log
+where action like 'listing_match.%' or action like 'cigar.%'
+group by client_id
+order by max(created_at) desc;
+```
+
+A null `client_id` is NOT proof of the web console. It means "no client was
+recorded", which covers three different things: a genuine console write (no OAuth
+client exists), any row written before this column shipped, and any curation write
+from a code path that does not yet carry the attribution — audit surfaces outside
+curation still do not (issue #183). Treat null as unknown, not as the console.
+
+What IS load-bearing: two rows for the same subject with DIFFERENT client ids are
+two different credentials, which is the question worth asking during an incident.
 
 The mint is **not idempotent** — every run creates new material. Use `list` to
 find an orphan and `revoke --id` to kill it.
@@ -156,6 +245,23 @@ explicit per-consumer scopes, audience binding, one client per consumer (so a
 leak is attributable and revocable in isolation), per-request validation, a
 delivery path no log collector can read, and rotation cheap enough to actually
 do.
+
+A `--allow-curation` token is the widest of these: it can curate the shared
+catalog, not just its own subject's journal. Give it its own `--client-name`
+so it is revocable without touching the pod's ordinary journal credential, and
+revoke it the moment the lane stops needing it. Its shorter ceiling (90 days)
+bounds the window if neither happens.
+
+**If one leaks, revoke it by id** — `revoke --id <uuid> --yes`, which bites on
+the next MCP call and touches nothing else. Do *not* reach for demoting the
+subject instead. The curation tools do re-check the role on every call, so it
+looks like a fast kill, but prod has exactly one user and that user is the
+admin: demoting him takes down the web console, the curation surface and every
+other admin credential he holds, to stop one token. It does not even hold —
+`packages/auth/src/auth.ts` re-asserts `admin` on session create for any
+allowlisted address, so the owner's next sign-in silently re-arms the token he
+was trying to neutralize. Find the id with `list` (or from the mint report) and
+revoke it.
 
 Expiry is a cliff. The daily `cigar-journal-credential-expiry` CronJob in
 haynes-ops is the alert: a failing Job pages. Today it watches one pinned

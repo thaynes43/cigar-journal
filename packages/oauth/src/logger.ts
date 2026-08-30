@@ -17,7 +17,7 @@ export type AuthEventName =
   | "token_revoked"
   | "audience_mismatch"
   | "token_rejected"
-  // Operator-minted service credentials (ADR-010) — never issued by a grant.
+  // Operator-minted service credentials (ADR-011) — never issued by a grant.
   | "service_client_created"
   | "service_token_minted"
   | "service_token_revoked";

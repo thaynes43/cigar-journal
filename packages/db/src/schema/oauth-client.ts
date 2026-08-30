@@ -4,7 +4,7 @@ import { pgTable, uuid, text, jsonb, boolean, timestamp } from "drizzle-orm/pg-c
 // handle returned to the client; `clientSecretHash` is present only for
 // confidential clients (public PKCE clients register with auth method 'none' and
 // carry no secret). `redirectUris` are exact-match validated at /oauth/authorize.
-// `isService` (migration 0021, ADR-010) marks an operator-minted service client:
+// `isService` (migration 0021, ADR-011) marks an operator-minted service client:
 // DCR never sets it, so it partitions "registered by a browser flow" from
 // "created by the service-token CLI" without inspecting redirect URIs.
 // Authoritative DDL lives in migrations 0003 and 0021.

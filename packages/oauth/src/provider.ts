@@ -487,7 +487,7 @@ async function issueTokenPair(
  * issuance rather than in the route, so every current and future caller of the
  * exchanges is covered by construction.
  *
- * This is what makes `grant_types: []` on a service client (ADR-010) a real
+ * This is what makes `grant_types: []` on a service client (ADR-011) a real
  * closure of /oauth/token rather than a note in a comment: if a redirect-less
  * grant (client_credentials, device code) is ever added, a service client is
  * still refused here. DCR registration defaults to

@@ -35,10 +35,15 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Log downloads are unreachable from the ops pod (egress allowlist), so a
-      # failure's tail goes to the job summary, which the API can serve.
       - run: pnpm test 2>&1 | tee /tmp/test-output.txt
         shell: bash
+      # Making a failure legible from the ops pod (cigar-journal#174, scope 1).
+      # Actions log downloads are egress-blocked there, and a job SUMMARY is not
+      # served by any REST endpoint — which is why every past failure read only
+      # as "Process completed with exit code 1". An ::error:: annotation IS
+      # served, by /check-runs/{id}/annotations on api.github.com, so the tail
+      # goes to both: the summary for a human in the browser, an annotation for
+      # anything reading over the API.
       - if: failure()
         run: |
           {
@@ -47,6 +52,29 @@ jobs:
             tail -c 6000 /tmp/test-output.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          # Annotation messages are a single line: encode newlines as %0A, and
+          # escape a literal % first or the encoding eats it. Two annotations —
+          # the failing test names are the answer most of the time, and the tail
+          # carries the assertion when they are not.
+          # `run:` is bash -e, so a non-matching grep would abort the step and
+          # lose the tail: every extraction is `|| true`.
+          # ANSI colour first, or the annotation is unreadable; then escape a
+          # literal % (before the newline encoding, which uses %) and fold to
+          # one line as %0A.
+          plain() { sed -e 's/\x1b\[[0-9;]*m//g' -e 's/%/%25/g'; }
+          fold() { awk '{ printf "%s%%0A", $0 }'; }
+          PLAIN=/tmp/test-plain.txt
+          plain < /tmp/test-output.txt > "$PLAIN"
+          # A failing assertion names its test; an UNHANDLED error names none, so
+          # capture that section's HEAD (the message and stack) rather than the
+          # tail, which is usually a dumped object.
+          NAMES=$(grep -aE '(FAIL|×|✗)' "$PLAIN" | head -40 | fold || true)
+          if [ -n "$NAMES" ]; then echo "::error title=failing tests::${NAMES}"; fi
+          ERRS=$(grep -aA 25 -E 'Unhandled (Error|Rejection)|Errors  *[0-9]+ error' "$PLAIN" \
+                   | head -60 | cut -c1-300 | fold || true)
+          if [ -n "$ERRS" ]; then echo "::error title=unhandled errors::${ERRS}"; fi
+          TAIL=$(tail -c 2500 "$PLAIN" | fold || true)
+          echo "::error title=test failure tail::${TAIL}"
 
   build:
     runs-on: ubuntu-latest

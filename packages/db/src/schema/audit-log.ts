@@ -17,6 +17,11 @@ export const auditLog = pgTable("audit_log", {
   before: jsonb("before"),
   after: jsonb("after"),
   correlationId: text("correlation_id"),
+  // The OAuth client whose credential drove this write (migration 0023,
+  // ADR-011); NULL for a session-driven web call, which has no client. Recorded
+  // from the server-derived Principal, never from a tool argument — it is what
+  // makes an elevated service token's writes separable from the lane's own.
+  clientId: text("client_id"),
   // The batch run this action belongs to ("Recent agent runs" groups on it); no
   // FK — there is no runs table. Text, not uuid: a run's identity is the
   // dev-env-ops work-order key ("wo-cigar-curate-20260829"), migration 0016.

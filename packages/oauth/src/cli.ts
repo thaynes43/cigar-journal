@@ -6,10 +6,16 @@ import {
   USAGE,
   type ParsedArgs,
 } from "./cli-args.js";
+import {
+  field,
+  formatList,
+  formatMintPlan,
+  formatMintReport,
+  formatRevokePlan,
+} from "./cli-report.js";
 import { OAuthError } from "./errors.js";
 import type { AuthEventWriter } from "./logger.js";
 import {
-  DEFAULT_SERVICE_TOKEN_TTL_DAYS,
   describeTokenForRevoke,
   listServiceTokens,
   mintServiceToken,
@@ -17,10 +23,9 @@ import {
   planServiceTokenMint,
   revokeServiceToken,
   ServiceTokenError,
-  type ServiceTokenSummary,
 } from "./service-tokens.js";
 
-// The `token` role entrypoint (ADR-010) — the ONLY supported writer of a
+// The `token` role entrypoint (ADR-011) — the ONLY supported writer of a
 // long-lived access token. Run via tsx, mirroring the migrate/import/crawl
 // roles; see the ROLE DISPATCH marker in the Dockerfile for the k8s command
 // array. Not an HTTP route: nothing in apps/web or @cj/mcp can reach the mint.
@@ -50,45 +55,6 @@ function resolveDatabaseUrl(explicit: string | null): string | null {
   return explicit ?? process.env.DATABASE_URL ?? null;
 }
 
-function field(label: string, value: string): string {
-  return `  ${label.padEnd(11)}${value}`;
-}
-
-function pad(value: string, width: number): string {
-  return value.length >= width ? value : value + " ".repeat(width - value.length);
-}
-
-function tokenState(row: Pick<ServiceTokenSummary, "revokedAt" | "expiresAt">): string {
-  if (row.revokedAt) return "revoked";
-  return row.expiresAt.getTime() <= Date.now() ? "expired" : "active";
-}
-
-function formatList(rows: ServiceTokenSummary[]): string {
-  if (rows.length === 0) return "no matching tokens";
-  const header = ["TOKEN ID", "CLIENT", "SVC", "USER", "SCOPES", "DAYS", "EXPIRES", "STATE"];
-  const body = rows.map((row) => [
-    row.tokenId,
-    row.clientName ?? row.clientId,
-    row.isService ? "yes" : "no",
-    row.userEmail,
-    row.scopes.join(","),
-    String(row.daysRemaining),
-    row.expiresAt.toISOString(),
-    tokenState(row),
-  ]);
-  const widths = header.map((_, column) =>
-    Math.max(header[column]!.length, ...body.map((cells) => cells[column]!.length)),
-  );
-  return [header, ...body]
-    .map((cells) =>
-      cells
-        .map((cell, column) => pad(cell, widths[column]!))
-        .join("  ")
-        .trimEnd(),
-    )
-    .join("\n");
-}
-
 async function runMint(
   options: Extract<ParsedArgs, { command: "mint" }>["options"],
 ): Promise<number> {
@@ -114,13 +80,17 @@ async function runMint(
     }
   }
 
-  const ttlDays = options.ttlDays ?? DEFAULT_SERVICE_TOKEN_TTL_DAYS;
   const input = {
     clientName: options.clientName,
     userEmail: options.userEmail,
     scopes: options.scopes,
+    allowCuration: options.allowCuration,
     reason: options.reason,
-    ttlDays,
+    // Left UNRESOLVED on purpose: the default is the ceiling for the scope set,
+    // and only the mint knows whether this set is curation-elevated (90 days) or
+    // ordinary (365). Defaulting here would hand an elevated mint a year and get
+    // it refused.
+    ttlDays: options.ttlDays ?? undefined,
     resource: options.resource ?? undefined,
     correlationId: RUN_ID,
     log: NARRATE,
@@ -133,39 +103,12 @@ async function runMint(
       // dry run that exits 0 is a statement about the apply rather than about
       // argv. It writes nothing.
       const plan = await planServiceTokenMint(db, input);
-      console.error(
-        [
-          "plan: mint a service token",
-          field("run id", RUN_ID),
-          field("client", `${plan.clientName} (${plan.clientId ?? "will be created"})`),
-          field("user", `${plan.userEmail} role=${plan.role}`),
-          field("scopes", plan.scopes.join(" ")),
-          field("ttl", `${plan.ttlDays}d → ${plan.expiresAt.toISOString()}`),
-          field("resource", plan.resource),
-          field("reason", options.reason),
-          "nothing written — re-run with --yes to mint.",
-        ].join("\n"),
-      );
+      console.error(formatMintPlan(plan, RUN_ID, options.reason));
       return 0;
     }
 
     const minted = await mintServiceToken(db, input);
-    console.error(
-      [
-        "minted service token",
-        field("run id", RUN_ID),
-        field("token id", minted.tokenId),
-        field(
-          "client",
-          `${minted.clientName} (${minted.clientId})${minted.clientCreated ? " [created]" : ""}`,
-        ),
-        field("user", `${minted.userEmail} role=${minted.role}`),
-        field("scopes", minted.scopes.join(" ")),
-        field("resource", minted.resource),
-        field("expires", `${minted.expiresAt.toISOString()} (${minted.ttlDays}d)`),
-        "the value below is not recoverable — capture it into 1Password now.",
-      ].join("\n"),
-    );
+    console.error(formatMintReport(minted, RUN_ID));
     process.stdout.write(`${minted.token}\n`);
     return 0;
   } finally {
@@ -215,22 +158,7 @@ async function runRevoke(
         console.error(`error: no token with id ${options.tokenId}`);
         return 1;
       }
-      console.error(
-        [
-          "plan: revoke a token",
-          field("run id", RUN_ID),
-          field("token id", row.tokenId),
-          field(
-            "client",
-            `${row.clientName ?? "(unnamed)"} (${row.clientId})${row.isService ? " [service]" : ""}`,
-          ),
-          field("user", row.userEmail ?? "(no user row)"),
-          field("scopes", row.scopes.join(" ")),
-          field("state", tokenState(row)),
-          ...(row.hasFamily ? [field("family", "its refresh chain goes too")] : []),
-          "nothing written — re-run with --yes to revoke.",
-        ].join("\n"),
-      );
+      console.error(formatRevokePlan(row, RUN_ID));
       return 0;
     }
 
@@ -288,9 +216,11 @@ main()
   .then((code) => process.exit(code))
   .catch((error: unknown) => {
     // An OAuthError here is an invariant the flags or the env violated (unknown
-    // scope, offline_access, a TTL out of range, an audience that is not this
-    // server's) — an invocation error, exit 2. A ServiceTokenError is an
-    // operational failure the operator must fix in the data — exit 1.
+    // scope, offline_access, curation:* without --allow-curation, a TTL out of
+    // range, an audience that is not this server's) — an invocation error, exit
+    // 2. A ServiceTokenError is an operational failure the operator must fix in
+    // the data, not in argv — an unknown subject, or a non-admin one asked to
+    // carry curation scopes — exit 1.
     if (error instanceof OAuthError) {
       console.error(`error: ${error.code}: ${error.description}`);
       process.exit(2);

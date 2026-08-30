@@ -1,4 +1,6 @@
 import {
+  CURATION_SERVICE_SCOPES,
+  CURATION_SERVICE_TOKEN_TTL_DAYS,
   DEFAULT_SERVICE_TOKEN_TTL_DAYS,
   MINTABLE_SERVICE_SCOPES,
 } from "./service-tokens.js";
@@ -19,6 +21,8 @@ export interface MintOptions {
   clientName: string;
   userEmail: string;
   scopes: string[];
+  /** Admit curation:* to the allowlist — off unless --allow-curation is passed. */
+  allowCuration: boolean;
   reason: string;
   ttlDays: number | null;
   resource: string | null;
@@ -46,19 +50,30 @@ export type ParsedArgs =
   | { command: "list"; options: ListOptions }
   | { command: "revoke"; options: RevokeOptions };
 
-export const USAGE = `service tokens (ADR-010)
+export const USAGE = `service tokens (ADR-011)
 
 usage:
   service-token mint   --client-name <name> --user-email <email> --scope <s> [--scope <s>...]
-                       --reason <text> [--ttl-days N] [--resource <url>] [--yes] [--database-url <url>]
+                       --reason <text> [--allow-curation] [--ttl-days N] [--resource <url>] [--yes]
+                       [--database-url <url>]
   service-token list   [--include-expired] [--include-revoked] [--all-clients] [--database-url <url>]
   service-token revoke --id <uuid> [--reason <text>] [--yes] [--database-url <url>]
 
   --client-name   the consumer ("dev-env-pod"); created on first mint, reused across rotations
   --user-email    the principal the token acts as; must exist (exit 1 if not)
   --scope         repeatable, required: ${MINTABLE_SERVICE_SCOPES.join(" | ")}.
-                  offline_access and curation:* are refused.
-  --ttl-days      default and maximum ${DEFAULT_SERVICE_TOKEN_TTL_DAYS} (it can only shorten)
+                  offline_access is always refused; ${CURATION_SERVICE_SCOPES.join(" | ")}
+                  only with --allow-curation.
+  --allow-curation  admit curation:* — a credential that mutates the SHARED catalog.
+                  The flag only ADMITS the scope; the admin check and the shorter
+                  TTL key on the scopes actually GRANTED, so passing it without a
+                  curation scope changes nothing. When a curation scope is granted:
+                  the subject must be an admin (checked at mint time; exit 1 if
+                  not), the elevation is recorded on the audit row and shown in the
+                  plan, and the TTL is capped at ${CURATION_SERVICE_TOKEN_TTL_DAYS}
+                  days — the widest credential is not also the longest-lived.
+  --ttl-days      default and maximum ${DEFAULT_SERVICE_TOKEN_TTL_DAYS}, or ${CURATION_SERVICE_TOKEN_TTL_DAYS} with --allow-curation
+                  (it can only shorten)
   --resource      assert the audience; must equal this server's own /mcp resource
   --reason        why this credential exists (recorded in the audit row); required on mint
   --yes           apply. Without it mint/revoke print the plan and write nothing.
@@ -110,6 +125,7 @@ function parseMint(argv: string[]): MintOptions {
   let clientName: string | null = null;
   let userEmail: string | null = null;
   const scopes: string[] = [];
+  let allowCuration = false;
   let reason: string | null = null;
   let ttlDays: number | null = null;
   let resource: string | null = null;
@@ -128,6 +144,11 @@ function parseMint(argv: string[]): MintOptions {
       case "--scope":
         // Repeatable — the scope set accumulates rather than overwriting.
         scopes.push(value(argv, ++i, flag));
+        break;
+      // A separate flag, never inferred from the scope list: an unknown argument
+      // is a usage error, so a typo ("--allow-curration") cannot silently elevate.
+      case "--allow-curation":
+        allowCuration = true;
         break;
       case "--reason":
         reason = value(argv, ++i, flag);
@@ -156,7 +177,17 @@ function parseMint(argv: string[]): MintOptions {
   if (!userEmail) throw new UsageError("--user-email is required");
   if (scopes.length === 0) throw new UsageError("at least one --scope is required");
   if (!reason) throw new UsageError("--reason is required");
-  return { clientName, userEmail, scopes, reason, ttlDays, resource, yes, databaseUrl };
+  return {
+    clientName,
+    userEmail,
+    scopes,
+    allowCuration,
+    reason,
+    ttlDays,
+    resource,
+    yes,
+    databaseUrl,
+  };
 }
 
 function parseList(argv: string[]): ListOptions {
