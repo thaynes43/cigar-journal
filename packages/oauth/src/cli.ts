@@ -6,6 +6,13 @@ import {
   USAGE,
   type ParsedArgs,
 } from "./cli-args.js";
+import {
+  field,
+  formatList,
+  formatMintPlan,
+  formatMintReport,
+  formatRevokePlan,
+} from "./cli-report.js";
 import { OAuthError } from "./errors.js";
 import type { AuthEventWriter } from "./logger.js";
 import {
@@ -16,7 +23,6 @@ import {
   planServiceTokenMint,
   revokeServiceToken,
   ServiceTokenError,
-  type ServiceTokenSummary,
 } from "./service-tokens.js";
 
 // The `token` role entrypoint (ADR-011) — the ONLY supported writer of a
@@ -47,48 +53,6 @@ const RUN_ID = newRunId();
 
 function resolveDatabaseUrl(explicit: string | null): string | null {
   return explicit ?? process.env.DATABASE_URL ?? null;
-}
-
-/** The one line that names the elevation in plain words; see runMint. */
-const CURATION_NOTICE = "ELEVATED — this token may curate the SHARED catalog for its whole life";
-
-function field(label: string, value: string): string {
-  return `  ${label.padEnd(11)}${value}`;
-}
-
-function pad(value: string, width: number): string {
-  return value.length >= width ? value : value + " ".repeat(width - value.length);
-}
-
-function tokenState(row: Pick<ServiceTokenSummary, "revokedAt" | "expiresAt">): string {
-  if (row.revokedAt) return "revoked";
-  return row.expiresAt.getTime() <= Date.now() ? "expired" : "active";
-}
-
-function formatList(rows: ServiceTokenSummary[]): string {
-  if (rows.length === 0) return "no matching tokens";
-  const header = ["TOKEN ID", "CLIENT", "SVC", "USER", "SCOPES", "DAYS", "EXPIRES", "STATE"];
-  const body = rows.map((row) => [
-    row.tokenId,
-    row.clientName ?? row.clientId,
-    row.isService ? "yes" : "no",
-    row.userEmail,
-    row.scopes.join(","),
-    String(row.daysRemaining),
-    row.expiresAt.toISOString(),
-    tokenState(row),
-  ]);
-  const widths = header.map((_, column) =>
-    Math.max(header[column]!.length, ...body.map((cells) => cells[column]!.length)),
-  );
-  return [header, ...body]
-    .map((cells) =>
-      cells
-        .map((cell, column) => pad(cell, widths[column]!))
-        .join("  ")
-        .trimEnd(),
-    )
-    .join("\n");
 }
 
 async function runMint(
@@ -139,44 +103,12 @@ async function runMint(
       // dry run that exits 0 is a statement about the apply rather than about
       // argv. It writes nothing.
       const plan = await planServiceTokenMint(db, input);
-      console.error(
-        [
-          "plan: mint a service token",
-          field("run id", RUN_ID),
-          field("client", `${plan.clientName} (${plan.clientId ?? "will be created"})`),
-          field("user", `${plan.userEmail} role=${plan.role}`),
-          field("scopes", plan.scopes.join(" ")),
-          // Printed only when it applies, so it reads as an alarm rather than a
-          // row of boilerplate — the elevation must not be discoverable only by
-          // decoding the scope list above.
-          ...(plan.curationElevated ? [field("curation", CURATION_NOTICE)] : []),
-          field("ttl", `${plan.ttlDays}d → ${plan.expiresAt.toISOString()}`),
-          field("resource", plan.resource),
-          field("reason", options.reason),
-          "nothing written — re-run with --yes to mint.",
-        ].join("\n"),
-      );
+      console.error(formatMintPlan(plan, RUN_ID, options.reason));
       return 0;
     }
 
     const minted = await mintServiceToken(db, input);
-    console.error(
-      [
-        "minted service token",
-        field("run id", RUN_ID),
-        field("token id", minted.tokenId),
-        field(
-          "client",
-          `${minted.clientName} (${minted.clientId})${minted.clientCreated ? " [created]" : ""}`,
-        ),
-        field("user", `${minted.userEmail} role=${minted.role}`),
-        field("scopes", minted.scopes.join(" ")),
-        ...(minted.curationElevated ? [field("curation", CURATION_NOTICE)] : []),
-        field("resource", minted.resource),
-        field("expires", `${minted.expiresAt.toISOString()} (${minted.ttlDays}d)`),
-        "the value below is not recoverable — capture it into 1Password now.",
-      ].join("\n"),
-    );
+    console.error(formatMintReport(minted, RUN_ID));
     process.stdout.write(`${minted.token}\n`);
     return 0;
   } finally {
@@ -226,22 +158,7 @@ async function runRevoke(
         console.error(`error: no token with id ${options.tokenId}`);
         return 1;
       }
-      console.error(
-        [
-          "plan: revoke a token",
-          field("run id", RUN_ID),
-          field("token id", row.tokenId),
-          field(
-            "client",
-            `${row.clientName ?? "(unnamed)"} (${row.clientId})${row.isService ? " [service]" : ""}`,
-          ),
-          field("user", row.userEmail ?? "(no user row)"),
-          field("scopes", row.scopes.join(" ")),
-          field("state", tokenState(row)),
-          ...(row.hasFamily ? [field("family", "its refresh chain goes too")] : []),
-          "nothing written — re-run with --yes to revoke.",
-        ].join("\n"),
-      );
+      console.error(formatRevokePlan(row, RUN_ID));
       return 0;
     }
 

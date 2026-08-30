@@ -44,6 +44,7 @@ import {
   ServiceTokenError,
 } from "./service-tokens.js";
 import { mintDeliveryRefusal, parseArgs, UsageError, USAGE } from "./cli-args.js";
+import { CURATION_NOTICE, formatMintPlan, formatMintReport } from "./cli-report.js";
 import { validateAccessToken } from "./validate.js";
 
 // Operator-minted service tokens (ADR-011) against a real embedded Postgres 16,
@@ -60,6 +61,9 @@ const MEMBER_EMAIL = "service-member@example.com";
 
 /** Silence the [auth] narration; the sink itself is covered by the CLI contract. */
 const quiet: AuthEventWriter = () => {};
+
+/** A stand-in run id for the report formatters, which only echo it. */
+const RUN = "service-token/00000000-0000-4000-8000-000000000000";
 
 let names = 0;
 /** A fresh consumer name — the partial unique index is per-name. */
@@ -843,6 +847,41 @@ describe("service tokens", () => {
     expect(ordinary.code).toBe(0);
     expect(ordinary.stderr).not.toContain("ELEVATED");
   }, 60_000);
+
+  it("names the elevation in the mint REPORT too, over a real minted token", async () => {
+    // The report is the one operator-facing string a spawned CLI cannot produce:
+    // `mint --yes` refuses unless stdout is an interactive terminal, and a
+    // child process is always piped, so the test above can only ever reach the
+    // plan. cli.ts therefore holds no formatting of its own — it calls these
+    // functions — and the report is asserted here, over the value a real mint
+    // returns rather than a hand-built stand-in that could drift from it.
+    const elevated = await mint({
+      scopes: ["curation:read", "curation:write"],
+      allowCuration: true,
+      reason: "daily curation lane",
+    });
+    const report = formatMintReport(elevated, RUN);
+    expect(report).toContain("curation");
+    expect(report).toContain(CURATION_NOTICE);
+    expect(report).toContain("SHARED catalog");
+    // The report is not a delivery path: it names the token's id, never its value.
+    expect(report).toContain(elevated.tokenId);
+    expect(report).not.toContain(elevated.token);
+
+    const ordinary = await mint({ scopes: ["journal:read"] });
+    expect(formatMintReport(ordinary, RUN)).not.toContain("ELEVATED");
+
+    // The plan the spawned CLI prints comes from the same pair of functions, so
+    // the two can never disagree about when the line appears.
+    const plan = await planServiceTokenMint(db, {
+      clientName: consumer(),
+      userEmail: OWNER_EMAIL,
+      scopes: ["curation:write"],
+      allowCuration: true,
+      reason: "daily curation lane",
+    });
+    expect(formatMintPlan(plan, RUN, "daily curation lane")).toContain(CURATION_NOTICE);
+  });
 
   // ---- run identity ------------------------------------------------------------
 
