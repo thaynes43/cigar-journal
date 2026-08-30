@@ -95,6 +95,7 @@ describe("@cj/mcp adapter", () => {
   // scope (the ops agent), and the SAME scope on a non-admin user (the gate test).
   let adminUser: Principal;
   let adminCuration: string;
+  let adminCurationClientId: string;
   let ownerCuration: string;
 
   async function mintToken(
@@ -230,7 +231,9 @@ describe("@cj/mcp adapter", () => {
     otherFull = (await mintToken(ALL_SCOPES, other.userId)).token;
 
     adminUser = await h.createUser("curator@example.com", "admin");
-    adminCuration = (await mintToken(["curation:read", "curation:write"], adminUser.userId)).token;
+    const adminCurationToken = await mintToken(["curation:read", "curation:write"], adminUser.userId);
+    adminCuration = adminCurationToken.token;
+    adminCurationClientId = adminCurationToken.clientId;
     ownerCuration = (await mintToken(["curation:read", "curation:write"], owner.userId)).token;
   }, 90_000);
 
@@ -1834,10 +1837,27 @@ describe("@cj/mcp adapter", () => {
   async function auditFor(
     action: string,
     runId: string,
-  ): Promise<{ actor: string; runId: string | null; confidence: number | null; after: unknown } | undefined> {
+  ): Promise<
+    | {
+        actor: string;
+        runId: string | null;
+        confidence: number | null;
+        clientId: string | null;
+        after: unknown;
+      }
+    | undefined
+  > {
     const all = await h.pg.db.select().from(auditLog);
     const row = all.find((r) => r.runId === runId && r.action === action);
-    return row ? { actor: row.actor, runId: row.runId, confidence: row.confidence, after: row.after } : undefined;
+    return row
+      ? {
+          actor: row.actor,
+          runId: row.runId,
+          confidence: row.confidence,
+          clientId: row.clientId,
+          after: row.after,
+        }
+      : undefined;
   }
 
   async function cigarById(cigarId: string): Promise<(typeof cigars.$inferSelect) | undefined> {
@@ -1968,6 +1988,53 @@ describe("@cj/mcp adapter", () => {
     const audit = await auditFor("listing_match.set_status", runId);
     expect(audit?.actor).toBe("agent");
     expect(audit?.runId).toBe(runId);
+  });
+
+  // Migration 0023 / ADR-011: the whole chain, over the wire. A second curation
+  // credential for the SAME admin subject stands in for a leaked elevated
+  // service token; it runs the exact scenario the threat row has to survive —
+  // read match_triage, then walk `unmatched` across it — under the same actor
+  // and the same run id as the lane. The only thing that separates the two
+  // afterwards is the client id the token row carried into the audit write.
+  it("carries the token's client id onto a curation audit row, so a second credential of one subject is separable", async () => {
+    const rogue = await mintToken(["curation:read", "curation:write"], adminUser.userId);
+    expect(rogue.clientId).not.toBe(adminCurationClientId);
+
+    const lane = await seedAutoMatch("Attribution Lane Toro");
+    const stolen = await seedAutoMatch("Attribution Stolen Toro");
+    const laneRun = randomUUID();
+    const rogueRun = randomUUID();
+
+    await withClient(adminCuration, async (client) => {
+      await call(client, "set_listing_match_status", {
+        clientRequestId: randomUUID(),
+        matchId: lane.matchId,
+        status: "unmatched",
+        runId: laneRun,
+        confidence: 0.9,
+      });
+    });
+
+    await withClient(rogue.token, async (client) => {
+      const queue = payloadOf(
+        await call(client, "get_curation_queue", { kind: "match_triage", limit: 200 }),
+      ) as { matches: { matchId: string }[] };
+      expect(queue.matches.some((m) => m.matchId === stolen.matchId)).toBe(true);
+      await call(client, "set_listing_match_status", {
+        clientRequestId: randomUUID(),
+        matchId: stolen.matchId,
+        status: "unmatched",
+        runId: rogueRun,
+        confidence: 0.9,
+      });
+    });
+
+    const laneAudit = await auditFor("listing_match.set_status", laneRun);
+    const rogueAudit = await auditFor("listing_match.set_status", rogueRun);
+    expect(laneAudit?.clientId).toBe(adminCurationClientId);
+    expect(rogueAudit?.clientId).toBe(rogue.clientId);
+    // Everything else about the two writes is identical — which is the point.
+    expect(laneAudit?.actor).toBe(rogueAudit?.actor);
   });
 
   it("set_cigar_facts overwrites a wrong value on a verified cigar (unlike update_cigar) and audits actor agent", async () => {

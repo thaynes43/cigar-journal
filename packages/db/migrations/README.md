@@ -43,7 +43,7 @@ init container at startup (ADR-003).
   Merges audited before this migration have no ledger and report non-reversible.
 - `0021_oauth_service_client.sql` — `oauth_client.is_service` (boolean, default
   false) plus a partial unique index on `client_name WHERE is_service`
-  (ADR-010): marks a client an operator created to carry a long-lived service
+  (ADR-011): marks a client an operator created to carry a long-lived service
   token, and makes "one service client per consumer" a database invariant. DCR
   never sets the flag, so every flow-registered client stays false.
 - `0022_invites.sql` — invite-gated registration (ADR-010, issue #46): `invites`
@@ -53,3 +53,12 @@ init container at startup (ADR-003).
   as its authorization). No role column, deliberately: an invite has no role
   field to escalate. A partial unique index keeps at most one open invite per
   address.
+- `0023_audit_log_client_id.sql` — `audit_log.client_id` (nullable text, plus a
+  partial index on `(client_id, created_at desc)`): which OAuth client's
+  credential drove the write (ADR-011). The table already answered who
+  (`user_id`), from where (`actor`) and in which batch (`run_id`), but every
+  token a user holds looked identical in it — so "one client per consumer, and
+  therefore a leak is attributable" was untrue on the write side. Curation
+  writes stamp it from the server-derived `Principal`; the web console has no
+  OAuth client and stays null. No FK: the audit log is append-only history that
+  must outlive the client row it names.

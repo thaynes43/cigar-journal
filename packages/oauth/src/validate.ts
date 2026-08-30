@@ -75,6 +75,11 @@ export async function validateAccessToken(
     userId: rec.userId,
     role: rec.role === "admin" ? "admin" : "user",
     scopes: rec.scopes,
+    // Carried ON the principal, not just returned beside it: the audit row a
+    // curation write stamps is written deep in @cj/domain, which sees only the
+    // principal. Without this the client id stops at the MCP adapter and every
+    // token the same subject holds writes identical history (ADR-011).
+    clientId: rec.clientId,
   };
   return { ok: true, principal, scopes: rec.scopes, clientId: rec.clientId, resource: rec.resource };
 }

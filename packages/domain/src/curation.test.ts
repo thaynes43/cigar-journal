@@ -1446,6 +1446,52 @@ describe("curation", () => {
       const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
       expect(row!.decidedBy).toBe("agent");
     });
+
+    // Migration 0023 / ADR-011. The service-token threat row claims a leak is
+    // attributable because there is one client per consumer — which is only true
+    // if the write says which client made it. Two credentials of the SAME admin
+    // subject, running the SAME tool with the SAME agent attribution, must leave
+    // separable history; otherwise a leaked curation token walking the triage
+    // queue is indistinguishable afterwards from the daily lane doing its job.
+    it("records the calling credential's client, so two tokens of one subject are separable", async () => {
+      const lane: Principal = { ...admin, clientId: "svc-curation-lane" };
+      const leaked: Principal = { ...admin, clientId: "svc-dev-env-pod" };
+      const runId = `attribution-${newRequestId()}`;
+
+      const byLane = await addMatch(await seedUnverified("LM Lane"));
+      await setListingMatchStatus(h.deps, lane, {
+        clientRequestId: newRequestId(),
+        matchId: byLane,
+        status: "unmatched",
+        attribution: { actor: "agent", runId, confidence: 0.9 },
+      });
+      const byLeaked = await addMatch(await seedUnverified("LM Leaked"));
+      await setListingMatchStatus(h.deps, leaked, {
+        clientRequestId: newRequestId(),
+        matchId: byLeaked,
+        status: "unmatched",
+        attribution: { actor: "agent", runId, confidence: 0.9 },
+      });
+
+      const rows = await h.deps.db.select().from(auditLog).where(eq(auditLog.runId, runId));
+      const clientOf = (matchId: string): string | null =>
+        rows.find((r) => (r.after as { id?: string }).id === matchId)!.clientId;
+      expect(clientOf(byLane)).toBe("svc-curation-lane");
+      expect(clientOf(byLeaked)).toBe("svc-dev-env-pod");
+
+      // The console has no OAuth client, so its rows stay null — the column
+      // separates credentials, it does not invent one for session-driven work.
+      const console = await addMatch(await seedUnverified("LM Console"));
+      const correlationId = newRequestId();
+      await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId: console,
+        status: "unmatched",
+        correlationId,
+      });
+      const [web] = await h.deps.db.select().from(auditLog).where(eq(auditLog.correlationId, correlationId));
+      expect(web!.clientId).toBeNull();
+    });
   });
 
   // --- excludeCigar / restoreCigar (DESIGN-003 §Curation) -------------------

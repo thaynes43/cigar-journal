@@ -286,6 +286,12 @@ describe("service tokens", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.principal.role).toBe("admin");
+    // The principal — not just the ValidateResult beside it — carries the client
+    // id, because the curation audit row is written deep in @cj/domain, which
+    // sees only the principal. This is the near end of the attribution chain
+    // migration 0023 closes: without it, every credential this subject holds
+    // writes indistinguishable history.
+    expect(result.principal.clientId).toBe(minted.clientId);
 
     // ...and it is still an ordinary service token in every other respect.
     const rows = await db
