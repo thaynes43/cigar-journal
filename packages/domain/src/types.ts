@@ -1210,6 +1210,67 @@ export interface MissingPhotoCigar {
   remaining: number;
 }
 
+// ---- queueEnrichmentBacklog (#154) ----------------------------------------
+//
+// Bulk-enqueue the "Missing photos" worklist into the enrichment queue the
+// crawler's enrich runs drain. One press replaces 55 one-at-a-time
+// request_cigar_enrichment calls; the console button and the curate agent's MCP
+// tool both land here, so the two surfaces cannot drift.
+
+// ADR-009's per-cigar verdict (enrichment.ts `EnrichmentRequestStatus`) plus the
+// three outcomes only a bulk press has. `exhausted` — the crawler tried and gave
+// up. `unverified_name` and `no_vendor_coverage` are the two PRECONDITIONS a press
+// enforces rather than documents (#154 review): enrichment resolves a cigar by its
+// canonical name, and only a vendor that actually runs enrich passes can serve it,
+// so a row failing either is reported and never written. Restated as literals
+// rather than imported so this stays a pure type module; curation.ts assigns an
+// EnrichmentRequestStatus into this union, which is the compile-time check that the
+// two vocabularies stay in step.
+export type EnrichmentBacklogStatus =
+  | "queued"
+  | "already_queued"
+  | "recently_enriched"
+  | "not_needed"
+  | "exhausted"
+  | "unverified_name"
+  | "no_vendor_coverage";
+
+export interface EnrichmentBacklogEntry {
+  cigarId: string;
+  canonicalName: string;
+  status: EnrichmentBacklogStatus;
+}
+
+// `limit` is clamped to [1, ENRICHMENT_BACKLOG_MAX] (curation.ts) — the ceiling is
+// what stops one press becoming an unbounded crawl as the catalog grows.
+// `retryExhausted` re-queues rows the crawler gave up on; it defaults FALSE because
+// neither dedupe predicate blocks on `exhausted`, so without it every press would
+// re-queue every dead row. Those rows still REPORT as `exhausted`, so the curator
+// sees them without having to re-crawl them. There is deliberately NO override for
+// the name and vendor-coverage gates: the way past them is to fix the name and to
+// run an enrich pass for that market, which is exactly what they are asserting.
+export interface QueueEnrichmentBacklogInput {
+  clientRequestId: string;
+  limit?: number;
+  retryExhausted?: boolean;
+  attribution?: CurationAttribution;
+  correlationId?: string;
+}
+
+export interface QueueEnrichmentBacklogResult {
+  eligible: number; // worklist rows before the cap
+  considered: number; // rows the cap admitted
+  queued: number;
+  skipped: number;
+  // The markets an enrich pass actually reaches right now — a crawl-enabled vendor
+  // with at least one succeeded `enrich` run. Reported so a press that queues
+  // nothing says WHY without a second read: an empty list means no enrich lane is
+  // running at all.
+  enrichedMarkets: CigarType[];
+  entries: EnrichmentBacklogEntry[];
+  replayed: boolean;
+}
+
 // The catalog lifecycle values (DESIGN-003 §Curation, migration 0013): `active`
 // shows everywhere; `excluded` hides from browse/search/queue but stays reachable
 // by direct id; `merged` is a tombstone folded into a survivor by mergeCigars.

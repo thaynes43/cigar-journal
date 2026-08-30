@@ -65,9 +65,15 @@ import type {
   WorklistMatch,
   DuplicateCandidatePair,
   MissingPhotoCigar,
+  QueueEnrichmentBacklogInput,
+  QueueEnrichmentBacklogResult,
+  EnrichmentBacklogEntry,
+  EnrichmentBacklogStatus,
+  CigarType,
 } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { strongLinkCompatible } from "./cigar-resolution.js";
+import { classifyEnrichmentRequest, type EnrichmentClassification } from "./enrichment.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 
@@ -2074,6 +2080,216 @@ export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Pro
 }
 
 // --------------------------------------------------------------------------
+// queueEnrichmentBacklog — bulk-enqueue the photoless-holdings worklist (#154).
+// --------------------------------------------------------------------------
+
+// A press drains the "Missing photos" section into enrichment_requests, which the
+// crawler's enrich runs consume. It replaces calling request_cigar_enrichment 55
+// times by hand; the console button and the curate agent's MCP tool both land here.
+//
+// Selection is cigarsMissingPhotos itself — the SAME read the section renders — so
+// the number on screen is the number queued. That matters beyond tidiness: the
+// worklist gates on `rights <> 'suppressed'` while curationWorklist's missing_photos
+// kind uses a bare NOT EXISTS, so the two diverge the first time a rights takedown
+// lands, and a taken-down photo must re-queue rather than silently vanish.
+//
+// The per-row verdict comes from classifyEnrichmentRequest (enrichment.ts), so this
+// report and request_cigar_enrichment speak one vocabulary. It is deliberately NOT
+// maybeQueueEnrichment: that returns a bare boolean (it cannot say WHY a row was
+// skipped) and its dedupe misses `in_progress`.
+//
+// Enveloped (ADR-003) where request_cigar_enrichment is deliberately bare: a bulk
+// press is a batch effect worth replaying identically, and a button can be
+// double-clicked. Not in REVERSIBLE_ACTIONS — the inverse (deleting a pending
+// request) has no user-visible value, so the run shows with no Undo by design.
+//
+// TWO PRECONDITIONS ARE ENFORCED, NOT DOCUMENTED. A queued request that cannot be
+// served is not inert: the crawler counts `attempts` per REQUEST across whichever
+// vendor drains it and marks the row `exhausted` at EXHAUST_ATTEMPTS = 2, which is
+// permanent. So a press only writes a row when both hold, and reports every other
+// row with the reason:
+//
+//   1. `unverified_name` — drainEnrichment resolves BY canonical name twice over
+//      (slug-token ranking, then a pg_trgm similarity floor), so a name nobody has
+//      reviewed is a request that misses and burns its two attempts. `verified` is
+//      the existing curator signal for "a human or agent read this row" (only
+//      verifyCigar sets it), so it is the gate. Fix the name with rename_cigar,
+//      verify it, then press.
+//   2. `no_vendor_coverage` — a market with no enrich lane running cannot serve
+//      any request, but the drain still consumes its attempts. See enrichedMarkets.
+//
+// Neither has an override argument. The way past them is to do the thing they
+// assert; a flag would just be the old footgun with a longer name.
+export const ENRICHMENT_BACKLOG_MAX = 100;
+
+// The cap covers today's backlog with headroom and refuses to become a 900-row
+// self-inflicted crawl. One transaction over up to this many rows stays short-lived;
+// raising the ceiling means batching the writes, not just raising the number.
+function clampBacklogLimit(limit: number | undefined): number {
+  if (limit == null || !Number.isFinite(limit)) return ENRICHMENT_BACKLOG_MAX;
+  return Math.min(Math.max(Math.trunc(limit), 1), ENRICHMENT_BACKLOG_MAX);
+}
+
+// The markets an enrich pass actually reaches: a crawl-enabled vendor whose focus
+// covers the market AND which has completed at least one `enrich` run. The run is
+// the load-bearing half — in prod today Cuban Lou's is `crawl_enabled` and has only
+// ever run a `seed`, so `crawl_enabled` alone would claim CC is covered while the
+// only enrich CronJob is NC-only. Reading the runs table means the gate opens by
+// itself the first night a new enrich lane runs, with no code or flag change.
+async function enrichedMarkets(tx: Tx): Promise<Set<CigarType>> {
+  const result = await tx.execute(sql`
+    SELECT DISTINCT v.focus
+    FROM vendors v
+    WHERE v.crawl_enabled
+      AND v.focus IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM crawl_runs cr
+        WHERE cr.vendor_id = v.id AND cr.kind = 'enrich' AND cr.status = 'succeeded'
+      )
+  `);
+  const markets = new Set<CigarType>();
+  for (const row of result.rows as unknown as { focus: string }[]) {
+    if (row.focus === "both") {
+      markets.add("NC");
+      markets.add("CC");
+    } else if (row.focus === "NC" || row.focus === "CC") {
+      markets.add(row.focus);
+    }
+  }
+  return markets;
+}
+
+// An untyped cigar could be either market, so it needs BOTH covered — enrichment is
+// what would tell us which, and guessing is how the 41 CC rows would get retired.
+function marketCovered(type: CigarType | null, markets: Set<CigarType>): boolean {
+  if (type === "CC" || type === "NC") return markets.has(type);
+  return markets.has("CC") && markets.has("NC");
+}
+
+// The per-row verdict. Ordered so the report answers the curator's actual question:
+// what stopped this row, given everything else was fine.
+function backlogStatus(
+  classified: EnrichmentClassification,
+  markets: Set<CigarType>,
+  retryExhausted: boolean,
+): EnrichmentBacklogStatus {
+  // Not a queue decision at all: nothing to fill, or a live request already exists.
+  if (classified.status === "not_needed" || classified.status === "already_queued") {
+    return classified.status;
+  }
+  // A row the crawler retired is reported, not re-queued, unless asked for. This
+  // deliberately outranks `recently_enriched`: ingest marks a request `fulfilled`
+  // on a name match even when the photo capture threw, so exhausted-AND-fulfilled
+  // is reachable for exactly the rows most likely to need the retry — keying the
+  // override off `status === "queued"` alone made it inert there.
+  if (classified.exhausted && !retryExhausted) return "exhausted";
+  if (!classified.exhausted && classified.status === "recently_enriched") return "recently_enriched";
+  // Preconditions for an actual insert.
+  if (classified.cigar.verification !== "verified") return "unverified_name";
+  if (!marketCovered(classified.cigar.type, markets)) return "no_vendor_coverage";
+  return "queued";
+}
+
+export async function queueEnrichmentBacklog(
+  deps: Deps,
+  principal: Principal,
+  input: QueueEnrichmentBacklogInput,
+): Promise<QueueEnrichmentBacklogResult> {
+  assertCurator(principal);
+  const requestFingerprint = fingerprint(input);
+  const limit = clampBacklogLimit(input.limit);
+
+  // The worklist read runs before the write transaction opens (it is the console's
+  // own read, which takes Deps). Every candidate is re-classified INSIDE the tx, so
+  // a row that gained a photo or a queue entry in between is reported, not
+  // double-queued.
+  const worklist = await cigarsMissingPhotos(deps, principal);
+  const candidates = worklist.slice(0, limit);
+
+  try {
+    return await deps.db.transaction((tx) =>
+      queueBacklogWithinTx(tx, principal, input, requestFingerprint, worklist.length, candidates),
+    );
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as QueueEnrichmentBacklogResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+async function queueBacklogWithinTx(
+  tx: Tx,
+  principal: Principal,
+  input: QueueEnrichmentBacklogInput,
+  requestFingerprint: string,
+  eligible: number,
+  candidates: MissingPhotoCigar[],
+): Promise<QueueEnrichmentBacklogResult> {
+  const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+  if (existing) {
+    assertReplayable(existing, requestFingerprint);
+    return { ...(existing.result as QueueEnrichmentBacklogResult), replayed: true };
+  }
+
+  // One read for the whole press: coverage is a property of the vendor fleet, not
+  // of a row.
+  const markets = await enrichedMarkets(tx);
+
+  const entries: EnrichmentBacklogEntry[] = [];
+  for (const candidate of candidates) {
+    const classified = await classifyEnrichmentRequest(tx, candidate.cigarId);
+    const status = backlogStatus(classified, markets, input.retryExhausted === true);
+
+    if (status === "queued") {
+      await tx.insert(enrichmentRequests).values({
+        cigarId: candidate.cigarId,
+        requestedBy: principal.userId,
+      });
+      // One audit row per INSERT (never for a skip), so "Recent agent runs" shows
+      // exactly what the press changed, attributed to the run.
+      await tx.insert(auditLog).values({
+        userId: principal.userId,
+        ...auditAttribution(input.attribution),
+        action: "cigar.enrichment_request",
+        smokeId: null,
+        before: null,
+        after: { cigarId: candidate.cigarId, missingFields: classified.assessment.missingFields },
+        correlationId: input.correlationId ?? input.clientRequestId,
+      });
+    }
+
+    entries.push({ cigarId: candidate.cigarId, canonicalName: candidate.canonicalName, status });
+  }
+
+  const queued = entries.filter((e) => e.status === "queued").length;
+  const result: QueueEnrichmentBacklogResult = {
+    eligible,
+    considered: candidates.length,
+    queued,
+    skipped: entries.length - queued,
+    enrichedMarkets: [...markets].sort(),
+    entries,
+    replayed: false,
+  };
+
+  await recordIdempotency(tx, {
+    userId: principal.userId,
+    clientRequestId: input.clientRequestId,
+    tool: "queue_enrichment_backlog",
+    requestFingerprint,
+    smokeId: null,
+    result,
+  });
+
+  return result;
+}
+
+// --------------------------------------------------------------------------
 // Recent agent runs + Undo (DESIGN-003 §Curation review console, #126). Two
 // reads (grouped runs, a run's rows) and one write (undo an action by its inverse).
 // --------------------------------------------------------------------------
@@ -2136,6 +2352,12 @@ function summarizeAudit(action: string, before: Record<string, unknown>, after: 
       const source = (before.source ?? {}) as Record<string, unknown>;
       const target = (before.target ?? {}) as Record<string, unknown>;
       return `${fmtValue(source.canonicalName)} → ${fmtValue(target.canonicalName)}`;
+    }
+    // A bulk enqueue lands one row per cigar (#154); without this case every row of
+    // a press renders blank.
+    case "cigar.enrichment_request": {
+      const missing = Array.isArray(after.missingFields) ? after.missingFields.map(fmtValue) : [];
+      return missing.length > 0 ? `queued · missing ${missing.join(", ")}` : "queued";
     }
     case "cigar.set_facts": {
       const parts = Object.keys(after)
@@ -2241,6 +2463,11 @@ export async function agentRunRows(
           THEN nullif(a.before->>'cigarId', '')
         WHEN a.action = 'cigar.merge'
           THEN nullif(a.after->>'tombstonedSourceId', '')
+        -- An enqueue has no before-image (nothing changed on the cigar), so its
+        -- target lives in after. Without this branch a bulk press (#154) renders as
+        -- N identically-titled rows and the run review is unreadable.
+        WHEN a.action = 'cigar.enrichment_request'
+          THEN nullif(a.after->>'cigarId', '')
       END
     )::uuid
     -- The un-undone merge ledger, if any: merge is reversible only through it.

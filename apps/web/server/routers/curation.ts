@@ -12,6 +12,8 @@ import {
   restoreCigar,
   setProductPhotoRights,
   renameCigar,
+  queueEnrichmentBacklog,
+  ENRICHMENT_BACKLOG_MAX,
   agentRuns,
   agentRunRows,
   undoCurationAction,
@@ -148,6 +150,19 @@ export const curationRouter = router({
       }),
     )
     .mutation(({ ctx, input }) => renameCigar(ctx.deps, ctx.principal, input)),
+
+  // Bulk-enqueue the "Missing photos" worklist for the crawler's enrich runs
+  // (#154) — the operator kickstart for the same list the section renders. The
+  // curate agent presses the identical service through its MCP tool.
+  queueEnrichmentBacklog: adminProcedure
+    .input(
+      z.object({
+        clientRequestId: z.string(),
+        limit: z.number().int().min(1).max(ENRICHMENT_BACKLOG_MAX).optional(),
+        retryExhausted: z.boolean().optional(),
+      }),
+    )
+    .mutation(({ ctx, input }) => queueEnrichmentBacklog(ctx.deps, ctx.principal, input)),
 
   // Recent agent runs (DESIGN-003 §Curation review console, #126): the runs list
   // grouped from the audit log by run_id, and a run's expandable rows.

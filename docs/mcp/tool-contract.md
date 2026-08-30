@@ -38,6 +38,14 @@ lazy catalog create inside save/add, the enrichment queue write, conversational
 catalog repair, and chat-submitted price observations). There is no
 `catalog:write` scope: catalog mutation rides `journal:write` by house precedent
 (the same scope already gates add_cigar's lazy create and the enrichment write).
+`curation:read` (get_curation_queue) and `curation:write` (set_listing_match_status,
+set_cigar_facts, verify_cigar, exclude_cigar, restore_cigar,
+set_product_photo_rights, rename_cigar, queue_enrichment_backlog) are a SEPARATE
+pair, so a journal:write token can never reach a curation tool. get_cigar is the
+one any-of tool: `catalog:read` OR `curation:read`. Curation scope is necessary but
+not sufficient — every curation handler also requires an admin principal, so a
+curation-scoped token on a non-admin user is rejected exactly as the web console
+rejects it.
 **Scope-bounded responses:** catalog tools include personal fields
 (`userSmokeCount`, `personalProfile`, the `wanted` and `favorited` overlays, and
 browse_catalog's tile overlay `smokeCount`/`myRating`/`remaining`/`wanted`/
@@ -82,7 +90,10 @@ Gap-fill. When the user smokes or acquires something search_cigars does not matc
 fill the gap first: add_cigar creates an unverified entry from their words and
 queues enrichment (specs + a product photo) so the later save_smoke links to a
 real cigar; record_purchase logs an acquisition and auto-creates the described
-cigar the same way. record_purchase is also how the humidor count is corrected —
+cigar the same way. If add_cigar errors cigar_ambiguous, show the search_cigars
+candidates and ask; only when the user confirms none is theirs, retry add_cigar
+with confirmedDistinct:true to create the distinct product. record_purchase is
+also how the humidor count is corrected —
 the ledger is append-only and holdings are derived, so a miscount is fixed with a
 negative-quantity row (say why in notes), never an edit. Record only what the user
 stated: never invent a price, date, or vendor.
@@ -128,6 +139,27 @@ Field conventions:
 - get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - Combine related corrections into one update_smoke call rather than several.
+
+Catalog curation (admin only). The get_curation_queue read and the eight curation
+write tools are for an operations agent maintaining the catalog — not for
+conversational journaling; a normal chat session never uses them. get_curation_queue
+pages the work by kind (unverified, duplicates, match_triage, unbranded, untyped,
+missing_photos); drain a kind with its nextCursor. Apply only what the evidence
+supports: high-confidence corrections apply directly (set_cigar_facts overwrites a
+wrong brand/line/type/manufacturer; rename_cigar corrects a wrong canonical name;
+verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
+non-cigar pollution, restore_cigar to undo; set_product_photo_rights
+approved/suppressed); low-confidence cases are skipped and
+reported, never guessed — leave an uncertain brand or type null rather than invent
+one. queue_enrichment_backlog is the operator's bulk enqueue of the photoless
+holdings, NOT part of a curation run: do not call it on your own initiative — report
+the worklist and leave the press to the operator. It queues a cigar only once its
+canonical name is verified and a crawl-enabled vendor covering that market has
+completed an enrich run; every other row comes back with the reason and nothing is
+written for it. Enrichment matches on the canonical name, so the way to make a row
+enqueueable is rename_cigar then verify_cigar. Pass runId (the batch id) and
+confidence (0-1) on every write so the run is auditable and reversible. Merges stay
+human-only in the web console — there is no merge tool here.
 ```
 
 Guidance, not enforcement — the server validates every request regardless.
@@ -978,6 +1010,66 @@ always inserts. Retry-safe through the envelope; an unknown `cigarId` is
 never mint registry vendor rows. Scope `journal:write`.
 
 ---
+
+## Curation surface (admin only)
+
+`get_curation_queue` (read, `curation:read`) plus eight writes on `curation:write`:
+`set_listing_match_status`, `set_cigar_facts`, `verify_cigar`, `exclude_cigar`,
+`restore_cigar`, `set_product_photo_rights`, `rename_cigar`,
+`queue_enrichment_backlog`. These are for an operations agent maintaining the
+catalog (DESIGN-003 §Curation); a conversational session never uses them. Every
+write carries the mutation envelope plus `runId` and `confidence`, and the adapter
+stamps `actor: agent` server-side so the review console can group and score a run.
+Scope alone is not enough — each handler also requires an admin principal.
+
+### queue_enrichment_backlog — write, idempotent
+
+Enqueue the caller's **photoless holdings** — cigars they hold with no servable
+product photo — for the crawler's enrich runs, in one call instead of looping
+`request_cigar_enrichment` (#154). Selection is the same read the console's
+"Missing photos" section renders, so the number on screen is the number
+considered. **Operator-initiated:** the server instructions tell the curation
+agent not to call it on its own initiative, and the tool enforces its own
+preconditions besides.
+
+```yaml
+arguments:
+  clientRequestId: 9f2c...        # required; reuse EXACTLY on a retry
+  limit: 60                       # optional; 1-100, default 100. Highest remaining stock first
+  retryExhausted: false           # optional, default false; re-queue rows the crawler gave up on
+  runId: wo-cigar-curate-20260830 # the batch this press belongs to
+  confidence: 0.9
+
+result:
+  eligible: 55                    # worklist rows before the cap
+  considered: 55                  # rows the cap admitted
+  queued: 7
+  skipped: 48
+  enrichedMarkets: [NC]           # markets an enrich lane actually reaches right now
+  entries:
+    - cigarId: cg_01j9x2
+      canonicalName: Trinidad Reyes
+      status: queued              # see the taxonomy below
+  replayed: false
+```
+
+The per-row `status` is `request_cigar_enrichment`'s taxonomy (`queued`,
+`already_queued`, `recently_enriched`, `not_needed`) plus three verdicts only a
+bulk press has:
+
+| status | meaning | how to clear it |
+| --- | --- | --- |
+| `exhausted` | the crawler retired the row (`EXHAUST_ATTEMPTS = 2`) | fix the cause, then press with `retryExhausted: true` |
+| `unverified_name` | nobody has reviewed this canonical name | `rename_cigar` if it is wrong, then `verify_cigar` |
+| `no_vendor_coverage` | no crawl-enabled vendor covering that market has completed an `enrich` run | bring that market's enrich lane up |
+
+**Both preconditions are enforced, not advised, and neither has an override.** A
+queued request that cannot be served is not inert: `attempts` is counted per
+*request* by whichever vendor drains it, so two passes by a vendor that cannot
+carry the cigar retire it permanently. Enrichment resolves by canonical name
+(slug-token ranking, then a pg_trgm similarity floor), which is why an unreviewed
+name is refused; and an untyped cigar needs BOTH markets covered, because
+enrichment is what would tell us which one it belongs to.
 
 ## Errors
 

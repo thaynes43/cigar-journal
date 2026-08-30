@@ -29,6 +29,7 @@ import {
   restoreCigar,
   setProductPhotoRights,
   renameCigar,
+  queueEnrichmentBacklog,
   UnauthenticatedError,
   UnauthorizedError,
   UnavailableError,
@@ -92,6 +93,8 @@ import {
   setProductPhotoRightsOutput,
   renameCigarSchema,
   renameCigarOutput,
+  queueEnrichmentBacklogSchema,
+  queueEnrichmentBacklogOutput,
   searchCigarsOutput,
   getCigarOutput,
   getMySmokesOutput,
@@ -1161,6 +1164,35 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           clientRequestId: args.clientRequestId,
           cigarId: args.cigarId,
           canonicalName: args.canonicalName,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "queue_enrichment_backlog",
+    {
+      title: "Queue enrichment backlog",
+      description:
+        "Operator-initiated bulk enqueue: turn the caller's photoless holdings — the cigars they hold with no servable product photo — into enrichment requests for the crawler, instead of looping request_cigar_enrichment. Do not call this on your own initiative; report the worklist and leave the press to the operator. It queues a row ONLY when the cigar's canonical name is verified and some crawl-enabled vendor covering its market has completed an enrich run; every other row is reported with the reason and nothing is written for it (unverified_name, no_vendor_coverage, already_queued, recently_enriched, not_needed, exhausted). A queued request that cannot be matched is not free — the crawler retires it permanently after two passes. Selects highest remaining stock first, capped by limit. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
+      inputSchema: queueEnrichmentBacklogSchema,
+      outputSchema: queueEnrichmentBacklogOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Queue enrichment backlog",
+      },
+    },
+    (args, extra) =>
+      run("queue_enrichment_backlog", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await queueEnrichmentBacklog(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          limit: args.limit ?? undefined,
+          retryExhausted: args.retryExhausted ?? undefined,
           attribution: curationAttribution(args),
           correlationId,
         });
