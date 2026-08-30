@@ -78,6 +78,10 @@ export interface Handoff {
   brand: string;
   publicSmoke: { id: string; cigarName: string; narrativeSnippet: string };
   privateSmokeId: string;
+  // Journal entries with no title, so the smoke-detail h1 falls back to the
+  // cigar name (issue #49). Prod has none, so only the fixture exercises it.
+  untitledSmoke: { id: string; cigarId: string; cigarName: string };
+  untitledPublicSmoke: { id: string; cigarName: string };
 }
 
 // Parse a session cookie out of a Better Auth response and shape it for a
@@ -213,6 +217,18 @@ export async function seed(opts: {
       lengthInches: "5",
       ringGauge: 52,
     });
+    // A deliberately long canonical name — the untitled-entry h1 has to wrap it
+    // rather than overflow, and prod's longest is 93 characters.
+    const opusx = await insertCigar(deps, {
+      canonicalName:
+        "Fuente Fuente OpusX 20 Years Double Corona Cigar Family Charitable Foundation Event Exclusive",
+      brand: "Arturo Fuente",
+      line: "OpusX",
+      vitolaName: "Double Corona",
+      type: "NC",
+      lengthInches: "7.6",
+      ringGauge: 49,
+    });
 
     // A near-duplicate pair (accent variant, well above the 0.6 trigram bar) so the
     // console's Duplicates → merge → Recent merges → Unmerge round trip has real
@@ -256,6 +272,17 @@ export async function seed(opts: {
       overallDescriptors: ["cedar", "espresso"],
       assessment: { rating: 92, liked: true, strength: "medium-full", body: "full", impression: null },
       journal: { title: "A reliable No. 2", narrative: "Classic Montecristo pyramid — cocoa and cedar." },
+    });
+    // No journal title: the detail page's h1 becomes the cigar name and links to
+    // the catalog. Kebab-cased descriptors ride along so the chip label
+    // transform is exercised on a real surface too.
+    const untitledSave = await saveSmoke(deps, admin, {
+      clientRequestId: randomUUID(),
+      cigar: { cigarId: opusx },
+      smokedAt: { value: "2026-08-21T20:00" },
+      overallDescriptors: ["dark chocolate", "white pepper"],
+      assessment: { rating: 100, liked: true, strength: "full", body: "full", impression: null },
+      journal: { narrative: "No title on this one — the cigar name has to carry the page." },
     });
 
     // --- Non-admin account (minted and redeemed through a real invite) ------
@@ -309,6 +336,16 @@ export async function seed(opts: {
       overallDescriptors: ["cocoa", "pepper"],
       journal: { title: "Maduro night", narrative: "The 1964 Maduro — cocoa, pepper, and a long finish." },
     });
+    // The public reader's view of an untitled entry: the cigar name heads the
+    // page, and unlike the owner's view it must NOT link — the catalog is behind
+    // auth, so a link there would be a dead end for an anonymous reader.
+    const untitledPublicSave = await saveSmoke(deps, publicOwner, {
+      clientRequestId: randomUUID(),
+      cigar: { cigarId: hemingway },
+      smokedAt: { value: "2026-08-22T17:00" },
+      overallDescriptors: ["graham cracker", "toasted almond"],
+      journal: { narrative: "A short story with no title of its own." },
+    });
 
     // --- Private journal (for the 404-parity spec) -------------------------
     const privateOwner = await insertUser(deps, "e2e-private@example.com", "private", "Private Owner");
@@ -345,6 +382,16 @@ export async function seed(opts: {
         narrativeSnippet: "calm evening with a Siglo VI",
       },
       privateSmokeId: privateSave.smoke.smokeId,
+      untitledSmoke: {
+        id: untitledSave.smoke.smokeId,
+        cigarId: opusx,
+        cigarName:
+          "Fuente Fuente OpusX 20 Years Double Corona Cigar Family Charitable Foundation Event Exclusive",
+      },
+      untitledPublicSmoke: {
+        id: untitledPublicSave.smoke.smokeId,
+        cigarName: "Arturo Fuente Hemingway Short Story",
+      },
     };
 
     return { handoff, adminState, nonAdminState };

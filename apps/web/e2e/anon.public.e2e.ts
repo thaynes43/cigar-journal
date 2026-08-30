@@ -25,6 +25,15 @@ test("anonymous can open a public smoke detail", async ({ page }) => {
   await expect(page.getByText(h.publicSmoke.narrativeSnippet)).toBeVisible();
 });
 
+test("an untitled public entry heads with the cigar name and no dead link", async ({ page }) => {
+  // The owner's view links the name to the catalog; the public view must not —
+  // /cigars is behind auth, so a link there would be a dead end (issue #49).
+  await page.goto(`/smokes/${h.untitledPublicSmoke.id}`);
+  const heading = page.getByRole("heading", { level: 1 });
+  await expect(heading).toHaveText(h.untitledPublicSmoke.cigarName);
+  await expect(heading.getByRole("link")).toHaveCount(0);
+});
+
 test("a private smoke stays 404 for anonymous readers", async ({ page }) => {
   const response = await page.goto(`/smokes/${h.privateSmokeId}`);
   expect(response?.status()).toBe(404);

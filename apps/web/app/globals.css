@@ -51,15 +51,46 @@
 
   /* Wrapper-shade ramp (Candela → Oscuro) — the data palette for band tiles
    * and chips. Theme-constant: a tile is an object, not chrome, so it keeps
-   * its ground in both themes. Each stop pairs with its monogram ink. */
-  --tobacco-1: #98995f;
-  --tobacco-2: #c9aa70;
-  --tobacco-3: #b78f5c;
-  --tobacco-4: #a1764a;
-  --tobacco-5: #8a613b;
-  --tobacco-6: #6f4a2c;
-  --tobacco-7: #573722;
-  --tobacco-8: #3e2517;
+   * its ground in both themes. Each stop pairs with its monogram ink.
+   *
+   * Retuned 2026-08-30 (DESIGN-001 amendment, issue #49) against measured
+   * criteria; `token-contrast.test.ts` is the guard and holds the arithmetic.
+   *
+   * A theme-constant stop's paper contrast and its espresso contrast are ZERO
+   * SUM — (Y_paper+.05)/(Y+.05) against (Y+.05)/(Y_espresso+.05) — so no ramp
+   * can beat another at every stop in both themes; the most any stop can reach
+   * against both grounds at once is 3.90:1. What a retune can move is each
+   * theme's WORST stop, and that is what these values are solved for:
+   *   - worst on paper (--surface #f4edde): 1.90 → 2.12
+   *   - worst on espresso (--surface #1d1712): 1.25 → 1.63
+   *   - worst monogram-ink contrast: 3.94 → 4.51 (≥ 4.5 text contrast)
+   *   - worst adjacent separation: ΔE 8.8 → 9.8
+   * Individual stops still trade: 6 of 8 lose paper contrast (stop 8 drops
+   * 12.16 → 9.34) because lifting the oscuro end off the espresso ground is
+   * the same move. The full stop-by-stop table is on the PR for issue #49.
+   *
+   * Where the stops may sit: ≥4.5:1 against a monogram ink admits only
+   * L* ≥ 56.8 (dark ink) or L* ≤ 44.2 (light ink), a dead zone between them,
+   * four stops each side — the 1–4 / 5–8 ink split below is that arithmetic's
+   * output, not a convention. On main stops 4 and 5 sat IN the dead zone
+   * (L* 53.0 and 44.6), which is why their ink failed. Pulling them into a
+   * valid band compresses the dark-ink band to ~10 L*, so separation inside it
+   * has to come from a hue sweep (118° olive → 53° oscuro) rather than from
+   * lightness — the reason the candela end reads greener than main's.
+   * The oscuro end deliberately stays in the chocolate family (stop 8:
+   * hue 53° / C* 16, against main's 55° / 17); an earlier revision of this
+   * branch reached ΔE 11.1 by pushing it to 38° / C* 31, which rendered
+   * burgundy across the catalog and is rejected — same artifact deviation 1
+   * rejected a hue sweep for.
+   * See docs/design/001-research.md § Amendment. */
+  --tobacco-1: #9dab73;
+  --tobacco-2: #9e9f5a;
+  --tobacco-3: #a49152;
+  --tobacco-4: #a18557;
+  --tobacco-5: #7f6438;
+  --tobacco-6: #7c5331;
+  --tobacco-7: #6a4531;
+  --tobacco-8: #51372a;
   --tobacco-ink-dark: #2c2012;
   --tobacco-ink-light: #f0e7d3;
   --tobacco-1-ink: var(--tobacco-ink-dark);
@@ -70,6 +101,13 @@
   --tobacco-6-ink: var(--tobacco-ink-light);
   --tobacco-7-ink: var(--tobacco-ink-light);
   --tobacco-8-ink: var(--tobacco-ink-light);
+
+  /* Chip wash — the tobacco tint DESIGN-001 specifies for normalized
+   * descriptor chips. Was paper-200 / espresso-800: a neutral fill 1.12:1
+   * against the card it sits on, so the filled tier and the keyline tier read
+   * as the same object and only the italic told them apart. */
+  --tobacco-wash-light: #d3b790;
+  --tobacco-wash-dark: #523b27;
 
   /* ---- Semantic roles ---------------------------------------------------- */
   color-scheme: light dark;
@@ -88,7 +126,7 @@
   --danger-wash: light-dark(var(--red-wash-light), var(--red-wash-dark));
 
   /* Descriptor chips: normalized tags sit on a tobacco-tinted fill. */
-  --chip: light-dark(var(--paper-200), var(--espresso-800));
+  --chip: light-dark(var(--tobacco-wash-light), var(--tobacco-wash-dark));
   --chip-ink: light-dark(var(--ink-900), var(--parchment-100));
 
   /* The unsmoked portion of a burn line — wrapper leaf in either theme. */

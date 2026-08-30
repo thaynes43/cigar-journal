@@ -31,6 +31,36 @@ describe("BandTile", () => {
     expect(monogram("Padrón 1964 Anniversary Exclusivo")).toBe("PA");
     expect(monogram("Padrón 1964")).toBe("P");
   });
+
+  it("pins every house's ramp index across a palette retune", () => {
+    // Identity is the contract: retuning the ramp's colours may not move a
+    // brand from one stop to another (issue #49). These are the live catalog's
+    // largest houses; the expected values are the ones prod renders today.
+    expect(bandStop("Arturo Fuente Hemingway")).toBe(3);
+    expect(bandStop("La Aroma de Cuba Mi Amor")).toBe(1);
+    expect(bandStop("My Father Le Bijou 1922")).toBe(2);
+    expect(bandStop("Padrón 1964 Anniversary")).toBe(8);
+    expect(bandStop("Rocky Patel Decade")).toBe(2);
+    expect(bandStop("H Upmann Connoisseur A")).toBe(6);
+  });
+
+  it("paints its own hairline edge when it owns its box", () => {
+    // A dark stop on the espresso ground has no boundary without one, so the
+    // journal thumb and the detail hero read as holes (issue #49).
+    for (const size of ["thumb", "card", "hero"] as const) {
+      expect(renderToStaticMarkup(<BandTile name="Oliva Serie V" size={size} />)).toContain(
+        "border border-line",
+      );
+    }
+  });
+
+  it("stays edgeless inside a frame that already has one", () => {
+    // Every `fill` call site wraps the tile in `border border-line`; a second
+    // rule there would read as a doubled edge.
+    expect(renderToStaticMarkup(<BandTile name="Oliva Serie V" shape="fill" />)).not.toContain(
+      "border-line",
+    );
+  });
 });
 
 describe("RatingSeal", () => {
@@ -53,6 +83,46 @@ describe("RatingSeal", () => {
     const html = renderToStaticMarkup(<RatingSeal rating={92} liked={true} />);
     expect(html).toContain(">92<");
     expect(html).toContain("♥");
+  });
+
+  it("names the lone heart for assistive tech", () => {
+    // An aria-label on a bare <span> is not reliably announced; the glyph needs
+    // a role before the label carries.
+    const html = renderToStaticMarkup(<RatingSeal rating={null} liked={true} />);
+    expect(html).toContain('role="img"');
+    expect(html).toContain('aria-label="Liked"');
+  });
+
+  it("hangs the sm heart beside the seal, not over it", () => {
+    // Every sm caller is a bg-surface card, so the overlay's bg-bg backing plate
+    // was a mismatched notch in the ring and the overhang pushed the glyph into
+    // the card's padding (issue #49).
+    const html = renderToStaticMarkup(<RatingSeal rating={92} liked={true} size="sm" />);
+    expect(html).not.toContain("bg-bg");
+    expect(html).not.toContain("-bottom-1");
+  });
+
+  it("keeps the md heart as an overlay anchored to the seal itself", () => {
+    // md only ever sits on --bg, where the backing plate matches the ground.
+    // The heart is absolutely positioned, so the ASSERTION THAT MATTERS is its
+    // containing block: the seal — `border-2`, inset 2px — must be the root
+    // element, not a wrapper around it. Hanging it off an unbordered wrapper
+    // renders the same classes and moves the glyph 2px on both axes.
+    const html = renderToStaticMarkup(<RatingSeal rating={92} liked={true} size="md" />);
+    const rootClass = /^<span class="([^"]*)"/.exec(html)?.[1] ?? "";
+    expect(rootClass).toContain("size-14");
+    expect(rootClass).toContain("border-2");
+    expect(rootClass).toContain("relative");
+    expect(html).toContain("-bottom-1");
+    expect(html).toContain("bg-bg");
+  });
+
+  it("forces lining figures so a 3-digit score keeps the baseline", () => {
+    // tabular-nums alone does not: the display stack's real first hits (Iowan
+    // Old Style, Georgia) are oldstyle-figure faces.
+    const html = renderToStaticMarkup(<RatingSeal rating={100} size="sm" />);
+    expect(html).toContain("lining-nums");
+    expect(html).toContain("tabular-nums");
   });
 });
 
@@ -202,6 +272,56 @@ describe("Chips", () => {
     expect(html).toContain("cocoa");
     expect(html).toContain("baker&#x27;s chocolate");
     expect(html).toContain("italic");
+  });
+
+  it("reads a stored slug as words, without recasing it", () => {
+    // 9% of the live descriptor vocabulary is multi-word and therefore stored
+    // kebab-cased (issue #49). Lowercase is deliberate: the normalized tier
+    // should match the verbatim tier's voice and the archive's.
+    const html = renderToStaticMarkup(<Chips items={["dark-chocolate", "white-pepper"]} />);
+    expect(html).toContain(">dark chocolate<");
+    expect(html).toContain(">white pepper<");
+    expect(html).not.toContain("dark-chocolate");
+    expect(html).not.toContain("Dark chocolate");
+  });
+
+  it("leaves a single-word descriptor alone", () => {
+    expect(renderToStaticMarkup(<Chips items={["leather"]} />)).toContain(">leather<");
+  });
+
+  it("keeps the specific tier byte-verbatim", () => {
+    // Verbatim descriptors are the user's exact words (ADR-002) — a hyphen the
+    // user typed is theirs, not a slug separator.
+    const html = renderToStaticMarkup(<Chips items={[]} specific={["wet slate", "sun-dried hay"]} />);
+    expect(html).toContain(">wet slate<");
+    expect(html).toContain(">sun-dried hay<");
+  });
+
+  it("does not print the same words in both tiers", () => {
+    // Once hyphens read as spaces the two tiers can collide: prod has
+    // progression rows carrying descriptors={graham-cracker} alongside
+    // specific_descriptors={"graham cracker"}. Rendering both puts the identical
+    // words on the row twice — the two-tiers-collapse-into-one failure
+    // DESIGN-001's split exists to avoid.
+    const html = renderToStaticMarkup(
+      <Chips items={["graham-cracker", "cedar"]} specific={["graham cracker", "wet slate"]} />,
+    );
+    expect(html.match(/graham cracker/g)).toHaveLength(1);
+    expect(html).toContain(">wet slate<");
+    expect(html).toContain(">cedar<");
+  });
+
+  it("still renders a verbatim descriptor that only looks similar", () => {
+    // The drop is exact-match only: "graham crackers" is the user's own word.
+    const html = renderToStaticMarkup(
+      <Chips items={["graham-cracker"]} specific={["graham crackers"]} />,
+    );
+    expect(html).toContain(">graham cracker<");
+    expect(html).toContain(">graham crackers<");
+  });
+
+  it("renders nothing when the verbatim tier is fully absorbed", () => {
+    expect(renderToStaticMarkup(<Chips items={[]} specific={[]} />)).toBe("");
   });
 });
 
