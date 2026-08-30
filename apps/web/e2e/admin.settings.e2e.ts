@@ -47,3 +47,46 @@ test("the Sign-in section lists Password only, with SSO unconfigured", async ({ 
   await expect(signIn.getByText("Authentik")).toHaveCount(0);
   await expect(signIn.getByRole("button")).toHaveCount(0);
 });
+
+// The Profile section (issue: "Save does nothing"). A save must be visibly
+// acknowledged, the button must go inert once the field matches what the server
+// holds, and the header — which reads the viewer from the session cookie cache —
+// must show the new name straight away, not after the cache expires.
+test("display name save is acknowledged and reaches the header", async ({ page }) => {
+  await page.goto("/settings");
+  const field = page.getByLabel("Display name");
+  const save = page.getByRole("button", { name: /^(Save|Saving…)$/ });
+  const avatar = page.getByRole("button", { name: "Account menu" });
+  const original = await field.inputValue();
+
+  // Nothing to save yet.
+  await expect(save).toBeDisabled();
+
+  await field.fill("Zed Tester");
+  await expect(save).toBeEnabled();
+  await Promise.all([
+    page.waitForResponse(
+      (r) => r.url().includes("settings.update") && r.request().method() === "POST",
+    ),
+    save.click(),
+  ]);
+  await expect(page.getByRole("status").filter({ hasText: "Saved." })).toBeVisible();
+  await expect(save).toBeDisabled();
+  // The header initial follows the new name without a reload or cache expiry.
+  await expect(avatar).toHaveText("Z");
+
+  await page.reload();
+  await expect(field).toHaveValue("Zed Tester");
+  await expect(avatar).toHaveText("Z");
+
+  // Leave the shared account as it started.
+  await field.fill(original);
+  await Promise.all([
+    page.waitForResponse(
+      (r) => r.url().includes("settings.update") && r.request().method() === "POST",
+    ),
+    save.click(),
+  ]);
+  await expect(page.getByRole("status").filter({ hasText: "Saved." })).toBeVisible();
+  await expect(field).toHaveValue(original);
+});

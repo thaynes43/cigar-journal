@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import type { InviteView, JournalVisibility, UserSettings } from "@cj/domain";
 import type { SignInMethod } from "@cj/auth";
 import { api } from "@/lib/trpc/react";
+import { authClient } from "@/lib/auth-client";
 import { ui } from "@/lib/ui";
 import { SignInSection } from "./signin-section";
 import { InvitesSection } from "./invites-section";
@@ -42,10 +43,33 @@ export function SettingsForm({
 function ProfileSection({ initialName }: { initialName: string | null }) {
   const router = useRouter();
   const [name, setName] = useState(initialName ?? "");
-  const update = api.settings.update.useMutation({ onSuccess: () => router.refresh() });
+  // The last value the server confirmed. Save is inert until the field differs
+  // from it, so a completed save leaves the button disabled rather than looking
+  // like a no-op that can be pressed again.
+  const [saved, setSaved] = useState(initialName ?? "");
+  const [notice, setNotice] = useState<{ kind: "saved" | "error"; text: string } | null>(null);
+  const update = api.settings.update.useMutation({
+    onSuccess: async (settings) => {
+      const confirmed = settings.displayName ?? "";
+      setSaved(confirmed);
+      setName(confirmed);
+      setNotice({ kind: "saved", text: "Saved." });
+      // The app shell reads the viewer (and so the header initial) from Better
+      // Auth's session cookie cache, which is good for five minutes. Re-read the
+      // session with the cache bypassed so the cookie is re-issued with the new
+      // name BEFORE the refresh re-renders the shell; otherwise the header keeps
+      // the old name and the save looks like it did nothing.
+      await authClient.getSession({ query: { disableCookieCache: true } }).catch(() => undefined);
+      router.refresh();
+    },
+    onError: (error) => setNotice({ kind: "error", text: error.message || "Saving failed." }),
+  });
+  const dirty = name.trim() !== saved;
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
+    if (!dirty || update.isPending) return;
+    setNotice(null);
     update.mutate({ displayName: name });
   };
 
@@ -57,14 +81,32 @@ function ProfileSection({ initialName }: { initialName: string | null }) {
           <span className={ui.legend}>Display name</span>
           <input
             value={name}
-            onChange={(event) => setName(event.target.value)}
+            onChange={(event) => {
+              setName(event.target.value);
+              setNotice(null);
+            }}
             className={ui.field}
             autoComplete="name"
           />
         </label>
-        <button type="submit" disabled={update.isPending} className={`${ui.primary} self-start`}>
+        <button
+          type="submit"
+          disabled={update.isPending || !dirty}
+          className={`${ui.primary} self-start`}
+        >
           {update.isPending ? "Saving…" : "Save"}
         </button>
+        {notice ? (
+          notice.kind === "error" ? (
+            <p role="alert" className={ui.alert}>
+              {notice.text}
+            </p>
+          ) : (
+            <p role="status" className={`text-sm ${ui.muted}`}>
+              {notice.text}
+            </p>
+          )
+        ) : null}
       </form>
     </section>
   );
