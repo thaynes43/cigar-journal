@@ -69,12 +69,34 @@ export async function startRawTestPostgres(): Promise<TestPostgres> {
 
     const url = `postgresql://postgres:postgres@127.0.0.1:${port}/postgres`;
     const { db, pool } = createDatabase(url);
+
+    // Shutting the server down terminates any client the pool still holds, and
+    // node-postgres surfaces that as an 'error' event on the POOL. `createDatabase`
+    // attaches no listener (production pools outlive the server), and an 'error'
+    // event with no listener is an UNHANDLED error — which fails the whole vitest
+    // process even though every test passed. That is the standing CI flake (#174):
+    // the job printed "66 files / 932 tests passed" and still exited 1 on a single
+    // pg 57P01 "terminating connection due to administrator command".
+    //
+    // The race is inherent to tearing a server down under a live pool, so the fix
+    // is to expect it rather than to try to order it away: swallow the shutdown
+    // class, and once `stop()` has been entered swallow everything, since nothing
+    // a dying server says is a test result. Anything else, at any other time, is
+    // still reported — loudly, but without killing an otherwise green run.
+    let stopping = false;
+    pool.on("error", (error: unknown) => {
+      const code = (error as { code?: string } | null)?.code;
+      if (stopping || code === "57P01" || code === "ECONNRESET" || code === "EPIPE") return;
+      console.error("[embedded-pg] unexpected pool error", error);
+    });
+
     return {
       db,
       url,
       stop: async () => {
-        await pool.end();
-        await pg.stop();
+        stopping = true;
+        await pool.end().catch(() => {});
+        await pg.stop().catch(() => {});
         rmSync(dir, { recursive: true, force: true });
       },
     };
