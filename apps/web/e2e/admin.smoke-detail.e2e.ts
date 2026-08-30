@@ -28,15 +28,18 @@ test("an untitled entry heads the page with the cigar name, linked to the catalo
 });
 
 test("a 93-character name wraps inside the page rather than overflowing it", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+  const width = 390;
+  await page.setViewportSize({ width, height: 844 });
   await page.goto(`/smokes/${h.untitledSmoke.id}`);
-  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 
-  // The document must not gain a horizontal scroll from the heading.
-  const overflow = await page.evaluate(
-    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-  );
-  expect(overflow).toBeLessThanOrEqual(0);
+  const heading = page.getByRole("heading", { level: 1 });
+  await expect(heading).toBeVisible();
+  // Measured rather than assumed: the heading's box has to end inside the
+  // viewport, and it only can by wrapping onto several lines.
+  const box = await heading.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+  expect(box!.height).toBeGreaterThan(100); // wrapped, not one clipped line
 });
 
 test("kebab-cased descriptors read as words on the detail page", async ({ page }) => {
