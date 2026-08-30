@@ -78,6 +78,8 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
       expect(result.verdict).toBe("ok");
       expect(result.robots.productPathAllowed).toBe(true);
       expect(result.sitemap.kind).toBe(c.expectedKind);
+      // For 2 Guys this is 2, not 14: the fixture's twelve `/store/go/registry/<n>/`
+      // locs are inside the prefix but subtracted by the exclusion.
       expect(result.sitemap.productLocs).toBeGreaterThanOrEqual(1);
       // Both routed products parse; the accessory is correctly not a cigar.
       expect(result.productSummary.parsed).toBeGreaterThanOrEqual(2);
@@ -114,7 +116,9 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
 
     expect(result.sitemap.samples).toHaveLength(4);
     expect(result.sitemap.varied).toBe(true);
-    expect(result.sitemap.productLocs).toBe(2); // only the warm sample carried /store/ locs
+    // Only the warm sample carried /store/ locs, and its twelve registry locs are
+    // excluded by the gate — so the union is the two real products.
+    expect(result.sitemap.productLocs).toBe(2);
     expect(result.notes.join(" ")).toMatch(/VARIES/);
     expect(result.verdict).toBe("ok");
     expect(fetcher.pagesFetched).toBeLessThanOrEqual(probeFetchBudget(twoGuysCigars));
@@ -133,8 +137,12 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
   });
 
   it("carries the crawl-shape fixes the live 2026-08-29 probes called for", () => {
-    // 2 Guys serves varying sitemap content — the enumeration unions N fetches.
+    // 2 Guys served varying sitemap content on 2026-08-29 (not reproduced on
+    // 2026-08-30) — the enumeration unions N fetches until two clean probes say
+    // otherwise. Its `/store/` prefix also admits the `/store/go/` dispatcher
+    // subtree, so Mode A subtracts that family (live probe 2026-08-30).
     expect(twoGuysCigars.sitemapSampling?.samples).toBe(4);
+    expect(twoGuysCigars.nonProductPathPattern).toBeInstanceOf(RegExp);
     // Small Batch products are root-level slugs: exclusion gate, no prefix.
     expect(smallBatchCigar.productPathPrefix).toBeUndefined();
     expect(smallBatchCigar.nonProductPathPattern).toBeInstanceOf(RegExp);

@@ -1,0 +1,30 @@
+<!doctype html>
+<!-- HAND-WRITTEN fixture for a `/store/go/registry/<n>/` page (ADR-006): the
+     non-product shape the live 2026-08-30 probe kept sampling. A NitroSell gift
+     registry — breadcrumbs and a heading, and deliberately NO schema.org Product
+     JSON-LD, so `hasProduct=false` matches the live probe line:
+
+       fail https://www.2guyscigars.com/store/go/registry/1059/  status=200 hasProduct=false
+
+     Routed in the probe tests to prove the narrowed gate never hands one of these
+     to the parser. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Gift Registry — 2 Guys Cigars</title>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://www.2guyscigars.com/" },
+    { "@type": "ListItem", "position": 2, "name": "Gift Registry" }
+  ]
+}
+</script>
+</head>
+<body>
+<h1>Gift Registry</h1>
+<p>This registry has no public items.</p>
+</body>
+</html>
