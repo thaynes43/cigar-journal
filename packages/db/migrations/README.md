@@ -36,3 +36,10 @@ init container at startup (ADR-003).
   moved and full payloads of the want/favorite de-dupe deletes. Unmerge claims it
   with a conditional `undone_at` UPDATE (single-use, like `photo_upload_tokens`).
   Merges audited before this migration have no ledger and report non-reversible.
+- `0022_invites.sql` — invite-gated registration (ADR-010, issue #46): `invites`
+  binds one email to a SHA-256-hashed link token with a 7-day expiry, revocation,
+  and two-phase redemption (`redeemed_at` is the atomic burn, `redeemed_by` the
+  claim once sign-up succeeded — the in-flight state a stateless auth hook reads
+  as its authorization). No role column, deliberately: an invite has no role
+  field to escalate. A partial unique index keeps at most one open invite per
+  address.
