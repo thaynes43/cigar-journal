@@ -3,6 +3,8 @@ import {
   filterProductUrls,
   isProductUrl,
   pathOf,
+  pathShapeCensus,
+  PATH_CENSUS_TOP,
   productGateLabel,
   robotsGatePath,
   segmentCount,
@@ -214,6 +216,63 @@ describe("topLevelAlternatives", () => {
     expect(topLevelAlternatives("^/(?:cart|checkout)/")).toEqual(["^/(?:cart|checkout)/"]);
     expect(topLevelAlternatives("^/[a|b]x")).toEqual(["^/[a|b]x"]);
     expect(topLevelAlternatives("^/a\\|b")).toEqual(["^/a\\|b"]);
+  });
+});
+
+// The census answers what the gate cannot: not "did anything pass?" but "what
+// KINDS of URL are on each side?". It is what would have named `/store/go` on
+// the first 2 Guys probe instead of a second in-cluster Job.
+describe("pathShapeCensus", () => {
+  it("keys on the first two path segments and ranks by count", () => {
+    const census = pathShapeCensus([
+      "https://x.test/store/go/registry/1/",
+      "https://x.test/store/go/registry/2/",
+      "https://x.test/store/go/wishlist/9/",
+      "https://x.test/store/padron-robusto/",
+      // Depth stops at two segments, so deeper paths collapse onto the same key.
+      "https://x.test/blog/2026/08/a-post/",
+    ]);
+    expect(census.top).toEqual([
+      { key: "/store/go", count: 3 },
+      { key: "/blog/2026", count: 1 },
+      { key: "/store/padron-robusto", count: 1 },
+    ]);
+    expect(census.total).toBe(5);
+    expect(census.otherKeys).toBe(0);
+    expect(census.otherUrls).toBe(0);
+  });
+
+  it("keys a one-segment path and the site root", () => {
+    const census = pathShapeCensus(["https://x.test/about-us/", "https://x.test/"]);
+    // Ties break on the key, so an unchanged site prints an identical line twice.
+    expect(census.top).toEqual([
+      { key: "/", count: 1 },
+      { key: "/about-us", count: 1 },
+    ]);
+  });
+
+  it("caps the top list and counts what it hid, both ways", () => {
+    const urls = [
+      ...Array.from({ length: 8 }, (_, i) => `https://x.test/a/${i}/`),
+      ...Array.from({ length: 7 }, (_, i) => `https://x.test/b/${i}/`),
+      ...Array.from({ length: 6 }, (_, i) => `https://x.test/c/${i}/`),
+      ...Array.from({ length: 5 }, (_, i) => `https://x.test/d/${i}/`),
+      ...Array.from({ length: 4 }, (_, i) => `https://x.test/e/${i}/`),
+      // Two hidden keys behind three URLs.
+      "https://x.test/f/1/",
+      "https://x.test/f/2/",
+      "https://x.test/g/1/",
+    ];
+    const census = pathShapeCensus(urls, 1);
+    expect(census.top).toHaveLength(PATH_CENSUS_TOP);
+    expect(census.top.map((e) => e.key)).toEqual(["/a", "/b", "/c", "/d", "/e"]);
+    expect(census.otherKeys).toBe(2);
+    expect(census.otherUrls).toBe(3);
+    expect(census.total).toBe(33);
+  });
+
+  it("is empty for an empty enumeration", () => {
+    expect(pathShapeCensus([])).toEqual({ top: [], otherKeys: 0, otherUrls: 0, total: 0 });
   });
 });
 

@@ -2,7 +2,14 @@ import { extractJsonLd } from "./jsonld.js";
 import { isCigarListing, normalizeListing } from "./normalize.js";
 import { parseRobots } from "./robots.js";
 import { collectSitemapSamples, type SitemapSample } from "./sitemap.js";
-import { filterProductUrls, productGateLabel, robotsGatePath } from "./product-url.js";
+import {
+  filterProductUrls,
+  isProductUrl,
+  pathShapeCensus,
+  productGateLabel,
+  robotsGatePath,
+  type PathCensus,
+} from "./product-url.js";
 import { spreadIndices } from "./spread.js";
 import { CRAWLER_UA_TOKEN, type Fetcher } from "./fetcher.js";
 import type { VendorAdapter } from "../adapters/types.js";
@@ -71,6 +78,12 @@ export interface ProbeResult {
     // this vendor is non-deterministic.
     varied: boolean;
   };
+  // What KINDS of URL sit on each side of the gate — the commonest first-two-
+  // segment shapes among the enumerated URLs the gate accepted and rejected.
+  // Free (the URLs are already fetched) and the difference between one probe and
+  // two: `accepted` shows a gate admitting a non-product subtree, `rejected`
+  // names where the products live when the gate admits nothing.
+  pathShapes: { accepted: PathCensus; rejected: PathCensus };
   products: ProbeProductSample[];
   productSummary: { sampled: number; parsed: number; cigars: number };
   verdict: "ok" | "needs-attention";
@@ -167,6 +180,10 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
   }
 
   const productUrls = filterProductUrls(sampled.urls, adapter);
+  const pathShapes = {
+    accepted: pathShapeCensus(productUrls),
+    rejected: pathShapeCensus(sampled.urls.filter((url) => !isProductUrl(url, adapter))),
+  };
   if (anyOk && sampled.urls.length > 0 && productUrls.length === 0) {
     notes.push(`no enumerated URL passes the product gate (${gate}) — the gate or sitemap shape is likely wrong.`);
   }
@@ -226,11 +243,19 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
     gate,
     robots: { status: robotsRes.status, matchedAgent: robots.matchedAgent, productPathAllowed },
     sitemap,
+    pathShapes,
     products,
     productSummary,
     verdict,
     notes,
   };
+}
+
+function formatCensus(census: PathCensus): string {
+  if (census.total === 0) return "(none)";
+  const top = census.top.map((entry) => `${entry.key} ${entry.count}`).join(" · ");
+  // The tail is what the top-N hid; omitted when it hid nothing.
+  return census.otherKeys > 0 ? `${top} (+${census.otherKeys} keys, ${census.otherUrls} urls)` : top;
 }
 
 export function formatProbe(result: ProbeResult): string {
@@ -260,6 +285,12 @@ export function formatProbe(result: ProbeResult): string {
         `union=${s.enumeratedLocs} varied=${s.varied ? "yes" : "no"}`,
     );
   }
+  // Two own lines, so the substring assertions on the sitemap/samples/products
+  // lines above and below are untouched by adding them.
+  lines.push(
+    `  paths: in  ${formatCensus(result.pathShapes.accepted)}`,
+    `         out ${formatCensus(result.pathShapes.rejected)}`,
+  );
   lines.push(
     `  products: sampled=${result.productSummary.sampled} parsed=${result.productSummary.parsed} ` +
       `cigars=${result.productSummary.cigars}`,

@@ -72,3 +72,57 @@ export function productGateLabel(adapter: VendorAdapter): string {
   const range = segments ? ` segments ${segments.min ?? 0}..${segments.max ?? "*"}` : "";
   return `not ${String(adapter.nonProductPathPattern)}${range}`;
 }
+
+// --- path-shape census -------------------------------------------------------
+// A pure count of URL SHAPES, keyed on the first `depth` path segments. Lives
+// here because this file already owns path shape (`pathOf`, `segmentCount`), and
+// it answers the question the gate cannot: not "did anything pass?" but "what
+// KINDS of URL are on each side of the gate?".
+//
+// The probe runs it over the accepted and rejected sets. It costs nothing — the
+// URLs are already fetched — and it is the difference between one coordinator
+// Job and two: on 2026-08-30 it would have named `/store/go` immediately instead
+// of leaving `parsed=0` to read as "this vendor has no JSON-LD". Where a gate
+// admits nothing, the rejected side names where the products actually live.
+
+// Keys shown before the tail collapses the rest. Five keeps the line readable on
+// a terminal while still separating a dominant shape from its long tail.
+export const PATH_CENSUS_TOP = 5;
+
+export interface PathCensusEntry {
+  key: string;
+  count: number;
+}
+
+export interface PathCensus {
+  top: PathCensusEntry[];
+  // What the top-N cut off, counted both ways: distinct keys, and URLs behind
+  // them. A large `otherUrls` under a small `otherKeys` is a second shape worth
+  // widening the census for; a large `otherKeys` with `otherUrls ~= otherKeys` is
+  // the per-product tail you expect from a healthy catalog.
+  otherKeys: number;
+  otherUrls: number;
+  total: number;
+}
+
+export function pathShapeCensus(urls: string[], depth = 2): PathCensus {
+  const counts = new Map<string, number>();
+  for (const url of urls) {
+    const segments = pathOf(url)
+      .split("/")
+      .filter((segment) => segment.length > 0)
+      .slice(0, depth);
+    const key = segments.length > 0 ? `/${segments.join("/")}` : "/";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  // Ties broken on the key so two probes of an unchanged site print an identical
+  // line — an operator diffing runs should see movement only when shape moved.
+  const ranked = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const rest = ranked.slice(PATH_CENSUS_TOP);
+  return {
+    top: ranked.slice(0, PATH_CENSUS_TOP).map(([key, count]) => ({ key, count })),
+    otherKeys: rest.length,
+    otherUrls: rest.reduce((sum, [, count]) => sum + count, 0),
+    total: urls.length,
+  };
+}

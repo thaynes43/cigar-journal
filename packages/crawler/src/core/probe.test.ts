@@ -424,6 +424,39 @@ describe("2 Guys product gate — the /store/go/ registry block", () => {
     expectWithinBudget(fetcher, twoGuysCigars);
   });
 
+  // Diagnosability, on the exact run that misled us. Every probe here is an
+  // in-cluster Job, so a needs-attention has to name the shape it saw or the next
+  // move costs another round-trip.
+  it("names the registry block in the path census on both sides of the gate", async () => {
+    const unfixed: VendorAdapter = { ...twoGuysCigars, nonProductPathPattern: undefined };
+    const broken = formatProbe(await runProbe(createMockFetcher(routesFor(registryLocs)), unfixed));
+    // The accepted side shows the gate admitting a non-product subtree — the one
+    // line that would have identified the defect on the first probe.
+    expect(broken).toContain("paths: in  /store/go 12");
+    expect(broken).toContain("out / 1 · /about-us 1");
+
+    const fixed = formatProbe(await runProbe(createMockFetcher(routesFor(registryLocs)), twoGuysCigars));
+    // After the fix the block has moved to the rejected side.
+    expect(fixed).toContain("out /store/go 12");
+    expect(fixed).toContain("paths: in  /store/padron-1926-serie-no-9-maduro 1");
+  });
+
+  it("collapses a long tail of shapes into a (+keys, urls) count", async () => {
+    // Eight distinct rejected shapes, so the top-5 cut leaves a tail to report.
+    const junk = ["blog", "brands", "pages", "help", "news", "events", "press", "legal"].map(
+      (segment) => `https://www.2guyscigars.com/${segment}/x/`,
+    );
+    const routes = routesFor(registryLocs);
+    routes[twoGuysCigars.sitemapUrl] = {
+      body: urlsetXml([...junk, ...registryLocs, PADRON, CUTTER, ABOUT]),
+    };
+    const out = formatProbe(await runProbe(createMockFetcher(routes), twoGuysCigars));
+
+    // 10 rejected keys (8 junk + /store/go + /about-us), 5 shown: 5 hidden keys
+    // behind 5 URLs — /store/go is the count-12 key, so it is never in the tail.
+    expect(out).toMatch(/out .*\(\+5 keys, 5 urls\)/);
+  });
+
   it("excludes the whole /store/go/ family, not just registry", async () => {
     // Siblings we have never sampled. If the gate named `registry` these would
     // pass and the sampler would draw them exactly as it drew the registry pages.
