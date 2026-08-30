@@ -65,7 +65,8 @@ export interface IngestStats {
     // Open requests this vendor selected — already filtered by its own budget.
     requests: number;
     // Looks that COMPLETED (miss + match): the vendor's catalogue was enumerated
-    // and every ranked candidate was judged. These are the ones that burn budget.
+    // and some ranked candidate parsed as a product. These are the ones that burn
+    // budget — a page that answers 200 with nothing parseable does not count.
     looked: number;
     matched: number;
     // Looks that could not complete: an empty enumeration, no candidate that

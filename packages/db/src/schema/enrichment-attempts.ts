@@ -29,7 +29,9 @@ export const enrichmentAttempts = pgTable(
       .notNull()
       .references(() => vendors.id, { onDelete: "cascade" }),
     // Completed looks — the budget. A look completes when the vendor's product
-    // enumeration was non-empty and every ranked candidate was fetched-and-judged.
+    // enumeration was non-empty AND some ranked candidate yielded a parseable
+    // product: only then did we actually read the catalogue, so only then is the
+    // vendor's silence evidence about the cigar rather than about the adapter.
     attempts: integer("attempts").notNull().default(0),
     // Looks that could not complete. Bounded separately so a broken vendor cannot
     // pin a request open forever, and reset by any completed look.

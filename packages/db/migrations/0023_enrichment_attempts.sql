@@ -14,9 +14,11 @@ CREATE TABLE enrichment_attempts (
   -- the row reopens the request, which is the honest outcome.
   vendor_id  uuid NOT NULL REFERENCES vendors (id) ON DELETE CASCADE,
   -- Completed looks. A look is complete when the vendor's product enumeration was
-  -- non-empty and every ranked candidate was fetched-and-judged — INCLUDING "no
+  -- non-empty AND some ranked candidate yielded a parseable product — INCLUDING "no
   -- candidate scored", which is a real miss (we read the catalogue; nothing there
-  -- resembled the cigar) and burns budget.
+  -- resembled the cigar) and burns budget. Pages that answer 200 with nothing a
+  -- product parser can read are an ERROR, not a miss: that is a broken gate, not a
+  -- catalogue without the cigar (the 2 Guys /store/ gift-registry shape, ADR-006).
   attempts   integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   -- Looks that could not complete (empty enumeration, every candidate non-200).
   -- Not evidence about the vendor's catalogue, so they never burn `attempts` —
