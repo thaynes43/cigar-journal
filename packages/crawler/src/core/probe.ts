@@ -56,8 +56,10 @@ export interface ProbeResult {
     url: string;
     status: number;
     kind: "urlset" | "sitemapindex" | null;
-    // Total <loc> entries at the root (child sitemaps for an index, page URLs for
-    // a urlset), and how many of the *enumerated* URLs pass the product gate.
+    // Root size — distinct child sitemaps for an index (union across samples, so
+    // a varying index is counted by what it ever served), the largest single root
+    // response for a urlset — and how many of the *enumerated* URLs pass the
+    // product gate.
     totalLocs: number;
     productLocs: number;
     // Union size across samples, and the child sitemaps descended into.
@@ -110,12 +112,19 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
   const locsPerSample = samples.map((s) => s.enumerated);
   const kind = samples.find((s) => s.kind !== null)?.kind ?? null;
   const sampledChildren = [...new Set(samples.flatMap((s) => s.children))];
+  // Every distinct child the root listed across samples. It is the denominator
+  // for coverage BECAUSE sampledChildren is a union across samples: a vendor
+  // whose index varies can serve a different child list per fetch, and measuring
+  // that union against one root's <loc> count printed ratios like 6/4 and
+  // suppressed the coverage note on exactly the vendors covered worst.
+  const rootChildren = [...new Set(samples.flatMap((s) => s.rootChildren))];
   const anyOk = samples.some((s) => s.status === 200);
-  // Root <loc> count: child sitemaps for an index, page URLs for a urlset. For an
-  // index this is the ONLY place the index's real size appears — the enumerated
-  // union is a different number and reporting it as `locs` hid how much of the
-  // index the probe never looked at.
-  const rootLocs = Math.max(0, ...samples.map((s) => s.rootLocs));
+  // Root size: distinct child sitemaps for an index, the largest single root
+  // response for a urlset. For an index this is the ONLY place the index's real
+  // size appears — the enumerated union is a different number and reporting it
+  // as `locs` hid how much of the index the probe never looked at.
+  const rootLocs =
+    kind === "sitemapindex" ? rootChildren.length : Math.max(0, ...samples.map((s) => s.rootLocs));
 
   if (!anyOk) {
     const statuses = [...new Set(samples.map((s) => s.status))].join("/");
@@ -150,9 +159,9 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
   // The probe descends at most MAX_PROBE_CHILDREN children; a product-only child
   // outside that pick is invisible to it. Say so with the numbers, so a
   // needs-attention on a big index is diagnosable from the output alone.
-  if (kind === "sitemapindex" && rootLocs > sampledChildren.length) {
+  if (kind === "sitemapindex" && rootChildren.length > sampledChildren.length) {
     notes.push(
-      `sitemapindex has ${rootLocs} children; probe sampled ${sampledChildren.length} ` +
+      `sitemapindex: sampled ${sampledChildren.length}/${rootChildren.length} children ` +
         `(${sampledChildren.join(", ")}) — products in an unsampled child would not be seen here.`,
     );
   }
@@ -230,9 +239,11 @@ export function formatProbe(result: ProbeResult): string {
     `probe ${result.vendor}  verdict=${result.verdict}  gate=${result.gate}`,
     `  robots: status=${result.robots.status} agent=${result.robots.matchedAgent} ` +
       `allows=${result.robots.productPathAllowed}`,
-    // `locs` is the ROOT count (children for an index), `enumerated` the union
-    // the gate was applied to — for an index they are different numbers and the
-    // gap is how much of the catalog this probe did not look at.
+    // `locs` is the ROOT size (distinct children for an index), `enumerated` the
+    // union the gate was applied to — for an index they are different numbers and
+    // `children=<sampled>/<listed>` is how much of the catalog this probe did not
+    // look at. Both sides of that ratio are unions across samples, so it holds
+    // for a vendor whose index varies between fetches.
     `  sitemap: status=${s.status} kind=${s.kind ?? "-"} locs=${s.totalLocs} ` +
       `enumerated=${s.enumeratedLocs} product-locs=${s.productLocs}` +
       (s.kind === "sitemapindex"

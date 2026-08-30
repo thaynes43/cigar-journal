@@ -65,11 +65,17 @@ describe("edgeSpreadIndices", () => {
     expect(edgeSpreadIndices(20, 3)).toEqual([0, 10, 19]);
   });
 
-  it("always includes the first and last entry", () => {
+  // Stated for two or more picks only: with one there is no second end to
+  // include, and edgeSpreadIndices(n, 1) is [0]. Callers that need both ends
+  // regardless of budget have to reserve the slots themselves — selectIndexChildren
+  // does, and pins the guarantee in its own tests.
+  it("includes the first and last entry whenever it is asked for two or more", () => {
     for (const total of [2, 4, 6, 7, 8, 20, 100, 985]) {
-      const picks = edgeSpreadIndices(total, 3);
-      expect(picks[0]).toBe(0);
-      expect(picks[picks.length - 1]).toBe(total - 1);
+      for (const want of [2, 3, 4]) {
+        const picks = edgeSpreadIndices(total, want);
+        expect(picks[0]).toBe(0);
+        expect(picks[picks.length - 1]).toBe(total - 1);
+      }
     }
   });
 

@@ -122,10 +122,17 @@ LLM-created cigars accumulate until curated.
   - **The two samples pick differently, on purpose.** PRODUCT URLs are picked by
     a midpoint spread that never returns index 0: the observed false negatives
     were both position-0 index/redirect rows, and sitemaps park those at the
-    front. A sitemapINDEX's CHILDREN have no such convention, so they are picked
-    name-first (`product`/`shop`/`store`/`catalog` — a Yoast index parks the
-    catalog in `product-sitemap1.xml` at an arbitrary position) and then by an
-    endpoint-inclusive spread, because a midpoint pick cannot reach child 0 past
-    6 children or the last child past 7. A bounded probe still cannot cover a
-    large index: it reports the index size, the children it sampled, and any
-    child that answered non-200, so a `needs-attention` says which it was.
+    front. A sitemapINDEX's CHILDREN have no such convention and are picked in
+    three ranks. First, catalog-shaped names — `product`/`shop`/`store`/`catalog`
+    in the child's FILE NAME, minus the Woo taxonomy names (`product_cat`,
+    `product_tag`, `product_brand`) that match the same words while enumerating
+    term archives, and which would otherwise fill the budget and crowd out the
+    one child holding products. That rank is capped at `budget - 2`. Second, the
+    FIRST and LAST child, which a midpoint pick cannot reach past 6 and 7
+    children. Third, the interior. The cap is what makes the endpoint guarantee
+    real: at a budget of three or more both ends are always fetched, so the name
+    hint can only add to the positional pick, never displace a child it would
+    have found. A bounded probe still cannot cover a large index: it reports the
+    index size (for a sampling vendor, the distinct children the root served
+    across samples), the children it sampled, and any child that answered
+    non-200, so a `needs-attention` says which it was.

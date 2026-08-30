@@ -214,6 +214,75 @@ describe("runProbe", () => {
     expect(result.sitemap.sampledChildren).toContain("https://www.cubanlous.com/product-sitemap1.xml");
   });
 
+  // The taxonomy trap. Woo/Yoast ships product_cat/product_tag/product_brand
+  // beside the catalog and every one of them matches the product hint, so ranking
+  // all hint matches alike fills a 3-child budget with term archives and skips the
+  // one child holding products — a shape the plain midpoint pick reached.
+  it("finds the catalog child of a Woo index whose taxonomy children also match the hint", async () => {
+    const children = [
+      "product_cat-sitemap.xml",
+      "products-sitemap.xml", // the catalog
+      "product_tag-sitemap.xml",
+      "product_brand-sitemap.xml",
+      "post-sitemap.xml",
+      "page-sitemap.xml",
+    ].map((n) => `https://www.cubanlous.com/${n}`);
+    const { result } = await indexProbe(children, 1);
+
+    expect(result.verdict).toBe("ok");
+    expect(result.sitemap.sampledChildren).toContain("https://www.cubanlous.com/products-sitemap.xml");
+  });
+
+  // ...and the mirror case: two hint matches must not eat the budget the ends
+  // need. The catalog here carries no hint word and sits last.
+  it("still reaches the last child when the hint matches two children in the middle", async () => {
+    const children = [
+      "post-sitemap.xml",
+      "page-sitemap.xml",
+      "product_cat-sitemap.xml",
+      "product_tag-sitemap.xml",
+      "author-sitemap.xml",
+      "tag-sitemap.xml",
+      "news-sitemap.xml",
+      "inventory-sitemap.xml", // the catalog
+    ].map((n) => `https://www.cubanlous.com/${n}`);
+    const { result } = await indexProbe(children, 7);
+
+    expect(result.verdict).toBe("ok");
+    expect(result.sitemap.sampledChildren).toContain(children[7]);
+  });
+
+  // Coverage on a VARYING index. sampledChildren is a union across samples, so
+  // its denominator has to be a union too — measured against one root's <loc>
+  // count it printed impossible ratios (6/4) and suppressed the coverage note on
+  // exactly the vendors sampling exists for.
+  it("counts index coverage against every child the root ever served", async () => {
+    const adapter: VendorAdapter = { ...cubanLous, sitemapSampling: { samples: 2 } };
+    const childUrl = (n: string): string => `https://www.cubanlous.com/${n}-sitemap.xml`;
+    const first = ["a1", "a2", "a3", "a4"].map(childUrl);
+    const second = ["b1", "b2", "b3", "b4"].map(childUrl);
+    const indexXml = (children: string[]): string =>
+      `<?xml version="1.0" encoding="UTF-8"?>
+      <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        ${children.map((c) => `<sitemap><loc>${c}</loc></sitemap>`).join("")}
+      </sitemapindex>`;
+
+    const routes: Record<string, MockRoute> = {
+      [ROBOTS]: { body: ALLOW_ALL },
+      [SITEMAP]: { sequence: [{ body: indexXml(first) }, { body: indexXml(second) }] },
+    };
+    for (const child of [...first, ...second]) routes[child] = { body: urlsetXml([]) };
+
+    const fetcher = createMockFetcher(routes);
+    const result = await runProbe(fetcher, adapter);
+
+    expect(result.sitemap.sampledChildren).toHaveLength(6); // 3 per sample, no overlap
+    expect(result.sitemap.totalLocs).toBe(8); // 8 distinct children across the two roots
+    expect(formatProbe(result)).toContain("children=6/8");
+    expect(result.notes.join(" ")).toMatch(/sitemapindex: sampled 6\/8 children/);
+    expectWithinBudget(fetcher, adapter);
+  });
+
   // Diagnosability: a needs-attention on a big index must say how big the index
   // was and which children were looked at, or the operator cannot tell an empty
   // catalog from an unsampled one.
@@ -225,7 +294,8 @@ describe("runProbe", () => {
     expect(result.sitemap.totalLocs).toBe(20); // the INDEX size, not the union
     expect(result.sitemap.enumeratedLocs).toBe(0);
     expect(result.sitemap.sampledChildren).toHaveLength(MAX_PROBE_CHILDREN);
-    expect(result.notes.join(" ")).toMatch(/sitemapindex has 20 children; probe sampled 3/);
+    expect(result.notes.join(" ")).toMatch(/sitemapindex: sampled 3\/20 children/);
+    expect(formatProbe(result)).toContain("children=3/20");
   });
 
   it("names a child sitemap that refused the fetch", async () => {

@@ -1,5 +1,5 @@
 import type { Fetcher } from "./fetcher.js";
-import { edgeSpreadIndices } from "./spread.js";
+import { edgeSpreadIndices, spreadIndices } from "./spread.js";
 
 // Sitemap parsing by regex (importer-style pragmatism — the shapes are regular
 // and a dependency-free `<loc>` sweep is enough). Supports both a flat urlset
@@ -76,7 +76,11 @@ export interface SitemapSample {
   rootLocs: number; // <loc> count in the root document
   enumerated: number; // page URLs this sample yielded
   newUrls: number; // URLs no earlier sample had
-  children: string[]; // child sitemaps descended into
+  // Every child the root listed, and the subset this sample descended into. A
+  // varying vendor can list a DIFFERENT child set per fetch, so coverage has to
+  // be measured against the children actually seen, not against one root's count.
+  rootChildren: string[];
+  children: string[];
   // Children that answered non-200 in BOUNDED mode. A skipped child looks
   // identical to an empty one in `enumerated`, and "the index 403s us" is a
   // different fix from "the gate is wrong" — the probe reports these.
@@ -107,30 +111,73 @@ function defaultSleep(ms: number): Promise<void> {
 // child NAMES. A stock Yoast/Woo index parks the catalog in `product-sitemap*.xml`
 // at an arbitrary position among post/page/category/product_cat/product_tag/author
 // children, so a bounded positional sample misses it more often than it hits it.
-// Deliberately narrow: `item` would match the substring inside "sitemap" and
-// make every child a hit.
+// Matched on the FILE NAME, not the whole URL — on `https://shop.example.com/`
+// every child would otherwise be a hit. Deliberately narrow: `item` would match
+// the substring inside "sitemap" and do the same.
 const PRODUCT_CHILD_HINT = /product|shop|store|catalog/i;
 
-// Which children of a sitemapindex a BOUNDED walk (the probe) descends into.
-// Name-matched children first, then an endpoint-inclusive spread of the rest —
-// the two together make "products live in child 0", "products live in the last
-// child" and "products live in the child called product-sitemap.xml" all
-// reachable, where the plain midpoint spread reached none of them past 5
-// children. Returned in document order so the list reads against the index.
+// Woo/Yoast parks its TAXONOMY sitemaps right beside the catalog, and every one
+// of them matches the hint above: product_cat, product_tag, product_brand,
+// product-category, product_shipping_class. They enumerate term archives, not
+// products, so treating all hint matches alike lets three taxonomies crowd the
+// one catalog child out of a 3-child budget — a shape the plain midpoint pick
+// happened to get right. Demoted below the catalog-shaped names, not excluded:
+// a vendor that really does enumerate products from `product-category-sitemap.xml`
+// is still reachable on the leftover budget.
+const TAXONOMY_CHILD_HINT =
+  /(?:^|[^a-z])(?:cat|categor(?:y|ies)|tag|brand|attribute|type|class|vendor|term)s?(?:[^a-z]|$)/i;
+
+function childName(loc: string): string {
+  const path = loc.split(/[?#]/)[0]!;
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+function isCatalogChild(loc: string): boolean {
+  const name = childName(loc);
+  return PRODUCT_CHILD_HINT.test(name) && !TAXONOMY_CHILD_HINT.test(name);
+}
+
+// Which children of a sitemapindex a BOUNDED walk (the probe) descends into, in
+// priority order:
+//
+//   1. catalog-shaped names (`product-sitemap.xml`, `shop-sitemap.xml`), capped
+//      at `want - 2` slots so step 2 always fits;
+//   2. the first and last child of the index itself — the two positions a
+//      midpoint spread is structurally blind to;
+//   3. taxonomy-shaped product children, then everything else, spread across the
+//      interior the ends already bracket.
+//
+// The cap is what makes the endpoint guarantee real rather than nominal: with a
+// budget of 3 or more, children[0] and children[n-1] are ALWAYS fetched, and the
+// name hint spends what is left. One catalog child is enough to prove a vendor
+// enumerates products, so capping the hint costs the probe nothing.
+// Returned in document order so the list reads against the index.
 export function selectIndexChildren(locs: string[], want: number): string[] {
   if (want <= 0) return [];
   const unique = [...new Set(locs)];
   if (unique.length <= want) return unique;
 
   const picked = new Set<string>();
-  const take = (candidates: string[]): void => {
-    for (const index of edgeSpreadIndices(candidates.length, want - picked.size)) {
-      picked.add(candidates[index]!);
-      if (picked.size >= want) return;
-    }
+  const room = (): number => want - picked.size;
+  const take = (
+    candidates: string[],
+    slots: number,
+    spread: (total: number, n: number) => number[],
+  ): void => {
+    const n = Math.min(slots, room());
+    if (n <= 0) return;
+    for (const index of spread(candidates.length, n)) picked.add(candidates[index]!);
   };
-  take(unique.filter((loc) => PRODUCT_CHILD_HINT.test(loc)));
-  if (picked.size < want) take(unique.filter((loc) => !picked.has(loc)));
+  const unpicked = (candidates: string[]): string[] => candidates.filter((loc) => !picked.has(loc));
+
+  take(unique.filter(isCatalogChild), Math.max(1, want - 2), edgeSpreadIndices);
+  if (room() > 0) picked.add(unique[0]!);
+  if (room() > 0) picked.add(unique[unique.length - 1]!);
+  // Both ends are anchored above, so the leftover budget is best spent on the
+  // interior — which is what the midpoint spread is for.
+  take(unpicked(unique.filter((loc) => PRODUCT_CHILD_HINT.test(childName(loc)))), room(), spreadIndices);
+  take(unpicked(unique), room(), spreadIndices);
+
   return unique.filter((loc) => picked.has(loc));
 }
 
@@ -139,6 +186,7 @@ interface RawSample {
   kind: "urlset" | "sitemapindex" | null;
   rootLocs: number;
   urls: string[];
+  rootChildren: string[];
   children: string[];
   childFailures: ChildFetchFailure[];
 }
@@ -150,7 +198,7 @@ async function takeSample(
 ): Promise<RawSample> {
   const { status, body } = await fetcher.fetchText(sitemapUrl);
   if (status !== 200) {
-    return { status, kind: null, rootLocs: 0, urls: [], children: [], childFailures: [] };
+    return { status, kind: null, rootLocs: 0, urls: [], rootChildren: [], children: [], childFailures: [] };
   }
 
   const parsed = parseSitemap(body);
@@ -160,6 +208,7 @@ async function takeSample(
       kind: "urlset",
       rootLocs: parsed.locs.length,
       urls: parsed.locs,
+      rootChildren: [],
       children: [],
       childFailures: [],
     };
@@ -169,6 +218,7 @@ async function takeSample(
   // collectSitemapUrls would be in when it recurses, so an unbounded sample walks
   // an index exactly as the plain collector does.
   const visited = new Set<string>([sitemapUrl]);
+  const rootChildren = [...new Set(parsed.locs)];
   const children =
     maxChildren === undefined ? parsed.locs : selectIndexChildren(parsed.locs, maxChildren);
 
@@ -192,7 +242,15 @@ async function takeSample(
     if (childParsed.kind === "urlset") urls.push(...childParsed.locs);
   }
 
-  return { status, kind: "sitemapindex", rootLocs: parsed.locs.length, urls, children, childFailures };
+  return {
+    status,
+    kind: "sitemapindex",
+    rootLocs: parsed.locs.length,
+    urls,
+    rootChildren,
+    children,
+    childFailures,
+  };
 }
 
 // Multiset comparison, not set comparison: a response that drops one loc and
@@ -243,6 +301,7 @@ export async function collectSitemapSamples(
       rootLocs: raw.rootLocs,
       enumerated: raw.urls.length,
       newUrls,
+      rootChildren: raw.rootChildren,
       children: raw.children,
       childFailures: raw.childFailures,
     });

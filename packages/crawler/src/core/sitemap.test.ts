@@ -81,7 +81,7 @@ describe("selectIndexChildren", () => {
 
   // A stock Yoast/Woo index: the catalog is in `product-sitemap.xml` at an
   // arbitrary position, which no positional rule can be relied on to hit.
-  it("prefers name-matched product children over their position", () => {
+  it("prefers a name-matched product child over its position", () => {
     const locs = [
       "https://vendor.example/post-sitemap.xml",
       "https://vendor.example/page-sitemap.xml",
@@ -91,12 +91,79 @@ describe("selectIndexChildren", () => {
       "https://vendor.example/product_tag-sitemap.xml",
       "https://vendor.example/author-sitemap.xml",
     ];
-    // All three name-matched children, in document order.
+    // The catalog child, plus both ends of the index. In document order.
     expect(selectIndexChildren(locs, 3)).toEqual([
+      "https://vendor.example/post-sitemap.xml",
       "https://vendor.example/product-sitemap.xml",
+      "https://vendor.example/author-sitemap.xml",
+    ]);
+  });
+
+  // Woo/Yoast ships product_cat/product_tag/product_brand next to the catalog and
+  // all of them match the product hint. Letting them share one rank with the
+  // catalog child lets three taxonomies fill a 3-child budget and skip it — worse
+  // than the plain midpoint pick, which reached it here.
+  it("picks the catalog child over the taxonomy children that share its prefix", () => {
+    const locs = [
+      "https://vendor.example/product_cat-sitemap.xml",
+      "https://vendor.example/product-sitemap.xml", // the catalog
+      "https://vendor.example/product_tag-sitemap.xml",
+      "https://vendor.example/product_brand-sitemap.xml",
+      "https://vendor.example/post-sitemap.xml",
+      "https://vendor.example/page-sitemap.xml",
+    ];
+    expect(selectIndexChildren(locs, 3)).toContain("https://vendor.example/product-sitemap.xml");
+  });
+
+  // The endpoint guarantee has to survive the hint spending part of the budget:
+  // with two taxonomy matches taking two of three slots, a single leftover slot
+  // used to go to the head of the remainder and the last child went unfetched.
+  it("keeps both ends reachable when the hint matches only some children", () => {
+    const locs = [
+      "https://vendor.example/post-sitemap.xml",
+      "https://vendor.example/page-sitemap.xml",
       "https://vendor.example/product_cat-sitemap.xml",
       "https://vendor.example/product_tag-sitemap.xml",
-    ]);
+      "https://vendor.example/author-sitemap.xml",
+      "https://vendor.example/tag-sitemap.xml",
+      "https://vendor.example/news-sitemap.xml",
+      "https://vendor.example/inventory-sitemap.xml", // the catalog, unhinted
+    ];
+    const picked = selectIndexChildren(locs, 3);
+    expect(picked).toContain(locs[0]);
+    expect(picked).toContain(locs[7]);
+  });
+
+  // The guarantee stated on selectIndexChildren, pinned where it is made rather
+  // than on edgeSpreadIndices alone: whatever the names do, a budget of 3 always
+  // spends two slots on the ends.
+  it("always samples both ends of the index at a budget of three", () => {
+    const shapes = [
+      numbered(8),
+      [...numbered(7), "https://vendor.example/product-sitemap.xml"],
+      ["https://vendor.example/shop-sitemap.xml", ...numbered(9)],
+      ["https://vendor.example/shop-sitemap.xml", "https://vendor.example/store-sitemap.xml", ...numbered(6)],
+    ];
+    for (const locs of shapes) {
+      const unique = [...new Set(locs)];
+      const picked = selectIndexChildren(locs, 3);
+      expect(picked).toContain(unique[0]);
+      expect(picked).toContain(unique[unique.length - 1]);
+      expect(picked).toHaveLength(3);
+    }
+  });
+
+  // `catalog` contains "cat" and `shop.example.com` contains "shop": the hints
+  // read the file name and respect word boundaries, or every child of a vendor on
+  // a shop.* host is a product hit.
+  it("matches on the file name and does not read catalog as a taxonomy", () => {
+    const locs = [
+      "https://shop.vendor.example/post-sitemap.xml",
+      ...Array.from({ length: 5 }, (_, i) => `https://shop.vendor.example/page-${i}-sitemap.xml`),
+      "https://shop.vendor.example/catalog-sitemap.xml",
+      "https://shop.vendor.example/author-sitemap.xml",
+    ];
+    expect(selectIndexChildren(locs, 3)).toContain("https://shop.vendor.example/catalog-sitemap.xml");
   });
 
   it("fills the remaining slots from the rest when too few children are name-matched", () => {
