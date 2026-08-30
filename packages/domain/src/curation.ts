@@ -69,10 +69,11 @@ import type {
   QueueEnrichmentBacklogResult,
   EnrichmentBacklogEntry,
   EnrichmentBacklogStatus,
+  CigarType,
 } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { strongLinkCompatible } from "./cigar-resolution.js";
-import { classifyEnrichmentRequest } from "./enrichment.js";
+import { classifyEnrichmentRequest, type EnrichmentClassification } from "./enrichment.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 
@@ -2101,6 +2102,24 @@ export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Pro
 // press is a batch effect worth replaying identically, and a button can be
 // double-clicked. Not in REVERSIBLE_ACTIONS — the inverse (deleting a pending
 // request) has no user-visible value, so the run shows with no Undo by design.
+//
+// TWO PRECONDITIONS ARE ENFORCED, NOT DOCUMENTED. A queued request that cannot be
+// served is not inert: the crawler counts `attempts` per REQUEST across whichever
+// vendor drains it and marks the row `exhausted` at EXHAUST_ATTEMPTS = 2, which is
+// permanent. So a press only writes a row when both hold, and reports every other
+// row with the reason:
+//
+//   1. `unverified_name` — drainEnrichment resolves BY canonical name twice over
+//      (slug-token ranking, then a pg_trgm similarity floor), so a name nobody has
+//      reviewed is a request that misses and burns its two attempts. `verified` is
+//      the existing curator signal for "a human or agent read this row" (only
+//      verifyCigar sets it), so it is the gate. Fix the name with rename_cigar,
+//      verify it, then press.
+//   2. `no_vendor_coverage` — a market with no enrich lane running cannot serve
+//      any request, but the drain still consumes its attempts. See enrichedMarkets.
+//
+// Neither has an override argument. The way past them is to do the thing they
+// assert; a flag would just be the old footgun with a longer name.
 export const ENRICHMENT_BACKLOG_MAX = 100;
 
 // The cap covers today's backlog with headroom and refuses to become a 900-row
@@ -2109,6 +2128,66 @@ export const ENRICHMENT_BACKLOG_MAX = 100;
 function clampBacklogLimit(limit: number | undefined): number {
   if (limit == null || !Number.isFinite(limit)) return ENRICHMENT_BACKLOG_MAX;
   return Math.min(Math.max(Math.trunc(limit), 1), ENRICHMENT_BACKLOG_MAX);
+}
+
+// The markets an enrich pass actually reaches: a crawl-enabled vendor whose focus
+// covers the market AND which has completed at least one `enrich` run. The run is
+// the load-bearing half — in prod today Cuban Lou's is `crawl_enabled` and has only
+// ever run a `seed`, so `crawl_enabled` alone would claim CC is covered while the
+// only enrich CronJob is NC-only. Reading the runs table means the gate opens by
+// itself the first night a new enrich lane runs, with no code or flag change.
+async function enrichedMarkets(tx: Tx): Promise<Set<CigarType>> {
+  const result = await tx.execute(sql`
+    SELECT DISTINCT v.focus
+    FROM vendors v
+    WHERE v.crawl_enabled
+      AND v.focus IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM crawl_runs cr
+        WHERE cr.vendor_id = v.id AND cr.kind = 'enrich' AND cr.status = 'succeeded'
+      )
+  `);
+  const markets = new Set<CigarType>();
+  for (const row of result.rows as unknown as { focus: string }[]) {
+    if (row.focus === "both") {
+      markets.add("NC");
+      markets.add("CC");
+    } else if (row.focus === "NC" || row.focus === "CC") {
+      markets.add(row.focus);
+    }
+  }
+  return markets;
+}
+
+// An untyped cigar could be either market, so it needs BOTH covered — enrichment is
+// what would tell us which, and guessing is how the 41 CC rows would get retired.
+function marketCovered(type: CigarType | null, markets: Set<CigarType>): boolean {
+  if (type === "CC" || type === "NC") return markets.has(type);
+  return markets.has("CC") && markets.has("NC");
+}
+
+// The per-row verdict. Ordered so the report answers the curator's actual question:
+// what stopped this row, given everything else was fine.
+function backlogStatus(
+  classified: EnrichmentClassification,
+  markets: Set<CigarType>,
+  retryExhausted: boolean,
+): EnrichmentBacklogStatus {
+  // Not a queue decision at all: nothing to fill, or a live request already exists.
+  if (classified.status === "not_needed" || classified.status === "already_queued") {
+    return classified.status;
+  }
+  // A row the crawler retired is reported, not re-queued, unless asked for. This
+  // deliberately outranks `recently_enriched`: ingest marks a request `fulfilled`
+  // on a name match even when the photo capture threw, so exhausted-AND-fulfilled
+  // is reachable for exactly the rows most likely to need the retry — keying the
+  // override off `status === "queued"` alone made it inert there.
+  if (classified.exhausted && !retryExhausted) return "exhausted";
+  if (!classified.exhausted && classified.status === "recently_enriched") return "recently_enriched";
+  // Preconditions for an actual insert.
+  if (classified.cigar.verification !== "verified") return "unverified_name";
+  if (!marketCovered(classified.cigar.type, markets)) return "no_vendor_coverage";
+  return "queued";
 }
 
 export async function queueEnrichmentBacklog(
@@ -2157,16 +2236,14 @@ async function queueBacklogWithinTx(
     return { ...(existing.result as QueueEnrichmentBacklogResult), replayed: true };
   }
 
+  // One read for the whole press: coverage is a property of the vendor fleet, not
+  // of a row.
+  const markets = await enrichedMarkets(tx);
+
   const entries: EnrichmentBacklogEntry[] = [];
   for (const candidate of candidates) {
     const classified = await classifyEnrichmentRequest(tx, candidate.cigarId);
-    // The assignment is the compile-time check that ADR-009's taxonomy stays a
-    // subset of the bulk one. `exhausted` overrides only a would-be queue: a row
-    // the crawler gave up on is reported, not re-queued, unless asked for.
-    const status: EnrichmentBacklogStatus =
-      classified.status === "queued" && classified.exhausted && input.retryExhausted !== true
-        ? "exhausted"
-        : classified.status;
+    const status = backlogStatus(classified, markets, input.retryExhausted === true);
 
     if (status === "queued") {
       await tx.insert(enrichmentRequests).values({
@@ -2195,6 +2272,7 @@ async function queueBacklogWithinTx(
     considered: candidates.length,
     queued,
     skipped: entries.length - queued,
+    enrichedMarkets: [...markets].sort(),
     entries,
     replayed: false,
   };
@@ -2385,6 +2463,11 @@ export async function agentRunRows(
           THEN nullif(a.before->>'cigarId', '')
         WHEN a.action = 'cigar.merge'
           THEN nullif(a.after->>'tombstonedSourceId', '')
+        -- An enqueue has no before-image (nothing changed on the cigar), so its
+        -- target lives in after. Without this branch a bulk press (#154) renders as
+        -- N identically-titled rows and the run review is unreadable.
+        WHEN a.action = 'cigar.enrichment_request'
+          THEN nullif(a.after->>'cigarId', '')
       END
     )::uuid
     -- The un-undone merge ledger, if any: merge is reversible only through it.

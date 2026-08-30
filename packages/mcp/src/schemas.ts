@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ENRICHMENT_BACKLOG_MAX } from "@cj/domain";
 
 // Zod input schemas mirroring docs/mcp/tool-contract.md. Design rules:
 //
@@ -1116,8 +1117,10 @@ export type RenameCigarArgs = z.infer<typeof renameCigarSchema>;
 
 // queue_enrichment_backlog (#154): enqueue the caller's photoless holdings for the
 // crawler's enrich runs in ONE call, instead of looping request_cigar_enrichment.
-// `limit` is bounded here AND clamped in the domain (ENRICHMENT_BACKLOG_MAX) — the
-// ceiling is what stops one press becoming an unbounded crawl.
+// `limit` is bounded here AND clamped in the domain — the ceiling is what stops one
+// press becoming an unbounded crawl. The bound is the DOMAIN constant, not a literal
+// 100: the tRPC router already imports it, and a schema that hardcoded the number
+// would start rejecting calls the console accepts the day the constant moves.
 export const queueEnrichmentBacklogSchema = z
   .object({
     clientRequestId: curationClientRequestId,
@@ -1125,14 +1128,16 @@ export const queueEnrichmentBacklogSchema = z
       .number()
       .int()
       .min(1)
-      .max(100)
+      .max(ENRICHMENT_BACKLOG_MAX)
       .nullish()
-      .describe("How many worklist rows to enqueue, highest remaining stock first. 1-100; defaults to 100."),
+      .describe(
+        `How many worklist rows to enqueue, highest remaining stock first. 1-${ENRICHMENT_BACKLOG_MAX}; defaults to ${ENRICHMENT_BACKLOG_MAX}.`,
+      ),
     retryExhausted: z
       .boolean()
       .nullish()
       .describe(
-        "Re-queue rows the crawler already gave up on (status exhausted). Defaults false — those rows are reported, not re-crawled. Set true only after the vendor coverage or the cigar's name has changed.",
+        "Re-queue rows the crawler already gave up on (status exhausted). Defaults false — those rows are reported, not re-crawled. Set true only after the cigar's name or the vendor coverage has changed, otherwise it just spends attempts again.",
       ),
     runId,
     confidence,
@@ -1201,6 +1206,7 @@ export const queueEnrichmentBacklogOutput = z
     considered: z.number(),
     queued: z.number(),
     skipped: z.number(),
+    enrichedMarkets: z.array(z.string()),
     entries: z.array(looseObject),
     replayed: z.boolean(),
   })

@@ -1176,7 +1176,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Queue enrichment backlog",
       description:
-        "Enqueue the caller's photoless holdings — the cigars they hold with no servable product photo — for the crawler's enrich runs, in one call instead of looping request_cigar_enrichment. Selects highest remaining stock first, capped by limit (1-100, default 100). Returns every considered row as queued or with the reason it was skipped (already_queued, recently_enriched, not_needed, exhausted). Enrichment matches on the canonical name, so fix a wrong one with rename_cigar first. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
+        "Operator-initiated bulk enqueue: turn the caller's photoless holdings — the cigars they hold with no servable product photo — into enrichment requests for the crawler, instead of looping request_cigar_enrichment. Do not call this on your own initiative; report the worklist and leave the press to the operator. It queues a row ONLY when the cigar's canonical name is verified and some crawl-enabled vendor covering its market has completed an enrich run; every other row is reported with the reason and nothing is written for it (unverified_name, no_vendor_coverage, already_queued, recently_enriched, not_needed, exhausted). A queued request that cannot be matched is not free — the crawler retires it permanently after two passes. Selects highest remaining stock first, capped by limit. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
       inputSchema: queueEnrichmentBacklogSchema,
       outputSchema: queueEnrichmentBacklogOutput,
       annotations: {

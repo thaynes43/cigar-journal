@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createDatabase, cigars, purchases, users, type NewCigarRow } from "@cj/db";
+import { createDatabase, cigars, crawlRuns, purchases, users, vendors, type NewCigarRow } from "@cj/db";
 import {
   claimInvite,
   createInvite,
@@ -234,7 +234,8 @@ export async function seed(opts: {
     });
 
     // Deliberately sparse — no dimensions, no photo — so it is genuinely
-    // enrichable rather than reported `not_needed`.
+    // enrichable rather than reported `not_needed`. Verified, because the enqueue
+    // refuses a canonical name nobody has reviewed (#154).
     const photoless = await insertCigar(deps, {
       canonicalName: "Tatuaje Black Label Corona Gorda",
       brand: "Tatuaje",
@@ -256,6 +257,21 @@ export async function seed(opts: {
       brand: "Ramón Allones",
       type: "CC",
       verification: "unverified",
+    });
+
+    // The enqueue also refuses a market no enrich lane reaches, so the fixture has
+    // to include the lane: one crawl-enabled NC vendor with a completed enrich run.
+    // Without this the Queue enrichment button correctly queues nothing. Seeding a
+    // vendor creates no user, so it is safe ahead of the first-run admin.
+    const vendorRows = await deps.db
+      .insert(vendors)
+      .values({ name: "E2E Cigars", focus: "NC", crawlEnabled: true, approvalStatus: "owner-added" })
+      .returning({ id: vendors.id });
+    await deps.db.insert(crawlRuns).values({
+      vendorId: vendorRows[0]!.id,
+      kind: "enrich",
+      status: "succeeded",
+      finishedAt: new Date(),
     });
 
     // --- Admin account (first-run bootstrap -> admin) ----------------------

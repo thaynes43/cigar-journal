@@ -81,7 +81,7 @@ test.describe("merge round trip", () => {
   });
 });
 
-test("Queue enrichment enqueues the Missing photos worklist, and a second press finds nothing to do", async ({
+test("Queue enrichment enqueues the Missing photos worklist, and a further press finds nothing to do", async ({
   page,
 }) => {
   await page.goto("/admin/catalog");
@@ -90,13 +90,21 @@ test("Queue enrichment enqueues the Missing photos worklist, and a second press 
   await expect(page.getByRole("heading", { name: "Missing photos" })).toBeVisible();
   await expect(page.getByRole("link", { name: h.cigars.heldPhotoless.name })).toBeVisible();
 
-  const queue = page.getByRole("button", { name: "Queue enrichment" });
-  await queue.click();
-  await expect(page.getByText(/Queued [1-9]\d* · skipped 0/)).toBeVisible();
+  // Retry-safe, per the house rule this suite runs under (one worker, one shared
+  // database, retries:1 on CI): the press MUTATES that database, so asserting a
+  // first-press-only receipt would make any flake here unrecoverable — the retry
+  // would run against an already-queued worklist and fail deterministically. The
+  // invariant that holds on the first attempt AND on a retry is the one asserted:
+  // a press reports on every row it considered, and the press after it queues
+  // nothing because the rows are already pending.
+  const receipt = /Queued (\d+) · skipped (\d+)/;
+  await page.getByRole("button", { name: "Queue enrichment" }).click();
+  await expect(page.getByText(receipt)).toBeVisible();
+  const [, queued, skipped] = receipt.exec((await page.getByText(receipt).textContent()) ?? "") ?? [];
+  expect(Number(queued) + Number(skipped)).toBeGreaterThan(0);
 
-  // The queue dedupes: every row now reports already_queued, so nothing is
-  // enqueued twice. A fresh load mints a new request id, so this is the real
-  // second press rather than an envelope replay.
+  // The dedupe: a fresh load mints a new request id, so this is a real second
+  // press rather than an envelope replay, and every row now reports already_queued.
   await page.reload();
   await page.getByRole("button", { name: "Queue enrichment" }).click();
   await expect(page.getByText(/Queued 0 · skipped [1-9]\d*/)).toBeVisible();

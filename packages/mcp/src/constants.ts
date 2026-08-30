@@ -210,10 +210,12 @@ verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
 non-cigar pollution, restore_cigar to undo; set_product_photo_rights
 approved/suppressed); low-confidence cases are skipped and
 reported, never guessed — leave an uncertain brand or type null rather than invent
-one. queue_enrichment_backlog enqueues the caller's photoless holdings for the
-crawler's enrich runs in one call — press it once per run, not once per cigar; it
-reports every row as queued, or why it was skipped. Enrichment matches on the
-canonical name, so fix a wrong one with rename_cigar BEFORE queuing it. Pass runId
-(the batch id) and confidence (0-1) on every write so the run is auditable and
-reversible. Merges stay human-only in the web console — there is no merge tool
-here.`;
+one. queue_enrichment_backlog is the operator's bulk enqueue of the photoless
+holdings, NOT part of a curation run: do not call it on your own initiative — report
+the worklist and leave the press to the operator. It queues a cigar only once its
+canonical name is verified and a crawl-enabled vendor covering that market has
+completed an enrich run; every other row comes back with the reason and nothing is
+written for it. Enrichment matches on the canonical name, so the way to make a row
+enqueueable is rename_cigar then verify_cigar. Pass runId (the batch id) and
+confidence (0-1) on every write so the run is auditable and reversible. Merges stay
+human-only in the web console — there is no merge tool here.`;

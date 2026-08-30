@@ -276,11 +276,13 @@ The worklist above lists the photoless holdings and offers a manual upload;
 into `enrichment_requests` rows for the crawler's enrich runs. Two surfaces,
 one domain service, so they cannot drift:
 
-- **The recurring enqueue is agent work** (§Curation rules: users never do
-  catalog data entry). The curate agent calls the MCP tool at the top of its
-  daily run under its existing `curation:write` token, passing that run's id.
-- **The console button is the operator kickstart**, in the "Missing photos"
-  section header. Not data entry — the same one action, pressed by hand.
+- **The console button is the operator press**, in the "Missing photos" section
+  header. Not data entry — one action over a list the console already renders.
+- **The MCP tool is the same press on the agent surface**, under the curate
+  agent's existing `curation:write` token and that run's id. It is *not* part of
+  the daily run: the server instructions tell the agent to report the worklist
+  and leave the press to the operator, because a press has an ops prerequisite
+  (below) that no agent can check from the conversation.
 
 It rides `curation:write`, not the `journal:write` the ADR-009 repair tools
 use: it is curator-gated, worklist-scoped and run-attributed. That choice is
@@ -289,17 +291,31 @@ nothing needs re-consenting, and the agent never has to be handed
 `journal:write` (which would give a catalog agent `save_smoke`,
 `record_purchase` and `set_want` over the owner's journal).
 
-**The rename gate.** Enrichment resolves a cigar by its canonical name twice
-over — slug-token ranking of candidate URLs, then a pg_trgm
-`similarity(canonical_name, listing.name) > 0.55` floor before it will link.
-The photoless holdings carry reversed, doubled and misspelled names
-(`Choix Supreme Rey Del Mundo`, `Trinidad Trinidad Reyes`,
-`Rockey Patel Rocky Patel Edge`), and none of them has a listing match, so
-enrichment is their only automated route to a photo. Queue them before a
-rename pass and every pass returns no match, twice, after which
-`EXHAUST_ATTEMPTS = 2` marks them `exhausted` for good. `rename_cigar` has
-existed since v0.26.0; what is missing is the **use** of it. The mechanism
-ships; the press waits on that pass and on CC vendor coverage.
+**Two preconditions, enforced by the service rather than documented.** A queued
+request the crawler cannot serve is not inert: `attempts` is counted per
+*request*, by whichever vendor drains it, and `EXHAUST_ATTEMPTS = 2` retires the
+row permanently. So a press writes a row only when both hold, and reports every
+other row with the reason:
+
+1. **The name has been reviewed** (`verification = 'verified'`, the signal
+   `verify_cigar` sets). Enrichment resolves a cigar by its canonical name twice
+   over — slug-token ranking of candidate URLs, then a pg_trgm
+   `similarity(canonical_name, listing.name) > 0.55` floor before it will link.
+   The photoless holdings carry reversed, doubled and misspelled names
+   (`Choix Supreme Rey Del Mundo`, `Trinidad Trinidad Reyes`,
+   `Rockey Patel Rocky Patel Edge`), and none of them has a listing match, so a
+   press over them is two no-match passes and a dead row. `rename_cigar` has
+   existed since v0.26.0; what is missing is the **use** of it. Rows that fail
+   this report `unverified_name`.
+2. **Some crawl-enabled vendor covering the cigar's market has completed an
+   `enrich` run.** Not `crawl_enabled` alone: Cuban Lou's is crawl-enabled today
+   and has only ever run a `seed`, while the one enrich CronJob is NC-only — so
+   41 of the 55 photoless holdings are CC rows that a press would feed to a
+   crawler that cannot carry them. An untyped cigar needs both markets covered,
+   because enrichment is what would say which it is. Rows that fail this report
+   `no_vendor_coverage`, and the gate opens by itself the first night that
+   market's enrich lane runs. There is no override argument for either gate: the
+   way past them is to do the thing they assert.
 
 ## Build waves (each a dispatchable lane; docs-first satisfied by this doc)
 

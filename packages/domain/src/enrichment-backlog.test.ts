@@ -1,20 +1,38 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
-import { auditLog, enrichmentRequests, productPhotos, purchases } from "@cj/db";
+import { auditLog, cigars, crawlRuns, enrichmentRequests, productPhotos, purchases, vendors } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
-import { queueEnrichmentBacklog, cigarsMissingPhotos } from "./curation.js";
+import { queueEnrichmentBacklog, cigarsMissingPhotos, agentRunRows, ENRICHMENT_BACKLOG_MAX } from "./curation.js";
 import { IdempotencyConflictError, UnauthorizedError } from "./errors.js";
 import type { Principal } from "./deps.js";
 
 // queueEnrichmentBacklog (#154): one press turns the "Missing photos" worklist into
 // enrichment_requests rows. The worklist is principal-scoped, so every case gets its
 // OWN admin — that is the isolation, and it doubles as the scoping proof.
+//
+// Vendor coverage is NOT principal-scoped: it is one fleet-wide fact. The fixture
+// mirrors prod's shape deliberately — one crawl-enabled NC vendor that has run an
+// enrich pass — so the CC and untyped cases below exercise the real gap rather than
+// an invented one.
 
 describe("queueEnrichmentBacklog", () => {
   let h: DomainHarness;
 
+  async function seedVendor(focus: "NC" | "CC" | "both", runKind: "seed" | "enrich" | null) {
+    const rows = await h.deps.db
+      .insert(vendors)
+      .values({ name: `Vendor ${focus} ${newRequestId()}`, focus, crawlEnabled: true })
+      .returning({ id: vendors.id });
+    const vendorId = rows[0]!.id;
+    if (runKind) {
+      await h.deps.db.insert(crawlRuns).values({ vendorId, kind: runKind, status: "succeeded" });
+    }
+    return vendorId;
+  }
+
   beforeAll(async () => {
     h = await createHarness();
+    await seedVendor("NC", "enrich");
   }, 60_000);
 
   afterAll(async () => {
@@ -28,9 +46,19 @@ describe("queueEnrichmentBacklog", () => {
   }
 
   // A held cigar with no photo and no dimensions — the shape of every one of the
-  // owner's real photoless holdings.
-  async function seedHeld(owner: Principal, name: string, quantity = 1): Promise<string> {
-    const cigarId = await h.seedCigar({ canonicalName: `${name} ${newRequestId()}` });
+  // owner's real photoless holdings. NC and verified by default, i.e. a row that
+  // passes both preconditions; the gate cases override one field each.
+  async function seedHeld(
+    owner: Principal,
+    name: string,
+    quantity = 1,
+    overrides: { type?: "NC" | "CC" | null; verification?: "verified" | "unverified" } = {},
+  ): Promise<string> {
+    const cigarId = await h.seedCigar({
+      canonicalName: `${name} ${newRequestId()}`,
+      type: overrides.type === undefined ? "NC" : overrides.type,
+      ...(overrides.verification ? { verification: overrides.verification } : {}),
+    });
     await h.deps.db.insert(purchases).values({ userId: owner.userId, cigarId, quantity });
     return cigarId;
   }
@@ -153,6 +181,31 @@ describe("queueEnrichmentBacklog", () => {
     expect(await requestRows(cigarId)).toHaveLength(2);
   });
 
+  it("retries a row that is exhausted AND fulfilled — the state a failed photo capture leaves", async () => {
+    const admin = await curator();
+    const cigarId = await seedHeld(admin, "Backlog Exhausted Fulfilled");
+    // Reachable without any race: ingest wraps capturePhoto in try/catch and still
+    // finalizes, so a name match with a throwing capture marks the request fulfilled
+    // while the cigar stays photoless and stays on this worklist. Keying the retry
+    // off `status === "queued"` alone left the escape hatch inert here — exactly the
+    // rows most likely to need it.
+    await h.deps.db.insert(enrichmentRequests).values([
+      { cigarId, status: "exhausted" },
+      { cigarId, status: "fulfilled" },
+    ]);
+
+    const reported = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+    expect(reported.entries[0]).toMatchObject({ cigarId, status: "exhausted" });
+    expect(await requestRows(cigarId)).toHaveLength(2);
+
+    const retried = await queueEnrichmentBacklog(h.deps, admin, {
+      clientRequestId: newRequestId(),
+      retryExhausted: true,
+    });
+    expect(retried.entries[0]).toMatchObject({ cigarId, status: "queued" });
+    expect(await requestRows(cigarId)).toHaveLength(3);
+  });
+
   it("caps at `limit`, reports the uncapped eligible count, and takes the highest-remaining rows in worklist order", async () => {
     const admin = await curator();
     for (let i = 1; i <= 12; i += 1) await seedHeld(admin, `Backlog Cap ${String(i).padStart(2, "0")}`, i);
@@ -169,12 +222,106 @@ describe("queueEnrichmentBacklog", () => {
 
   it("clamps a limit above the ceiling instead of running unbounded", async () => {
     const admin = await curator();
-    await seedHeld(admin, "Backlog Clamp");
+    // One more row than the ceiling: the assertion has to be able to SEE the clamp.
+    // Seeded in two bulk statements rather than a loop so the arrange stays cheap.
+    const over = ENRICHMENT_BACKLOG_MAX + 1;
+    const inserted = await h.deps.db
+      .insert(cigars)
+      .values(
+        Array.from({ length: over }, (_, i) => ({
+          canonicalName: `Backlog Clamp ${String(i).padStart(3, "0")} ${newRequestId()}`,
+          type: "NC" as const,
+          verification: "verified" as const,
+        })),
+      )
+      .returning({ id: cigars.id });
+    await h.deps.db
+      .insert(purchases)
+      .values(inserted.map((row) => ({ userId: admin.userId, cigarId: row.id, quantity: 1 })));
+
     const result = await queueEnrichmentBacklog(h.deps, admin, {
       clientRequestId: newRequestId(),
       limit: 10_000,
     });
-    expect(result).toMatchObject({ eligible: 1, considered: 1, queued: 1 });
+
+    // Delete the clamp and the raw 10_000 flows into the slice: eligible would still
+    // be over, but considered/queued would be over too. This is the assertion that
+    // fails in that world.
+    expect(result).toMatchObject({
+      eligible: over,
+      considered: ENRICHMENT_BACKLOG_MAX,
+      queued: ENRICHMENT_BACKLOG_MAX,
+      skipped: 0,
+    });
+    expect(result.entries).toHaveLength(ENRICHMENT_BACKLOG_MAX);
+  }, 60_000);
+
+  // ---- the two preconditions a press ENFORCES (#154 review) -----------------
+
+  it("refuses a canonical name nobody has verified, and writes nothing for it", async () => {
+    const admin = await curator();
+    const reviewed = await seedHeld(admin, "Backlog Reviewed", 2);
+    const raw = await seedHeld(admin, "Backlog Unreviewed", 1, { verification: "unverified" });
+
+    const result = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+    const byId = new Map(result.entries.map((e) => [e.cigarId, e.status]));
+
+    // Enrichment resolves BY canonical name, and a miss is not free: the crawler
+    // counts attempts per request and retires the row after two. The owner's real
+    // backlog carries reversed and doubled names ("Trinidad Trinidad Reyes"), so
+    // this gate is what stops a press retiring them.
+    expect(byId.get(raw)).toBe("unverified_name");
+    expect(byId.get(reviewed)).toBe("queued");
+    expect(await requestRows(raw)).toHaveLength(0);
+    expect(await enrichmentAudits(raw)).toHaveLength(0);
+    expect(result).toMatchObject({ queued: 1, skipped: 1 });
+  });
+
+  it("refuses a market no enrich lane reaches — a CC row while only an NC vendor enriches", async () => {
+    const admin = await curator();
+    const nc = await seedHeld(admin, "Backlog Covered NC", 3);
+    const cc = await seedHeld(admin, "Backlog Cuban", 2, { type: "CC" });
+    const untyped = await seedHeld(admin, "Backlog Untyped", 1, { type: null });
+
+    const result = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+    const byId = new Map(result.entries.map((e) => [e.cigarId, e.status]));
+
+    // Prod's exact shape: 41 of the 55 photoless holdings are CC and the only enrich
+    // CronJob is NC-only, while `attempts` counts per REQUEST — so queuing them is
+    // how they get marked exhausted for good. An untyped row could be either market,
+    // so it needs both covered.
+    expect(byId.get(nc)).toBe("queued");
+    expect(byId.get(cc)).toBe("no_vendor_coverage");
+    expect(byId.get(untyped)).toBe("no_vendor_coverage");
+    expect(result.enrichedMarkets).toEqual(["NC"]);
+    expect(await requestRows(cc)).toHaveLength(0);
+    expect(await requestRows(untyped)).toHaveLength(0);
+  });
+
+  it("opens the CC gate by itself once a CC vendor has completed an enrich run", async () => {
+    const admin = await curator();
+    const cc = await seedHeld(admin, "Backlog Cuban Lou", 1, { type: "CC" });
+
+    // Cuban Lou's in prod today: crawl_enabled, but only ever a `seed` run and no
+    // enrich CronJob. crawl_enabled alone would call CC covered; the run is the
+    // half that is actually load-bearing.
+    const seedOnly = await seedVendor("CC", "seed");
+    const stillBlocked = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+    expect(stillBlocked.entries[0]).toMatchObject({ cigarId: cc, status: "no_vendor_coverage" });
+
+    // The ops prerequisite lands (a CC enrich CronJob runs once) and the gate opens
+    // with no code change and no flag.
+    await h.deps.db.insert(crawlRuns).values({ vendorId: seedOnly, kind: "enrich", status: "succeeded" });
+    try {
+      const opened = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+      expect(opened.entries[0]).toMatchObject({ cigarId: cc, status: "queued" });
+      expect(opened.enrichedMarkets).toEqual(["CC", "NC"]);
+      expect(await requestRows(cc)).toHaveLength(1);
+    } finally {
+      // Coverage is fleet-wide: leave it as this file's other cases expect it.
+      await h.deps.db.delete(crawlRuns).where(eq(crawlRuns.vendorId, seedOnly));
+      await h.deps.db.delete(vendors).where(eq(vendors.id, seedOnly));
+    }
   });
 
   it("never reaches another user's holdings", async () => {
@@ -218,6 +365,32 @@ describe("queueEnrichmentBacklog", () => {
     expect(await enrichmentAudits(already)).toHaveLength(0);
   });
 
+  it("renders each queued row in the run review under the cigar's name, not the bare action", async () => {
+    const admin = await curator();
+    const first = await seedHeld(admin, "Backlog Reviewable A", 2);
+    const second = await seedHeld(admin, "Backlog Reviewable B", 1);
+    const runId = `wo-cigar-curate-${newRequestId()}`;
+
+    await queueEnrichmentBacklog(h.deps, admin, {
+      clientRequestId: newRequestId(),
+      attribution: { actor: "agent", runId, confidence: 0.9 },
+    });
+
+    // An enqueue audit has no before-image, and agentRunRows resolves most targets
+    // through `before`. Without the after->>'cigarId' branch every row of a bulk
+    // press renders as an identical, anonymous "cigar.enrichment_request" — which is
+    // the whole run review for the press that matters most.
+    const { rows } = await agentRunRows(h.deps, admin, { runId });
+    const worklist = await cigarsMissingPhotos(h.deps, admin);
+    const nameOf = new Map(worklist.map((w) => [w.cigarId, w.canonicalName]));
+
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.action === "cigar.enrichment_request")).toBe(true);
+    expect(new Set(rows.map((r) => r.targetName))).toEqual(
+      new Set([nameOf.get(first), nameOf.get(second)]),
+    );
+  });
+
   it("defaults the audit actor to web, so a console press is not filed as agent work", async () => {
     const admin = await curator();
     const cigarId = await seedHeld(admin, "Backlog Console");
@@ -239,6 +412,7 @@ describe("queueEnrichmentBacklog", () => {
     const admin = await curator();
     const cigarId = await h.seedCigar({
       canonicalName: `Backlog Suppressed ${newRequestId()}`,
+      type: "NC",
       lengthInches: "5.5",
       ringGauge: 50,
     });

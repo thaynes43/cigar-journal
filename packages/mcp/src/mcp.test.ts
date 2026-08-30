@@ -17,7 +17,17 @@ import {
 } from "@cj/oauth";
 import { createHarness, type DomainHarness } from "@cj/domain/testing";
 import type { Principal } from "@cj/domain";
-import { purchases, vendors, enrichmentRequests, offers, listingMatches, productPhotos, auditLog, cigars } from "@cj/db";
+import {
+  purchases,
+  vendors,
+  crawlRuns,
+  enrichmentRequests,
+  offers,
+  listingMatches,
+  productPhotos,
+  auditLog,
+  cigars,
+} from "@cj/db";
 import { buildApp } from "./app.js";
 import { INSTRUCTIONS, TOOL_SCOPES } from "./constants.js";
 
@@ -2097,7 +2107,7 @@ describe("@cj/mcp adapter", () => {
   });
 
   it("queue_enrichment_backlog refuses a curation-scoped NON-admin and writes nothing", async () => {
-    const cigarId = await h.seedCigar({ canonicalName: `Backlog Gate ${randomUUID().slice(0, 8)}` });
+    const cigarId = await h.seedCigar({ canonicalName: `Backlog Gate ${randomUUID().slice(0, 8)}`, type: "NC" });
     await h.pg.db.insert(purchases).values({ userId: owner.userId, cigarId, quantity: 1 });
 
     await withClient(ownerCuration, async (client) => {
@@ -2109,14 +2119,37 @@ describe("@cj/mcp adapter", () => {
     expect(rows.filter((r) => r.cigarId === cigarId)).toHaveLength(0);
   });
 
-  it("queue_enrichment_backlog queues the admin's photoless holdings under the run id (agent surface)", async () => {
-    const deep = await h.seedCigar({ canonicalName: `Backlog Deep ${randomUUID().slice(0, 8)}` });
-    const shallow = await h.seedCigar({ canonicalName: `Backlog Shallow ${randomUUID().slice(0, 8)}` });
+  it("queue_enrichment_backlog writes nothing until an enrich lane covers the market, then queues under the run id", async () => {
+    const deep = await h.seedCigar({ canonicalName: `Backlog Deep ${randomUUID().slice(0, 8)}`, type: "NC" });
+    const shallow = await h.seedCigar({ canonicalName: `Backlog Shallow ${randomUUID().slice(0, 8)}`, type: "NC" });
     await h.pg.db.insert(purchases).values([
       { userId: adminUser.userId, cigarId: deep, quantity: 5 },
       { userId: adminUser.userId, cigarId: shallow, quantity: 1 },
     ]);
     const runId = `wo-cigar-curate-${randomUUID().slice(0, 8)}`;
+
+    // The state this ships in: no vendor has completed an enrich run, so the agent
+    // surface reports the whole worklist and writes NOTHING. This is the shipped
+    // default, not a documented caution — a queued request the crawler cannot serve
+    // is retired permanently after two passes.
+    await withClient(adminCuration, async (client) => {
+      const blocked = payloadOf(
+        await call(client, "queue_enrichment_backlog", { clientRequestId: randomUUID(), runId, confidence: 0.9 }),
+      ) as { queued: number; skipped: number; entries: { status: string }[]; enrichedMarkets: string[] };
+
+      expect(blocked.queued).toBe(0);
+      expect(blocked.skipped).toBe(2);
+      expect(blocked.enrichedMarkets).toEqual([]);
+      expect(blocked.entries.every((e) => e.status === "no_vendor_coverage")).toBe(true);
+    });
+    expect((await h.pg.db.select().from(enrichmentRequests)).filter((r) => r.cigarId === deep)).toHaveLength(0);
+
+    // The ops prerequisite lands: a crawl-enabled vendor completes an enrich run.
+    const [enricher] = await h.pg.db
+      .insert(vendors)
+      .values({ name: `Enricher ${randomUUID().slice(0, 8)}`, focus: "both", crawlEnabled: true })
+      .returning({ id: vendors.id });
+    await h.pg.db.insert(crawlRuns).values({ vendorId: enricher!.id, kind: "enrich", status: "succeeded" });
 
     await withClient(adminCuration, async (client) => {
       const res = payloadOf(
@@ -2147,7 +2180,7 @@ describe("@cj/mcp adapter", () => {
 
   it("queue_enrichment_backlog honours limit and reports the uncapped eligible count", async () => {
     // The admin already holds the two rows above; add a third and cap at one.
-    const extra = await h.seedCigar({ canonicalName: `Backlog Capped ${randomUUID().slice(0, 8)}` });
+    const extra = await h.seedCigar({ canonicalName: `Backlog Capped ${randomUUID().slice(0, 8)}`, type: "NC" });
     await h.pg.db.insert(purchases).values({ userId: adminUser.userId, cigarId: extra, quantity: 9 });
 
     await withClient(adminCuration, async (client) => {

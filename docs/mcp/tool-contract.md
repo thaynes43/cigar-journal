@@ -151,13 +151,15 @@ verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
 non-cigar pollution, restore_cigar to undo; set_product_photo_rights
 approved/suppressed); low-confidence cases are skipped and
 reported, never guessed — leave an uncertain brand or type null rather than invent
-one. queue_enrichment_backlog enqueues the caller's photoless holdings for the
-crawler's enrich runs in one call — press it once per run, not once per cigar; it
-reports every row as queued, or why it was skipped. Enrichment matches on the
-canonical name, so fix a wrong one with rename_cigar BEFORE queuing it. Pass runId
-(the batch id) and confidence (0-1) on every write so the run is auditable and
-reversible. Merges stay human-only in the web console — there is no merge tool
-here.
+one. queue_enrichment_backlog is the operator's bulk enqueue of the photoless
+holdings, NOT part of a curation run: do not call it on your own initiative — report
+the worklist and leave the press to the operator. It queues a cigar only once its
+canonical name is verified and a crawl-enabled vendor covering that market has
+completed an enrich run; every other row comes back with the reason and nothing is
+written for it. Enrichment matches on the canonical name, so the way to make a row
+enqueueable is rename_cigar then verify_cigar. Pass runId (the batch id) and
+confidence (0-1) on every write so the run is auditable and reversible. Merges stay
+human-only in the web console — there is no merge tool here.
 ```
 
 Guidance, not enforcement — the server validates every request regardless.
@@ -1025,7 +1027,10 @@ Scope alone is not enough — each handler also requires an admin principal.
 Enqueue the caller's **photoless holdings** — cigars they hold with no servable
 product photo — for the crawler's enrich runs, in one call instead of looping
 `request_cigar_enrichment` (#154). Selection is the same read the console's
-"Missing photos" section renders, so the number on screen is the number queued.
+"Missing photos" section renders, so the number on screen is the number
+considered. **Operator-initiated:** the server instructions tell the curation
+agent not to call it on its own initiative, and the tool enforces its own
+preconditions besides.
 
 ```yaml
 arguments:
@@ -1038,24 +1043,33 @@ arguments:
 result:
   eligible: 55                    # worklist rows before the cap
   considered: 55                  # rows the cap admitted
-  queued: 52
-  skipped: 3
+  queued: 7
+  skipped: 48
+  enrichedMarkets: [NC]           # markets an enrich lane actually reaches right now
   entries:
     - cigarId: cg_01j9x2
       canonicalName: Trinidad Reyes
-      status: queued              # queued | already_queued | recently_enriched | not_needed | exhausted
+      status: queued              # see the taxonomy below
   replayed: false
 ```
 
-The per-row `status` is `request_cigar_enrichment`'s taxonomy plus `exhausted` —
-the crawler tried every enabled vendor and gave up. Those rows are **reported but
-not re-queued** unless `retryExhausted` is true, because neither dedupe predicate
-blocks on `exhausted` and a plain press would otherwise re-queue every dead row.
+The per-row `status` is `request_cigar_enrichment`'s taxonomy (`queued`,
+`already_queued`, `recently_enriched`, `not_needed`) plus three verdicts only a
+bulk press has:
 
-**Fix names first.** Enrichment resolves by canonical name (slug-token ranking,
-then a pg_trgm similarity floor), so a reversed or misspelled name produces a
-no-match pass — and `EXHAUST_ATTEMPTS = 2` means two of those retire the row
-permanently. Correct it with `rename_cigar` before queuing it.
+| status | meaning | how to clear it |
+| --- | --- | --- |
+| `exhausted` | the crawler retired the row (`EXHAUST_ATTEMPTS = 2`) | fix the cause, then press with `retryExhausted: true` |
+| `unverified_name` | nobody has reviewed this canonical name | `rename_cigar` if it is wrong, then `verify_cigar` |
+| `no_vendor_coverage` | no crawl-enabled vendor covering that market has completed an `enrich` run | bring that market's enrich lane up |
+
+**Both preconditions are enforced, not advised, and neither has an override.** A
+queued request that cannot be served is not inert: `attempts` is counted per
+*request* by whichever vendor drains it, so two passes by a vendor that cannot
+carry the cigar retire it permanently. Enrichment resolves by canonical name
+(slug-token ranking, then a pg_trgm similarity floor), which is why an unreviewed
+name is refused; and an untyped cigar needs BOTH markets covered, because
+enrichment is what would tell us which one it belongs to.
 
 ## Errors
 
