@@ -1258,8 +1258,12 @@ describe("service-token argv", () => {
     expect(USAGE).toContain("offline_access is always refused");
     expect(USAGE).toContain("curation:read | curation:write");
     expect(USAGE).toContain("only with --allow-curation");
-    expect(USAGE).toContain("The subject must be an admin");
+    expect(USAGE).toContain("subject must be an admin");
     expect(USAGE).toContain("default and maximum 365");
+    // The gate keys on the scopes GRANTED, not on the flag — USAGE must say so,
+    // because "--allow-curation makes it admin-only" is the wrong mental model
+    // and would have an operator expect a refusal that never comes.
+    expect(USAGE).toContain("scopes actually GRANTED");
   });
 
   it("takes the curation elevation only from its own flag", () => {

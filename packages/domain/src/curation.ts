@@ -420,7 +420,12 @@ async function mergeWithinTx(
     .insert(auditLog)
     .values({
       userId: principal.userId,
-      actor: "web",
+      // Through the same funnel as every other curation write, so "a curation
+      // audit row names the credential behind it" is structural rather than
+      // incidental. Resolves to actor "web" with a null clientId today — merge
+      // and dismiss are console-only, with no MCP tool and so no OAuth client —
+      // and stays correct the day one gains a tool.
+      ...auditAttribution(principal, undefined),
       action: "cigar.merge",
       smokeId: null,
       before,
@@ -1048,7 +1053,12 @@ async function dismissWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: "web",
+    // Through the same funnel as every other curation write, so "a curation
+    // audit row names the credential behind it" is structural rather than
+    // incidental. Resolves to actor "web" with a null clientId today — merge
+    // and dismiss are console-only, with no MCP tool and so no OAuth client —
+    // and stays correct the day one gains a tool.
+    ...auditAttribution(principal, undefined),
     action: "cigar.dismiss_duplicate",
     smokeId: null,
     before: { a: cigarSnapshot(a), b: cigarSnapshot(b) },

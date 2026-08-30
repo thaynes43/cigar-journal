@@ -1,4 +1,4 @@
--- 0023_audit_log_client_id — record WHICH CREDENTIAL drove a curation write
+-- 0024_audit_log_client_id — record WHICH CREDENTIAL drove a curation write
 -- (ADR-011). `audit_log` already answered "who" (`user_id`), "from where"
 -- (`actor`) and "in which batch" (`run_id`), but every token a user holds looks
 -- identical in it. That made the service-token threat row's claim — "one client

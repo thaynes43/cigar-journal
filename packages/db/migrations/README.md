@@ -53,7 +53,7 @@ init container at startup (ADR-003).
   as its authorization). No role column, deliberately: an invite has no role
   field to escalate. A partial unique index keeps at most one open invite per
   address.
-- `0023_audit_log_client_id.sql` — `audit_log.client_id` (nullable text, plus a
+- `0024_audit_log_client_id.sql` — `audit_log.client_id` (nullable text, plus a
   partial index on `(client_id, created_at desc)`): which OAuth client's
   credential drove the write (ADR-011). The table already answered who
   (`user_id`), from where (`actor`) and in which batch (`run_id`), but every

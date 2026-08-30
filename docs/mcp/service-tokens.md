@@ -160,9 +160,14 @@ group by client_id
 order by max(created_at) desc;
 ```
 
-A `client_id` of null in that second query is the web console, which has no
-OAuth client. Two rows for the same subject with different client ids are two
-different credentials — which is the whole point during an incident.
+A null `client_id` is NOT proof of the web console. It means "no client was
+recorded", which covers three different things: a genuine console write (no OAuth
+client exists), any row written before this column shipped, and any curation write
+from a code path that does not yet carry the attribution — audit surfaces outside
+curation still do not (issue #183). Treat null as unknown, not as the console.
+
+What IS load-bearing: two rows for the same subject with DIFFERENT client ids are
+two different credentials, which is the question worth asking during an incident.
 
 The mint is **not idempotent** — every run creates new material. Use `list` to
 find an orphan and `revoke --id` to kill it.

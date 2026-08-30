@@ -65,9 +65,13 @@ usage:
                   offline_access is always refused; ${CURATION_SERVICE_SCOPES.join(" | ")}
                   only with --allow-curation.
   --allow-curation  admit curation:* — a credential that mutates the SHARED catalog.
-                  The subject must be an admin (checked at mint time; exit 1 if not).
-                  Recorded on the audit row and shown in the plan. Caps the TTL at
-                  ${CURATION_SERVICE_TOKEN_TTL_DAYS} days: the widest credential is not also the longest-lived.
+                  The flag only ADMITS the scope; the admin check and the shorter
+                  TTL key on the scopes actually GRANTED, so passing it without a
+                  curation scope changes nothing. When a curation scope is granted:
+                  the subject must be an admin (checked at mint time; exit 1 if
+                  not), the elevation is recorded on the audit row and shown in the
+                  plan, and the TTL is capped at ${CURATION_SERVICE_TOKEN_TTL_DAYS}
+                  days — the widest credential is not also the longest-lived.
   --ttl-days      default and maximum ${DEFAULT_SERVICE_TOKEN_TTL_DAYS}, or ${CURATION_SERVICE_TOKEN_TTL_DAYS} with --allow-curation
                   (it can only shorten)
   --resource      assert the audience; must equal this server's own /mcp resource
