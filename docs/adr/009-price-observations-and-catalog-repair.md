@@ -75,13 +75,21 @@ requested "priceObservations" store exists; it is incomplete, not absent.
 - Chat can now repair the catalog it reads — bounded by fill-nulls-only, so
   curation keeps authority over corrections and verification.
 - The crawler does **not** yet honour "a multipack is the same cigar with its
-  packaging recorded": it has only two dispositions for a listing, create a
-  `cigars` row or drop it by name pattern, so packaging SKUs land as catalog
-  rows (44 of them from the 2026-08-29 Cuban Lou's seed). The interim remedy is
-  exclusion, recorded with its manifest and rollback in
+  packaging recorded". A listing that clears the name-pattern gate
+  (`isCigarListing`, `packages/crawler/src/core/normalize.ts:137`) gets one of
+  three dispositions in `ingestListing`
+  (`packages/crawler/src/core/ingest.ts:219-232`): link to an **existing**
+  cigar as `auto` when `findCatalogMatch` hits; create a new `cigars` row when
+  it misses in `seed` mode; otherwise leave the listing `unmatched` with a null
+  `cigar_id`. None of the three records packaging against a base cigar — a
+  packaged SKU either becomes its own catalog row or, when `findCatalogMatch`'s
+  trigram lookup clears `MATCH_THRESHOLD` (0.55, `match.ts:12`) against the base
+  cigar, silently attaches a bundle price to a single stick.
+  44 such rows came from the 2026-08-29 Cuban Lou's seed. The interim remedy is
+  exclusion, recorded with its manifest, pre-apply gate and rollback in
   [`.agents/reference/catalog-exclusions.md`](../../.agents/reference/catalog-exclusions.md);
-  the third disposition — ingest the SKU as an offer against the base cigar — is
-  issue #164.
+  the missing fourth disposition — ingest the SKU as an offer against the base
+  cigar, carrying `packaging`/`sticksPerPackage` — is issue #164.
 
 ## Alternatives considered
 
