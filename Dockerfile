@@ -190,24 +190,23 @@ ENTRYPOINT ["/sbin/tini", "--"]
 #     Resolves/creates the vendor registry row, refuses to crawl a path robots.txt
 #     disallows, rate-limits every fetch (≥2.5s), and brackets the run in a
 #     crawl_runs row. Exits 0 on success, 1 on a run failure.
-#   token (one-shot Job or `kubectl exec` — operator service tokens, ADR-010):
-#     workingDir: /app/token               # REQUIRED: `--import tsx` resolves the
-#     command: ["/sbin/tini","--","node","--import","tsx","src/cli.ts","mint",
-#               "--client-name","dev-env-pod","--user-email","<owner-email>",
-#               "--scope","catalog:read","--scope","journal:read",
-#               "--scope","journal:write","--reason","<why>","--yes"]
-#                                          # tsx loader relative to CWD; tsx lives
-#                                          # in /app/token/node_modules. Drop
-#                                          # "--yes" to print the plan and write
-#                                          # nothing. Subcommands: mint | list |
-#                                          # revoke --id <uuid>.
+#   token (operator service tokens, ADR-010 — `kubectl exec`, NOT a Job):
+#     kubectl -n frontend exec -it deploy/cigar-journal-main -c app -- \
+#       sh -c 'cd /app/token && node --import tsx src/cli.ts mint \
+#         --client-name dev-env-pod --user-email <owner-email> \
+#         --scope catalog:read --scope journal:read --scope journal:write \
+#         --reason "<why>" --yes'
+#     The `cd` is required: `--import tsx` resolves the loader from CWD and tsx
+#     lives in /app/token/node_modules. Drop --yes to print the plan (which
+#     still reads the database and runs every check the apply runs) and write
+#     nothing. Subcommands: mint | list | revoke --id <uuid>.
 #     Reads DATABASE_URL and (mint only) BETTER_AUTH_URL — the RFC 8707 audience,
 #     so a wrong origin fails fast instead of minting a token /mcp will reject.
-#     mint --yes writes EXACTLY the token to stdout and its report to stderr; the
-#     token is not recoverable afterwards. Run with backoffLimit: 0 and
-#     restartPolicy: Never — the mint is deliberately NOT idempotent, so a retry
-#     leaves a live token nobody captured (`list` finds orphans, `revoke` kills
-#     them). Job stdout is collected into Loki: `kubectl exec` into the running
-#     web pod is the lower-exposure way to run a mint. Exits 0 ok, 1 operational
-#     failure (unknown user or token id), 2 usage/env error.
+#     There is deliberately NO Job or CronJob for this role: `mint --yes` refuses
+#     to run unless stdout is an interactive terminal, because a container's
+#     stdout is collected into Loki and cannot carry a credential. The refusal
+#     happens before the insert, so nothing is orphaned. The mint is also NOT
+#     idempotent (`list` finds orphans, `revoke --id` kills them). Exits 0 ok,
+#     1 operational failure (unknown user or token id), 2 usage, env, or a
+#     refused delivery.
 CMD ["node", "apps/web/server.js"]

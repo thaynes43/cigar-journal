@@ -1,11 +1,20 @@
 import { createDatabase } from "@cj/db";
-import { parseArgs, UsageError, USAGE, type ParsedArgs } from "./cli-args.js";
+import {
+  mintDeliveryRefusal,
+  parseArgs,
+  UsageError,
+  USAGE,
+  type ParsedArgs,
+} from "./cli-args.js";
 import { OAuthError } from "./errors.js";
 import type { AuthEventWriter } from "./logger.js";
 import {
   DEFAULT_SERVICE_TOKEN_TTL_DAYS,
+  describeTokenForRevoke,
   listServiceTokens,
   mintServiceToken,
+  newRunId,
+  planServiceTokenMint,
   revokeServiceToken,
   ServiceTokenError,
   type ServiceTokenSummary,
@@ -16,22 +25,29 @@ import {
 // roles; see the ROLE DISPATCH marker in the Dockerfile for the k8s command
 // array. Not an HTTP route: nothing in apps/web or @cj/mcp can reach the mint.
 //
-// STREAM DISCIPLINE — stdout is data, stderr is narration:
-//   mint --yes  → stdout carries EXACTLY the token, one line. Nothing else.
-//   list        → stdout carries the table (it holds no secret material).
+// DELIVERY — there is exactly ONE way the token reaches a human. `mint --yes`
+// runs only when stdout is an interactive terminal, i.e. under
+// `kubectl exec -it`, whose stream the API server proxies to the operator and
+// which never becomes a container log line. A Job, a CronJob, a pipe or a
+// redirect is refused before anything is written (`mintDeliveryRefusal`),
+// because a container's stdout is collected into Loki for the whole retention
+// window. `list` and `revoke` hold no secret material and run anywhere.
+//
+// STREAM DISCIPLINE — stderr narrates, stdout carries only results:
+//   mint --yes  → the token, one line, after the report on stderr. On a pty
+//                 both land on the same terminal; nothing parses this.
+//   list        → the table (no secret material).
 //   revoke      → stdout is empty; the report goes to stderr.
 // The raw token is never logged, never written to a file, and never returned by
-// list. `correlationId` is the pod name, so the audit row and the Loki
-// `[auth] service_token_minted` line join.
+// list. Every audit row a run writes carries the same `runId`.
 
 const NARRATE: AuthEventWriter = (message, ...rest) => console.error(message, ...rest);
 
+/** One id for the whole invocation; see newRunId for why it is not HOSTNAME. */
+const RUN_ID = newRunId();
+
 function resolveDatabaseUrl(explicit: string | null): string | null {
   return explicit ?? process.env.DATABASE_URL ?? null;
-}
-
-function correlationId(): string | undefined {
-  return process.env.HOSTNAME ?? undefined;
 }
 
 function field(label: string, value: string): string {
@@ -42,7 +58,7 @@ function pad(value: string, width: number): string {
   return value.length >= width ? value : value + " ".repeat(width - value.length);
 }
 
-function tokenState(row: ServiceTokenSummary): string {
+function tokenState(row: Pick<ServiceTokenSummary, "revokedAt" | "expiresAt">): string {
   if (row.revokedAt) return "revoked";
   return row.expiresAt.getTime() <= Date.now() ? "expired" : "active";
 }
@@ -88,41 +104,56 @@ async function runMint(
     return 2;
   }
 
-  const ttlDays = options.ttlDays ?? DEFAULT_SERVICE_TOKEN_TTL_DAYS;
-  if (!options.yes) {
-    console.error(
-      [
-        "plan: mint a service token",
-        field("client", options.clientName),
-        field("user", options.userEmail),
-        field("scopes", options.scopes.join(" ")),
-        field("ttl", `${ttlDays}d`),
-        field(
-          "resource",
-          options.resource ?? `${process.env.BETTER_AUTH_URL.replace(/\/+$/, "")}/mcp`,
-        ),
-        field("reason", options.reason),
-        "nothing written — re-run with --yes to mint.",
-      ].join("\n"),
-    );
-    return 0;
+  // Before the database, before anything: a mint that cannot deliver its output
+  // safely must not create the row it could not hand over.
+  if (options.yes) {
+    const refusal = mintDeliveryRefusal(process.stdout.isTTY);
+    if (refusal) {
+      console.error(`error: ${refusal}`);
+      return 2;
+    }
   }
+
+  const ttlDays = options.ttlDays ?? DEFAULT_SERVICE_TOKEN_TTL_DAYS;
+  const input = {
+    clientName: options.clientName,
+    userEmail: options.userEmail,
+    scopes: options.scopes,
+    reason: options.reason,
+    ttlDays,
+    resource: options.resource ?? undefined,
+    correlationId: RUN_ID,
+    log: NARRATE,
+  };
 
   const { db, pool } = createDatabase(databaseUrl);
   try {
-    const minted = await mintServiceToken(db, {
-      clientName: options.clientName,
-      userEmail: options.userEmail,
-      scopes: options.scopes,
-      reason: options.reason,
-      ttlDays,
-      resource: options.resource ?? undefined,
-      correlationId: correlationId(),
-      log: NARRATE,
-    });
+    if (!options.yes) {
+      // The plan runs the mint's own validators against the same database, so a
+      // dry run that exits 0 is a statement about the apply rather than about
+      // argv. It writes nothing.
+      const plan = await planServiceTokenMint(db, input);
+      console.error(
+        [
+          "plan: mint a service token",
+          field("run id", RUN_ID),
+          field("client", `${plan.clientName} (${plan.clientId ?? "will be created"})`),
+          field("user", `${plan.userEmail} role=${plan.role}`),
+          field("scopes", plan.scopes.join(" ")),
+          field("ttl", `${plan.ttlDays}d → ${plan.expiresAt.toISOString()}`),
+          field("resource", plan.resource),
+          field("reason", options.reason),
+          "nothing written — re-run with --yes to mint.",
+        ].join("\n"),
+      );
+      return 0;
+    }
+
+    const minted = await mintServiceToken(db, input);
     console.error(
       [
         "minted service token",
+        field("run id", RUN_ID),
         field("token id", minted.tokenId),
         field(
           "client",
@@ -132,7 +163,7 @@ async function runMint(
         field("scopes", minted.scopes.join(" ")),
         field("resource", minted.resource),
         field("expires", `${minted.expiresAt.toISOString()} (${minted.ttlDays}d)`),
-        "capture the value on stdout into 1Password now — it is not recoverable.",
+        "the value below is not recoverable — capture it into 1Password now.",
       ].join("\n"),
     );
     process.stdout.write(`${minted.token}\n`);
@@ -175,26 +206,28 @@ async function runRevoke(
   const { db, pool } = createDatabase(databaseUrl);
   try {
     if (!options.yes) {
-      // Show the row the id actually names — a dry run that only echoed the id
-      // would confirm nothing.
-      const all = await listServiceTokens(db, {
-        includeExpired: true,
-        includeRevoked: true,
-        allClients: true,
-      });
-      const row = all.find((candidate) => candidate.tokenId === options.tokenId);
+      // Resolved the way the revoke resolves it — any token row by id, not just
+      // the long-lived ones `list` shows. The dry run and the apply must agree
+      // about which ids exist, or an operator chasing a leaked 1h flow token is
+      // told it does not exist by the very tool that would kill it.
+      const row = await describeTokenForRevoke(db, options.tokenId);
       if (!row) {
-        console.error(`error: no long-lived token with id ${options.tokenId}`);
+        console.error(`error: no token with id ${options.tokenId}`);
         return 1;
       }
       console.error(
         [
           "plan: revoke a token",
+          field("run id", RUN_ID),
           field("token id", row.tokenId),
-          field("client", `${row.clientName ?? row.clientId} (${row.clientId})`),
-          field("user", row.userEmail),
+          field(
+            "client",
+            `${row.clientName ?? "(unnamed)"} (${row.clientId})${row.isService ? " [service]" : ""}`,
+          ),
+          field("user", row.userEmail ?? "(no user row)"),
           field("scopes", row.scopes.join(" ")),
           field("state", tokenState(row)),
+          ...(row.hasFamily ? [field("family", "its refresh chain goes too")] : []),
           "nothing written — re-run with --yes to revoke.",
         ].join("\n"),
       );
@@ -204,7 +237,7 @@ async function runRevoke(
     const result = await revokeServiceToken(db, {
       tokenId: options.tokenId,
       reason: options.reason ?? undefined,
-      correlationId: correlationId(),
+      correlationId: RUN_ID,
       log: NARRATE,
     });
     if (!result.ok) {
@@ -214,6 +247,7 @@ async function runRevoke(
     console.error(
       [
         result.alreadyRevoked ? "already revoked — nothing to do" : "revoked service token",
+        field("run id", RUN_ID),
         field("token id", result.tokenId),
         field("client", `${result.clientName ?? result.clientId} (${result.clientId})`),
         ...(result.familyRevoked ? [field("family", "refresh chain revoked")] : []),

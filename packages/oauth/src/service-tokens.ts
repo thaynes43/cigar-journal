@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { auditLog, oauthAccessToken, oauthClient, users, type Database } from "@cj/db";
 import { SUPPORTED_SCOPES, mcpResource, resourceMatches } from "./config.js";
@@ -20,7 +21,37 @@ import { revokeFamily } from "./provider.js";
 /** The CLAUDE_CODE_OAUTH_TOKEN precedent — long enough that rotation is annual. */
 export const DEFAULT_SERVICE_TOKEN_TTL_DAYS = 365;
 const MIN_TTL_DAYS = 1;
-const MAX_TTL_DAYS = 730;
+/**
+ * A year is the ceiling, not just the default (owner ruling 2026-08-30). The
+ * previous 730 made a two-year bearer a one-flag change from any caller, which
+ * is the opposite of a bound; `--ttl-days` now only ever shortens a token.
+ */
+const MAX_TTL_DAYS = DEFAULT_SERVICE_TOKEN_TTL_DAYS;
+
+/**
+ * The scopes a service token may carry — enforced here, not merely defaulted by
+ * whatever args a caller passes (owner ruling 2026-08-30).
+ *   offline_access  a service token has no refresh chain to gate.
+ *   curation:*      would let a browserless holder mutate the SHARED catalog
+ *                   under the subject's admin role for the token's whole life.
+ */
+export const MINTABLE_SERVICE_SCOPES: readonly string[] = SUPPORTED_SCOPES.filter(
+  (scope) => scope !== "offline_access" && !scope.startsWith("curation:"),
+);
+
+/**
+ * A fresh id per CLI invocation, echoed in the report and stored on every audit
+ * row the run writes, so two mints months apart are distinguishable and either
+ * can be quoted in an incident record.
+ *
+ * NOT the pod name. The only supported way to run the mint is `kubectl exec -it`
+ * into the web pod, where HOSTNAME is the Next.js bind address — literally
+ * "0.0.0.0", identical for every run forever — and the exec stream never reaches
+ * the container log or Loki, so there is no log line to join a pod name to.
+ */
+export function newRunId(): string {
+  return `service-token/${randomUUID()}`;
+}
 
 /** A token's lifetime above which it cannot have come from the 1h grant. */
 const LONG_LIVED_HOURS = 24;
@@ -92,6 +123,34 @@ export interface ServiceTokenSummary {
   daysRemaining: number;
 }
 
+export interface ServiceTokenMintPlan {
+  clientName: string;
+  /** The service client the mint would REUSE, or null when it would create one. */
+  clientId: string | null;
+  userId: string;
+  userEmail: string;
+  role: "user" | "admin";
+  scopes: string[];
+  resource: string;
+  ttlDays: number;
+  expiresAt: Date;
+}
+
+export interface RevocableToken {
+  tokenId: string;
+  clientId: string;
+  clientName: string | null;
+  isService: boolean;
+  userEmail: string | null;
+  scopes: string[];
+  resource: string;
+  createdAt: Date;
+  expiresAt: Date;
+  revokedAt: Date | null;
+  /** True when a refresh chain would be revoked alongside this row. */
+  hasFamily: boolean;
+}
+
 export interface RevokeServiceTokenInput {
   tokenId: string;
   reason?: string;
@@ -113,10 +172,10 @@ export type RevokeResult =
   | { ok: false; error: "unknown_token" };
 
 /**
- * Reject anything that is not a real, currently-issuable scope. `offline_access`
- * is refused explicitly rather than as an unknown scope: a service token has no
- * refresh chain, so accepting it would advertise a refresh path that does not
- * exist.
+ * Reject anything outside MINTABLE_SERVICE_SCOPES. The two exclusions get their
+ * own messages rather than a bare "unknown scope": both are real, issuable
+ * scopes on the browser flow, so the operator needs to know they were refused
+ * on purpose and not typo'd.
  */
 function checkScopes(scopes: string[]): string[] {
   if (scopes.length === 0) throw invalidScope("at least one scope is required");
@@ -126,7 +185,12 @@ function checkScopes(scopes: string[]): string[] {
         "offline_access is not available to a service token — it has no refresh chain",
       );
     }
-    if (!(SUPPORTED_SCOPES as readonly string[]).includes(scope)) {
+    if (scope.startsWith("curation:") && (SUPPORTED_SCOPES as readonly string[]).includes(scope)) {
+      throw invalidScope(
+        `${scope} is not mintable as a service token — it would let a browserless holder mutate the shared catalog under the subject's admin role for the token's whole life`,
+      );
+    }
+    if (!MINTABLE_SERVICE_SCOPES.includes(scope)) {
       throw invalidScope(`Unknown scope: ${scope}`);
     }
   }
@@ -154,11 +218,42 @@ function checkResource(resource: string | undefined): string {
 }
 
 /**
+ * The principal, resolved by email (citext — the lookup is case-insensitive).
+ * Shared by the plan and the apply: if the two resolved principals differently,
+ * a clean dry run would stop meaning anything.
+ */
+async function findPrincipal(
+  tx: Database,
+  email: string,
+): Promise<{ id: string; email: string; role: "user" | "admin" }> {
+  const found = await tx
+    .select({ id: users.id, email: users.email, role: users.role })
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1);
+  const user = found[0];
+  if (!user) throw new ServiceTokenError("unknown_user", `no user with email "${email}"`);
+  return user;
+}
+
+/** The service client this consumer name already owns, or undefined. */
+async function findServiceClient(tx: Database, clientName: string): Promise<string | undefined> {
+  const existing = await tx
+    .select({ clientId: oauthClient.clientId })
+    .from(oauthClient)
+    .where(and(eq(oauthClient.clientName, clientName), eq(oauthClient.isService, true)))
+    .limit(1);
+  return existing[0]?.clientId;
+}
+
+/**
  * Mint a long-lived service token and return it once.
  *
- * Deliberately NOT idempotent — every call creates new material, so a retried
- * Job leaves a live token nobody captured. Run it with `backoffLimit: 0` and use
- * `listServiceTokens` to find and revoke orphans.
+ * Deliberately NOT idempotent — every call creates new material, so any retry
+ * leaves a live token nobody captured. That is one reason the CLI runs this only
+ * on an interactive terminal and never as a retriable batch workload; the other
+ * is that a container's stdout is collected into Loki. `listServiceTokens` finds
+ * an orphan and `revokeServiceToken` kills it.
  */
 export async function mintServiceToken(
   db: Database,
@@ -172,30 +267,16 @@ export async function mintServiceToken(
   if (!input.reason) throw invalidRequest("reason is required");
 
   return db.transaction(async (tx) => {
-    // The principal is a REAL human user, resolved by email (citext — the lookup
-    // is case-insensitive). Not a synthetic service user: validateAccessToken
-    // joins `users` for the role, and a synthetic principal would own its own
-    // empty journal, which is the opposite of what a journal-writing agent needs.
-    const found = await tx
-      .select({ id: users.id, email: users.email, role: users.role })
-      .from(users)
-      .where(eq(users.email, input.userEmail))
-      .limit(1);
-    const user = found[0];
-    if (!user) {
-      throw new ServiceTokenError("unknown_user", `no user with email "${input.userEmail}"`);
-    }
+    // The principal is a REAL human user. Not a synthetic service user:
+    // validateAccessToken joins `users` for the role, and a synthetic principal
+    // would own its own empty journal, which is the opposite of what a
+    // journal-writing agent needs.
+    const user = await findPrincipal(tx, input.userEmail);
 
     // Find-or-create the service client. One client per consumer name (a partial
     // unique index enforces it), so a leak is attributable and revocable without
     // touching the other consumers.
-    const existing = await tx
-      .select({ clientId: oauthClient.clientId })
-      .from(oauthClient)
-      .where(and(eq(oauthClient.clientName, input.clientName), eq(oauthClient.isService, true)))
-      .limit(1);
-
-    let clientId = existing[0]?.clientId;
+    let clientId = await findServiceClient(tx, input.clientName);
     const clientCreated = clientId === undefined;
     if (clientId === undefined) {
       clientId = randomClientId();
@@ -203,10 +284,11 @@ export async function mintServiceToken(
       //   redirectUris []  — resolveAuthorizationClient exact-matches against the
       //                      registered set, so EVERY redirect_uri is rejected and
       //                      the browser flow cannot start for this client.
-      //   grantTypes  []   — declarative honesty; the token route does not consult
-      //                      it (see ADR-010 risks). What actually closes the flow
-      //                      is the empty redirect set plus the absence of any code
-      //                      or refresh row for this client.
+      //   grantTypes  []   — ENFORCED, not decorative: exchangeAuthorizationCode
+      //                      and exchangeRefreshToken both refuse a grant the
+      //                      client is not registered for, so /oauth/token stays
+      //                      closed to this client even if a redirect-less grant
+      //                      (client_credentials, device code) lands later.
       //   secret null      — there is nothing to authenticate for.
       //   scope null       — the token row is the only authority, so nothing drifts
       //                      after a scope-changing rotation.
@@ -295,6 +377,83 @@ export async function mintServiceToken(
       expiresAt,
     };
   });
+}
+
+/**
+ * What `mint --yes` WOULD do, against the same database and the same validators,
+ * writing nothing.
+ *
+ * Every check the mint can fail on runs here — scopes, TTL, audience, and the
+ * principal lookup — so a dry run that exits 0 is a real statement about the
+ * apply. Computing the plan from the flags alone would confirm only that the
+ * flags parsed, which is the failure mode this replaced: a clean-looking
+ * rehearsal followed by an exit 2 on the run that matters.
+ */
+export async function planServiceTokenMint(
+  db: Database,
+  input: MintServiceTokenInput,
+): Promise<ServiceTokenMintPlan> {
+  const scopes = checkScopes(input.scopes);
+  const ttlDays = checkTtlDays(input.ttlDays ?? DEFAULT_SERVICE_TOKEN_TTL_DAYS);
+  const resource = checkResource(input.resource);
+  if (!input.clientName) throw invalidRequest("clientName is required");
+  if (!input.reason) throw invalidRequest("reason is required");
+
+  const user = await findPrincipal(db, input.userEmail);
+
+  return {
+    clientName: input.clientName,
+    clientId: (await findServiceClient(db, input.clientName)) ?? null,
+    userId: user.id,
+    userEmail: user.email,
+    role: user.role,
+    scopes,
+    resource,
+    ttlDays,
+    expiresAt: new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000),
+  };
+}
+
+/**
+ * The row `revokeServiceToken` would act on, or null.
+ *
+ * Keyed EXACTLY as the revoke is — any access token by id, service client or
+ * not, long-lived or not — so the dry run and the apply can never disagree about
+ * which ids exist. Resolving it through `listServiceTokens` instead would apply
+ * that function's long-lived filter and report "no such token" for an ordinary
+ * 1h flow token that `revoke --yes` kills perfectly well, which is precisely the
+ * id an operator reaches for during a leak.
+ */
+export async function describeTokenForRevoke(
+  db: Database,
+  tokenId: string,
+): Promise<RevocableToken | null> {
+  if (!UUID_RE.test(tokenId)) return null;
+  const found = await db
+    .select({
+      tokenId: oauthAccessToken.id,
+      clientId: oauthAccessToken.clientId,
+      clientName: oauthClient.clientName,
+      isService: oauthClient.isService,
+      userEmail: users.email,
+      scopes: oauthAccessToken.scopes,
+      resource: oauthAccessToken.resource,
+      createdAt: oauthAccessToken.createdAt,
+      expiresAt: oauthAccessToken.expiresAt,
+      revokedAt: oauthAccessToken.revokedAt,
+      familyId: oauthAccessToken.familyId,
+    })
+    .from(oauthAccessToken)
+    .innerJoin(oauthClient, eq(oauthClient.clientId, oauthAccessToken.clientId))
+    // LEFT, not INNER: the revoke does not join users at all, and a token whose
+    // principal row vanished must still be reported rather than silently missing.
+    .leftJoin(users, eq(users.id, oauthAccessToken.userId))
+    .where(eq(oauthAccessToken.id, tokenId))
+    .limit(1);
+  const row = found[0];
+  if (!row) return null;
+  const { familyId, ...rest } = row;
+  return { ...rest, hasFamily: familyId !== null };
 }
 
 /**

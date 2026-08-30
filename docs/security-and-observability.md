@@ -16,7 +16,7 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
 | Invite link theft / replay | SHA-256 hash stored, never the raw token (as with `photo_upload_tokens`); bound to one address; single use enforced by an atomic conditional UPDATE; 7-day expiry. Unknown/expired/spent/revoked collapse to one message — no probing oracle. Residual: the token rides the URL path, so it reaches access logs and `Referer` — same accepted trade-off as `/u/<token>`. |
 | Lockout via a broken SSO config | The OIDC plugin is constructed only when all three env vars are present and the discovery URL parses, and `accountIssuer` is set explicitly so an IdP outage cannot throw out of plugin init. Local email+password sign-in is never gated on any of it; a test pins that fallback. |
 | OAuth token leakage / replay | Short-lived audience-bound access tokens (RFC 8707); PKCE + state; revocation via connector disconnect and a connected-apps page; tokens never logged. |
-| Long-lived service-token leakage (ADR-010) | The one exception to short lifetimes: an operator-minted token for a browserless client lives up to a year. Compensating controls — explicit per-consumer scopes (mint the minimum), the same RFC 8707 audience binding, one client per consumer so a leak is attributable and revocable in isolation, per-request validation with no cache so a revoke bites on the next call, printed to stdout exactly once and never stored or logged, and every mint/revoke audited. Residual risk: no refresh-rotation heartbeat would reveal theft, and a mint Job's stdout reaches Loki — prefer `kubectl exec`. |
+| Long-lived service-token leakage (ADR-010) | The one exception to short lifetimes: an operator-minted token for a browserless client lives up to a year. Compensating controls — a mintable-scope allowlist and a 365-day TTL ceiling enforced in the mint, the same RFC 8707 audience binding, one client per consumer so a leak is attributable and revocable in isolation, per-request validation with no cache so a revoke bites on the next call, and every mint/revoke audited under a per-run id. Delivery is the control that keeps it out of a log sink: the mint refuses to run unless stdout is an interactive terminal, so it exists only on an operator's `kubectl exec -it` stream and never in a container log or Loki. Residual risk: no refresh-rotation heartbeat would reveal theft; expiry is watched by the daily credential-expiry CronJob. |
 | Over-permissioned tools / scope leakage | Six tools, three scopes; no delete via MCP; catalog writes only as a side effect of `save_smoke`; responses are scope-bounded — catalog tools omit personal fields without `journal:read`. |
 | Duplicate/replayed writes | Envelope on every mutation: unique-constrained keys with request fingerprints, same-transaction; conflicting key reuse rejected (flow 004). |
 | SQL injection | Drizzle parameterized queries only; no string-built SQL (raw migrations are static files). |
@@ -38,12 +38,15 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
 - **Probes:** `/api/health` (process-only, house pattern) for k8s; Gatus for
   the web origin and `/mcp` reachability; crawler CronJobs alert on repeated
   failure, not single misses.
-- **Credential expiry:** the `dev-env-cli` OAuth access token (lead 7 days) and
+- **Credential expiry:** long-lived OAuth access tokens (lead 7 days) and
   `RELEASE_PLEASE_TOKEN` (lead 14 days) are counted down daily from haynes-ops
   (`kubernetes/main/apps/frontend/cigar-journal/app/credential-expiry-cronjob.yaml`).
   Both expiries are read from their source of truth — `oauth_access_token` and
   GitHub's token-expiration response header — never from a copied constant. The
-  job's terminal failure pages via `severity=critical`.
+  job's terminal failure pages via `severity=critical`. The OAuth half currently
+  names one client id; haynes-ops#2681 re-points it at every live token whose
+  lifetime exceeds 24h, so it follows an ADR-010 re-mint under a new client
+  instead of watching a retired one.
 - **Diagnosable by design:** every failure class in the PRD (connection,
   auth, validation, save, resolution) is distinguishable from metrics + one
   log line without reading journal content.

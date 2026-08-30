@@ -482,6 +482,27 @@ async function issueTokenPair(
   };
 }
 
+/**
+ * RFC 6749 §3.1/§4: a client may only use a grant it registered for. Enforced at
+ * issuance rather than in the route, so every current and future caller of the
+ * exchanges is covered by construction.
+ *
+ * This is what makes `grant_types: []` on a service client (ADR-010) a real
+ * closure of /oauth/token rather than a note in a comment: if a redirect-less
+ * grant (client_credentials, device code) is ever added, a service client is
+ * still refused here. DCR registration defaults to
+ * ["authorization_code","refresh_token"] (see registerClient), so this changes
+ * nothing for a client that did not narrow its own registration.
+ */
+function assertGrantAllowed(client: OAuthClientRow, grantType: string): void {
+  if (!client.grantTypes.includes(grantType)) {
+    throw new OAuthError(
+      "unauthorized_client",
+      `Client is not registered for the ${grantType} grant`,
+    );
+  }
+}
+
 /** authorization_code grant: verify PKCE + audience, consume the code once. */
 export async function exchangeAuthorizationCode(
   db: Database,
@@ -494,6 +515,7 @@ export async function exchangeAuthorizationCode(
   },
 ): Promise<TokenResponse> {
   const { client, code, codeVerifier, redirectUri, resource } = input;
+  assertGrantAllowed(client, "authorization_code");
   const rows = await db
     .select()
     .from(oauthAuthorizationCode)
@@ -581,6 +603,7 @@ export async function exchangeRefreshToken(
   },
 ): Promise<TokenResponse> {
   const { client, refreshToken, scope, resource } = input;
+  assertGrantAllowed(client, "refresh_token");
   const rows = await db
     .select()
     .from(oauthRefreshToken)

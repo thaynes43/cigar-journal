@@ -1,5 +1,7 @@
-import { SUPPORTED_SCOPES } from "./config.js";
-import { DEFAULT_SERVICE_TOKEN_TTL_DAYS } from "./service-tokens.js";
+import {
+  DEFAULT_SERVICE_TOKEN_TTL_DAYS,
+  MINTABLE_SERVICE_SCOPES,
+} from "./service-tokens.js";
 
 // argv parsing for the `token` role, split out of cli.ts so it is unit-testable
 // without executing main(). The crawler and importer keep their parsers inline
@@ -44,8 +46,6 @@ export type ParsedArgs =
   | { command: "list"; options: ListOptions }
   | { command: "revoke"; options: RevokeOptions };
 
-const MINTABLE_SCOPES = SUPPORTED_SCOPES.filter((scope) => scope !== "offline_access");
-
 export const USAGE = `service tokens (ADR-010)
 
 usage:
@@ -56,9 +56,9 @@ usage:
 
   --client-name   the consumer ("dev-env-pod"); created on first mint, reused across rotations
   --user-email    the principal the token acts as; must exist (exit 1 if not)
-  --scope         repeatable, required: ${MINTABLE_SCOPES.join(" | ")}.
-                  offline_access is refused.
-  --ttl-days      default ${DEFAULT_SERVICE_TOKEN_TTL_DAYS}, max 730
+  --scope         repeatable, required: ${MINTABLE_SERVICE_SCOPES.join(" | ")}.
+                  offline_access and curation:* are refused.
+  --ttl-days      default and maximum ${DEFAULT_SERVICE_TOKEN_TTL_DAYS} (it can only shorten)
   --resource      assert the audience; must equal this server's own /mcp resource
   --reason        why this credential exists (recorded in the audit row); required on mint
   --yes           apply. Without it mint/revoke print the plan and write nothing.
@@ -67,7 +67,37 @@ usage:
 
 env:
   DATABASE_URL     required
-  BETTER_AUTH_URL  required for mint (RFC 8707 audience) — fails fast if unset`;
+  BETTER_AUTH_URL  required for mint (RFC 8707 audience) — fails fast if unset
+
+mint --yes runs ONLY on an interactive terminal:
+  kubectl -n frontend exec -it deploy/cigar-journal-main -c app -- \\
+    sh -c 'cd /app/token && node --import tsx src/cli.ts mint … --yes'`;
+
+/**
+ * The delivery gate on `mint --yes`, checked BEFORE the row is written so a
+ * refusal leaves nothing behind.
+ *
+ * A mint prints a credential, so it runs only where the bytes cannot be
+ * collected. `kubectl exec -it` allocates a pty and the API server proxies it
+ * straight to the operator's terminal: verified 2026-08-30 that
+ * `process.stdout.isTTY` is true there and undefined without `-t`. A container's
+ * stdout, by contrast, is written to the node's log file and shipped to Loki for
+ * the whole retention window — so every non-interactive run (a Job, a CronJob, a
+ * pipe, a redirect to a file) is refused rather than discouraged. There is no
+ * flag to override this; a second delivery path is a second copy of the secret.
+ *
+ * Returns the operator-facing reason, or null when delivery is safe.
+ */
+export function mintDeliveryRefusal(isTty: boolean | undefined): string | null {
+  if (isTty === true) return null;
+  return [
+    "refusing to mint: stdout is not an interactive terminal.",
+    "A container's stdout is collected into Loki, so it cannot carry a credential.",
+    "Nothing was written. Re-run the mint through an interactive exec:",
+    "  kubectl -n frontend exec -it deploy/cigar-journal-main -c app -- \\",
+    "    sh -c 'cd /app/token && node --import tsx src/cli.ts mint … --yes'",
+  ].join("\n");
+}
 
 /** The next argv value, or a usage error naming the flag that wants one. */
 function value(argv: string[], index: number, flag: string): string {

@@ -38,11 +38,17 @@ such a row, replacing the hand-INSERT.
   (ADR-001) — and its colocated test.
 - **A dedicated service client per consumer** (`oauth_client.is_service`,
   migration 0021, unique per `client_name`). Registered with
-  `redirect_uris: []`, `grant_types: []`, `response_types: []`, no secret. The
-  empty redirect set is what closes the browser flow:
-  `resolveAuthorizationClient` exact-matches against the registered set, so
-  every `redirect_uri` is rejected — no authorization-server code changes.
-  One client per consumer makes a leak attributable and revocable in isolation.
+  `redirect_uris: []`, `grant_types: []`, `response_types: []`, no secret.
+  Two independent closures, both enforced: the empty redirect set means
+  `resolveAuthorizationClient` rejects every `redirect_uri`, so the browser
+  flow cannot start; and `grant_types` is now checked at issuance
+  (`exchangeAuthorizationCode` / `exchangeRefreshToken` throw
+  `unauthorized_client` for a grant the client did not register), so the
+  empty set closes `/oauth/token` for this client even if a redirect-less
+  grant is added later. Registration keeps defaulting to
+  `["authorization_code","refresh_token"]`, so no existing client changes
+  behavior. One client per consumer makes a leak attributable and revocable
+  in isolation.
 - **The principal is a real user, resolved by `--user-email`.**
   `validateAccessToken` joins `users` for the role at validation time, so a
   synthetic service user would own its own empty journal — the opposite of
@@ -57,8 +63,24 @@ such a row, replacing the hand-INSERT.
   `oauth.service_token.revoke` write `audit_log` rows (actor `system`) in the
   mint/revoke transaction, carrying the reason and the `tokenId` join key —
   never token material or a hash.
-- **Default TTL 365 days, max 730**; `--yes` gates every write; `mint --yes`
-  prints the token to stdout exactly once and nowhere else.
+- **Scopes and TTL are bounded in the mint, not by the caller's arguments.**
+  `catalog:read`, `journal:read` and `journal:write` are mintable;
+  `offline_access` is refused (no refresh chain) and so is `curation:*` — it
+  would let a browserless holder mutate the shared catalog under the
+  subject's admin role for a year. TTL defaults to 365 days **and caps
+  there**, so `--ttl-days` can only shorten.
+- **One delivery path, and no other is possible.** `mint --yes` refuses to run
+  unless stdout is an interactive terminal, and refuses before writing
+  anything. A container's stdout is collected into Loki for the whole
+  retention window, so a Job or CronJob mint would put the credential in a log
+  sink; `kubectl exec -it` allocates a pty whose stream the API server proxies
+  to the operator and which never becomes a log line. There is no override
+  flag and no Job manifest — a second delivery path is a second copy of the
+  secret. `--yes` still gates every write.
+- **Both dry runs read the database.** `mint` without `--yes` runs the same
+  scope, TTL, audience and principal checks the apply runs, and `revoke`
+  without `--yes` resolves ids exactly as the revoke does (any token row, not
+  only long-lived ones). A rehearsal that confirms nothing is not a rehearsal.
 
 This is not the ADR-004 anti-goal: the credential is user-bound,
 audience-bound (RFC 8707), scope-limited, per-consumer, revocable, and never
@@ -75,14 +97,19 @@ any future hand-INSERT.
 
 What we accept: a year-long bearer that acts as its user, with no
 refresh-rotation heartbeat that would reveal theft, held by whoever can read
-the secret store, the pod env, or a mint Job's log. Expiry is a cliff, not a
-gradual failure — `list` reports days-remaining, but that is a pull, not an
-alert (follow-up: a `--json` mode polled by the dev-env-ops cron).
-`grant_types: []` is documentation, not enforcement — the token route never
-consults it — so if a redirect-less grant (client credentials, device code)
-ever lands, a service client would silently become usable at `/oauth/token`;
-enforcing `grant_types` at the token endpoint is the real fix when that day
-comes. And when the connected-apps page ADR-004 promises arrives, it must
+the secret store or the pod env. Expiry is a cliff, not a gradual failure —
+`list` reports days-remaining, but that is a pull; the alert is the daily
+`cigar-journal-credential-expiry` CronJob in haynes-ops. That Job currently
+pins the legacy `client_id`, so haynes-ops#2681 re-points it at every live
+token whose lifetime exceeds 24h — following the credential across this
+cutover with no edit, and failing when none exists at all.
+
+Containment of the mint is enforced three ways: it is absent from
+`index.ts`, the package's `exports` map blocks subpath imports, and an
+ESLint `no-restricted-imports` rule refuses a relative path into
+`packages/oauth/src/service-tokens*` from anywhere outside `@cj/oauth`.
+
+And when the connected-apps page ADR-004 promises arrives, it must
 decide explicitly whether service clients appear: invisible means the owner
 cannot revoke them from the UI, naively listed means a "disconnect" could kill
 a production credential. Recommended: shown, read-only, admin-revocable.
