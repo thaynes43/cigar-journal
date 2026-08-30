@@ -8,11 +8,58 @@ import { createMcpServer } from "./server.js";
 import { bearerAuth } from "./auth.js";
 import { jsonResponseEnabled } from "./config.js";
 import { mcpEvent } from "./logger.js";
+import { describeRequestMeta, shapeOf } from "./photo-intake.js";
 
 // The HTTP surface: GET /healthz and the Streamable HTTP MCP transport at /mcp
 // (ADR-005). One transport per MCP session, keyed by the mcp-session-id the SDK
 // assigns on initialize — the spike-proven shape. A fresh initialize with no
 // session id creates a session and its own McpServer over @cj/domain.
+
+// The add_smoke_photo intake probe (see photo-intake.ts). It runs at the HTTP
+// layer, on the RAW JSON-RPC body, because the MCP SDK validates tool input
+// BEFORE the handler runs and raises a rejection as McpError(InvalidParams) —
+// which never reaches `mcpEvent`. So a call carrying an undeclared top-level key
+// (the `.strict()` schema refuses it, and deliberately keeps refusing it: relaxing
+// would flip `additionalProperties` in the published manifest) leaves ZERO trace
+// today. This record is the one that can finally answer the owner's real question:
+// does the host put the file somewhere we never looked?
+//
+// It is TOTAL by construction — it reads, never mutates; tolerates a JSON-RPC
+// batch array; returns immediately for any other method; and every call site
+// wraps it in try/catch. A diagnostic must never become an outage.
+//
+// It sits AFTER bearerAuth on purpose: before it, an unauthenticated caller could
+// write arbitrary key names into Loki.
+function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): void {
+  const messages = Array.isArray(body) ? body : [body];
+  for (const message of messages) {
+    if (typeof message !== "object" || message === null) continue;
+    const rpc = message as Record<string, unknown>;
+    if (rpc.method !== "tools/call") continue;
+    const params = rpc.params;
+    if (typeof params !== "object" || params === null) continue;
+    const call = params as Record<string, unknown>;
+    if (call.name !== "add_smoke_photo") continue;
+
+    const args = call.arguments;
+    const image =
+      typeof args === "object" && args !== null && !Array.isArray(args)
+        ? (args as Record<string, unknown>).image
+        : undefined;
+
+    // Key names and JSON types only — never a handle's values (a download_url is a
+    // short-lived credential; its path and query are the credential).
+    mcpEvent("photo_intake_request", {
+      tool: "add_smoke_photo",
+      sessionId,
+      rpcId: rpc.id,
+      argKeys: shapeOf(args).keys,
+      argImage: shapeOf(image),
+      metaKeys: shapeOf(call._meta).keys,
+      metaFileParams: describeRequestMeta(call._meta),
+    });
+  }
+}
 
 // `storage` is the photo object store (ADR-007), read once from the environment
 // and shared across sessions; null when photos are unconfigured, in which case
@@ -78,7 +125,22 @@ export function buildApp(
 
   // express.json() runs before bearerAuth so the parsed JSON-RPC body is
   // available for per-tool scope determination (see requiredScopesForBody).
-  app.post("/mcp", express.json(), bearerAuth(deps.db), (req, res) => void handlePost(req, res));
+  // The photo probe follows bearerAuth and precedes the transport, so an
+  // add_smoke_photo call is recorded even when the SDK rejects its arguments.
+  app.post(
+    "/mcp",
+    express.json(),
+    bearerAuth(deps.db),
+    (req, _res, next) => {
+      try {
+        logPhotoIntakeRequest(req.body, req.headers["mcp-session-id"] as string | undefined);
+      } catch {
+        // A diagnostic must never fail a request.
+      }
+      next();
+    },
+    (req, res) => void handlePost(req, res),
+  );
   app.get("/mcp", bearerAuth(deps.db), (req, res) => void handleSessionRequest(req, res));
   app.delete("/mcp", bearerAuth(deps.db), (req, res) => void handleSessionRequest(req, res));
 

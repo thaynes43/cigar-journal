@@ -1,8 +1,8 @@
 import { randomBytes, createHash, randomUUID } from "node:crypto";
-import { createServer, type Server as HttpServer } from "node:http";
+import { createServer, type Server as HttpServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -378,6 +378,45 @@ describe("@cj/mcp adapter", () => {
       expect(inputSchema.properties ?? {}).toHaveProperty("image");
       // `image` stays OUT of required — a missing/partial file must never block the call.
       expect(inputSchema.required ?? []).not.toContain("image");
+    });
+  });
+
+  it("tools/list publishes the exact add_smoke_photo `image` schema (manifest stability)", async () => {
+    // A PIN, not a nicety. schemas.ts wraps `image` in a `z.preprocess` so an
+    // unparsable delivery reaches the handler and gets LOGGED instead of being
+    // rejected before any record exists — and that wrapper is only safe because it
+    // emits a byte-identical published schema. A zod/SDK upgrade that changes how a
+    // pipe is emitted would silently rewrite the file-input declaration ChatGPT
+    // reads; this test fails first. (Related: `.catch()` cannot be used here at all
+    // — it throws "Dynamic catch values are not supported in JSON Schema" at
+    // emission time and would break tools/list for the WHOLE server.)
+    await withClient(ownerFull, async (client) => {
+      const { tools } = await client.listTools();
+      const photo = tools.find((t) => t.name === "add_smoke_photo")!;
+      const inputSchema = photo.inputSchema as {
+        properties: Record<string, unknown>;
+        required?: string[];
+      };
+
+      const image = inputSchema.properties.image as Record<string, unknown>;
+      expect(image.type).toBe("object");
+      expect(image.additionalProperties).toEqual({});
+      const properties = image.properties as Record<string, { type: string }>;
+      expect(Object.keys(properties).sort()).toEqual([
+        "download_url",
+        "file_id",
+        "file_name",
+        "mime_type",
+      ]);
+      for (const [name, schema] of Object.entries(properties)) {
+        expect(schema.type, `image.${name} must stay a plain string`).toBe("string");
+      }
+      // No sub-field is required, and `image` itself stays out of `required`.
+      expect(image.required).toBeUndefined();
+      expect(inputSchema.required ?? []).not.toContain("image");
+      expect((photo._meta as Record<string, unknown> | undefined)?.["openai/fileParams"]).toEqual([
+        "image",
+      ]);
     });
   });
 
@@ -1773,6 +1812,471 @@ describe("@cj/mcp adapter", () => {
       const data = payloadOf(result) as { mode: string; uploadUrl: string };
       expect(data.mode).toBe("upload_url");
       expect(data.uploadUrl).toMatch(new RegExp(`^${ORIGIN}/u/[A-Za-z0-9_-]+$`));
+    });
+  });
+
+
+  // ---- add_smoke_photo intake diagnostics (issue: in-chat images never arrive) --
+  //
+  // THE ACCEPTANCE BAR these tests defend: from ONE `[mcp] photo_intake` line, a
+  // human must be able to say which of these happened — nothing delivered /
+  // delivered without a usable URL (and which keys it had) / URL present but
+  // unfetchable / success. Before this change all four produced the same output and
+  // the same single log line (`tool_called … latencyMs:9`).
+
+  // Capture the structured `[mcp]` lines emitted while `fn` runs. mcpEvent writes
+  // through console.log, so this is the real wire format an operator greps in Loki.
+  async function captureMcpLog<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    });
+    try {
+      const value = await fn();
+      return { value, lines };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  // Parse the JSON payload of the single `[mcp] <event>` line.
+  function eventPayload(lines: string[], event: string): Record<string, unknown> {
+    const marker = `[mcp] ${event} `;
+    const line = lines.find((l) => l.includes(marker));
+    expect(line, `no ${event} line was emitted; saw: ${lines.join(" | ")}`).toBeDefined();
+    return JSON.parse(line!.slice(line!.indexOf("{", line!.indexOf(marker)))) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  // A one-shot fixture server standing in for the host's short-lived signed URL.
+  async function withFixture<T>(
+    handler: (req: unknown, res: ServerResponse) => void,
+    fn: (url: string) => Promise<T>,
+    path = "/img.png",
+  ): Promise<T> {
+    const fixture: HttpServer = createServer((req, res) => {
+      res.on("error", () => {});
+      req.on("error", () => {});
+      handler(req, res);
+    });
+    await new Promise<void>((resolve) => fixture.listen(0, resolve));
+    try {
+      return await fn(`http://127.0.0.1:${(fixture.address() as AddressInfo).port}${path}`);
+    } finally {
+      await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    }
+  }
+
+  it("records `no_delivery` when nothing arrived on either channel", async () => {
+    await withClient(ownerFull, async (client) => {
+      const smokeId = await saveBareSmoke(client, "intake-no-delivery");
+      const { value, lines } = await captureMcpLog(() =>
+        call(client, "add_smoke_photo", { smokeId, kind: "band" }),
+      );
+
+      const data = payloadOf(value) as { mode: string; delivery: { status: string } };
+      expect(data.mode).toBe("upload_url");
+      expect(data.delivery.status).toBe("no_image_received");
+
+      const record = eventPayload(lines, "photo_intake");
+      expect(record.outcome).toBe("no_delivery");
+      expect(record.channel).toBe("none");
+      expect(record.argument).toEqual({ type: "absent", keys: [], filled: [] });
+      expect(record.requestMeta).toEqual({ type: "absent", keys: [], filled: [], count: 0 });
+    });
+  });
+
+  it("records `no_url` and the keys that DID arrive for a file_id-only handle", async () => {
+    // The owner's exact reported failure: ChatGPT sends a handle the server cannot
+    // resolve. The file lives in the user's ChatGPT workspace and only the host can
+    // turn it into a download_url — so this is a NAMED permanent outcome, not a
+    // retryable bug, and mode B stays the working path.
+    await withClient(ownerFull, async (client) => {
+      const smokeId = await saveBareSmoke(client, "intake-file-id-only");
+      const { value, lines } = await captureMcpLog(() =>
+        call(client, "add_smoke_photo", {
+          smokeId,
+          image: { file_id: "file_abc123", mime_type: "image/jpeg" },
+        }),
+      );
+
+      expect(value.isError).not.toBe(true);
+      const data = payloadOf(value) as { mode: string; delivery: { status: string } };
+      expect(data.mode).toBe("upload_url");
+      expect(data.delivery.status).toBe("image_reference_unusable");
+
+      const record = eventPayload(lines, "photo_intake");
+      expect(record.outcome).toBe("no_url");
+      expect(record.channel).toBe("argument");
+      expect(record.argument).toEqual({
+        type: "object",
+        keys: ["file_id", "mime_type"],
+        filled: ["file_id", "mime_type"],
+      });
+      // Key NAMES only — the file id itself is a value and never lands in the log.
+      expect(JSON.stringify(record)).not.toContain("file_abc123");
+    });
+  });
+
+  it("survives an `image` the schema cannot parse and records its shape", async () => {
+    // Every one of these FAILED input validation before this change — raised by the
+    // SDK before the handler ran, so they left zero lines in Loki and returned a
+    // bare error string to the model. `image: null` is a plausible "no file
+    // attached" host shape, and it hard-errored the whole call.
+    const cases: { image: unknown; outcome: string; type: string }[] = [
+      { image: "https://chatgpt.com/c/file-abc", outcome: "not_an_object", type: "string" },
+      { image: null, outcome: "not_an_object", type: "null" },
+      { image: 5, outcome: "not_an_object", type: "number" },
+      // An object with a wrongly-typed URL is an object — it is `no_url`, not
+      // `not_an_object`, and the record names the key that arrived.
+      { image: { download_url: 12 }, outcome: "no_url", type: "object" },
+    ];
+
+    await withClient(ownerFull, async (client) => {
+      for (const testCase of cases) {
+        const smokeId = await saveBareSmoke(client, "intake-unparsable");
+        const { value, lines } = await captureMcpLog(() =>
+          call(client, "add_smoke_photo", { smokeId, image: testCase.image }),
+        );
+
+        expect(value.isError, `image=${JSON.stringify(testCase.image)} must not error`).not.toBe(
+          true,
+        );
+        const data = payloadOf(value) as { mode: string; delivery: { status: string } };
+        expect(data.mode).toBe("upload_url");
+        expect(data.delivery.status).toBe("image_reference_unusable");
+
+        const record = eventPayload(lines, "photo_intake");
+        expect(record.outcome).toBe(testCase.outcome);
+        expect((record.argument as { type: string }).type).toBe(testCase.type);
+        // The internal leniency marker never reaches the record or the result.
+        expect(JSON.stringify(record)).not.toContain("__cj_unparsed_image");
+        expect(JSON.stringify(data)).not.toContain("__cj_unparsed_image");
+      }
+    });
+  });
+
+  it("falls back to mode B with `fetch_failed` when the signed URL does not resolve", async () => {
+    // Behavior change: this used to return the contract error `unavailable`. Mode B
+    // is guaranteed, so a dead URL now yields a working upload link and the signal
+    // moves into the record — queryable and alertable, unlike an error the user
+    // never sees.
+    await withFixture(
+      (_req, res) => {
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("gone");
+      },
+      async (fixtureUrl) => {
+        await withClient(ownerFull, async (client) => {
+          const smokeId = await saveBareSmoke(client, "intake-fetch-failed");
+          const { value, lines } = await captureMcpLog(() =>
+            call(client, "add_smoke_photo", { smokeId, image: { download_url: fixtureUrl } }),
+          );
+
+          expect(value.isError).not.toBe(true);
+          const data = payloadOf(value) as { mode: string; delivery: { status: string } };
+          expect(data.mode).toBe("upload_url");
+          expect(data.delivery.status).toBe("image_fetch_failed");
+
+          const record = eventPayload(lines, "photo_intake");
+          expect(record.outcome).toBe("fetch_failed");
+          expect(record.urlKey).toBe("download_url");
+          const fetched = record.fetch as { host: string; scheme: string; status: number };
+          expect(fetched.status).toBe(404);
+          expect(fetched.host).toBe("127.0.0.1");
+          expect(fetched.scheme).toBe("http");
+        });
+      },
+    );
+  });
+
+  it("enforces the 20MB cap on the streamed byte count, not the header", async () => {
+    const megabyte = Buffer.alloc(1024 * 1024, 0x41);
+    await withFixture(
+      (_req, res) => {
+        // No content-length: chunked, so only the streamed count can stop it.
+        res.writeHead(200, { "content-type": "image/png" });
+        let sent = 0;
+        const pump = (): void => {
+          while (sent < 21) {
+            sent += 1;
+            if (!res.write(megabyte)) {
+              res.once("drain", pump);
+              return;
+            }
+          }
+          res.end();
+        };
+        pump();
+      },
+      async (fixtureUrl) => {
+        await withClient(ownerFull, async (client) => {
+          const smokeId = await saveBareSmoke(client, "intake-too-large");
+          const { value, lines } = await captureMcpLog(() =>
+            call(client, "add_smoke_photo", { smokeId, image: { download_url: fixtureUrl } }),
+          );
+
+          const data = payloadOf(value) as { mode: string; delivery: { status: string } };
+          expect(data.mode).toBe("upload_url");
+          expect(data.delivery.status).toBe("image_fetch_failed");
+
+          const record = eventPayload(lines, "photo_intake");
+          expect(record.outcome).toBe("too_large");
+          expect((record.fetch as { bytes: number }).bytes).toBeGreaterThan(20 * 1024 * 1024);
+        });
+      },
+    );
+  });
+
+  it("falls back to mode B with `unreadable` when the bytes are not a photo", async () => {
+    // Used to be a `validation_error` telling the model to attach a supported
+    // image — advice the model cannot act on, since it never attached anything.
+    await withFixture(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("this is definitely not an image, it is just prose");
+      },
+      async (fixtureUrl) => {
+        await withClient(ownerFull, async (client) => {
+          const smokeId = await saveBareSmoke(client, "intake-unreadable");
+          const { value, lines } = await captureMcpLog(() =>
+            call(client, "add_smoke_photo", { smokeId, image: { download_url: fixtureUrl } }),
+          );
+
+          expect(value.isError).not.toBe(true);
+          const data = payloadOf(value) as { mode: string; delivery: { status: string } };
+          expect(data.mode).toBe("upload_url");
+          expect(data.delivery.status).toBe("image_unreadable");
+          const record = eventPayload(lines, "photo_intake");
+          expect(record.outcome).toBe("unreadable");
+          // The error CLASS is recorded, never its message.
+          expect(record.decodeError).toBe("UnsupportedImageTypeError");
+        });
+      },
+    );
+  });
+
+  it("attaches a PNG served as application/octet-stream by sniffing magic bytes", async () => {
+    // The pipeline gates on the DECLARED type, so a perfectly good photo used to
+    // fail on a bad header alone. Magic bytes now win.
+    await withFixture(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        res.end(PNG_FIXTURE);
+      },
+      async (fixtureUrl) => {
+        await withClient(ownerFull, async (client) => {
+          const smokeId = await saveBareSmoke(client, "intake-sniffed");
+          const { value, lines } = await captureMcpLog(() =>
+            call(client, "add_smoke_photo", {
+              smokeId,
+              image: { url: fixtureUrl, file_id: "file_sniff" },
+            }),
+          );
+
+          const data = payloadOf(value) as { mode: string; photo: { photoId: string } };
+          expect(data.mode).toBe("attached");
+          expect(data.photo.photoId).toBeTruthy();
+
+          const record = eventPayload(lines, "photo_intake");
+          expect(record.outcome).toBe("attached");
+          expect(record.mode).toBe("attached");
+          // The alternate URL key was accepted, and the record says which one hit.
+          expect(record.urlKey).toBe("url");
+          const fetched = record.fetch as { declaredType: string; sniffedType: string };
+          expect(fetched.declaredType).toBe("application/octet-stream");
+          expect(fetched.sniffedType).toBe("image/png");
+        });
+      },
+    );
+  });
+
+  it("refuses a non-loopback http reference before opening a socket", async () => {
+    // `image.download_url` is model-writable and the server fetches it from inside
+    // the cluster, so widening the accepted URL keys had to ship WITH this guard.
+    await withClient(ownerFull, async (client) => {
+      const smokeId = await saveBareSmoke(client, "intake-bad-scheme");
+      const { value, lines } = await captureMcpLog(() =>
+        call(client, "add_smoke_photo", {
+          smokeId,
+          image: { download_url: "http://169.254.169.254/latest/meta-data" },
+        }),
+      );
+
+      const data = payloadOf(value) as { mode: string; delivery: { status: string } };
+      expect(data.mode).toBe("upload_url");
+      expect(data.delivery.status).toBe("image_reference_unusable");
+
+      const record = eventPayload(lines, "photo_intake");
+      expect(record.outcome).toBe("bad_scheme");
+      // No fetch was attempted, so there is no fetch record to report.
+      expect(record.fetch).toBeUndefined();
+    });
+  });
+
+
+  it("follows a redirect to the real object, and refuses one that escapes the scheme guard", async () => {
+    // Signed download URLs commonly 302 to a CDN, so redirects must work — but they
+    // are followed MANUALLY and revalidated on every hop, because auto-following
+    // would be a free bypass of the guard (https://host/ -> http://169.254.169.254/).
+    await withFixture(
+      (req, res) => {
+        const url = (req as { url?: string }).url ?? "";
+        if (url.startsWith("/hop")) {
+          res.writeHead(302, { location: "/img.png" });
+          res.end();
+          return;
+        }
+        if (url.startsWith("/escape")) {
+          res.writeHead(302, { location: "http://169.254.169.254/latest/meta-data" });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { "content-type": "image/png" });
+        res.end(PNG_FIXTURE);
+      },
+      async (fixtureUrl) => {
+        const origin = new URL(fixtureUrl).origin;
+        await withClient(ownerFull, async (client) => {
+          const smokeId = await saveBareSmoke(client, "intake-redirect");
+
+          const followed = await captureMcpLog(() =>
+            call(client, "add_smoke_photo", {
+              smokeId,
+              image: { download_url: `${origin}/hop` },
+            }),
+          );
+          expect((payloadOf(followed.value) as { mode: string }).mode).toBe("attached");
+          const okRecord = eventPayload(followed.lines, "photo_intake");
+          expect(okRecord.outcome).toBe("attached");
+          expect((okRecord.fetch as { redirects: number }).redirects).toBe(1);
+
+          const blocked = await captureMcpLog(() =>
+            call(client, "add_smoke_photo", {
+              smokeId,
+              image: { download_url: `${origin}/escape` },
+            }),
+          );
+          const data = payloadOf(blocked.value) as { mode: string; delivery: { status: string } };
+          expect(data.mode).toBe("upload_url");
+          expect(data.delivery.status).toBe("image_fetch_failed");
+          const blockedRecord = eventPayload(blocked.lines, "photo_intake");
+          expect(blockedRecord.outcome).toBe("fetch_failed");
+          // The guard bit at the redirect, so the recorded host is still the origin
+          // we were allowed to talk to — the link-local address was never contacted.
+          expect((blockedRecord.fetch as { host: string }).host).toBe("127.0.0.1");
+          expect(blocked.lines.join("\n")).not.toContain("169.254.169.254");
+        });
+      },
+      "/img.png",
+    );
+  });
+
+  it("logs shapes, never values: no URL, query, token, or inline payload reaches the log", async () => {
+    await withFixture(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "image/png" });
+        res.end(PNG_FIXTURE);
+      },
+      async (fixtureUrl) => {
+        await withClient(ownerFull, async (client) => {
+          const smokeId = await saveBareSmoke(client, "intake-hygiene");
+          const signed = `${fixtureUrl}?sig=SUPERSECRETSIGNATURE&exp=99`;
+          const { value, lines } = await captureMcpLog(async () => {
+            await client.callTool({
+              name: "add_smoke_photo",
+              arguments: { smokeId, image: { download_url: signed, file_id: "file_secret_id" } },
+              _meta: { "openai/fileParams": [{ download_url: signed, file_id: "file_secret_id" }] },
+            });
+            // A second call whose only delivery is inline base64, to prove the
+            // payload never lands in a log line either.
+            return (await call(client, "add_smoke_photo", {
+              smokeId,
+              image: { data: PNG_FIXTURE.toString("base64"), mime_type: "image/png" },
+            })) as CallToolResult;
+          });
+
+          const mcpLines = lines.filter((l) => l.includes("[mcp] "));
+          const blob = mcpLines.join("\n");
+          for (const secret of [
+            "SUPERSECRETSIGNATURE",
+            "file_secret_id",
+            "/img.png",
+            "sig=",
+            PNG_FIXTURE.toString("base64").slice(0, 24),
+          ]) {
+            expect(blob, `a log line leaked ${secret}`).not.toContain(secret);
+          }
+          // …but the useful key names ARE there, on both channels.
+          expect(blob).toContain('"download_url"');
+          expect(blob).toContain('"file_id"');
+
+          // Inline base64 is a real delivery: it attaches, with no fetch at all.
+          const inline = payloadOf(value) as { mode: string };
+          expect(inline.mode).toBe("attached");
+        });
+      },
+    );
+  });
+
+  it("records an add_smoke_photo call the SDK rejects before the handler runs", async () => {
+    // The one class of call today's instrumentation cannot see AT ALL: `.strict()`
+    // refuses an undeclared top-level key inside the SDK, before `run()` — so no
+    // `tool_called`, no `tool_error`, nothing. The HTTP probe records it anyway,
+    // which is what will finally answer "does the host put the file somewhere we
+    // never looked?". The strict schema is deliberately unchanged: relaxing it
+    // would flip `additionalProperties` in the published manifest.
+    await withClient(ownerFull, async (client) => {
+      const smokeId = await saveBareSmoke(client, "intake-probe");
+      const { value, lines } = await captureMcpLog(
+        () =>
+          client.callTool({
+            name: "add_smoke_photo",
+            arguments: { smokeId, attachments: [{ file_id: "file_zzz" }] },
+          }) as Promise<CallToolResult>,
+      );
+
+      expect(value.isError).toBe(true);
+
+      const probe = eventPayload(lines, "photo_intake_request");
+      expect(probe.tool).toBe("add_smoke_photo");
+      expect(probe.argKeys).toEqual(["attachments", "smokeId"]);
+      expect(probe.argImage).toEqual({ type: "absent", keys: [], filled: [] });
+      expect(probe.metaFileParams).toEqual({ type: "absent", keys: [], filled: [], count: 0 });
+      // The handler never ran, so there is no photo_intake line — the probe is the
+      // only record, exactly as designed.
+      expect(lines.some((l) => l.includes("[mcp] photo_intake {"))).toBe(false);
+      // Nothing from the rejected arguments leaks as a value.
+      expect(lines.join("\n")).not.toContain("file_zzz");
+    });
+  });
+
+  it("emits a probe record carrying the request-_meta file-param shape", async () => {
+    await withClient(ownerFull, async (client) => {
+      const smokeId = await saveBareSmoke(client, "intake-probe-meta");
+      const { lines } = await captureMcpLog(() =>
+        client.callTool({
+          name: "add_smoke_photo",
+          arguments: { smokeId, image: { file_id: "f" } },
+          _meta: { "openai/fileParams": [{ file_id: "f1" }, { file_id: "f2" }] },
+        }),
+      );
+
+      const probe = eventPayload(lines, "photo_intake_request");
+      expect(probe.argImage).toEqual({ type: "object", keys: ["file_id"], filled: ["file_id"] });
+      expect(probe.metaFileParams).toEqual({
+        type: "object",
+        keys: ["file_id"],
+        filled: ["file_id"],
+        count: 2,
+      });
+      expect(probe.metaKeys).toEqual(["openai/fileParams"]);
+      // The probe and the handler record join on (sessionId, rpcId).
+      const record = eventPayload(lines, "photo_intake");
+      expect(record.rpcId).toEqual(probe.rpcId);
+      expect(record.sessionId).toEqual(probe.sessionId);
     });
   });
 

@@ -35,6 +35,23 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
   per vendor, match-queue depth.
 - **Logs (Loki):** structured; tool name + error code + correlation id, never
   payload prose. Auth events logged at grant/revoke.
+- **Photo intake — shapes, never values (2026-08-30).** `add_smoke_photo` emits
+  `photo_intake` (per call, from the handler) and `photo_intake_request` (per
+  `/mcp` POST, from the HTTP layer after bearer auth) so a failed attachment is
+  diagnosable: *nothing delivered* / *delivered without a usable URL, and these are
+  the keys it carried* / *URL present but unfetchable* / *success*. The rule that
+  makes this safe: a host file handle's `download_url` is a **short-lived signed
+  credential** — its path and query *are* the credential — so **no value from a
+  file handle is ever logged**. The record carries key NAMES, the JSON type of each
+  value, and a per-key "is a non-empty string" flag, nothing else; key names are
+  capped at 20 per record and truncated to 64 characters so a hostile handle keyed
+  by an identifier cannot smuggle data in or grow the line without bound. One
+  deliberate exception: `fetch.host` (hostname only, never path/query/fragment) is
+  recorded, because it is the only way to tell an egress block from an upstream
+  403 and a hostname is not the credential. `photo_intake_request` sits **after**
+  auth on purpose — before it, an unauthenticated caller could write arbitrary key
+  names into Loki — and is wrapped in try/catch so a diagnostic can never become an
+  outage.
 - **Probes:** `/api/health` (process-only, house pattern) for k8s; Gatus for
   the web origin and `/mcp` reachability; crawler CronJobs alert on repeated
   failure, not single misses.

@@ -128,6 +128,46 @@ journal workflow; per the per-conversation manifest cache above, the new tools
 reach a client only after a connector refresh and a new chat — but they are not
 intended for conversational clients at all.
 
+## 2026-08-30 — in-chat image attachment: what is verified, what is not
+
+**Verified on the wire (live `tools/list`, authenticated, production endpoint).**
+`add_smoke_photo` publishes `_meta = {"openai/fileParams": ["image"]}` and an
+object-typed top-level `image` property, out of `required`. The manifest/declaration
+hypothesis for the owner's failure is **disproven** — the declaration is correct and
+ChatGPT is reading it.
+
+**Verified in Loki.** The owner's failing call is recorded:
+`[mcp] tool_called {"tool":"add_smoke_photo","latencyMs":9}` — and that was the
+*entire* record. The model behaved correctly: it called with `{ smokeId, kind }` and
+did **not** invent an `image` field, exactly as the tool contract asks. The smoke
+saved fine; only the photo fell back to the mode-B link. Nothing in the log could
+say whether an image argument arrived, whether request `_meta` arrived, or why mode
+B was chosen — and a `file_id`-only handle would have looked identical to no image
+at all.
+
+**Still unresolved: does ChatGPT forward an in-chat image to the tool call?** The
+user had uploaded photos *earlier in the same conversation*, not in the invoking
+turn. The leading hypothesis is that only a file attached to the *current* turn is
+forwarded — but that is a hypothesis drawn from one transcript, not a verified fact,
+so it is deliberately **not** asserted in the shipped tool description. The
+`photo_intake_request` record (tool-contract.md, "Intake diagnostics") is what will
+settle it: it is written before input validation, on the raw JSON-RPC body, so it
+reports every key the host actually sent — including keys we do not currently read.
+
+**What shipped meanwhile.** Named intake outcomes in the log; a schema that no
+longer rejects an odd `image` before it can be recorded; acceptance of alternate URL
+keys, inline base64, and magic-byte type sniffing; an https-or-loopback scheme
+guard; fetch/decode failure falling back to the mode-B link instead of erroring; and
+a `delivery.status` on the mode-B result so the model can tell the user something
+true. **This may not make in-chat attachment work at all.** If ChatGPT forwards
+nothing, the outcome is a precise diagnosis and honest model guidance — mode B stays
+the working path, and the logs become the evidence for an upstream report.
+
+**Re-testing requires a connector refresh AND a new chat.** The tool description and
+server instructions changed, and per the manifest-cache section above an in-flight
+conversation keeps serving the pre-change text. Testing without both is testing the
+old description against the new server, and the result is uninterpretable.
+
 ## Workflows
 
 **Ideal (design target):** the user talks to ChatGPT normally for the whole
