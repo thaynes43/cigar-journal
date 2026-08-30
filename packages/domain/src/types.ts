@@ -769,6 +769,23 @@ export interface BrandShelf {
   // That cover cigar's photo row id, for fingerprinting the poster thumb (#127) —
   // null exactly when coverCigarId is null.
   coverProductPhotoId: string | null;
+  // The Wikidata/Commons brand image, populated ONLY when coverCigarId is null
+  // (a member product photo always wins — ADR-007, issue #127). Null when no
+  // servable brand image exists; the tile then falls back to BandTile art.
+  brandImage: BrandImageCover | null;
+}
+
+// A servable brand image plus the credit the surface is obliged to render with
+// it. The credit line is computed once at write time (crawl pod) so no surface
+// re-derives it; `sourceUrl` is the Commons file description page the credit
+// links to. Bytes stream from /api/brand-images/<slug>[/thumb]; `version`
+// fingerprints that URL so a replacement busts the year-long immutable cache.
+// It is derived from the stored object key, NOT the row id — the crawl job
+// upserts one row per slug, so the row id never changes while the bytes do.
+export interface BrandImageCover {
+  version: string;
+  creditLine: string;
+  sourceUrl: string;
 }
 
 export interface BrowseBrandsResult {
@@ -837,6 +854,10 @@ export interface GetBrandResult {
   coverCigarId: string | null;
   // That cover cigar's photo row id, for fingerprinting the hero thumb (#127).
   coverProductPhotoId: string | null;
+  // The brand-level fallback cover, populated only when coverCigarId is null
+  // (#127). Line sections deliberately do NOT fall back: a brand logo standing in
+  // for a line section would misrepresent the product.
+  brandImage: BrandImageCover | null;
   lines: LineGroup[]; // alphabetical by line
   loose: CatalogCigarTile[]; // cigars with no line, a trailing section
 }
@@ -1255,6 +1276,85 @@ export interface SetProductPhotoRightsInput {
 export interface SetProductPhotoRightsResult {
   cigarId: string;
   rights: ProductPhotoRights;
+  replayed: boolean;
+}
+
+// The brand-image lookup outcome (issue #127, migration 0019). Distinct from
+// `rights`: this records what the Wikidata lookup found, and doubles as the
+// negative cache the crawl job honors.
+export type BrandImageStatus = "resolved" | "ambiguous" | "no_match" | "no_image" | "blocked" | "error";
+
+// Brand-image display gating — the same vocabulary and semantics as
+// ProductPhotoRights. `suppressed` is a takedown: never served, and never
+// re-resolved by a later crawl (a tombstone, not a retry).
+export type BrandImageRights = "pending" | "approved" | "suppressed";
+
+// One Wikidata entity the lookup considered, persisted when the outcome was
+// ambiguous so a curator can decide without a second crawl.
+export interface BrandImageCandidate {
+  qid: string;
+  label: string | null;
+  description: string | null;
+  imageFile: string | null;
+  score: number;
+  reasons: string[];
+}
+
+// A brand-image row as the curator console sees it (DESIGN-003 §Curation).
+export interface BrandImageAdminRow {
+  brandSlug: string;
+  brandName: string;
+  status: BrandImageStatus;
+  rights: BrandImageRights;
+  wikidataQid: string | null;
+  sourceUrl: string | null;
+  creditLine: string | null;
+  // Whether bytes are stored — a resolved row with no object yet is waiting on
+  // the next crawl-pod run (the curator's pick is recorded, the web never fetches
+  // Wikimedia itself).
+  hasImage: boolean;
+  candidates: BrandImageCandidate[];
+  note: string | null;
+}
+
+export interface BrandImageQueueResult {
+  // Ambiguous lookups waiting on a human pick.
+  ambiguous: BrandImageAdminRow[];
+  // Resolved rows, whatever their rights — the approve/suppress worklist.
+  resolved: BrandImageAdminRow[];
+}
+
+// Approve or suppress a brand's Wikimedia cover (issue #127). Same shape and
+// semantics as SetProductPhotoRightsInput, keyed on the brand slug.
+export interface SetBrandImageRightsInput {
+  clientRequestId: string;
+  brandSlug: string;
+  rights: BrandImageRights;
+  attribution?: CurationAttribution;
+  correlationId?: string;
+}
+
+export interface SetBrandImageRightsResult {
+  brandSlug: string;
+  rights: BrandImageRights;
+  replayed: boolean;
+}
+
+// Resolve an ambiguous brand-image lookup by picking one of its recorded
+// candidates. Records the pick only — status flips to `resolved` with the keys
+// still null, and the next crawl-pod run downloads the bytes. The web app never
+// talks to Wikimedia.
+export interface ChooseBrandImageInput {
+  clientRequestId: string;
+  brandSlug: string;
+  qid: string;
+  attribution?: CurationAttribution;
+  correlationId?: string;
+}
+
+export interface ChooseBrandImageResult {
+  brandSlug: string;
+  qid: string;
   replayed: boolean;
 }
 

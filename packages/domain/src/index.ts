@@ -77,6 +77,18 @@ export {
   recentMerges,
   MERGE_LEDGER_TABLES,
 } from "./curation.js";
+// Brand imagery (ADR-007 third binding, issue #127): the Wikidata/Commons wall
+// cover used only where no member cigar has a product photo. The read path is
+// catalog-scoped; the curator mutations record decisions only — the crawl pod
+// owns every byte and every Wikimedia request.
+export {
+  getBrandImage,
+  loadBrandCovers,
+  brandImageQueue,
+  setBrandImageRights,
+  chooseBrandImageCandidate,
+  type BrandImageObject,
+} from "./brand-images.js";
 export { getMyInventory, deriveHoldingSummary, getHoldingForCigar } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
 

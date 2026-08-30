@@ -1,0 +1,41 @@
+{
+  "query": {
+    "pages": [
+      {
+        "pageid": 1234,
+        "ns": 6,
+        "title": "File:Camacho logo.png",
+        "imagerepository": "local",
+        "imageinfo": [
+          {
+            "size": 402210,
+            "width": 2000,
+            "height": 2000,
+            "url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Camacho_logo.png",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Camacho_logo.png",
+            "mime": "image/jpeg",
+            "extmetadata": {
+              "LicenseShortName": {
+                "value": "Fair use",
+                "source": "commons-desc-page"
+              },
+              "Artist": {
+                "value": "Camacho Cigars",
+                "source": "commons-desc-page"
+              },
+              "Copyrighted": {
+                "value": "True",
+                "source": "commons-desc-page"
+              }
+            },
+            "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Camacho_logo.png/1024px-Camacho_logo.png.png",
+            "thumbwidth": 1024,
+            "thumbheight": 1024,
+            "thumbmime": "image/png"
+          }
+        ]
+      }
+    ]
+  },
+  "success": 1
+}

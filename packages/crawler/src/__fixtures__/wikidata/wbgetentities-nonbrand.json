@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "Q9100020": {
+      "type": "item",
+      "id": "Q9100020",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Ashton"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "town in England"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000903"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P18": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Ashton town hall.jpg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Ashton"
+        }
+      }
+    }
+  },
+  "success": 1
+}

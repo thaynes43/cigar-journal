@@ -24,6 +24,7 @@ describe("migrations", () => {
     expect(names).toEqual(
       expect.arrayContaining([
         "audit_log",
+        "brand_images",
         "cigar_merges",
         "cigars",
         "duplicate_dismissals",
@@ -82,5 +83,32 @@ describe("migrations", () => {
 
     await pg.db.execute(sql`UPDATE invites SET redeemed_at = now() WHERE id = ${secondId}::uuid`);
     await expect(insert("hash-four")).resolves.toBeDefined();
+  });
+
+  // The brand_images rights model is enforced by shape (0019): a Wikimedia image
+  // may not be stored without the attribution the UI is obliged to render with
+  // it. A row carrying object_key but no source_url/license_name must not exist.
+  it("brand_images rejects stored bytes without their attribution", async () => {
+    const insert = (columns: string, values: string) =>
+      pg.db.execute(sql.raw(`INSERT INTO brand_images (${columns}) VALUES (${values})`));
+
+    // Drizzle wraps the driver error, so the constraint name rides the cause.
+    const rejected = await insert(
+      "brand_slug, brand_name, status, object_key, thumb_key, content_type",
+      "'gate-a', 'Gate A', 'resolved', 'brand/gate-a/1.jpg', 'brand/gate-a/1.thumb.jpg', 'image/jpeg'",
+    ).catch((e: unknown) => e);
+    expect((rejected as { cause?: { constraint?: string } })?.cause?.constraint).toBe(
+      "brand_images_servable_complete",
+    );
+
+    // Same row plus the credit columns is accepted.
+    await insert(
+      "brand_slug, brand_name, status, object_key, thumb_key, content_type, source_url, license_name",
+      "'gate-b', 'Gate B', 'resolved', 'brand/gate-b/1.jpg', 'brand/gate-b/1.thumb.jpg', 'image/jpeg', " +
+        "'https://commons.wikimedia.org/wiki/File:B.jpg', 'CC BY-SA 4.0'",
+    );
+
+    // And an outcome-only row (no bytes) is unconstrained — the negative cache.
+    await insert("brand_slug, brand_name, status", "'gate-c', 'Gate C', 'no_match'");
   });
 });

@@ -6,6 +6,7 @@ import { getAdapter, adapterSlugs } from "./adapters/index.js";
 import { createFetcher } from "./core/fetcher.js";
 import { runIngest, type CrawlMode, type IngestResult } from "./core/ingest.js";
 import { runProbe, formatProbe, probeFetchBudget } from "./core/probe.js";
+import { runBrandImages, probeBrandTaxonomy, type BrandImagesResult } from "./core/brand-images.js";
 import {
   parseApprovedWiki,
   diffApproved,
@@ -16,11 +17,13 @@ import type { VendorAdapter } from "./adapters/types.js";
 
 // One-shot CLI entry (run via tsx, mirroring the migrate/mcp roles). Selects a
 // vendor adapter and a mode, resolves/creates the vendor registry row, wires the
-// polite fetcher + (optional) photo storage, and drives one crawl. Two read-only
-// utility modes ride the same entry: `--probe` (live-verify an adapter before
-// enabling it, writes nothing) and `--import-approved` (the admin-reviewed
-// r/cubancigars approved-list diff). Reads DATABASE_URL and PHOTOS_S3_* from env.
-// See the ROLE DISPATCH marker in the Dockerfile for the exact k8s command array.
+// polite fetcher + (optional) photo storage, and drives one crawl. Three
+// vendor-independent modes ride the same entry: `--probe` (live-verify an adapter
+// before enabling it, writes nothing), `--import-approved` (the admin-reviewed
+// r/cubancigars approved-list diff) and `--brand-images` (the Wikidata/Commons
+// brand-cover job, issue #127 — an official-API client, not a vendor crawl).
+// Reads DATABASE_URL and PHOTOS_S3_* from env. See the ROLE DISPATCH marker in
+// the Dockerfile for the exact k8s command array.
 
 interface CrawlArgs {
   vendor: string | null;
@@ -28,6 +31,10 @@ interface CrawlArgs {
   dryRun: boolean;
   probe: boolean;
   importApproved: string | null;
+  brandImages: boolean;
+  brand: string | null;
+  refresh: boolean;
+  runId: string | null;
   yes: boolean;
   limit: number | null;
   databaseUrl: string | null;
@@ -42,6 +49,8 @@ usage:
   crawl --vendor <slug> --mode <seed|offers|enrich> [--dry-run] [--limit N] [--database-url <url>]
   crawl --vendor <slug> --probe [--database-url <url>]
   crawl --import-approved <file> [--yes] [--database-url <url>]
+  crawl --brand-images [--dry-run] [--limit N] [--brand "<name>"] [--refresh]
+  crawl --brand-images --probe [--limit N]
 
   --vendor           adapter slug (${adapterSlugs().join(", ") || "none registered"})
   --mode             seed (create catalog + offers + photos), offers (offers only,
@@ -56,11 +65,21 @@ usage:
                      diff store entries against vendors.approval_status and print it.
                      No Reddit API calls. Read-only unless --yes.
   --yes              apply the --import-approved diff (audited). Default: print only.
-  --limit N          cap listings walked (seed/offers) or requests drained (enrich)
+  --brand-images     fill the brand wall's uncovered shelves from Wikidata/Commons
+                     (issue #127). Vendor-independent: no adapter, no vendors row,
+                     no crawl_runs row. With --probe it WRITES NOTHING and prints
+                     the claim QIDs that seed core/wikidata-taxonomy.ts.
+  --brand            restrict --brand-images to one brand name (exact, case-insensitive)
+  --refresh          --brand-images: ignore the 30-day negative cache and re-check
+                     rows that already carry bytes (never ambiguous or suppressed)
+  --run-id           stamp brand_images.run_id for this run
+  --limit N          cap listings walked (seed/offers), requests drained (enrich),
+                     or brands checked (--brand-images)
   --database-url     Postgres URL (default: env DATABASE_URL)
 
 env:
-  DATABASE_URL    required (except --probe)
+  DATABASE_URL    required (except a vendor --probe; --brand-images --probe still
+                  reads the uncovered-brand list, but writes nothing)
   PHOTOS_S3_*     optional — photos are skipped when the object store is unconfigured`;
 
 function parseArgs(argv: string[]): CrawlArgs {
@@ -70,6 +89,10 @@ function parseArgs(argv: string[]): CrawlArgs {
     dryRun: false,
     probe: false,
     importApproved: null,
+    brandImages: false,
+    brand: null,
+    refresh: false,
+    runId: null,
     yes: false,
     limit: null,
     databaseUrl: null,
@@ -95,6 +118,18 @@ function parseArgs(argv: string[]): CrawlArgs {
         break;
       case "--import-approved":
         args.importApproved = argv[++i] ?? null;
+        break;
+      case "--brand-images":
+        args.brandImages = true;
+        break;
+      case "--brand":
+        args.brand = argv[++i] ?? null;
+        break;
+      case "--refresh":
+        args.refresh = true;
+        break;
+      case "--run-id":
+        args.runId = argv[++i] ?? null;
         break;
       case "--yes":
         args.yes = true;
@@ -210,11 +245,70 @@ async function runImportApprovedMode(filePath: string, apply: boolean, databaseU
   }
 }
 
+// --brand-images: the Wikidata/Commons brand-cover job. Vendor-independent, so it
+// resolves no registry row and brackets no crawl_runs row — the brand_images rows
+// and this report ARE the record. --probe is read-only (no storage, no image
+// requests) and exists to seed the QID allowlists.
+function formatBrandImages(result: BrandImagesResult, photosEnabled: boolean, dryRun: boolean): string {
+  const s = result.stats;
+  const lines = [
+    `brand-images  status=${result.status}${photosEnabled ? "" : "  [photos disabled]"}${dryRun ? "  [dry run]" : ""}`,
+    `  uncovered=${s.brandsUncovered} checked=${s.brandsChecked} resolved=${s.resolved} ambiguous=${s.ambiguous} ` +
+      `no-match=${s.noMatch} no-image=${s.noImage} blocked=${s.blocked} stored=${s.imagesStored}/${s.storeAttempts} ` +
+      `unchecked=${s.leftUnchecked} errors=${s.errors}`,
+  ];
+  if (result.error) lines.push(`  error: ${result.error}`);
+  for (const line of result.report) lines.push(`  ${line}`);
+  return lines.join("\n");
+}
+
+async function runBrandImagesMode(args: CrawlArgs, databaseUrl: string): Promise<number> {
+  // Wikimedia's own limiter is generous, but this rides the shared polite fetcher
+  // so a brand-image run is indistinguishable from any other crawl in its manners.
+  const fetcher = createFetcher();
+  const storage = args.probe ? null : photoStorageFromEnv();
+  const { db, pool } = createDatabase(databaseUrl);
+  try {
+    if (args.probe) {
+      const report = await probeBrandTaxonomy(
+        { db, fetcher, storage: null, now: () => new Date() },
+        { limit: args.limit, brand: args.brand },
+      );
+      console.log(report.join("\n"));
+      return 0;
+    }
+    const result = await runBrandImages(
+      { db, fetcher, storage, now: () => new Date() },
+      {
+        limit: args.limit,
+        brand: args.brand,
+        refresh: args.refresh,
+        dryRun: args.dryRun,
+        runId: args.runId ?? undefined,
+      },
+    );
+    console.log(formatBrandImages(result, storage !== null, args.dryRun));
+    return result.status === "succeeded" ? 0 : 1;
+  } finally {
+    await pool.end();
+  }
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(USAGE);
     return 0;
+  }
+
+  // --- --brand-images (vendor-independent) ---------------------------------
+  if (args.brandImages) {
+    const databaseUrl = args.databaseUrl ?? process.env.DATABASE_URL ?? null;
+    if (!databaseUrl) {
+      console.error("error: DATABASE_URL is not set (pass --database-url or export DATABASE_URL)");
+      return 2;
+    }
+    return runBrandImagesMode(args, databaseUrl);
   }
 
   // --- --import-approved (vendor-independent) ------------------------------

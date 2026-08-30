@@ -1,0 +1,150 @@
+{
+  "entities": {
+    "Q9100001": {
+      "type": "item",
+      "id": "Q9100001",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Padrón"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "Nicaraguan cigar brand and manufacturer"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000001"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P17": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P17",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000010"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P18": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Padron logo deprecated.svg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "deprecated"
+          },
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Padron logo.svg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "preferred"
+          },
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Padron alt.svg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "aliases": {
+        "en": [
+          {
+            "language": "en",
+            "value": "Padron Cigars"
+          }
+        ],
+        "es": [
+          {
+            "language": "es",
+            "value": "Padrón Cigars"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Padrón"
+        }
+      }
+    },
+    "Q9100002": {
+      "type": "item",
+      "id": "Q9100002",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Padrón"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "Spanish surname"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000900"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      }
+    }
+  },
+  "success": 1
+}

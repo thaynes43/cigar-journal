@@ -1,0 +1,132 @@
+{
+  "entities": {
+    "Q9100030": {
+      "type": "item",
+      "id": "Q9100030",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Partagas"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "Cuban cigar brand"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000001"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P17": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P17",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000010"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P18": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Partagas cuba.jpg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Partagas"
+        }
+      }
+    },
+    "Q9100031": {
+      "type": "item",
+      "id": "Q9100031",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Partagas"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "Dominican cigar brand"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000002"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P18": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Partagas dominican.jpg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Partagas"
+        }
+      }
+    }
+  },
+  "success": 1
+}

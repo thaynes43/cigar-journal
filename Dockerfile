@@ -209,4 +209,25 @@ ENTRYPOINT ["/sbin/tini", "--"]
 #     idempotent (`list` finds orphans, `revoke --id` kills them). Exits 0 ok,
 #     1 operational failure (unknown user or token id), 2 usage, env, or a
 #     refused delivery.
+#   brand-images (CronJob or one-shot Job — the Wikidata/Commons brand covers,
+#   issue #127; same crawl role, vendor-independent):
+#     workingDir: /app/crawler
+#     command: ["/sbin/tini","--","node","--import","tsx","src/cli.ts",
+#               "--brand-images"]
+#                                          # Add "--dry-run" to report without
+#                                          # writing, "--limit N" to bound the run,
+#                                          # "--brand <name>" for one shelf,
+#                                          # "--refresh" to ignore the 30-day
+#                                          # negative cache. "--probe" WRITES
+#                                          # NOTHING and prints the claim QIDs that
+#                                          # seed core/wikidata-taxonomy.ts — run
+#                                          # that FIRST, commit the QIDs, then run
+#                                          # the job (ADR-006 live-verification).
+#     Fills brand-wall shelves that no member cigar photo covers. Writes NO
+#     crawl_runs row (Wikidata is not a vendor — ADR-006 amendment 2026-08-29).
+#     Requires egress to www.wikidata.org, commons.wikimedia.org and
+#     upload.wikimedia.org; without PHOTOS_S3_* it records outcomes and skips
+#     bytes, and skips any row that already carries bytes (it could neither
+#     replace nor delete them). Exits 1 on an unseeded taxonomy — seed it first —
+#     and on a run where every attempted brand errored.
 CMD ["node", "apps/web/server.js"]

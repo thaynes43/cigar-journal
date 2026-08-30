@@ -136,3 +136,23 @@ LLM-created cigars accumulate until curated.
     index size (for a sampling vendor, the distinct children the root served
     across samples), the children it sampled, and any child that answered
     non-200, so a `needs-attention` says which it was.
+- **2026-08-29 — Wikidata/Wikimedia Commons as an official-API source
+  (issue #127).** Brand imagery for the wall's uncovered shelves comes from
+  Wikidata (`wbsearchentities`, `wbgetentities`) plus Wikimedia Commons
+  (`imageinfo`), under the **same posture this ADR already rules for the
+  r/cubancigars wiki**: the official documented API, an identifying
+  User-Agent, attributed wherever shown, never bulk republication. It is
+  explicitly **not a vendor** — no `vendors` row, no adapter, no sitemap or
+  robots-gated HTML walk, and **no `crawl_runs` row** (`crawl_runs.vendor_id`
+  is `NOT NULL`; loosening it to admit a non-vendor would erode the vendor
+  model). The durable record is the `brand_images` rows plus the run report;
+  `brand_images.run_id` is the grouping key if run history is ever wanted.
+  `query.wikidata.org` (SPARQL) is deliberately not used: it adds a hostname
+  and harsher throttling while answering nothing a claims check does not.
+  The class QIDs the disambiguator runs on are **data seeded by a live
+  crawl-pod `--brand-images --probe` run**, not guesses — the same
+  live-verification rule this ADR imposes on every adapter. An unseeded
+  allowlist makes the job **refuse to run** rather than write: with no
+  qualifying class every brand would read `no_match`, and that row *is* the
+  30-day negative cache, so a seeded follow-up run would then find no work and
+  report a clean, empty success. `--dry-run` writes nothing and stays available.

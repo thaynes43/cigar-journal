@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
-import { cigars, productPhotos, offers } from "@cj/db";
+import { brandImages, cigars, productPhotos, offers } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import { recordPurchase } from "./record-purchase.js";
@@ -707,6 +707,79 @@ describe("catalog browse", () => {
     const page = await getBrand(h.deps, userA, { slug: brandSlug(brand) });
     const shownIds = [...page.lines.flatMap((l) => l.cigars), ...page.loose].map((c) => c.cigarId);
     expect(shownIds.sort()).toEqual([active]);
+  });
+
+  // --- Wikidata brand-image fallback (ADR-007 third binding, issue #127) ----
+
+  // A servable brand image: approved, resolved, with the credit the CHECK
+  // demands alongside its bytes.
+  async function addBrandImage(
+    slug: string,
+    rights: "pending" | "approved" | "suppressed" = "approved",
+  ): Promise<void> {
+    await h.deps.db.insert(brandImages).values({
+      brandSlug: slug,
+      brandName: slug,
+      status: "resolved",
+      rights,
+      sourceUrl: `https://commons.wikimedia.org/wiki/File:${slug}.jpg`,
+      licenseName: "CC BY-SA 4.0",
+      creditLine: "Ana Example · CC BY-SA 4.0",
+      objectKey: `brand/${slug}/1.jpg`,
+      thumbKey: `brand/${slug}/1.thumb.jpg`,
+      contentType: "image/jpeg",
+    });
+  }
+
+  it("browseBrands surfaces the brand image only where no member photo exists", async () => {
+    const uncovered = `Wikiuncovered ${tag}`;
+    await h.seedCigar({ canonicalName: `${uncovered} Robusto`, brand: uncovered });
+    await addBrandImage(brandSlug(uncovered));
+
+    const covered = `Wikicovered ${tag}`;
+    const photographed = await h.seedCigar({ canonicalName: `${covered} Robusto`, brand: covered });
+    await addProductPhoto(photographed);
+    await addBrandImage(brandSlug(covered));
+
+    const { brands } = await browseBrands(h.deps, userA);
+    const fallback = brands.find((b) => b.brand === uncovered)!;
+    expect(fallback.coverCigarId).toBeNull();
+    expect(fallback.brandImage?.creditLine).toBe("Ana Example · CC BY-SA 4.0");
+    expect(fallback.brandImage?.sourceUrl).toContain("commons.wikimedia.org");
+
+    // A member product photo always outranks the brand logo.
+    const memberWins = brands.find((b) => b.brand === covered)!;
+    expect(memberWins.coverCigarId).toBe(photographed);
+    expect(memberWins.brandImage).toBeNull();
+  });
+
+  it("a suppressed brand image yields no cover — the shelf falls back to its monogram", async () => {
+    const brand = `Wikisuppressed ${tag}`;
+    await h.seedCigar({ canonicalName: `${brand} Robusto`, brand });
+    await addBrandImage(brandSlug(brand), "suppressed");
+
+    const shelf = (await browseBrands(h.deps, userA)).brands.find((b) => b.brand === brand)!;
+    expect(shelf.coverCigarId).toBeNull();
+    expect(shelf.brandImage).toBeNull();
+  });
+
+  it("getBrand falls back to the brand image for the hero, never for a line section", async () => {
+    const brand = `Wikihero ${tag}`;
+    await h.seedCigar({ canonicalName: `${brand} Robusto`, brand, line: "Serie" });
+    await addBrandImage(brandSlug(brand));
+
+    const page = await getBrand(h.deps, userA, { slug: brandSlug(brand) });
+    expect(page.coverCigarId).toBeNull();
+    expect(page.brandImage?.creditLine).toBe("Ana Example · CC BY-SA 4.0");
+    // A brand logo standing in for a line section would misrepresent the product.
+    expect(page.lines.find((l) => l.line === "Serie")!.coverCigarId).toBeNull();
+
+    // Once a member gains a photo, the hero reverts to it and the brand row stays.
+    const photographed = await h.seedCigar({ canonicalName: `${brand} Toro`, brand, line: "Serie" });
+    await addProductPhoto(photographed);
+    const after = await getBrand(h.deps, userA, { slug: brandSlug(brand) });
+    expect(after.coverCigarId).toBe(photographed);
+    expect(after.brandImage).toBeNull();
   });
 
   it("restoring an excluded cigar (status back to active) returns it to browse", async () => {

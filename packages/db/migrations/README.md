@@ -31,6 +31,11 @@ init container at startup (ADR-003).
 - `0018_vendor_purchase_linkout.sql` — `vendors.purchase_linkout` (boolean,
   default true): a crawled vendor whose offers/photos are ingested but which is
   never presented as a place to buy (owner ruling 2026-08-29 — Cuban Lou's).
+- `0019_brand_images.sql` — `brand_images` (ADR-007 third binding, issue #127):
+  one Wikidata/Commons image per `brand_slug`, the wall-cover fallback where no
+  member cigar has a product photo. `status` is the lookup outcome (also the
+  negative cache), `rights` the display gate; a CHECK makes stored bytes without
+  their attribution unrepresentable.
 - `0020_cigar_merges.sql` — per-merge bookkeeping (#45): one `cigar_merges` row
   per merge, written in the merge's transaction, holding the exact row ids that
   moved and full payloads of the want/favorite de-dupe deletes. Unmerge claims it

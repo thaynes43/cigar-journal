@@ -1,0 +1,49 @@
+{
+  "query": {
+    "pages": [
+      {
+        "pageid": 1234,
+        "ns": 6,
+        "title": "File:Old cigar label.jpg",
+        "imagerepository": "local",
+        "imageinfo": [
+          {
+            "size": 402210,
+            "width": 2000,
+            "height": 2000,
+            "url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Old_cigar_label.jpg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Old_cigar_label.jpg",
+            "mime": "image/jpeg",
+            "extmetadata": {
+              "License": {
+                "value": "pd-old-100",
+                "source": "commons-desc-page"
+              },
+              "LicenseShortName": {
+                "value": "Public domain",
+                "source": "commons-desc-page"
+              },
+              "Artist": {
+                "value": "Unknown author",
+                "source": "commons-desc-page"
+              },
+              "AttributionRequired": {
+                "value": "false",
+                "source": "commons-desc-page"
+              },
+              "Copyrighted": {
+                "value": "False",
+                "source": "commons-desc-page"
+              }
+            },
+            "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Old_cigar_label.jpg/1024px-Old_cigar_label.jpg.png",
+            "thumbwidth": 1024,
+            "thumbheight": 1024,
+            "thumbmime": "image/png"
+          }
+        ]
+      }
+    ]
+  },
+  "success": 1
+}
