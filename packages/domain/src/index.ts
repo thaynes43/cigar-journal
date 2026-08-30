@@ -67,6 +67,15 @@ export {
   agentRuns,
   agentRunRows,
   undoCurationAction,
+  // #45: unmerge. mergeCigars writes a per-merge `cigar_merges` ledger (migration
+  // 0020) recording exactly which rows moved and full payloads of the marks its
+  // de-dupe deleted; unmergeCigars claims that ledger single-use and puts them back.
+  // recentMerges is the console section the pair lives in — a merge audit is actor
+  // 'web', so it can never surface under "Recent agent runs". MERGE_LEDGER_TABLES is
+  // the one list of cigar-referencing tables both ends read.
+  unmergeCigars,
+  recentMerges,
+  MERGE_LEDGER_TABLES,
 } from "./curation.js";
 export { getMyInventory, deriveHoldingSummary, getHoldingForCigar } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";

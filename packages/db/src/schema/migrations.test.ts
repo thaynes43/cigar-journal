@@ -24,6 +24,7 @@ describe("migrations", () => {
     expect(names).toEqual(
       expect.arrayContaining([
         "audit_log",
+        "cigar_merges",
         "cigars",
         "duplicate_dismissals",
         "favorites",

@@ -31,3 +31,8 @@ init container at startup (ADR-003).
 - `0018_vendor_purchase_linkout.sql` — `vendors.purchase_linkout` (boolean,
   default true): a crawled vendor whose offers/photos are ingested but which is
   never presented as a place to buy (owner ruling 2026-08-29 — Cuban Lou's).
+- `0020_cigar_merges.sql` — per-merge bookkeeping (#45): one `cigar_merges` row
+  per merge, written in the merge's transaction, holding the exact row ids that
+  moved and full payloads of the want/favorite de-dupe deletes. Unmerge claims it
+  with a conditional `undone_at` UPDATE (single-use, like `photo_upload_tokens`).
+  Merges audited before this migration have no ledger and report non-reversible.

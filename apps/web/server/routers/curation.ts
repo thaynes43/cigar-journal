@@ -4,6 +4,8 @@ import {
   cigarsMissingPhotos,
   dismissDuplicate,
   mergeCigars,
+  unmergeCigars,
+  recentMerges,
   verifyCigar,
   setListingMatchStatus,
   excludeCigar,
@@ -50,6 +52,15 @@ export const curationRouter = router({
       }),
     )
     .mutation(({ ctx, input }) => mergeCigars(ctx.deps, ctx.principal, input)),
+
+  // Reverse a merge from its `cigar_merges` ledger (#45), and the console's
+  // history of merges to reverse. A merge audit is actor 'web', so the pair can
+  // never appear under "Recent agent runs" — this section is where it lives.
+  recentMerges: adminProcedure.query(({ ctx }) => recentMerges(ctx.deps, ctx.principal)),
+
+  unmerge: adminProcedure
+    .input(z.object({ clientRequestId: z.string(), mergeId: z.string().uuid() }))
+    .mutation(({ ctx, input }) => unmergeCigars(ctx.deps, ctx.principal, input)),
 
   verify: adminProcedure
     .input(z.object({ clientRequestId: z.string(), cigarId: z.string().uuid() }))
@@ -125,7 +136,8 @@ export const curationRouter = router({
     .query(({ ctx, input }) => agentRunRows(ctx.deps, ctx.principal, input)),
 
   // Undo one agent action by its inverse (exclude→restore, listing/photo/facts→prior
-  // value, verify→unverify), linked through the audit `reverts` self-link.
+  // value, verify→unverify, rename→prior name, merge→the full unmerge), linked
+  // through the audit `reverts` self-link.
   undo: adminProcedure
     .input(z.object({ clientRequestId: z.string(), auditId: z.string().uuid() }))
     .mutation(({ ctx, input }) => undoCurationAction(ctx.deps, ctx.principal, input)),

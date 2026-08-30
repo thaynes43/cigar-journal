@@ -976,9 +976,11 @@ export interface CurationAttribution {
 }
 
 // Merge a duplicate catalog Cigar into the one that survives. Re-points every
-// reference off the source, then deletes it (curator-only, ADR-006). Idempotent
+// reference off the source, then tombstones it (curator-only, ADR-006). Idempotent
 // via the mutation envelope; cigars carry no version column, so distinct-id and
-// existence checks are the safety net (see curation.ts).
+// existence checks are the safety net (see curation.ts). Neither side may already
+// be a tombstone — a merged row is unmerged first, and a merge targets the
+// survivor, never a tombstone; both keep every ledger's referent valid.
 export interface MergeCigarsInput {
   clientRequestId: string;
   sourceCigarId: string; // the duplicate that goes away
@@ -1015,7 +1017,97 @@ export interface MergeCigarsResult {
     // wants.
     favorites: number;
   };
+  // The `cigar_merges` ledger row this merge wrote (migration 0020) — the handle
+  // `unmergeCigars` takes, and the reason the merge is reversible at all.
+  mergeId: string;
   replayed: boolean;
+}
+
+// ---- Unmerge (#45) ---------------------------------------------------------
+
+// Reverse one merge by its ledger id (curator-only). Restores every row the merge
+// moved back to the source and un-tombstones it. Idempotent via the mutation
+// envelope; the ledger's single-use `undone_at` claim is the second backstop, so a
+// merge is undone at most once even across distinct request ids.
+export interface UnmergeCigarsInput {
+  clientRequestId: string;
+  mergeId: string;
+  correlationId?: string;
+}
+
+// A ledger row the restore deliberately did NOT move back. Unmerge is not always a
+// byte-exact inverse: a curator may have moved a row on since the merge, re-marked
+// the tombstone, or attached a photo to it. Forcing those back would destroy newer
+// intent, so each is skipped with its reason and enumerated in the result and the
+// `cigar.unmerge` audit.
+//   moved_on        — the row no longer sits on the survivor (re-pointed, unmatched
+//                     or deleted since the merge); left where it is.
+//   source_occupied — product_photos is UNIQUE(cigar_id) and the tombstone acquired
+//                     a photo after the merge; the moved photo stays on the survivor.
+//   conflict        — the user re-marked the tombstone, so restoring would violate
+//                     wants/favorites UNIQUE(user_id, cigar_id).
+export interface UnmergeSkip {
+  entity: string; // the ledger slot key (smokes, wants, productPhotos, …)
+  rowId: string;
+  reason: "moved_on" | "source_occupied" | "conflict";
+}
+
+export interface UnmergeCigarsResult {
+  mergeId: string;
+  sourceCigarId: string;
+  targetCigarId: string;
+  // Rows actually returned to the source, per ledger slot. Re-created want and
+  // favorite marks (the merge's de-dupe deletes) count here too.
+  restored: {
+    smokes: number;
+    purchases: number;
+    listingMatches: number;
+    offers: number;
+    productPhotos: number;
+    enrichmentRequests: number;
+    wants: number;
+    favorites: number;
+  };
+  skipped: UnmergeSkip[];
+  // The lifecycle status the source went back to — its pre-merge value, so a
+  // cigar that was `excluded` before the merge does not come back `active`.
+  restoredSourceStatus: CatalogStatus;
+  // Smoke consumptions still attributing a returned purchase lot while their smoke
+  // sits on another cigar — a post-merge smoke on the survivor that drew from a
+  // moved lot. Inventory aggregates stay correct on both cigars (acquired counts key
+  // on purchases.cigar_id, consumed on smokes.cigar_id), so the row is deliberately
+  // NOT rewritten: the count is recorded rather than a user's consumption edited.
+  crossCigarLots: number;
+  undoAuditId: string; // the `cigar.unmerge` audit, reverts-linked to the merge
+  replayed: boolean;
+}
+
+// One row of the console's "Recent merges" list: what was folded into what, how
+// much moved, and whether it can still be reversed.
+export interface RecentMerge {
+  mergeId: string;
+  mergedAt: string; // ISO
+  source: { cigarId: string; canonicalName: string };
+  target: { cigarId: string; canonicalName: string };
+  // Non-empty ledger slots — every row an unmerge would try to restore, so a
+  // de-duped mark counts alongside a re-pointed one.
+  moved: { entity: string; count: number }[];
+  undone: boolean;
+  undoneAt: string | null;
+  // Rows the completed unmerge deliberately left where they were (moved on,
+  // photo slot re-taken, mark re-created). Null until the merge is undone. Shown
+  // in the console because unmerge is not always a byte-exact inverse and a
+  // curator must not have to read the audit log to learn that.
+  skippedCount: number | null;
+  // The survivor was itself later merged. LIFO: undoing this one first would move
+  // rows back from a cigar that no longer holds them and corrupt the later ledger,
+  // so the console renders a blocked state rather than an erroring button.
+  blockedByLaterMerge: boolean;
+  reversible: boolean;
+}
+
+export interface RecentMergesResult {
+  merges: RecentMerge[];
 }
 
 // Flip an unverified catalog Cigar to verified (curator-only). Idempotent — a
@@ -1222,9 +1314,10 @@ export interface RenameCigarResult {
 // Undo one agent audit action by writing its inverse, linked back through the
 // audit `reverts` self-link (migration 0012). Only actions with a true inverse are
 // undoable — exclude→restore, listing_match/photo-rights/set_facts→prior value,
-// verify→unverify; merge is intentionally NOT undoable (a per-merge bookkeeping
-// gap, documented). Curator-only; the whole check-and-reverse runs in one
-// transaction so a double-click can never double-undo. Idempotent via the envelope.
+// verify→unverify, rename→prior name, and merge→the full unmerge (via its 0020
+// ledger; a merge audited before that ledger existed reports non-reversible).
+// Curator-only; the whole check-and-reverse runs in one transaction so a
+// double-click can never double-undo. Idempotent via the envelope.
 export interface UndoCurationActionInput {
   clientRequestId: string;
   auditId: string; // the audit row to reverse

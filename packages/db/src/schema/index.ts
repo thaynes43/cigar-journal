@@ -23,6 +23,7 @@ export * from "./wants.js";
 export * from "./favorites.js";
 export * from "./idempotency-keys.js";
 export * from "./audit-log.js";
+export * from "./cigar-merges.js";
 export * from "./product-photos.js";
 export * from "./crawl-runs.js";
 export * from "./enrichment-requests.js";

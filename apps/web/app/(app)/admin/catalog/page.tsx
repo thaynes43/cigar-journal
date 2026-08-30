@@ -2,7 +2,7 @@ import Link from "next/link";
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { getPrincipal } from "@cj/auth";
-import type { CurationQueueCigar } from "@cj/domain";
+import type { CurationQueueCigar, RecentMerge } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
 import { ui } from "@/lib/ui";
 import { DismissButton } from "./dismiss-button";
@@ -10,6 +10,8 @@ import { MergeButton } from "./merge-button";
 import { VerifyButton } from "./verify-button";
 import { RenameButton } from "./rename-button";
 import { RecentAgentRuns } from "./recent-agent-runs";
+import { UnmergeButton } from "./unmerge-button";
+import { LocalDate } from "../../_components/local-date";
 
 // Catalog review console (ADR-006, DESIGN-003 §Chrome), admin-only: a non-admin
 // gets a 404 so the route's existence never leaks. Moved from /curation to
@@ -23,10 +25,11 @@ export default async function CatalogReviewPage() {
   if (!principal || principal.role !== "admin") notFound();
 
   const caller = await getServerCaller();
-  const [{ unverified, duplicates }, missingPhotos, { runs }] = await Promise.all([
+  const [{ unverified, duplicates }, missingPhotos, { runs }, { merges }] = await Promise.all([
     caller.curation.queue(),
     caller.curation.missingPhotos(),
     caller.curation.agentRuns(),
+    caller.curation.recentMerges(),
   ]);
 
   return (
@@ -86,6 +89,40 @@ export default async function CatalogReviewPage() {
         )}
       </section>
 
+      {/* Merges and their inverse, together. A merge audit is actor 'web' with no
+          run_id, so it can never appear under "Recent agent runs" — this is the
+          only surface the pair has (#45). Absent when nothing has been merged. */}
+      {merges.length > 0 ? (
+        <section className="flex flex-col gap-4">
+          <h2 className="label-caps">Recent merges</h2>
+          <ul className="rounded-card border border-line bg-surface">
+            {merges.map((merge) => (
+              <li
+                key={merge.mergeId}
+                className="flex flex-wrap items-start justify-between gap-3 border-b border-line/60 px-4 py-3 last:border-b-0"
+              >
+                <div className="flex min-w-0 flex-col gap-1.5">
+                  <span className="font-display font-semibold text-ink">
+                    {merge.source.canonicalName} → {merge.target.canonicalName}
+                  </span>
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    {merge.moved.map((m) => (
+                      <span key={m.entity} className={`${ui.chipOutline} tabular-nums`}>
+                        {m.entity} {m.count}
+                      </span>
+                    ))}
+                    <span className="text-xs text-muted tabular-nums">
+                      <LocalDate format="day" value={merge.mergedAt} />
+                    </span>
+                  </span>
+                </div>
+                <MergeState merge={merge} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       <section className="flex flex-col gap-4">
         <h2 className="label-caps">Unverified</h2>
         {unverified.length === 0 ? (
@@ -113,6 +150,24 @@ export default async function CatalogReviewPage() {
       </section>
     </div>
   );
+}
+
+// The action or state for one merge row. Undone and chain-blocked merges render
+// as state, never as a button that would error — and an undone one names its skip
+// count, since unmerge is not always a byte-exact inverse.
+function MergeState({ merge }: { merge: RecentMerge }) {
+  if (merge.undone) {
+    return (
+      <span className="label-caps shrink-0">
+        {merge.skippedCount ? `Unmerged · ${merge.skippedCount} skipped` : "Unmerged"}
+      </span>
+    );
+  }
+  if (merge.blockedByLaterMerge) {
+    return <span className="label-caps shrink-0">Blocked by a later merge</span>;
+  }
+  if (!merge.reversible) return null;
+  return <UnmergeButton mergeId={merge.mergeId} />;
 }
 
 // One side of a duplicate pair: this cigar survives, the other is merged into it.

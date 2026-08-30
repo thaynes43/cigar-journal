@@ -51,6 +51,10 @@ export interface Handoff {
     wanted: { id: string; name: string };
     sampleNC: { id: string; name: string };
   };
+  // A deterministic near-duplicate pair for the admin console's merge/unmerge
+  // round trip. Distinct from every other seeded name so the pair is the only one
+  // the Duplicates section surfaces for these two rows.
+  duplicatePair: { survivor: { id: string; name: string }; duplicate: { id: string; name: string } };
   brand: string;
   publicSmoke: { id: string; cigarName: string; narrativeSnippet: string };
   privateSmokeId: string;
@@ -190,6 +194,23 @@ export async function seed(opts: {
       ringGauge: 52,
     });
 
+    // A near-duplicate pair (accent variant, well above the 0.6 trigram bar) so the
+    // console's Duplicates → merge → Recent merges → Unmerge round trip has real
+    // data. Unverified so they also sit in the verification backlog, like any
+    // freshly crawled row.
+    const dupePlain = await insertCigar(deps, {
+      canonicalName: "Ramon Allones Especialmente Seleccionados",
+      brand: "Ramon Allones",
+      type: "CC",
+      verification: "unverified",
+    });
+    const dupeAccented = await insertCigar(deps, {
+      canonicalName: "Ramón Allones Especialmente Seleccionados",
+      brand: "Ramón Allones",
+      type: "CC",
+      verification: "unverified",
+    });
+
     // --- Admin account (allowlisted -> admin) ------------------------------
     await auth.api.signUpEmail({
       body: { email: ACCOUNTS.admin.email, password: ACCOUNTS.admin.password, name: "E2E Admin" },
@@ -263,6 +284,10 @@ export async function seed(opts: {
         smoked: { id: monte2, name: "Montecristo No. 2" },
         wanted: { id: hemingway, name: "Arturo Fuente Hemingway Short Story" },
         sampleNC: { id: padron64, name: "Padrón 1964 Anniversary Maduro" },
+      },
+      duplicatePair: {
+        survivor: { id: dupePlain, name: "Ramon Allones Especialmente Seleccionados" },
+        duplicate: { id: dupeAccented, name: "Ramón Allones Especialmente Seleccionados" },
       },
       brand: "Padrón",
       publicSmoke: {

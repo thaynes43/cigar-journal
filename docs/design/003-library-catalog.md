@@ -200,9 +200,33 @@ gamification — automation. The console inverts from "do the work" to
   hard-deleting (tombstone the source) so Undo is real. Review UI = two
   lists: pending proposals (approve/reject, before/after diff) and recent
   agent runs (undo).
+- **Unmerge (per-merge ledger + LIFO):** the tombstone preserves the
+  *data*; a `cigar_merges` row per merge preserves *which rows moved*,
+  which is otherwise unrecoverable — after the merge a re-pointed smoke is
+  indistinguishable from one the survivor always had, and the
+  want/favorite de-dupe deletes rows outright. The ledger holds the exact
+  ids the merge re-pointed plus full payloads of the deleted marks;
+  `unmergeCigars` claims it single-use (conditional `undone_at`) and puts
+  them back. Consequences that are rules, not implementation detail:
+  **(1)** rows created on the survivor after the merge are never touched —
+  the ledger is an explicit id list, so no "move everything pointing at
+  the target" query exists; **(2)** neither side of a merge may already be
+  a tombstone, so the only chain that forms is A→B then B→C, and that
+  chain unwinds **LIFO** (undo B→C first) because A→B's rows now sit on C;
+  **(3)** unmerge is not forced to be byte-exact — a row a curator moved
+  on, a photo slot the tombstone re-took, a mark the user re-created are
+  each skipped with a reason and counted in the audit and the console,
+  never overwritten; **(4)** a merge audited before the ledger existed
+  reports non-reversible rather than guessing. Merge and unmerge are actor
+  `web` with no `run_id`, so they get their own **Recent merges** console
+  section — they can never surface under "Recent agent runs".
 - **Humans stay in the loop only for:** merges, rights takedowns,
   exclusions that would hide an owner-held item, and any low-confidence
-  proposal.
+  proposal. Renames are deliberately absent from that list — the agent
+  owns name cleanup (`rename_cigar` on the MCP curation surface), the
+  human owns the review and the Undo. Unmerge stays out of MCP for the
+  same reason merge is: handing the agent unmerge would hand it the merge
+  lever backwards, letting it reverse a curator's verdict.
 
 ## Product images: coverage plan
 
@@ -268,6 +292,7 @@ sequence (rights-honest, fastest visible fix first):
 | Settings page | `Settings`; sections `Profile` · `Journal` · `Time` |
 | Journal visibility control | `Public` / `Private` |
 | Admin page | `Catalog review` |
+| Merge section | `Recent merges`; action `Unmerge`; states `Unmerged` · `Blocked by a later merge` |
 | Review lists | `Proposals` · `Recent agent runs`; actions `Approve` · `Reject` · `Undo` |
 | Paddle buttons | `aria-label` = `Scroll left` / `Scroll right` |
 
