@@ -1,0 +1,20 @@
+{
+  "searchinfo": {
+    "search": "Padrón"
+  },
+  "search": [
+    {
+      "id": "Q9100001",
+      "title": "Q9100001",
+      "label": "Padrón",
+      "description": "Nicaraguan cigar brand"
+    },
+    {
+      "id": "Q9100002",
+      "title": "Q9100002",
+      "label": "Padrón",
+      "description": "Spanish surname"
+    }
+  ],
+  "success": 1
+}

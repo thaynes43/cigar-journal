@@ -7,9 +7,10 @@ import { BandTile } from "../../../_components/band-tile";
 import { CigarStillTile } from "../../../_components/cigar-still-tile";
 import { CATALOG_GRID } from "../../../_components/catalog-registry";
 
-// A brand page — the "series". A typographic hero (no brand art asset yet), then
-// each line as a collapsible poster section (the haynesnetwork season pattern),
-// and finally the loose cigars with no line. Unknown slug → 404.
+// A brand page — the "series". A typographic hero, carrying the brand's Wikimedia
+// cover where one exists (issue 127) with its full linked credit; then each line
+// as a collapsible poster section (the haynesnetwork season pattern), and finally
+// the loose cigars with no line. Unknown slug → 404.
 export default async function BrandPage({ params }: { params: Promise<{ slug: string }> }) {
   await requireAuth();
   const { slug } = await params;
@@ -23,16 +24,36 @@ export default async function BrandPage({ params }: { params: Promise<{ slug: st
     throw error;
   }
 
-  const { brand, lines, loose } = data;
+  const { brand, brandImage, lines, loose } = data;
   const cigarCount = lines.reduce((sum, line) => sum + line.cigars.length, 0) + loose.length;
 
   return (
     <div className="flex flex-col gap-8">
-      <header className="flex flex-col gap-2">
-        <h1 className="font-display text-3xl leading-tight font-semibold text-ink">{brand}</h1>
-        <p className="label-caps">
-          {cigarCount} sticks · {lines.length} lines
-        </p>
+      <header className="flex items-start gap-4">
+        {brandImage ? (
+          <span className="block aspect-[3/4] w-20 shrink-0 overflow-hidden rounded-card border border-line">
+            {/* Fingerprinted with the row id so a replacement busts the cache. */}
+            <img src={`/api/brand-images/${slug}?v=${brandImage.id}`} alt="" className="h-full w-full object-cover" />
+          </span>
+        ) : null}
+        <div className="flex flex-col gap-2">
+          <h1 className="font-display text-3xl leading-tight font-semibold text-ink">{brand}</h1>
+          <p className="label-caps">
+            {cigarCount} sticks · {lines.length} lines
+          </p>
+          {/* The licence condition the image carries, linked to its Commons file
+              description page — the surface where the full credit fits. */}
+          {brandImage ? (
+            <a
+              href={brandImage.sourceUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="label-caps text-muted transition-colors hover:text-accent"
+            >
+              {brandImage.creditLine}
+            </a>
+          ) : null}
+        </div>
       </header>
 
       {lines.map((line) => (

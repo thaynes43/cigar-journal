@@ -1,0 +1,65 @@
+{
+  "query": {
+    "pages": [
+      {
+        "pageid": 1234,
+        "ns": 6,
+        "title": "File:Montecristo band.jpg",
+        "imagerepository": "local",
+        "imageinfo": [
+          {
+            "size": 402210,
+            "width": 2000,
+            "height": 2000,
+            "url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Montecristo_band.jpg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Montecristo_band.jpg",
+            "mime": "image/jpeg",
+            "extmetadata": {
+              "License": {
+                "value": "cc-by-sa-4.0",
+                "source": "commons-desc-page"
+              },
+              "LicenseShortName": {
+                "value": "CC BY-SA 4.0",
+                "source": "commons-desc-page"
+              },
+              "LicenseUrl": {
+                "value": "https://creativecommons.org/licenses/by-sa/4.0",
+                "source": "commons-desc-page"
+              },
+              "UsageTerms": {
+                "value": "Creative Commons Attribution-Share Alike 4.0",
+                "source": "commons-desc-page"
+              },
+              "Artist": {
+                "value": "<a href=\"https://commons.wikimedia.org/wiki/User:Example\" title=\"User:Example\">Ana&nbsp;Example</a>",
+                "source": "commons-desc-page"
+              },
+              "Credit": {
+                "value": "Own work",
+                "source": "commons-desc-page"
+              },
+              "AttributionRequired": {
+                "value": "true",
+                "source": "commons-desc-page"
+              },
+              "Restrictions": {
+                "value": "trademarked",
+                "source": "commons-desc-page"
+              },
+              "Copyrighted": {
+                "value": "True",
+                "source": "commons-desc-page"
+              }
+            },
+            "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Montecristo_band.jpg/1024px-Montecristo_band.jpg.png",
+            "thumbwidth": 1024,
+            "thumbheight": 1024,
+            "thumbmime": "image/png"
+          }
+        ]
+      }
+    ]
+  },
+  "success": 1
+}

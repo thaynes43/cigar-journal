@@ -68,3 +68,37 @@ runs a ready Ceph RGW object store with ObjectBucketClaim provisioning
   rights gating; the proxy route keeps authorization in one place.
 - Retain originals alongside normalized output — storage cost and GPS
   liability for no product need.
+
+## Amendments
+
+- **2026-08-29 — a third binding: BrandImage (issue #127).** Binding is a
+  property of the row, so a brand-level image needs no new substrate: same
+  bucket, same pipeline, same authed proxy route. **BrandImage** is bound to
+  a brand *slug* (`brandSlug(brand)` — brand is free text and there is no
+  brands table), at most one per slug, sourced from Wikimedia Commons via the
+  crawl pod, and used ONLY as a cover where no member cigar has a servable
+  product photo. Keys extend the convention with a third prefix,
+  `brand/<brand_slug>/<uuid>.jpg` + `.thumb.jpg`. `product_photos` is
+  untouched: a brand image is never written there and never substitutes for a
+  member product photo.
+  - **Attribution is part of the row, enforced by shape.** The attribution
+    columns (`source_url` — the Commons file description page —
+    `license_code`/`license_name`/`license_url`, `artist`, `credit_line`,
+    `attribution_required`) sit alongside the keys, and a CHECK
+    (`brand_images_servable_complete`) makes stored bytes without them
+    unrepresentable. The rule that follows: **a Wikimedia-sourced image is
+    rendered only where its credit renders with it** — the brand page hero
+    shows the full linked credit; the wall tile shows the same credit as one
+    muted line of plain text (the tile body is already a link, and nested
+    anchors are invalid HTML).
+  - **Licence gate before bytes.** Only `cc0` / `cc-by-*` / `cc-by-sa-*` /
+    `pd-*` / public domain are downloaded; anything else, or absent licence
+    metadata, records `status='blocked'` and requests nothing.
+    `extmetadata.Restrictions` (e.g. `trademarked`) is recorded in `note`, not
+    treated as a blocker — trademark is not copyright and a brand cover is
+    nominative use. **This trademark posture is a deliberate owner-facing
+    call, recorded here so it is reviewable rather than implicit.**
+  - **Two axes, kept separate.** `status` is the lookup outcome (and the
+    negative cache); `rights` is the display gate, with the same three values
+    and semantics as `product_photos`. `suppressed` is both a takedown and a
+    tombstone — never served, and never re-resolved by a later crawl.

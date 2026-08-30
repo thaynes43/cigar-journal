@@ -11,6 +11,7 @@ import { VerifyButton } from "./verify-button";
 import { RenameButton } from "./rename-button";
 import { RecentAgentRuns } from "./recent-agent-runs";
 import { UnmergeButton } from "./unmerge-button";
+import { BrandImagery } from "./brand-imagery";
 import { LocalDate } from "../../_components/local-date";
 
 // Catalog review console (ADR-006, DESIGN-003 §Chrome), admin-only: a non-admin
@@ -25,12 +26,14 @@ export default async function CatalogReviewPage() {
   if (!principal || principal.role !== "admin") notFound();
 
   const caller = await getServerCaller();
-  const [{ unverified, duplicates }, missingPhotos, { runs }, { merges }] = await Promise.all([
-    caller.curation.queue(),
-    caller.curation.missingPhotos(),
-    caller.curation.agentRuns(),
-    caller.curation.recentMerges(),
-  ]);
+  const [{ unverified, duplicates }, missingPhotos, { runs }, { merges }, brandImages] =
+    await Promise.all([
+      caller.curation.queue(),
+      caller.curation.missingPhotos(),
+      caller.curation.agentRuns(),
+      caller.curation.recentMerges(),
+      caller.curation.brandImages(),
+    ]);
 
   return (
     // Review console, not a catalog grid — it owns a reading measure now the shell
@@ -64,6 +67,15 @@ export default async function CatalogReviewPage() {
               </li>
             ))}
           </ul>
+        </section>
+      ) : null}
+
+      {/* Wikidata/Commons wall covers awaiting a pick or a rights decision
+          (issue 127). Absent when empty, per the honest-degradation rule. */}
+      {brandImages.ambiguous.length > 0 || brandImages.resolved.length > 0 ? (
+        <section className="flex flex-col gap-4">
+          <h2 className="label-caps">Brand imagery</h2>
+          <BrandImagery queue={brandImages} />
         </section>
       ) : null}
 

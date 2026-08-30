@@ -1,0 +1,49 @@
+{
+  "query": {
+    "pages": [
+      {
+        "pageid": 1234,
+        "ns": 6,
+        "title": "File:Padron logo.svg",
+        "imagerepository": "local",
+        "imageinfo": [
+          {
+            "size": 402210,
+            "width": 2000,
+            "height": 2000,
+            "url": "https://upload.wikimedia.org/wikipedia/commons/a/ab/Padron_logo.svg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Padron_logo.svg",
+            "mime": "image/svg+xml",
+            "extmetadata": {
+              "License": {
+                "value": "cc0",
+                "source": "commons-desc-page"
+              },
+              "LicenseShortName": {
+                "value": "CC0",
+                "source": "commons-desc-page"
+              },
+              "LicenseUrl": {
+                "value": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "source": "commons-desc-page"
+              },
+              "Attribution": {
+                "value": "Padrón Cigars via <b>Wikimedia Commons</b>",
+                "source": "commons-desc-page"
+              },
+              "AttributionRequired": {
+                "value": "false",
+                "source": "commons-desc-page"
+              }
+            },
+            "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Padron_logo.svg/1024px-Padron_logo.svg.png",
+            "thumbwidth": 1024,
+            "thumbheight": 1024,
+            "thumbmime": "image/png"
+          }
+        ]
+      }
+    ]
+  },
+  "success": 1
+}

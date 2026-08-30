@@ -1,0 +1,214 @@
+{
+  "entities": {
+    "Q9100010": {
+      "type": "item",
+      "id": "Q9100010",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Montecristo"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "Cuban cigar brand"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000001"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P17": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P17",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000010"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P18": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Montecristo band.jpg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Montecristo"
+        }
+      }
+    },
+    "Q9100011": {
+      "type": "item",
+      "id": "Q9100011",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Montecristo"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "1844 adventure novel"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000902"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P18": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Monte Cristo cover.jpg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Montecristo"
+        }
+      }
+    },
+    "Q9100012": {
+      "type": "item",
+      "id": "Q9100012",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Montecristo"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "Argentine footballer"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000900"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Montecristo"
+        }
+      }
+    },
+    "Q9100013": {
+      "type": "item",
+      "id": "Q9100013",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Montecristo"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "Wikimedia disambiguation page"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000901"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Montecristo"
+        }
+      }
+    }
+  },
+  "success": 1
+}

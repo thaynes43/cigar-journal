@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "Q9100040": {
+      "type": "item",
+      "id": "Q9100040",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Camacho"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "brand of cigars sold in the United States"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000500"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P18": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Camacho logo.png",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Camacho"
+        }
+      }
+    }
+  },
+  "success": 1
+}

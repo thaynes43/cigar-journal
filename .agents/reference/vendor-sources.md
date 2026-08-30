@@ -33,8 +33,15 @@ with attribution and a link back to r/cubancigars.
 
 1. **Cigar API** (cigarapi.com / RapidAPI) — clean brands+cigars JSON, free
    tier. The seed candidate, pending license + coverage/freshness check.
-2. **Wikidata** — CC-licensed brand-level skeleton via SPARQL; shallow but
-   legitimately free.
+2. **Wikidata** — CC-licensed brand-level skeleton; shallow but legitimately
+   free. **IN USE for brand imagery only** (issue #127, ADR-006 amendment
+   2026-08-29): the official Action API, not SPARQL —
+   `www.wikidata.org/w/api.php` (`wbsearchentities`, `wbgetentities`) plus
+   `commons.wikimedia.org/w/api.php` (`imageinfo`), with the bytes coming from
+   `upload.wikimedia.org`. Those three hostnames must be on the crawl pod's
+   egress allowlist; `query.wikidata.org` is deliberately NOT requested. Runs
+   as `crawl --brand-images` under the identifying crawler UA, attributed
+   wherever shown. No catalog *facts* are taken from Wikidata — imagery only.
 3. **Elite Cigar Library** — 56k+ cigars, no API yet ("under
    consideration") — watch, or email them.
 4. Not viable for bulk: Cigar Aficionado, halfwheel (copyright — link out

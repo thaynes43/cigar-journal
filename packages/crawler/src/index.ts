@@ -83,3 +83,37 @@ export {
   type IngestStats,
   type CrawlMode,
 } from "./core/ingest.js";
+
+// Brand imagery (issue #127): the Wikidata/Commons client and the job driver
+// behind `crawl --brand-images`. An official-API client under ADR-006's Reddit-API
+// posture — not a vendor adapter.
+export {
+  resolveBrandImage,
+  lookupChosenEntity,
+  qualifyCandidates,
+  selectImageFile,
+  parseImageInfo,
+  licenseAllowed,
+  buildCreditLine,
+  fold,
+  searchUrl,
+  entitiesUrl,
+  imageInfoUrl,
+  WikimediaUnavailableError,
+  WIKIDATA_API,
+  COMMONS_API,
+  type BrandImageLookup,
+  type CommonsImage,
+  type WikidataEntity,
+} from "./core/wikidata.js";
+export { WIKIDATA_TAXONOMY, taxonomyIsUnseeded, type WikidataTaxonomy } from "./core/wikidata-taxonomy.js";
+export {
+  runBrandImages,
+  probeBrandTaxonomy,
+  uncoveredBrands,
+  selectWork,
+  type BrandImagesDeps,
+  type BrandImagesOptions,
+  type BrandImagesResult,
+  type BrandImagesStats,
+} from "./core/brand-images.js";

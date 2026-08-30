@@ -17,6 +17,9 @@ import {
   undoCurationAction,
   getProductPhotoState,
   mintProductPhotoUploadToken,
+  brandImageQueue,
+  setBrandImageRights,
+  chooseBrandImageCandidate,
 } from "@cj/domain";
 import { router, adminProcedure } from "../trpc";
 
@@ -109,6 +112,31 @@ export const curationRouter = router({
       }),
     )
     .mutation(({ ctx, input }) => setProductPhotoRights(ctx.deps, ctx.principal, input)),
+
+  // Brand imagery (issue 127): the Wikidata/Commons wall covers awaiting a pick
+  // or a rights decision. `chooseBrandImage` RECORDS a curator's pick only — the
+  // bytes arrive on the next crawl-pod run, the web never fetches Wikimedia.
+  brandImages: adminProcedure.query(({ ctx }) => brandImageQueue(ctx.deps, ctx.principal)),
+
+  setBrandImageRights: adminProcedure
+    .input(
+      z.object({
+        clientRequestId: z.string(),
+        brandSlug: z.string(),
+        rights: z.enum(["pending", "approved", "suppressed"]),
+      }),
+    )
+    .mutation(({ ctx, input }) => setBrandImageRights(ctx.deps, ctx.principal, input)),
+
+  chooseBrandImage: adminProcedure
+    .input(
+      z.object({
+        clientRequestId: z.string(),
+        brandSlug: z.string(),
+        qid: z.string(),
+      }),
+    )
+    .mutation(({ ctx, input }) => chooseBrandImageCandidate(ctx.deps, ctx.principal, input)),
 
   // Set a cigar's canonical name (#45) — the one authorized identity edit.
   rename: adminProcedure

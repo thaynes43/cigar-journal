@@ -1,0 +1,20 @@
+{
+  "searchinfo": {
+    "search": "Partagas"
+  },
+  "search": [
+    {
+      "id": "Q9100030",
+      "title": "Q9100030",
+      "label": "Partagas",
+      "description": "Cuban cigar brand"
+    },
+    {
+      "id": "Q9100031",
+      "title": "Q9100031",
+      "label": "Partagas",
+      "description": "Dominican cigar brand"
+    }
+  ],
+  "success": 1
+}

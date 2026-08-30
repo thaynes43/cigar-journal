@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "Q9100050": {
+      "type": "item",
+      "id": "Q9100050",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Tatuaje"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "American cigar brand"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000001"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Tatuaje"
+        }
+      }
+    }
+  },
+  "success": 1
+}

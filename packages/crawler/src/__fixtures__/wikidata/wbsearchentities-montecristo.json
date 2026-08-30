@@ -1,0 +1,32 @@
+{
+  "searchinfo": {
+    "search": "Montecristo"
+  },
+  "search": [
+    {
+      "id": "Q9100010",
+      "title": "Q9100010",
+      "label": "Montecristo",
+      "description": "Cuban cigar brand"
+    },
+    {
+      "id": "Q9100011",
+      "title": "Q9100011",
+      "label": "Montecristo",
+      "description": "1844 adventure novel"
+    },
+    {
+      "id": "Q9100012",
+      "title": "Q9100012",
+      "label": "Montecristo",
+      "description": "Argentine footballer"
+    },
+    {
+      "id": "Q9100013",
+      "title": "Q9100013",
+      "label": "Montecristo",
+      "description": "Wikimedia disambiguation page"
+    }
+  ],
+  "success": 1
+}

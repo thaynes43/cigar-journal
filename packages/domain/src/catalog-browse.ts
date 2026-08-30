@@ -16,6 +16,7 @@ import type {
   CatalogSort,
 } from "./types.js";
 import { CigarNotFoundError } from "./errors.js";
+import { loadBrandCovers } from "./brand-images.js";
 
 // The poster library reads (PRD-002 phase 2 / PRD-003 R-UNI). Browse descends
 // brand → line → cigar; the personal overlay (caller's smoke count + average
@@ -394,7 +395,22 @@ export async function browseBrands(
     types: [...((row.types ?? []) as CigarType[])].sort(),
     coverCigarId: row.cover_cigar_id ?? null,
     coverProductPhotoId: row.cover_photo_id ?? null,
+    brandImage: null,
   }));
+
+  // The Wikidata fallback (issue #127), asked for ONLY where the grouped query
+  // found no member product photo — a member photo always outranks a brand logo,
+  // and when one later arrives the wall reverts to it silently. One batched query
+  // for the whole wall, merged in TS (see loadBrandCovers).
+  const uncovered = brands.filter((b) => b.coverCigarId == null && b.slug != null).map((b) => b.slug!);
+  if (uncovered.length > 0) {
+    const covers = await loadBrandCovers(deps, uncovered);
+    for (const shelf of brands) {
+      if (shelf.coverCigarId == null && shelf.slug != null) {
+        shelf.brandImage = covers.get(shelf.slug) ?? null;
+      }
+    }
+  }
 
   return { brands };
 }
@@ -571,11 +587,17 @@ export async function getBrand(
     });
 
   const brandCover = tiles.find((tile) => tile.hasProductPhoto) ?? null;
+  // Same fallback rule as the wall: only when no member photo exists. Line
+  // sections deliberately keep BandTile — a brand logo standing in for a line
+  // section would misrepresent the product.
+  const brandImage =
+    brandCover == null ? ((await loadBrandCovers(deps, [args.slug])).get(args.slug) ?? null) : null;
 
   return {
     brand,
     coverCigarId: brandCover?.cigarId ?? null,
     coverProductPhotoId: brandCover?.productPhotoId ?? null,
+    brandImage,
     lines,
     loose,
   };

@@ -309,6 +309,7 @@ sequence (rights-honest, fastest visible fix first):
 | Admin page | `Catalog review` |
 | Merge section | `Recent merges`; action `Unmerge`; states `Unmerged` · `Blocked by a later merge`; moved-row chips `Smokes` · `Purchases` · `Listing matches` · `Offers` · `Photos` · `Gap-fill requests` · `Wants` · `Favorites` |
 | Review lists | `Proposals` · `Recent agent runs`; actions `Approve` · `Reject` · `Undo` |
+| Brand imagery (review) | `Brand imagery`; actions `Choose` · `Approve` · `Suppress` |
 | Paddle buttons | `aria-label` = `Scroll left` / `Scroll right` |
 
 ## Supersessions and what stands
