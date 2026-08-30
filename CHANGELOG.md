@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.27.0](https://github.com/thaynes43/cigar-journal/compare/v0.26.1...v0.27.0) (2026-08-30)
+
+
+### Features
+
+* Authentik OIDC sign-in + invite system ([#46](https://github.com/thaynes43/cigar-journal/issues/46)) ([#168](https://github.com/thaynes43/cigar-journal/issues/168)) ([7d03d96](https://github.com/thaynes43/cigar-journal/commit/7d03d96d4787405dd47f784e3a767e8d36d81fe0))
+* **catalog:** Wikidata brand imagery as wall-cover fallback ([#127](https://github.com/thaynes43/cigar-journal/issues/127)) ([#163](https://github.com/thaynes43/cigar-journal/issues/163)) ([b872fa0](https://github.com/thaynes43/cigar-journal/commit/b872fa09a9a6cab6ff7210e42e9569c385026926))
+* **crawler:** sitemap sampling, root-slug product gate, multi-sample probe ([#127](https://github.com/thaynes43/cigar-journal/issues/127)) ([#160](https://github.com/thaynes43/cigar-journal/issues/160)) ([e821982](https://github.com/thaynes43/cigar-journal/commit/e821982d4c674514d9338b7879d4fed7e6861156))
+* **curation:** bulk-enqueue enrichment for photoless holdings ([#167](https://github.com/thaynes43/cigar-journal/issues/167)) ([5f58213](https://github.com/thaynes43/cigar-journal/commit/5f58213b016d75033a06b4ff85de61f08aa3abfa))
+* **curation:** unmerge bookkeeping + rename undo ([#45](https://github.com/thaynes43/cigar-journal/issues/45)) ([#162](https://github.com/thaynes43/cigar-journal/issues/162)) ([6e7c6d1](https://github.com/thaynes43/cigar-journal/commit/6e7c6d1d0ce158a2764e58ac2d915bfebd905128))
+* **oauth:** operator-minted service tokens for browserless MCP clients ([#129](https://github.com/thaynes43/cigar-journal/issues/129)) ([#165](https://github.com/thaynes43/cigar-journal/issues/165)) ([ab58810](https://github.com/thaynes43/cigar-journal/commit/ab588102c6390cf0043bd1481dfa74b3a0487ada))
+
+
+### Bug Fixes
+
+* **web:** measured tobacco ramp, seal fit, chip legibility ([#49](https://github.com/thaynes43/cigar-journal/issues/49)) ([#171](https://github.com/thaynes43/cigar-journal/issues/171)) ([946ae6a](https://github.com/thaynes43/cigar-journal/commit/946ae6ac8e5f2fda315bcbd4c812f75c630943ad))
+
 ## [0.26.1](https://github.com/thaynes43/cigar-journal/compare/v0.26.0...v0.26.1) (2026-08-29)
 
 
