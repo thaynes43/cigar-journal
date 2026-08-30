@@ -239,3 +239,72 @@ No competitor shows flavor evolution within a smoke; ours records continuous
   page (histogram, wrapper/origin buckets, heatmap).
 - **Not touched:** data model (beyond image refs), tRPC surface, form
   behavior, component-library adoption (none).
+
+## Amendment — measured palette criteria (2026-08-30, issue #49)
+
+Direction A named the wrapper-shade ramp as the data palette and the chips as
+"tobacco-tinted" but fixed no numbers, so both drifted. Measured against the
+live catalog before the walkthrough:
+
+- 19% of catalog names hash to stops 7–8, which sat at **1.32:1 / 1.25:1**
+  against the dark page and card grounds — a tile there is a hole, and
+  `BandTile` painted no edge of its own at thumb or hero size.
+- Stops 4 and 5 carried their monogram ink at **3.94:1 and 4.43:1**, below
+  text contrast, and the `vitola · type` footer is real information.
+- The eight stops' worst adjacent separation was **ΔE 8.8** (CIE76), all
+  seven adjacent pairs under 11 — eight stops reading as roughly four shades.
+- `--chip` was `--paper-200` / `--espresso-800`: **1.12:1** against the card it
+  sits on, and byte-identical to `--raised` on paper. The filled tier and the
+  keyline tier were the same object; only the italic separated them.
+
+### The criteria, and the arithmetic they force
+
+Every stop must clear **1.6:1 against both `--bg` and `--surface` in both
+themes** and **4.5:1 against its own monogram ink**. Those two floors are not
+independent: the first bounds a stop's luminance from both ends
+(Y ∈ [0.045, 0.513]), the second splits what remains into two disjoint bands —
+**L\* 56.8–76.9** for stops taking the dark ink and **L\* 25.2–44.2** for the
+light ink — with a dead zone between them no stop may occupy. Four stops per
+band is what fits, so the 1–4 / 5–8 ink split is that arithmetic's output, not
+a convention: each stop clears 4.5:1 against exactly one of the two inks, and
+`token-contrast.test.ts` asserts precisely that rather than the split itself.
+
+1.6:1 is not a WCAG figure. No single ramp value can reach the 3:1
+non-text threshold against an espresso ground and warm paper at once while a
+tile keeps one theme-constant colour, so the floor buys "still an object, not a
+hole" and `BandTile` now paints its own hairline `border-line` edge when it owns
+its box. Tiles rendered `shape="fill"` stay edgeless — all four call sites frame
+them in `border border-line` already.
+
+**Adjacent separation lands at ΔE 11.1, not the 12 the fix was scoped at.** With
+~6 L\* units per step inside each band, reaching 12 needs roughly 10 units of
+extra a/b separation per step, and a muted tobacco chroma envelope yields about
+7. The two ways past that were both rejected on rendered evidence: alternating
+chroma ±8 hits ΔE 12.3 but makes every other stop read as a mistake rather than
+a step, and sweeping hue below ~35° hits 12.7 by turning the oscuro end
+burgundy. A monotone 110°→38° hue sweep at C\* 31–38 is the ceiling for a ramp
+that still reads as one ordered leaf family, so 11 is the recorded criterion.
+The remaining separation is carried by the edge and by the caption beneath the
+art — which is also the honest answer to sibling tiles, below.
+
+Chips take the tobacco tint the direction always specified
+(`--tobacco-wash-light` / `--tobacco-wash-dark`), at **≥1.5:1** against both
+grounds with the label still at 4.5:1. That restores the two-tier read without
+touching the stored vocabulary: normalized descriptors are kebab-cased, so
+`Chips` now renders `dark-chocolate` as "dark chocolate" — a label transform
+only, lowercase so the normalized tier keeps the verbatim tier's voice.
+`normalizeDescriptor` and every query path and MCP payload are unchanged.
+
+`--wrapper-leaf` is a ramp stop, so the retune restyles the burn-line rail;
+the leaf's separation from both ends of the ash→ember gradient is asserted
+alongside the ramp rather than left to be noticed later.
+
+### Not fixed here
+
+Identity is hashed from the house and the monogram is the house's two initials,
+so at catalog scale the grid renders **runs of byte-identical tiles** — 30
+consecutive Arturo Fuente, 26 La Aroma de Cuba, and in the owner's own photoless
+humidor H Upmann ×4 and Ramon Allones ×4 adjacent. 824 of 967 names (85%) share
+a mark with a sibling. That is the identity algorithm working as designed, and
+changing it is a design decision rather than a contrast fix; the caption below
+the art is what differentiates siblings today.

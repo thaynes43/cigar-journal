@@ -51,15 +51,33 @@
 
   /* Wrapper-shade ramp (Candela → Oscuro) — the data palette for band tiles
    * and chips. Theme-constant: a tile is an object, not chrome, so it keeps
-   * its ground in both themes. Each stop pairs with its monogram ink. */
-  --tobacco-1: #98995f;
-  --tobacco-2: #c9aa70;
-  --tobacco-3: #b78f5c;
-  --tobacco-4: #a1764a;
-  --tobacco-5: #8a613b;
-  --tobacco-6: #6f4a2c;
-  --tobacco-7: #573722;
-  --tobacco-8: #3e2517;
+   * its ground in both themes. Each stop pairs with its monogram ink.
+   *
+   * Retuned 2026-08-30 (DESIGN-001 amendment, issue #49) against measured
+   * acceptance criteria rather than by eye — `token-contrast.test.ts` is the
+   * guard. The two hard constraints fix where a stop may sit:
+   *   - ≥1.6:1 against --bg AND --surface in both themes, so no tile reads as
+   *     a hole in the espresso ground (stop 8 used to be 1.25:1) or dissolves
+   *     into paper (stop 2 used to be 1.90:1);
+   *   - ≥4.5:1 against its own monogram ink (stops 4 and 5 used to be 3.94
+   *     and 4.43).
+   * Together those carve two disjoint luminance bands — L* 56.8–76.9 for the
+   * dark-ink stops, L* 25.2–44.2 for the light-ink stops, with a dead zone
+   * between them no stop can occupy. Four stops per band is what fits; the
+   * 1–4 / 5–8 ink split below is that arithmetic's output, not an assumption
+   * (each stop clears 4.5:1 against exactly one of the two inks). Separation
+   * inside a band is then carried by a hue sweep (110° olive → 38° oscuro)
+   * at a muted chroma, which lands adjacent ΔE at 11.1 — up from 8.8, and
+   * the ceiling for a palette that still reads as one ordered leaf family.
+   * See docs/design/001-research.md § Amendment. */
+  --tobacco-1: #babf77;
+  --tobacco-2: #b5aa70;
+  --tobacco-3: #b29655;
+  --tobacco-4: #a88252;
+  --tobacco-5: #87602b;
+  --tobacco-6: #7a4f2d;
+  --tobacco-7: #753a1d;
+  --tobacco-8: #642c21;
   --tobacco-ink-dark: #2c2012;
   --tobacco-ink-light: #f0e7d3;
   --tobacco-1-ink: var(--tobacco-ink-dark);
@@ -70,6 +88,13 @@
   --tobacco-6-ink: var(--tobacco-ink-light);
   --tobacco-7-ink: var(--tobacco-ink-light);
   --tobacco-8-ink: var(--tobacco-ink-light);
+
+  /* Chip wash — the tobacco tint DESIGN-001 specifies for normalized
+   * descriptor chips. Was paper-200 / espresso-800: a neutral fill 1.12:1
+   * against the card it sits on, so the filled tier and the keyline tier read
+   * as the same object and only the italic told them apart. */
+  --tobacco-wash-light: #d3b790;
+  --tobacco-wash-dark: #523b27;
 
   /* ---- Semantic roles ---------------------------------------------------- */
   color-scheme: light dark;
@@ -88,7 +113,7 @@
   --danger-wash: light-dark(var(--red-wash-light), var(--red-wash-dark));
 
   /* Descriptor chips: normalized tags sit on a tobacco-tinted fill. */
-  --chip: light-dark(var(--paper-200), var(--espresso-800));
+  --chip: light-dark(var(--tobacco-wash-light), var(--tobacco-wash-dark));
   --chip-ink: light-dark(var(--ink-900), var(--parchment-100));
 
   /* The unsmoked portion of a burn line — wrapper leaf in either theme. */

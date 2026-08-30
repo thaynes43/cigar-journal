@@ -78,7 +78,13 @@ export function BandTile({
   const footer = [vitola, type].filter(Boolean).join(" · ");
   // A filled tile is pure art inside a framed parent — no footer, no own box.
   const showFooter = shape === "self" && size !== "thumb" && footer.length > 0;
-  const box = shape === "fill" ? "h-full w-full" : `rounded-tile ${BOX[size]}`;
+  // A self-shaped tile carries its own hairline edge. Without it a dark stop on
+  // the espresso ground has no boundary at all — the journal thumb and the
+  // detail hero read as holes rather than objects (issue #49). Every `fill`
+  // call site frames the tile in `border border-line` already, so a filled tile
+  // stays edgeless rather than doubling the rule.
+  const box =
+    shape === "fill" ? "h-full w-full" : `rounded-tile border border-line ${BOX[size]}`;
 
   return (
     <div
