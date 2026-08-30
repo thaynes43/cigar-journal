@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runProbe, probeFetchBudget, MAX_PROBE_CHILDREN } from "./probe.js";
+import { runProbe, formatProbe, probeFetchBudget, MAX_PROBE_CHILDREN } from "./probe.js";
 import { cubanLous } from "../adapters/cuban-lous.js";
 import { twoGuysCigars } from "../adapters/two-guys-cigars.js";
 import { createMockFetcher, urlsetXml, type MockFetcher, type MockRoute } from "../testing/fixtures.js";
@@ -154,25 +154,96 @@ describe("runProbe", () => {
     expect(oneOfOne.verdict).toBe("ok");
   });
 
-  it("finds products living in the LAST child of a sitemapindex", async () => {
-    const children = [1, 2, 3, 4].map((n) => `https://www.cubanlous.com/sitemap-${n}.xml`);
+  // Child-coverage regression. A positional midpoint pick over N children is
+  // [1, 3, 5] at N=7 and [1, 4, 6] at N=8: neither end is reachable, so a healthy
+  // vendor whose products sit in the first or last child probed as
+  // needs-attention — the false-negative class this probe exists to remove. The
+  // sizes below are the ones that break it; 4 children happens to work either way.
+  const indexProbe = async (children: string[], productChild: number) => {
     const indexXml = `<?xml version="1.0" encoding="UTF-8"?>
       <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
         ${children.map((c) => `<sitemap><loc>${c}</loc></sitemap>`).join("")}
       </sitemapindex>`;
     const routes: Record<string, MockRoute> = { [ROBOTS]: { body: ALLOW_ALL }, [SITEMAP]: { body: indexXml } };
-    for (const child of children.slice(0, 3)) routes[child] = { body: urlsetXml([]) };
-    routes[children[3]!] = { body: urlsetXml([PRODUCT, PRODUCT2]) };
+    for (const child of children) routes[child] = { body: urlsetXml([]) };
+    routes[children[productChild]!] = { body: urlsetXml([PRODUCT, PRODUCT2]) };
     routes[PRODUCT] = { body: productHtml("Montecristo No. 4", "18.00") };
     routes[PRODUCT2] = { body: productHtml("Partagas Serie D No. 4", "22.00") };
 
     const fetcher = createMockFetcher(routes);
     const result = await runProbe(fetcher, cubanLous);
+    expectWithinBudget(fetcher, cubanLous);
+    return { result, fetcher };
+  };
+
+  const numberedChildren = (count: number): string[] =>
+    Array.from({ length: count }, (_, i) => `https://www.cubanlous.com/sitemap-${i}.xml`);
+
+  it("finds products living in the LAST child of an 8-child sitemapindex", async () => {
+    const children = numberedChildren(8);
+    const { result } = await indexProbe(children, 7);
 
     expect(result.verdict).toBe("ok");
     expect(result.sitemap.sampledChildren.length).toBeLessThanOrEqual(MAX_PROBE_CHILDREN);
-    expect(result.sitemap.sampledChildren).toContain(children[3]);
-    expectWithinBudget(fetcher, cubanLous);
+    expect(result.sitemap.sampledChildren).toContain(children[7]);
+  });
+
+  it("finds products living in the FIRST child of an 8-child sitemapindex", async () => {
+    const children = numberedChildren(8);
+    const { result } = await indexProbe(children, 0);
+
+    expect(result.verdict).toBe("ok");
+    expect(result.sitemap.sampledChildren).toContain(children[0]);
+  });
+
+  // A stock Yoast/WooCommerce index: the catalog is in `product-sitemap.xml`,
+  // parked at an arbitrary position no positional rule can be relied on to hit.
+  it("finds the product child of a Yoast-shaped index by name", async () => {
+    const children = [
+      "post-sitemap.xml",
+      "page-sitemap.xml",
+      "product-sitemap1.xml",
+      "category-sitemap.xml",
+      "product_cat-sitemap.xml",
+      "product_tag-sitemap.xml",
+      "author-sitemap.xml",
+    ].map((n) => `https://www.cubanlous.com/${n}`);
+    const { result } = await indexProbe(children, 2);
+
+    expect(result.verdict).toBe("ok");
+    expect(result.sitemap.sampledChildren).toContain("https://www.cubanlous.com/product-sitemap1.xml");
+  });
+
+  // Diagnosability: a needs-attention on a big index must say how big the index
+  // was and which children were looked at, or the operator cannot tell an empty
+  // catalog from an unsampled one.
+  it("reports the index size and the sampled slice when it cannot cover the index", async () => {
+    const children = numberedChildren(20);
+    const { result } = await indexProbe(children, 5); // outside the 3-child pick
+
+    expect(result.verdict).toBe("needs-attention");
+    expect(result.sitemap.totalLocs).toBe(20); // the INDEX size, not the union
+    expect(result.sitemap.enumeratedLocs).toBe(0);
+    expect(result.sitemap.sampledChildren).toHaveLength(MAX_PROBE_CHILDREN);
+    expect(result.notes.join(" ")).toMatch(/sitemapindex has 20 children; probe sampled 3/);
+  });
+
+  it("names a child sitemap that refused the fetch", async () => {
+    const CHILD = "https://www.cubanlous.com/product-sitemap-1.xml";
+    const indexXml = `<?xml version="1.0" encoding="UTF-8"?>
+      <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        <sitemap><loc>${CHILD}</loc></sitemap>
+      </sitemapindex>`;
+    const fetcher = createMockFetcher({
+      [ROBOTS]: { body: ALLOW_ALL },
+      [SITEMAP]: { body: indexXml },
+      [CHILD]: { status: 403, body: "" },
+    });
+
+    const result = await runProbe(fetcher, cubanLous);
+    expect(result.verdict).toBe("needs-attention");
+    // "the index 403s us" is an ops fix; "the gate is wrong" is an adapter fix.
+    expect(result.notes.join(" ")).toMatch(/child sitemap https:\/\/www\.cubanlous\.com\/product-sitemap-1\.xml returned 403/);
   });
 
   it("surfaces sitemap content variance and still passes on the union", async () => {
@@ -196,6 +267,10 @@ describe("runProbe", () => {
     expect(result.sitemap.enumeratedLocs).toBe(2);
     expect(result.verdict).toBe("ok");
     expect(result.notes.join(" ")).toMatch(/VARIES/);
+    // The marginal contribution per sample is what a `samples` count is tuned
+    // from, so it has to reach the operator's screen, not just the struct.
+    expect(result.sitemap.samples.map((s) => s.newUrls)).toEqual([2, 0, 0]);
+    expect(formatProbe(result)).toContain("samples: n=3 locs=2/0/2 new=2/0/0 union=2 varied=yes");
     expectWithinBudget(fetcher, adapter);
   });
 

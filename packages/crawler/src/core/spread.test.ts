@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { spreadIndices } from "./spread.js";
+import { spreadIndices, edgeSpreadIndices } from "./spread.js";
 
 describe("spreadIndices", () => {
   it("returns nothing for an empty list or a zero request", () => {
@@ -36,6 +36,61 @@ describe("spreadIndices", () => {
       [9, 4],
     ] as const) {
       const picks = spreadIndices(total, want);
+      expect(picks.length).toBeLessThanOrEqual(want);
+      expect(new Set(picks).size).toBe(picks.length);
+      expect([...picks].sort((a, b) => a - b)).toEqual(picks);
+      for (const index of picks) {
+        expect(index).toBeGreaterThanOrEqual(0);
+        expect(index).toBeLessThan(total);
+      }
+    }
+  });
+});
+
+describe("edgeSpreadIndices", () => {
+  it("returns nothing for an empty list or a zero request", () => {
+    expect(edgeSpreadIndices(0, 3)).toEqual([]);
+    expect(edgeSpreadIndices(10, 0)).toEqual([]);
+    expect(edgeSpreadIndices(-1, 3)).toEqual([]);
+  });
+
+  // The regression this exists for: the midpoint spread cannot reach either end
+  // of a sitemapindex once it has a handful of children, so a vendor whose
+  // products live in the first or last child probes as needs-attention.
+  it("reaches the ends the midpoint spread cannot", () => {
+    expect(spreadIndices(7, 3)).toEqual([1, 3, 5]); // child 0 and child 6 unreachable
+    expect(edgeSpreadIndices(7, 3)).toEqual([0, 3, 6]);
+    expect(spreadIndices(8, 3)).toEqual([1, 4, 6]);
+    expect(edgeSpreadIndices(8, 3)).toEqual([0, 4, 7]);
+    expect(edgeSpreadIndices(20, 3)).toEqual([0, 10, 19]);
+  });
+
+  it("always includes the first and last entry", () => {
+    for (const total of [2, 4, 6, 7, 8, 20, 100, 985]) {
+      const picks = edgeSpreadIndices(total, 3);
+      expect(picks[0]).toBe(0);
+      expect(picks[picks.length - 1]).toBe(total - 1);
+    }
+  });
+
+  it("dedupes when it is asked for more picks than there are entries", () => {
+    expect(edgeSpreadIndices(1, 3)).toEqual([0]);
+    expect(edgeSpreadIndices(2, 3)).toEqual([0, 1]);
+    expect(edgeSpreadIndices(3, 3)).toEqual([0, 1, 2]);
+    expect(edgeSpreadIndices(4, 3)).toEqual([0, 2, 3]);
+    // A single pick takes the head — there is no second end to include.
+    expect(edgeSpreadIndices(5, 1)).toEqual([0]);
+  });
+
+  it("returns unique ascending in-range indices", () => {
+    for (const [total, want] of [
+      [1462, 3],
+      [7, 3],
+      [4, 3],
+      [50, 8],
+      [9, 4],
+    ] as const) {
+      const picks = edgeSpreadIndices(total, want);
       expect(picks.length).toBeLessThanOrEqual(want);
       expect(new Set(picks).size).toBe(picks.length);
       expect([...picks].sort((a, b) => a - b)).toEqual(picks);

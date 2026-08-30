@@ -1,5 +1,5 @@
 import type { Fetcher } from "./fetcher.js";
-import { spreadIndices } from "./spread.js";
+import { edgeSpreadIndices } from "./spread.js";
 
 // Sitemap parsing by regex (importer-style pragmatism — the shapes are regular
 // and a dependency-free `<loc>` sweep is enough). Supports both a flat urlset
@@ -64,6 +64,11 @@ export async function collectSitemapUrls(
 
 export const MAX_SITEMAP_SAMPLES = 8;
 
+export interface ChildFetchFailure {
+  url: string;
+  status: number;
+}
+
 export interface SitemapSample {
   attempt: number; // 1-based
   status: number; // ROOT fetch status
@@ -72,6 +77,10 @@ export interface SitemapSample {
   enumerated: number; // page URLs this sample yielded
   newUrls: number; // URLs no earlier sample had
   children: string[]; // child sitemaps descended into
+  // Children that answered non-200 in BOUNDED mode. A skipped child looks
+  // identical to an empty one in `enumerated`, and "the index 403s us" is a
+  // different fix from "the gate is wrong" — the probe reports these.
+  childFailures: ChildFetchFailure[];
 }
 
 export interface SampledSitemap {
@@ -94,12 +103,44 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// A sitemapindex carries one strong hint a positional pick throws away: its
+// child NAMES. A stock Yoast/Woo index parks the catalog in `product-sitemap*.xml`
+// at an arbitrary position among post/page/category/product_cat/product_tag/author
+// children, so a bounded positional sample misses it more often than it hits it.
+// Deliberately narrow: `item` would match the substring inside "sitemap" and
+// make every child a hit.
+const PRODUCT_CHILD_HINT = /product|shop|store|catalog/i;
+
+// Which children of a sitemapindex a BOUNDED walk (the probe) descends into.
+// Name-matched children first, then an endpoint-inclusive spread of the rest —
+// the two together make "products live in child 0", "products live in the last
+// child" and "products live in the child called product-sitemap.xml" all
+// reachable, where the plain midpoint spread reached none of them past 5
+// children. Returned in document order so the list reads against the index.
+export function selectIndexChildren(locs: string[], want: number): string[] {
+  if (want <= 0) return [];
+  const unique = [...new Set(locs)];
+  if (unique.length <= want) return unique;
+
+  const picked = new Set<string>();
+  const take = (candidates: string[]): void => {
+    for (const index of edgeSpreadIndices(candidates.length, want - picked.size)) {
+      picked.add(candidates[index]!);
+      if (picked.size >= want) return;
+    }
+  };
+  take(unique.filter((loc) => PRODUCT_CHILD_HINT.test(loc)));
+  if (picked.size < want) take(unique.filter((loc) => !picked.has(loc)));
+  return unique.filter((loc) => picked.has(loc));
+}
+
 interface RawSample {
   status: number;
   kind: "urlset" | "sitemapindex" | null;
   rootLocs: number;
   urls: string[];
   children: string[];
+  childFailures: ChildFetchFailure[];
 }
 
 async function takeSample(
@@ -108,11 +149,20 @@ async function takeSample(
   maxChildren: number | undefined,
 ): Promise<RawSample> {
   const { status, body } = await fetcher.fetchText(sitemapUrl);
-  if (status !== 200) return { status, kind: null, rootLocs: 0, urls: [], children: [] };
+  if (status !== 200) {
+    return { status, kind: null, rootLocs: 0, urls: [], children: [], childFailures: [] };
+  }
 
   const parsed = parseSitemap(body);
   if (parsed.kind === "urlset") {
-    return { status, kind: "urlset", rootLocs: parsed.locs.length, urls: parsed.locs, children: [] };
+    return {
+      status,
+      kind: "urlset",
+      rootLocs: parsed.locs.length,
+      urls: parsed.locs,
+      children: [],
+      childFailures: [],
+    };
   }
 
   // Fresh `visited` per sample, seeded with the root at depth 0 — the same state
@@ -120,11 +170,10 @@ async function takeSample(
   // an index exactly as the plain collector does.
   const visited = new Set<string>([sitemapUrl]);
   const children =
-    maxChildren === undefined
-      ? parsed.locs
-      : spreadIndices(parsed.locs.length, maxChildren).map((i) => parsed.locs[i]!);
+    maxChildren === undefined ? parsed.locs : selectIndexChildren(parsed.locs, maxChildren);
 
   const urls: string[] = [];
+  const childFailures: ChildFetchFailure[] = [];
   for (const child of children) {
     if (maxChildren === undefined) {
       urls.push(...(await collectSitemapUrls(fetcher, child, 1, visited)));
@@ -135,18 +184,26 @@ async function takeSample(
     if (visited.has(child)) continue;
     visited.add(child);
     const res = await fetcher.fetchText(child);
-    if (res.status !== 200) continue;
+    if (res.status !== 200) {
+      childFailures.push({ url: child, status: res.status });
+      continue;
+    }
     const childParsed = parseSitemap(res.body);
     if (childParsed.kind === "urlset") urls.push(...childParsed.locs);
   }
 
-  return { status, kind: "sitemapindex", rootLocs: parsed.locs.length, urls, children };
+  return { status, kind: "sitemapindex", rootLocs: parsed.locs.length, urls, children, childFailures };
 }
 
+// Multiset comparison, not set comparison: a response that drops one loc and
+// duplicates another has the same length AND the same membership as the original,
+// and calling that pair identical reports a varying vendor as stable — the exact
+// conclusion that would send an operator back to samples: 1.
 function sameUrls(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
-  const set = new Set(b);
-  return a.every((url) => set.has(url));
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((url, index) => url === sortedB[index]);
 }
 
 // Take N samples of one sitemap and union them in first-seen order. `varied` is
@@ -187,10 +244,16 @@ export async function collectSitemapSamples(
       enumerated: raw.urls.length,
       newUrls,
       children: raw.children,
+      childFailures: raw.childFailures,
     });
   }
 
-  const first = perSampleUrls[0] ?? [];
-  const varied = samples.length > 1 && perSampleUrls.some((sample) => !sameUrls(sample, first));
+  // Only samples whose ROOT fetch succeeded can testify to variance. A 503
+  // enumerates nothing, and scoring that as "this vendor serves different content
+  // per request" writes a permanent varied=true into crawl_runs.stats for a
+  // vendor whose sitemap was merely flaky once.
+  const fetched = perSampleUrls.filter((_, index) => samples[index]!.status === 200);
+  const first = fetched[0] ?? [];
+  const varied = fetched.length > 1 && fetched.some((sample) => !sameUrls(sample, first));
   return { urls, samples, varied };
 }

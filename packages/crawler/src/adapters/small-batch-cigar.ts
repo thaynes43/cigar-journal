@@ -40,8 +40,13 @@ export const smallBatchCigar: ExclusionVendorAdapter = {
   // single path segment. The depth bound carries most of the load — `/blogs/news/x`
   // is out on shape alone — and the pattern catches root-level non-products
   // (`/`, `/cart.php`, `/search`).
+  //
+  // Every reserved word ends at `(?:\/|$)`, a full SEGMENT boundary, not `\b`:
+  // `\b` also fires at a hyphen, so `^\/cart\b` matched `/cart-blanche-robusto/`
+  // and the gate dropped real products silently. Both alternatives are anchored
+  // at `^` for the same reason — an unanchored branch matches mid-path.
   nonProductPathPattern:
-    /^\/(?:$|(?:pages|blogs?|collections?|categories|brands|policies|customer|account)\/|(?:search|cart|checkout|login|logout|register|wishlist|compare|sitemap|feed|rss)\b)|\.(?:php|xml|json|txt)$/i,
+    /^\/(?:$|(?:pages|blogs?|collections?|categories|brands|policies|customer|account)\/|(?:search|cart|checkout|login|logout|register|wishlist|compare|sitemap|feed|rss)(?:\/|$))|^\/.*\.(?:php|xml|json|txt)$/i,
   productPathSegments: { min: 1, max: 1 },
   cigarCategoryPattern: /cigar/i,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?/i,

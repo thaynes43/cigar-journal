@@ -113,10 +113,19 @@ LLM-created cigars accumulate until curated.
     listings" row that reads as healthy; a non-sampling vendor still
     succeeds-with-zero.
   - **Probe verdict.** `--probe` now samples up to three index children and
-    three spread-apart product URLs (never index 0 — the observed false
-    negatives were both position-0 index/redirect rows) and passes only when
-    robots allows the gate, the enumeration yields product URLs, and at least
-    `min(2, sampled)` product pages parse. One parse proves the JSON-LD
-    extractor works but not that the enumeration selects products; two prove
-    both, and requiring all three would re-import the false negative. The
-    fetcher's page cap for a probe is derived from those bounds, not fixed.
+    three product URLs, and passes only when robots allows the gate, the
+    enumeration yields product URLs, and at least `min(2, sampled)` product
+    pages parse. One parse proves the JSON-LD extractor works but not that the
+    enumeration selects products; two prove both, and requiring all three would
+    re-import the false negative. The fetcher's page cap for a probe is derived
+    from those bounds, not fixed.
+  - **The two samples pick differently, on purpose.** PRODUCT URLs are picked by
+    a midpoint spread that never returns index 0: the observed false negatives
+    were both position-0 index/redirect rows, and sitemaps park those at the
+    front. A sitemapINDEX's CHILDREN have no such convention, so they are picked
+    name-first (`product`/`shop`/`store`/`catalog` — a Yoast index parks the
+    catalog in `product-sitemap1.xml` at an arbitrary position) and then by an
+    endpoint-inclusive spread, because a midpoint pick cannot reach child 0 past
+    6 children or the last child past 7. A bounded probe still cannot cover a
+    large index: it reports the index size, the children it sampled, and any
+    child that answered non-200, so a `needs-attention` says which it was.

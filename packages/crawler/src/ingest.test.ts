@@ -350,6 +350,9 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(result.stats.sitemapSampling).toEqual({
       samples: 3,
       locsPerSample: [1, 0, 1],
+      // Marginal contribution per sample — the number `samples` is tuned from.
+      // Recorded in crawl_runs.stats, not just computed and dropped.
+      newPerSample: [1, 0, 1],
       unionLocs: 2,
       productLocs: 2,
       varied: true,

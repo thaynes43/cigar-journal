@@ -45,6 +45,10 @@ export interface IngestStats {
   sitemapSampling?: {
     samples: number;
     locsPerSample: number[];
+    // Marginal contribution per sample (URLs no earlier sample enumerated). The
+    // number `sitemapSampling.samples` is tuned from: a trailing 0 means the
+    // count is already enough, a non-zero last entry means raise it.
+    newPerSample: number[];
     unionLocs: number;
     productLocs: number;
     varied: boolean;
@@ -162,6 +166,7 @@ async function productUrls(deps: IngestDeps, adapter: VendorAdapter, stats: Inge
   stats.sitemapSampling = {
     samples: sampled.samples.length,
     locsPerSample: sampled.samples.map((sample) => sample.enumerated),
+    newPerSample: sampled.samples.map((sample) => sample.newUrls),
     unionLocs: sampled.urls.length,
     productLocs: urls.length,
     varied: sampled.varied,

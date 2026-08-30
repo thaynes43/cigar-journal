@@ -37,13 +37,15 @@ export {
   parseSitemap,
   collectSitemapUrls,
   collectSitemapSamples,
+  selectIndexChildren,
   MAX_SITEMAP_SAMPLES,
   type ParsedSitemap,
+  type ChildFetchFailure,
   type SitemapSample,
   type SampledSitemap,
   type SampleOptions,
 } from "./core/sitemap.js";
-export { spreadIndices } from "./core/spread.js";
+export { spreadIndices, edgeSpreadIndices } from "./core/spread.js";
 export {
   pathOf,
   segmentCount,

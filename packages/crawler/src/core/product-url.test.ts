@@ -49,7 +49,27 @@ describe("prefix gate (mode A)", () => {
 });
 
 describe("exclusion gate (mode B)", () => {
-  const accepts = ["https://www.smallbatchcigar.com/tatuaje-brown-label-noella/", "https://www.smallbatchcigar.com/xikar-xi3-cutter"];
+  const accepts = [
+    "https://www.smallbatchcigar.com/tatuaje-brown-label-noella/",
+    "https://www.smallbatchcigar.com/xikar-xi3-cutter",
+  ];
+  // Product slugs whose FIRST hyphen-delimited word is a reserved path word. A
+  // `\b` after the word matches at the hyphen too, so these were all dropped —
+  // silently, with no note, error or stat, leaving a short catalog that reads as
+  // a healthy run.
+  const reservedWordSlugs = [
+    "https://www.smallbatchcigar.com/feed-the-monster-toro/",
+    "https://www.smallbatchcigar.com/cart-blanche-robusto/",
+    "https://www.smallbatchcigar.com/search-and-destroy-toro/",
+    "https://www.smallbatchcigar.com/register-edition-2020/",
+    "https://www.smallbatchcigar.com/compare-cigars-sampler/",
+    "https://www.smallbatchcigar.com/login-torpedo/",
+    "https://www.smallbatchcigar.com/logout-lancero/",
+    "https://www.smallbatchcigar.com/checkout-line-lancero/",
+    "https://www.smallbatchcigar.com/wishlist-edition/",
+    "https://www.smallbatchcigar.com/sitemap-cigar/",
+    "https://www.smallbatchcigar.com/rss-limited-2019/",
+  ];
   const rejects = [
     "https://www.smallbatchcigar.com/",
     "https://www.smallbatchcigar.com/pages/about/",
@@ -61,6 +81,10 @@ describe("exclusion gate (mode B)", () => {
     "https://www.smallbatchcigar.com/search",
     "https://www.smallbatchcigar.com/sitemap.xml",
     "https://www.smallbatchcigar.com/a/b/",
+    // The reserved words themselves, as whole segments, still go.
+    "https://www.smallbatchcigar.com/cart/",
+    "https://www.smallbatchcigar.com/checkout",
+    "https://www.smallbatchcigar.com/feed/",
   ];
 
   it("accepts root-level product slugs", () => {
@@ -69,6 +93,10 @@ describe("exclusion gate (mode B)", () => {
 
   it("rejects non-product paths and anything deeper than one segment", () => {
     for (const url of rejects) expect(isProductUrl(url, smallBatchCigar)).toBe(false);
+  });
+
+  it("accepts a product slug that merely STARTS with a reserved path word", () => {
+    for (const url of reservedWordSlugs) expect(isProductUrl(url, smallBatchCigar), url).toBe(true);
   });
 });
 
@@ -87,6 +115,50 @@ describe("gate metadata", () => {
   });
 });
 
+// Split a regex source on TOP-LEVEL alternation, stepping over `|` inside
+// groups, character classes and escapes. `source.startsWith("^")` says nothing
+// about the branches after the first `|`, and an unanchored branch matches
+// mid-path — which is how a gate silently drops products.
+function topLevelAlternatives(source: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let depth = 0;
+  let inClass = false;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i]!;
+    if (ch === "\\") {
+      current += ch + (source[i + 1] ?? "");
+      i += 1;
+      continue;
+    }
+    if (inClass) {
+      if (ch === "]") inClass = false;
+      current += ch;
+      continue;
+    }
+    if (ch === "[") inClass = true;
+    else if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    else if (ch === "|" && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts;
+}
+
+describe("topLevelAlternatives", () => {
+  it("splits only on alternation outside groups, classes and escapes", () => {
+    expect(topLevelAlternatives("^/cart|checkout")).toEqual(["^/cart", "checkout"]);
+    expect(topLevelAlternatives("^/(?:cart|checkout)/")).toEqual(["^/(?:cart|checkout)/"]);
+    expect(topLevelAlternatives("^/[a|b]x")).toEqual(["^/[a|b]x"]);
+    expect(topLevelAlternatives("^/a\\|b")).toEqual(["^/a\\|b"]);
+  });
+});
+
 describe("registry invariant", () => {
   // The types make the two gate modes mutually exclusive; this is the runtime
   // guard behind that, so a `as VendorAdapter` cast in a future adapter cannot
@@ -100,9 +172,17 @@ describe("registry invariant", () => {
         expect(adapter.productPathSegments, slug).toBeUndefined();
         expect(adapter.robotsProbePath, slug).toBeUndefined();
       } else {
-        // Anchored at the start, or it matches mid-path and silently drops
-        // products (a slug containing "cart" is not the cart page).
-        expect(adapter.nonProductPathPattern!.source.startsWith("^"), slug).toBe(true);
+        const pattern = adapter.nonProductPathPattern!;
+        // EVERY top-level branch anchored, not just the first — an unanchored
+        // branch matches mid-path and silently drops products (a slug containing
+        // "checkout" is not the checkout page).
+        for (const alternative of topLevelAlternatives(pattern.source)) {
+          expect(alternative.startsWith("^"), `${slug}: unanchored branch ${alternative}`).toBe(true);
+        }
+        // `g`/`y` make RegExp.test stateful via lastIndex, so consecutive
+        // matching URLs would alternate accept/reject inside filterProductUrls.
+        expect(pattern.global, slug).toBe(false);
+        expect(pattern.sticky, slug).toBe(false);
       }
     }
   });

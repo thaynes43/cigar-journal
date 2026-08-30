@@ -111,6 +111,11 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
   const kind = samples.find((s) => s.kind !== null)?.kind ?? null;
   const sampledChildren = [...new Set(samples.flatMap((s) => s.children))];
   const anyOk = samples.some((s) => s.status === 200);
+  // Root <loc> count: child sitemaps for an index, page URLs for a urlset. For an
+  // index this is the ONLY place the index's real size appears — the enumerated
+  // union is a different number and reporting it as `locs` hid how much of the
+  // index the probe never looked at.
+  const rootLocs = Math.max(0, ...samples.map((s) => s.rootLocs));
 
   if (!anyOk) {
     const statuses = [...new Set(samples.map((s) => s.status))].join("/");
@@ -132,6 +137,25 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
   if (kind === "sitemapindex" && sampledChildren.length === 0) {
     notes.push("sitemapindex is empty — no child sitemaps.");
   }
+  // A child that 403s or 404s enumerates zero URLs, exactly like an empty one.
+  // Without this the operator cannot tell "the gate is wrong" from "we were
+  // blocked", which is the difference between an adapter fix and an ops fix.
+  const failedChildren = new Map<string, number>();
+  for (const sample of samples) {
+    for (const failure of sample.childFailures) failedChildren.set(failure.url, failure.status);
+  }
+  for (const [url, status] of failedChildren) {
+    notes.push(`child sitemap ${url} returned ${status}.`);
+  }
+  // The probe descends at most MAX_PROBE_CHILDREN children; a product-only child
+  // outside that pick is invisible to it. Say so with the numbers, so a
+  // needs-attention on a big index is diagnosable from the output alone.
+  if (kind === "sitemapindex" && rootLocs > sampledChildren.length) {
+    notes.push(
+      `sitemapindex has ${rootLocs} children; probe sampled ${sampledChildren.length} ` +
+        `(${sampledChildren.join(", ")}) — products in an unsampled child would not be seen here.`,
+    );
+  }
 
   const productUrls = filterProductUrls(sampled.urls, adapter);
   if (anyOk && sampled.urls.length > 0 && productUrls.length === 0) {
@@ -142,7 +166,7 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
     url: adapter.sitemapUrl,
     status: samples[0]!.status,
     kind,
-    totalLocs: kind === "sitemapindex" ? sampled.urls.length : Math.max(0, ...samples.map((s) => s.rootLocs)),
+    totalLocs: rootLocs,
     productLocs: productUrls.length,
     enumeratedLocs: sampled.urls.length,
     sampledChildren,
@@ -206,12 +230,22 @@ export function formatProbe(result: ProbeResult): string {
     `probe ${result.vendor}  verdict=${result.verdict}  gate=${result.gate}`,
     `  robots: status=${result.robots.status} agent=${result.robots.matchedAgent} ` +
       `allows=${result.robots.productPathAllowed}`,
-    `  sitemap: status=${s.status} kind=${s.kind ?? "-"} locs=${s.totalLocs} product-locs=${s.productLocs}` +
-      (s.sampledChildren.length > 0 ? ` children=${s.sampledChildren.join(",")}` : ""),
+    // `locs` is the ROOT count (children for an index), `enumerated` the union
+    // the gate was applied to — for an index they are different numbers and the
+    // gap is how much of the catalog this probe did not look at.
+    `  sitemap: status=${s.status} kind=${s.kind ?? "-"} locs=${s.totalLocs} ` +
+      `enumerated=${s.enumeratedLocs} product-locs=${s.productLocs}` +
+      (s.kind === "sitemapindex"
+        ? ` children=${s.sampledChildren.length}/${s.totalLocs}` +
+          (s.sampledChildren.length > 0 ? ` (${s.sampledChildren.join(",")})` : "")
+        : ""),
   ];
   if (s.samples.length > 1) {
     lines.push(
+      // `new` is the per-sample marginal contribution — the number the adapter's
+      // `samples` count is tuned from (a trailing 0 means the count is enough).
       `  samples: n=${s.samples.length} locs=${s.samples.map((x) => x.enumerated).join("/")} ` +
+        `new=${s.samples.map((x) => x.newUrls).join("/")} ` +
         `union=${s.enumeratedLocs} varied=${s.varied ? "yes" : "no"}`,
     );
   }

@@ -160,6 +160,7 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
   if (sampling) {
     lines.push(
       `  sitemap: samples=${sampling.samples} locs=${sampling.locsPerSample.join("/")} ` +
+        `new=${sampling.newPerSample.join("/")} ` +
         `union=${sampling.unionLocs} product=${sampling.productLocs} varied=${sampling.varied ? "yes" : "no"}`,
     );
   }
