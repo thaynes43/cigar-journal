@@ -20,7 +20,7 @@ import {
   type ServiceTokenSummary,
 } from "./service-tokens.js";
 
-// The `token` role entrypoint (ADR-010) — the ONLY supported writer of a
+// The `token` role entrypoint (ADR-011) — the ONLY supported writer of a
 // long-lived access token. Run via tsx, mirroring the migrate/import/crawl
 // roles; see the ROLE DISPATCH marker in the Dockerfile for the k8s command
 // array. Not an HTTP route: nothing in apps/web or @cj/mcp can reach the mint.
@@ -49,6 +49,9 @@ const RUN_ID = newRunId();
 function resolveDatabaseUrl(explicit: string | null): string | null {
   return explicit ?? process.env.DATABASE_URL ?? null;
 }
+
+/** The one line that names the elevation in plain words; see runMint. */
+const CURATION_NOTICE = "ELEVATED — this token may curate the SHARED catalog for its whole life";
 
 function field(label: string, value: string): string {
   return `  ${label.padEnd(11)}${value}`;
@@ -119,6 +122,7 @@ async function runMint(
     clientName: options.clientName,
     userEmail: options.userEmail,
     scopes: options.scopes,
+    allowCuration: options.allowCuration,
     reason: options.reason,
     ttlDays,
     resource: options.resource ?? undefined,
@@ -140,6 +144,10 @@ async function runMint(
           field("client", `${plan.clientName} (${plan.clientId ?? "will be created"})`),
           field("user", `${plan.userEmail} role=${plan.role}`),
           field("scopes", plan.scopes.join(" ")),
+          // Printed only when it applies, so it reads as an alarm rather than a
+          // row of boilerplate — the elevation must not be discoverable only by
+          // decoding the scope list above.
+          ...(plan.curationElevated ? [field("curation", CURATION_NOTICE)] : []),
           field("ttl", `${plan.ttlDays}d → ${plan.expiresAt.toISOString()}`),
           field("resource", plan.resource),
           field("reason", options.reason),
@@ -161,6 +169,7 @@ async function runMint(
         ),
         field("user", `${minted.userEmail} role=${minted.role}`),
         field("scopes", minted.scopes.join(" ")),
+        ...(minted.curationElevated ? [field("curation", CURATION_NOTICE)] : []),
         field("resource", minted.resource),
         field("expires", `${minted.expiresAt.toISOString()} (${minted.ttlDays}d)`),
         "the value below is not recoverable — capture it into 1Password now.",
@@ -288,9 +297,11 @@ main()
   .then((code) => process.exit(code))
   .catch((error: unknown) => {
     // An OAuthError here is an invariant the flags or the env violated (unknown
-    // scope, offline_access, a TTL out of range, an audience that is not this
-    // server's) — an invocation error, exit 2. A ServiceTokenError is an
-    // operational failure the operator must fix in the data — exit 1.
+    // scope, offline_access, curation:* without --allow-curation, a TTL out of
+    // range, an audience that is not this server's) — an invocation error, exit
+    // 2. A ServiceTokenError is an operational failure the operator must fix in
+    // the data, not in argv — an unknown subject, or a non-admin one asked to
+    // carry curation scopes — exit 1.
     if (error instanceof OAuthError) {
       console.error(`error: ${error.code}: ${error.description}`);
       process.exit(2);

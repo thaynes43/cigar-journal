@@ -31,6 +31,7 @@ import {
   validateAuthorizationParams,
 } from "./provider.js";
 import {
+  CURATION_SERVICE_SCOPES,
   describeTokenForRevoke,
   listServiceTokens,
   mintServiceToken,
@@ -43,7 +44,7 @@ import {
 import { mintDeliveryRefusal, parseArgs, UsageError, USAGE } from "./cli-args.js";
 import { validateAccessToken } from "./validate.js";
 
-// Operator-minted service tokens (ADR-010) against a real embedded Postgres 16,
+// Operator-minted service tokens (ADR-011) against a real embedded Postgres 16,
 // driven exactly as the `token` role CLI drives them. The central claim under
 // test: a minted row is an ORDINARY access token — validateAccessToken accepts
 // it with no change, and no grant state is touched to produce it.
@@ -52,6 +53,8 @@ const ORIGIN = "https://cigars.example.com";
 const RESOURCE = `${ORIGIN}/mcp`;
 const REDIRECT = "https://client.example.com/callback";
 const OWNER_EMAIL = "service-owner@example.com";
+/** A role=user subject — the curation elevation must refuse this one. */
+const MEMBER_EMAIL = "service-member@example.com";
 
 /** Silence the [auth] narration; the sink itself is covered by the CLI contract. */
 const quiet: AuthEventWriter = () => {};
@@ -84,6 +87,7 @@ describe("service tokens", () => {
       .values({ email: OWNER_EMAIL, role: "admin" })
       .returning({ id: users.id });
     userId = inserted[0]!.id;
+    await db.insert(users).values({ email: MEMBER_EMAIL, role: "user" });
   }, 60_000);
 
   afterAll(async () => {
@@ -224,16 +228,31 @@ describe("service tokens", () => {
     expect(error.description).toContain("offline_access");
   });
 
-  it("refuses curation scopes in code, not merely by leaving them out of the args", async () => {
-    for (const scope of ["curation:read", "curation:write"]) {
+  // ---- the curation elevation (owner override 2026-08-30, ADR-011) -----------
+  //
+  // curation:* is OFF by default and stays off; `allowCuration` is the only way
+  // in, and it is not enough on its own — the subject must be an admin. The four
+  // cases below are the whole contract: refused without the flag, permitted with
+  // it, refused with it for a non-admin subject, and recorded when it happens.
+
+  it("refuses curation scopes by default — the flag is the only way in", async () => {
+    for (const scope of CURATION_SERVICE_SCOPES) {
       const error = await expectOAuthError(
         mint({ scopes: ["journal:read", scope] }),
         "invalid_scope",
       );
       // Refused deliberately, and said so — curation:* IS a real scope on the
-      // browser flow, so a bare "unknown scope" would read as a typo.
+      // browser flow, so a bare "unknown scope" would read as a typo. The
+      // message names the flag, because the operator's next move is to decide
+      // whether to pass it, not to hunt for the reason in the source.
       expect(error.description).toContain(scope);
       expect(error.description).toContain("shared catalog");
+      expect(error.description).toContain("--allow-curation");
+      // An explicit false is the same refusal as an omitted flag.
+      await expectOAuthError(
+        mint({ scopes: ["journal:read", scope], allowCuration: false }),
+        "invalid_scope",
+      );
       // The dry run refuses identically; a plan that accepted it would send the
       // operator into an apply that cannot succeed.
       await expectOAuthError(
@@ -246,7 +265,145 @@ describe("service tokens", () => {
         "invalid_scope",
       );
     }
+    // The DEFAULT set is unchanged by the elevation — curation:* is admitted at
+    // mint time, never folded into the advertised allowlist.
     expect(MINTABLE_SERVICE_SCOPES).toEqual(["catalog:read", "journal:read", "journal:write"]);
+    expect(CURATION_SERVICE_SCOPES).toEqual(["curation:read", "curation:write"]);
+  });
+
+  it("mints curation scopes with the flag, for an admin subject", async () => {
+    const minted = await mint({
+      scopes: ["catalog:read", "curation:read", "curation:write"],
+      allowCuration: true,
+      reason: "daily curation lane",
+    });
+    expect(minted.scopes).toEqual(["catalog:read", "curation:read", "curation:write"]);
+    expect(minted.curationElevated).toBe(true);
+
+    // The point of the whole change: the curation lane's token works at /mcp,
+    // with an admin principal the curation tools' own assertAdmin accepts.
+    const result = await validateAccessToken(db, minted.token, ["curation:write"]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.principal.role).toBe("admin");
+
+    // ...and it is still an ordinary service token in every other respect.
+    const rows = await db
+      .select({ familyId: oauthAccessToken.familyId, expiresAt: oauthAccessToken.expiresAt })
+      .from(oauthAccessToken)
+      .where(eq(oauthAccessToken.id, minted.tokenId));
+    expect(rows[0]!.familyId).toBeNull();
+    expect(minted.ttlDays).toBe(365);
+
+    // An unelevated mint is unmarked — the flag alone, with no curation scope,
+    // is a no-op rather than a second meaning.
+    const plain = await mint({ scopes: ["journal:read"], allowCuration: true });
+    expect(plain.curationElevated).toBe(false);
+  });
+
+  it("refuses curation scopes for a non-admin subject even with the flag", async () => {
+    const before = [
+      (await db.select().from(oauthAccessToken)).length,
+      (await db.select().from(oauthClient)).length,
+    ];
+    const clientName = consumer();
+    const error = await mint({
+      clientName,
+      userEmail: MEMBER_EMAIL,
+      scopes: ["curation:write"],
+      allowCuration: true,
+    }).catch((e: unknown) => e);
+    // Not a usage error: the flags are fine, the DATA is wrong — exit 1, and the
+    // fix is to promote the subject or pick another, not to retype the command.
+    expect(error).toBeInstanceOf(ServiceTokenError);
+    expect((error as ServiceTokenError).code).toBe("subject_not_admin");
+    expect((error as ServiceTokenError).description).toContain(MEMBER_EMAIL);
+
+    // The refusal leaves NOTHING behind — not the token, and not the service
+    // client the mint would otherwise have created on the way to it.
+    expect([
+      (await db.select().from(oauthAccessToken)).length,
+      (await db.select().from(oauthClient)).length,
+    ]).toEqual(before);
+
+    // The dry run refuses identically, reading the same users row.
+    const planned = await planServiceTokenMint(db, {
+      clientName,
+      userEmail: MEMBER_EMAIL,
+      scopes: ["curation:write"],
+      allowCuration: true,
+      reason: "test",
+    }).catch((e: unknown) => e);
+    expect((planned as ServiceTokenError).code).toBe("subject_not_admin");
+
+    // The same subject is fine for the ordinary scopes — the gate is on the
+    // elevation, not on the user.
+    const ordinary = await mint({ userEmail: MEMBER_EMAIL, scopes: ["journal:write"] });
+    expect(ordinary.role).toBe("user");
+    expect(ordinary.curationElevated).toBe(false);
+  });
+
+  it("refuses offline_access in every combination — no flag admits it", async () => {
+    for (const allowCuration of [false, true]) {
+      for (const scopes of [
+        ["offline_access"],
+        ["journal:read", "offline_access"],
+        ["curation:write", "offline_access"],
+        ["offline_access", "curation:read"],
+      ]) {
+        const error = await expectOAuthError(mint({ scopes, allowCuration }), "invalid_scope");
+        // offline_access is refused FIRST, whatever it is paired with: there is
+        // no refresh chain on a service token, so the elevation cannot reach it.
+        expect(error.description).toContain("offline_access");
+        await expectOAuthError(
+          planServiceTokenMint(db, {
+            clientName: consumer(),
+            userEmail: OWNER_EMAIL,
+            scopes,
+            allowCuration,
+            reason: "test",
+          }),
+          "invalid_scope",
+        );
+      }
+    }
+  });
+
+  it("records the elevation on the mint's audit row, and its absence too", async () => {
+    const elevated = await mint({
+      scopes: ["curation:read", "curation:write"],
+      allowCuration: true,
+      reason: "daily curation lane",
+    });
+    const auditFor = async (tokenId: string): Promise<Record<string, unknown>> => {
+      const rows = await db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.action, "oauth.service_token.mint"));
+      const row = rows.find(
+        (candidate) => (candidate.after as { tokenId?: string }).tokenId === tokenId,
+      );
+      expect(row, `no mint audit row for ${tokenId}`).toBeDefined();
+      return row!.after as Record<string, unknown>;
+    };
+
+    // Nobody should have to decode a scope list to discover a year-long token
+    // could curate the shared catalog — and the subject's role AT MINT TIME is
+    // recorded too, since users.role can change afterwards.
+    expect(await auditFor(elevated.tokenId)).toMatchObject({
+      curationElevated: true,
+      subjectRole: "admin",
+      scopes: ["curation:read", "curation:write"],
+      reason: "daily curation lane",
+    });
+
+    // Present-and-false on an ordinary mint: a missing field would only say that
+    // some older code did not write one.
+    const ordinary = await mint({ scopes: ["journal:read"] });
+    expect(await auditFor(ordinary.tokenId)).toMatchObject({
+      curationElevated: false,
+      subjectRole: "admin",
+    });
   });
 
   it("issues no refresh token and no family — nothing to rotate", async () => {
@@ -574,6 +731,54 @@ describe("service tokens", () => {
     expect(plan.stderr).toContain("no user with email");
   }, 30_000);
 
+  it("names the elevation in the plan the operator reads, and only when it applies", async () => {
+    // The dry run is where an operator sees what a mint would do, so the
+    // elevation has to be legible there — not implicit in a scope list.
+    const mintArgs = (extra: string[]): string[] => [
+      "mint",
+      "--client-name",
+      consumer(),
+      "--user-email",
+      OWNER_EMAIL,
+      "--scope",
+      "curation:write",
+      "--reason",
+      "daily curation lane",
+      ...extra,
+    ];
+
+    const elevated = await runCli(mintArgs(["--allow-curation"]), { BETTER_AUTH_URL: ORIGIN });
+    expect(elevated.code).toBe(0);
+    expect(elevated.stderr).toContain("curation");
+    expect(elevated.stderr).toContain("ELEVATED");
+    expect(elevated.stderr).toContain("SHARED catalog");
+    expect(elevated.stderr).toContain("nothing written");
+
+    // Without the flag the same command is refused as a usage error (exit 2),
+    // and the refusal names the flag rather than reading as an unknown scope.
+    const refused = await runCli(mintArgs([]), { BETTER_AUTH_URL: ORIGIN });
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toContain("--allow-curation");
+
+    // An ordinary plan carries no elevation line at all.
+    const ordinary = await runCli(
+      [
+        "mint",
+        "--client-name",
+        consumer(),
+        "--user-email",
+        OWNER_EMAIL,
+        "--scope",
+        "journal:read",
+        "--reason",
+        "ordinary",
+      ],
+      { BETTER_AUTH_URL: ORIGIN },
+    );
+    expect(ordinary.code).toBe(0);
+    expect(ordinary.stderr).not.toContain("ELEVATED");
+  }, 60_000);
+
   // ---- run identity ------------------------------------------------------------
 
   it("stamps each run with a fresh id, never the pod hostname", async () => {
@@ -862,6 +1067,7 @@ describe("service-token argv", () => {
         clientName: "dev-env-pod",
         userEmail: "owner@example.com",
         scopes: ["catalog:read", "journal:write"],
+        allowCuration: false,
         reason: "dev-env pod MCP client",
         ttlDays: 180,
         resource: null,
@@ -942,11 +1148,39 @@ describe("service-token argv", () => {
   });
 
   it("advertises only the scopes a service token can actually carry", () => {
-    // The scope list is generated from MINTABLE_SERVICE_SCOPES, so it cannot
-    // drift from what the mint accepts. curation:* appears only as a refusal.
+    // The scope lists are generated from MINTABLE_SERVICE_SCOPES and
+    // CURATION_SERVICE_SCOPES, so they cannot drift from what the mint accepts.
     expect(USAGE).toContain("catalog:read | journal:read | journal:write");
-    expect(USAGE).toContain("offline_access and curation:* are refused");
+    expect(USAGE).toContain("offline_access is always refused");
+    expect(USAGE).toContain("curation:read | curation:write");
+    expect(USAGE).toContain("only with --allow-curation");
+    expect(USAGE).toContain("The subject must be an admin");
     expect(USAGE).toContain("default and maximum 365");
+  });
+
+  it("takes the curation elevation only from its own flag", () => {
+    const base = [
+      "mint",
+      "--client-name",
+      "curate-lane",
+      "--user-email",
+      "owner@example.com",
+      "--scope",
+      "curation:write",
+      "--reason",
+      "r",
+    ];
+    const off = parseArgs(base);
+    expect(off.command === "mint" && off.options.allowCuration).toBe(false);
+    const on = parseArgs([...base, "--allow-curation"]);
+    expect(on.command === "mint" && on.options.allowCuration).toBe(true);
+    // A typo cannot elevate: an unknown argument is a usage error, so a
+    // near-miss fails loudly instead of parsing into the default (off).
+    expect(() => parseArgs([...base, "--allow-curration"])).toThrow(UsageError);
+    expect(() => parseArgs([...base, "--allow_curation"])).toThrow(UsageError);
+    // ...and it is a boolean: it consumes no value, so the next flag still parses.
+    const trailing = parseArgs([...base, "--allow-curation", "--yes"]);
+    expect(trailing.command === "mint" && trailing.options.yes).toBe(true);
   });
 
   it("treats --help anywhere as help", () => {

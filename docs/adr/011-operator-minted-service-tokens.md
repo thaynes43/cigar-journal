@@ -1,7 +1,8 @@
 # ADR-011: Operator-minted service tokens for non-interactive MCP clients
 
 - **Status:** accepted
-- **Date:** 2026-08-29
+- **Date:** 2026-08-29 (amended 2026-08-30 — see "Curation scopes: the owner
+  override")
 
 ## Context
 
@@ -64,11 +65,11 @@ such a row, replacing the hand-INSERT.
   mint/revoke transaction, carrying the reason and the `tokenId` join key —
   never token material or a hash.
 - **Scopes and TTL are bounded in the mint, not by the caller's arguments.**
-  `catalog:read`, `journal:read` and `journal:write` are mintable;
-  `offline_access` is refused (no refresh chain) and so is `curation:*` — it
-  would let a browserless holder mutate the shared catalog under the
-  subject's admin role for a year. TTL defaults to 365 days **and caps
-  there**, so `--ttl-days` can only shorten.
+  `catalog:read`, `journal:read` and `journal:write` are mintable by default;
+  `offline_access` is refused unconditionally (no refresh chain). `curation:*`
+  is off by default and reachable only through the explicit elevation below.
+  TTL defaults to 365 days **and caps there**, so `--ttl-days` can only
+  shorten.
 - **One delivery path, and no other is possible.** `mint --yes` refuses to run
   unless stdout is an interactive terminal, and refuses before writing
   anything. A container's stdout is collected into Loki for the whole
@@ -85,6 +86,64 @@ such a row, replacing the hand-INSERT.
 This is not the ADR-004 anti-goal: the credential is user-bound,
 audience-bound (RFC 8707), scope-limited, per-consumer, revocable, and never
 accepted or issued at `/oauth/token`.
+
+## Curation scopes: the owner override (2026-08-30)
+
+The original decision refused `curation:*` outright. **The owner overrode that
+refusal on 2026-08-30.** The reasoning behind it — a browserless holder can
+mutate the *shared* catalog under the subject's admin role for the token's
+whole life — is unchanged and still true; what changed is the cost of the
+alternative.
+
+The daily curation lane ran on a rotating refresh token, and that model kept
+failing. The final failure (`wo-cigar-curate-20260830`) is the shape of all of
+them: the session-start refresh returned HTTP 200, the agent lost the rotated
+`refresh_token` without writing it back, and both the access token and its
+replacement were gone. It behaved correctly from there — replaying the stale
+refresh token would have tripped reuse detection and revoked the whole family,
+so it parked the credential as `token.json.consumed-20260830` and made zero
+catalog writes. Every such failure costs the owner a manual browser
+re-consent, and the lane produces nothing until he does it.
+
+Against that, a minted token has **no rotation to lose**. It is also revocable
+in isolation (one client per consumer), audited per mint, and already covered
+by the daily `cigar-journal-credential-expiry` monitor, which selects by token
+*lifetime* rather than `client_id` and so picks up a new one with no edit.
+
+The elevation is **narrow and explicit**, not a widening of the default set:
+
+- `MINTABLE_SERVICE_SCOPES` keeps its meaning — the scopes mintable with no
+  flag — and `curation:*` is still not in it. The elevation is a separate set,
+  `CURATION_SERVICE_SCOPES`, admitted only at mint time.
+- **An explicit operator flag, `--allow-curation`.** Never inferred from the
+  scope list; an unknown argument is a usage error, so a typo cannot produce
+  it. Without the flag the refusal stands, and its message now names the flag
+  so the refusal reads as a decision rather than a typo.
+- **The subject must be an admin, checked at mint time** against `users.role`
+  in the same transaction as the insert. The curation tools already re-check
+  the role on every call (`assertAdmin` in `@cj/mcp`), so this adds no
+  authorization — it makes an *ineffective* token unmintable instead of
+  mintable-but-inert. A non-admin subject is an operational failure (exit 1,
+  `subject_not_admin`), not a usage error: the fix is in the data.
+- **The elevation is visible after the fact.** The mint's audit row carries
+  `curationElevated` and the `subjectRole` read at mint time — on every mint,
+  so a present-and-false value means "ordinary", where a missing field would
+  only mean "some older code did not write one". The CLI prints a named
+  `curation ELEVATED …` line in both the dry-run plan and the mint report, so
+  the elevation is never something you discover by decoding a scope list.
+- **Every other guarantee is untouched:** `offline_access` is still refused in
+  every combination (and is now swept for first, so pairing it with a curation
+  scope cannot blame curation and imply a flag would help), the 365-day TTL
+  ceiling, the RFC 8707 audience binding, one service client per consumer,
+  stdout-only delivery gated on an interactive TTY, and no change whatsoever to
+  the `authorization_code` or `refresh_token` grants.
+
+What we accept, on top of the year-long bearer already accepted below: for the
+curation lane's token specifically, that bearer can curate the shared catalog
+for its whole life without a consent screen. It is bounded by the same
+revocation, audience, per-consumer attribution and per-request validation as
+every other service token, and the curation tools' own `assertAdmin` still
+gates each call.
 
 ## Consequences
 
@@ -119,7 +178,16 @@ a production credential. Recommended: shown, read-only, admin-revocable.
 - Reuse the existing `dev-env-cli` client row — the audit trail could never
   separate flow-issued from operator-minted on client identity alone.
 - A synthetic service user — owns its own empty journal, and `curation:*`
-  would need it promoted to admin; the agent must write as the owner.
+  would need it promoted to admin; the agent must write as the owner. The
+  2026-08-30 override does not revive this: the admin check makes the *real*
+  owner the only viable curation subject, which is what the lane wants anyway.
+- Keeping the rotating refresh token and hardening the write-back — the agent
+  is not the only consumer that can lose a rotated token, and each loss is a
+  manual re-consent. The owner ruled that out explicitly; he does not want to
+  keep doing it.
+- Widening `MINTABLE_SERVICE_SCOPES` to include `curation:*` — one line, and
+  every future mint silently reaches the shared catalog. The whole point of
+  the flag is that the elevation is per-mint and recorded.
 - A `client_credentials` grant at `/oauth/token` — a real network-reachable
   mint, new grant code on the AS, and a client secret that is itself a static
   bearer. Rejected as strictly more surface for the same capability.
