@@ -319,4 +319,13 @@ LLM-created cigars accumulate until curated.
     is an accessory, or that misses the similarity floor, is a MISS: we did read
     the vendor's catalogue, and what it holds is not this cigar. "No candidate
     scored above zero" is a miss too — the enumeration IS the vendor's product
-    list, and nothing in it resembled the cigar.
+    list, and nothing in it resembled the cigar. **The residual, stated rather
+    than papered over:** that last rule assumes the enumeration really is
+    products, and a broken gate can defeat it, because zero ranked candidates
+    means zero fetches and so nothing for the parsed-product test to run on. No
+    drain-time check can close that; the pre-enable `--probe` and its path-shape
+    census are what close it, which is why this ADR requires live verification
+    before a vendor is enabled and why a gate correction never rides a ledger
+    change. Widening the rule instead — calling "nothing scored" an error — would
+    mean a vendor that simply does not stock a brand could never retire the
+    request, which is the hang this amendment exists to remove.

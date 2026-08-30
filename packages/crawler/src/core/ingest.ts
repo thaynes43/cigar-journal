@@ -505,7 +505,12 @@ async function drainEnrichment(
 //           Honest evidence; it burns one of this vendor's two attempts. NOTE that
 //           "nothing scored above zero" is a miss, not an absence of evidence: the
 //           enumeration IS the vendor's product list and nothing in it resembled
-//           the cigar, which is exactly the Red Anchor/Fox result.
+//           the cigar, which is exactly the Red Anchor/Fox result. That rests on
+//           the enumeration being real products, which nothing at drain time can
+//           check — zero candidates means zero fetches. It is the ADR's mandatory
+//           pre-enable `--probe` (and its path-shape census, #179) that
+//           establishes it, and the reason a gate correction is never allowed to
+//           ride a ledger change.
 //   error — the look could not COMPLETE, so it says nothing about any catalogue:
 //           it never burns an attempt, and ERROR_BUDGET bounds it so a permanently
 //           broken vendor cannot pin the request open and re-fetch the same
