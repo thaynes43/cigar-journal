@@ -71,9 +71,10 @@ export interface FleetVendor extends VendorBrief {
 
 export interface EnrichmentCoverage {
   // Every crawl-enabled vendor whose focus covers the market: who COULD look.
-  // Reporting only — `crawl_enabled` is a registry flag no crawler consults
-  // (issue #156), so it says nothing about whether a lane will ever run and
-  // cannot be a denominator.
+  // Reporting only — no crawler consults `crawl_enabled` (issue #156), so
+  // flipping it true schedules nothing and it says nothing about whether a lane
+  // will ever run. This module is the column's first reader and uses it only as a
+  // negative filter: off drops a vendor from the fleet, on does not make one run.
   eligible: VendorBrief[];
   // Eligible AND the lane actually runs. THE EXHAUSTION DENOMINATOR, and the
   // honest answer to "who has not been asked?".
@@ -232,10 +233,10 @@ interface Rollup {
 
 // The rollup, and the sentence at the top of this file in code.
 //
-// THE DENOMINATOR IS LIVENESS, NOT `crawl_enabled`. `crawl_enabled` is a registry
-// flag nothing in the crawler reads (issue #156): the CronJob list is the real
-// crawl gate, so an enabled vendor with a suspended lane says nothing about
-// whether anyone will ever look. A denominator built on it is a denominator that
+// THE DENOMINATOR IS LIVENESS, NOT `crawl_enabled`. No crawler consults
+// `crawl_enabled` (issue #156): the CronJob list is the real crawl gate, so
+// enabling a vendor schedules nothing and an enabled vendor with a suspended lane
+// says nothing about whether anyone will ever look. A denominator built on it is a denominator that
 // can never fill — in prod that is Cuban Lou's holding all 890 untyped cigars
 // open forever, past `exhausted` and so past `retryExhausted` too.
 //

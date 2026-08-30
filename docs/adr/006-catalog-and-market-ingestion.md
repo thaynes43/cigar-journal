@@ -237,9 +237,13 @@ LLM-created cigars accumulate until curated.
     budget on it — where a lane counts if it is crawl-enabled, its focus covers
     the cigar's market, and it has either finished an `enrich` run or already
     recorded a look at this very request.* `crawl_enabled` cannot be the
-    denominator: nothing in the crawler reads that flag (issue #156 — the CronJob
-    list is the real crawl gate), so a vendor enabled in the registry with a
-    suspended lane can never fill it. Prod is exactly that shape — Cuban Lou's is
+    denominator: no crawler consults that flag (issue #156 — the CronJob list is
+    the real crawl gate), so flipping it true schedules nothing and a vendor
+    enabled in the registry with a suspended lane can never fill it. Note this
+    amendment makes the coverage rollup the column's FIRST reader, and only as a
+    negative filter: turning it off drops a vendor from the fleet, turning it on
+    still does not make one run. That asymmetry is the point — it is exactly why
+    the flag can gate who is *listed* and never who has *looked*. Prod is exactly that shape — Cuban Lou's is
     crawl-enabled with a suspended enrich CronJob and only a `seed` run — and it
     sits in the denominator of every untyped cigar, which is 890 of 977 catalog
     rows: never `exhausted`, therefore permanently `already_queued`, therefore

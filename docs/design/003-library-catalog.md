@@ -325,9 +325,9 @@ against a request, and the row retires only once every one of them is spent.
 The denominator is **liveness** — crawl-enabled, focus covers the market, and the
 lane has completed an `enrich` run (or has already looked at this very request).
 It is the same predicate as the queue gate above, read as vendors rather than as
-markets. It is deliberately NOT `crawl_enabled` alone: nothing in the crawler
-reads that flag (#156), so an enabled vendor with a suspended CronJob would hold
-every matching row open forever — which, with 890 untyped rows needing both
+markets. It is deliberately NOT `crawl_enabled` alone: no crawler consults
+that flag (#156), so enabling a vendor schedules nothing and one with a suspended
+CronJob would hold every matching row open forever — which, with 890 untyped rows needing both
 markets and Cuban Lou's lane suspended, is the whole catalogue. Enabling a vendor
 does not by itself retire anything; its lane RUNNING does, and that lane's first
 night also reopens every row it has not looked at, with no reopen job.

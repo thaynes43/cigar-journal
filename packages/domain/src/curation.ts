@@ -2151,9 +2151,10 @@ export async function cigarsMissingPhotos(deps: Deps, principal: Principal): Pro
 // granularities: LIVE — crawl-enabled, focus covers the market, and the lane has
 // completed an `enrich` run — as markets here (one fleet-wide read) and as vendors
 // in the rollup (per row, because eligibility depends on the cigar's market).
-// `crawl_enabled` alone is not either of them: nothing in the crawler reads that
-// flag (#156), so a vendor with a suspended CronJob would gate nothing and retire
-// nothing while holding every matching request open forever.
+// `crawl_enabled` alone is not either of them: no crawler consults that flag
+// (#156), so enabling a vendor schedules nothing — one with a suspended CronJob
+// would gate nothing and retire nothing while holding every matching request open
+// forever.
 //
 // There is no circularity in using liveness as the denominator, because the drain
 // does NOT gate on it: its open set admits `exhausted` rows and its only

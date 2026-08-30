@@ -1282,9 +1282,9 @@ export interface QueueEnrichmentBacklogResult {
   // running at all.
   enrichedMarkets: CigarType[];
   // Every crawl-enabled vendor whose focus covers at least one considered row:
-  // who COULD look. NOT the exhaustion denominator — `crawl_enabled` is a
-  // registry flag no crawler consults (#156), so an enabled vendor whose enrich
-  // CronJob is suspended is listed here and is counted against nothing. Read it
+  // who COULD look. NOT the exhaustion denominator — no crawler consults
+  // `crawl_enabled` (#156), so enabling a vendor schedules nothing and one whose
+  // enrich CronJob is suspended is listed here while counting against nothing. Read it
   // against `enrichedMarkets`: a vendor here whose market is absent there is a
   // lane that has never run.
   eligibleVendors: string[];
