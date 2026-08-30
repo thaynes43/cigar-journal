@@ -4,6 +4,10 @@ import { useState, type FormEvent } from "react";
 import { authClient } from "@/lib/auth-client";
 import { ui } from "@/lib/ui";
 
+// Sign-in only. This page used to fall back to sign-up whenever sign-in failed,
+// which under invite-gated registration (ADR-010) would turn every mistyped
+// password into a registration attempt. Accounts are created at /invite/<token>.
+
 // Only ever follow a same-origin relative path (guards against open redirect via
 // a crafted `?next=`). Used to resume an interrupted /oauth/authorize flow.
 function safeNext(raw: string | null): string {
@@ -30,19 +34,7 @@ export default function SignInPage() {
       return;
     }
 
-    // No account yet: sign-up succeeds only for an allowlisted email (enforced
-    // server-side). The name is derived so the form stays email + password.
-    const signUp = await authClient.signUp.email({
-      email,
-      password,
-      name: email.split("@")[0] ?? email,
-    });
-    if (!signUp.error) {
-      window.location.assign(next);
-      return;
-    }
-
-    setError(signUp.error.message ?? "Sign in failed.");
+    setError(signIn.error.message ?? "Sign in failed.");
     setPending(false);
   }
 

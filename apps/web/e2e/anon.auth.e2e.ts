@@ -31,6 +31,16 @@ test("sign-in with an existing account, then sign-out via the user menu", async 
   await expect(page).toHaveURL(/\/signin$/);
 });
 
+test("a wrong password shows an error and never attempts registration", async ({ page }) => {
+  await page.goto("/signin");
+  await page.getByLabel("Email").fill(h.accounts.admin.email);
+  await page.getByLabel("Password").fill("not-the-password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  await expect(page.locator("form").getByRole("alert")).toBeVisible();
+  await expect(page).toHaveURL(/\/signin/);
+});
+
 test("an address with no account cannot sign in", async ({ page }) => {
   await page.goto("/signin");
   await page.getByLabel("Email").fill(h.accounts.stranger.email);
