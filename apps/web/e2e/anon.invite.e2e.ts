@@ -29,9 +29,8 @@ test("an open invite creates an account and lands signed in; the link is then sp
   await expect(page).toHaveURL(/127\.0\.0\.1:\d+\/$/);
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
 
-  // The same link, reopened, is spent — single use is enforced in the database.
-  await page.getByRole("button", { name: "Account menu" }).click();
-  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  // The same link, reopened, is spent — single use is enforced in the database,
+  // so the session the redemption just minted makes no difference to it.
   await page.goto(`/invite/${invite.token}`);
   await expect(page.getByText(/invalid or has expired/i)).toBeVisible();
 });

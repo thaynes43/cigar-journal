@@ -1,14 +1,13 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { authClient } from "@/lib/auth-client";
 import { ui } from "@/lib/ui";
 import { redeemInvite } from "./actions";
 
 // The invite redemption form (ADR-010). The address is fixed by the invite and
 // shown read-only — the server takes it from the invite row regardless, so the
-// field is a statement of fact, not an input. On success the credentials just set
-// are used to sign in through the normal endpoint, then the app opens.
+// field is a statement of fact, not an input. The action returns with the session
+// cookie already set, so success is simply the app opening.
 export function RedeemForm({ token, email }: { token: string; email: string }) {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -23,13 +22,6 @@ export function RedeemForm({ token, email }: { token: string; email: string }) {
     const result = await redeemInvite({ token, name, password });
     if (!result.ok) {
       setError(result.error);
-      setPending(false);
-      return;
-    }
-
-    const signIn = await authClient.signIn.email({ email: result.email, password });
-    if (signIn.error) {
-      setError("Account created. Sign in to continue.");
       setPending(false);
       return;
     }

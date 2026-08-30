@@ -1,5 +1,7 @@
 "use server";
 
+import { cookies } from "next/headers";
+import { parseSetCookieHeader, toCookieOptions } from "better-auth/cookies";
 import { db } from "@cj/db";
 import { InviteInvalidError, claimInvite, releaseInvite, reserveInvite, type Deps } from "@cj/domain";
 import { auth } from "@cj/auth";
@@ -16,11 +18,22 @@ import { auth } from "@cj/auth";
 //      the invite, but a crash between phases leaves it spent (fails closed).
 //
 // No role is passed anywhere: an invite has no role to grant, and the create-hook
-// forces `user`. The session is minted client-side afterwards, through the same
-// signIn.email endpoint every other sign-in uses, rather than re-plumbing
-// Set-Cookie out of an in-process API call.
+// forces `user`. Sign-up already mints a session, so its Set-Cookie is forwarded
+// onto this action's response and the invitee lands signed in — rather than
+// making a second signIn round trip, which the auth rate limiter can refuse and
+// which would strand a brand-new account at the sign-in form.
 
-export type RedeemResult = { ok: true; email: string } | { ok: false; error: string };
+export type RedeemResult = { ok: true } | { ok: false; error: string };
+
+async function forwardSessionCookies(response: Response): Promise<void> {
+  const setCookie = response.headers.get("set-cookie");
+  if (!setCookie) return;
+  const jar = await cookies();
+  for (const [name, value] of parseSetCookieHeader(setCookie)) {
+    if (!name) continue;
+    jar.set(name, value.value, toCookieOptions(value));
+  }
+}
 
 export async function redeemInvite(input: {
   token: string;
@@ -39,22 +52,25 @@ export async function redeemInvite(input: {
     throw error;
   }
 
-  let created;
-  try {
-    created = await auth.api.signUpEmail({
-      body: {
-        email: reserved.email,
-        password: input.password,
-        name: input.name.trim() || reserved.email.split("@")[0] || reserved.email,
-      },
-    });
-  } catch (error) {
+  const response = await auth.api.signUpEmail({
+    body: {
+      email: reserved.email,
+      password: input.password,
+      name: input.name.trim() || reserved.email.split("@")[0] || reserved.email,
+    },
+    asResponse: true,
+  });
+
+  if (!response.ok) {
     // Only sign-up failure releases the reservation. A failure past this point
     // must not, or a release would un-spend an invite that already made a user.
     await releaseInvite(deps, { inviteId: reserved.inviteId });
-    return { ok: false, error: error instanceof Error ? error.message : "Sign-up failed." };
+    const body = (await response.json().catch(() => null)) as { message?: string } | null;
+    return { ok: false, error: body?.message ?? "Sign-up failed." };
   }
 
-  await claimInvite(deps, { inviteId: reserved.inviteId, userId: created.user.id });
-  return { ok: true, email: reserved.email };
+  const { user } = (await response.json()) as { user: { id: string } };
+  await forwardSessionCookies(response);
+  await claimInvite(deps, { inviteId: reserved.inviteId, userId: user.id });
+  return { ok: true };
 }
