@@ -67,16 +67,32 @@ export interface SitemapSampling {
 }
 
 // --- product gate ------------------------------------------------------------
-// Two modes, mutually exclusive at compile time via `?: never`. An adapter that
-// mixes them fails to typecheck (the error reads `Type 'RegExp' is not assignable
-// to type 'undefined'` — that means "you put a Mode-B field on a Mode-A adapter").
-// `product-url.test.ts` asserts the same invariant at runtime over the registry.
+// Two modes, discriminated by `productPathPrefix`: present = Mode A, absent =
+// Mode B. `productPathSegments`/`robotsProbePath` stay Mode-B-only via `?: never`,
+// so putting one on a prefix adapter fails to typecheck (the error reads
+// `Type 'X' is not assignable to type 'undefined'` — that means "you put a
+// Mode-B-only field on a Mode-A adapter"). `nonProductPathPattern` is legal in
+// BOTH modes: required in Mode B, where it is the whole gate; optional in Mode A,
+// where it subtracts a non-product subtree from an otherwise-correct prefix.
+// `product-url.test.ts` asserts the same invariants at runtime over the registry.
 
 // Mode A — every product URL shares one path prefix (Fox `/shop/`), or the
 // sitemap is already product-only and the prefix is just `/` (Cuban Lou's).
 export interface PrefixProductGate {
   productPathPrefix: string;
-  nonProductPathPattern?: never;
+  // Optional subtraction, applied AFTER the prefix: a path that starts with the
+  // prefix but matches this is NOT a product. Exists because a prefix broad
+  // enough to be right can also be broad enough to admit a non-catalog subtree —
+  // 2 Guys' `/store/` also matches `/store/go/registry/<n>/`, gift-registry pages
+  // that carry no Product JSON-LD (live probe 2026-08-30).
+  //
+  // MUST be anchored at `^` on every top-level branch, and MUST end a reserved
+  // word at a full SEGMENT boundary `(?:\/|$)`, never `\b`: `\b` also fires at a
+  // hyphen, which is how Small Batch's `^\/cart\b` silently ate
+  // `/cart-blanche-robusto/`. No `g`/`y` flags — they make `.test` stateful.
+  // Over-matching here drops real products SILENTLY; under-matching only wastes
+  // fetches, since normalize + isCigarListing still gate the writes.
+  nonProductPathPattern?: RegExp;
   productPathSegments?: never;
   robotsProbePath?: never;
 }

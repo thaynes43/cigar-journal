@@ -156,3 +156,51 @@ LLM-created cigars accumulate until curated.
   qualifying class every brand would read `no_match`, and that row *is* the
   30-day negative cache, so a seeded follow-up run would then find no work and
   report a clean, empty success. `--dry-run` writes nothing and stays available.
+
+- **2026-08-30 — Mode A gains an optional exclusion (issue #127).** The prefix
+  gate is now **prefix AND NOT pattern**: `nonProductPathPattern` is legal on a
+  Mode-A adapter, applied after the prefix test. It is still *required* in Mode
+  B, where it is the whole gate; the mode discriminator is therefore
+  `productPathPrefix`, not "carries a pattern". `productPathSegments` and
+  `robotsProbePath` stay Mode-B-only — a depth bound on a prefix adapter would
+  be an unbacked guess at that vendor's product depth, and the robots gate must
+  keep asking about the coarse prefix even when the URL filter is narrower.
+  - **Why.** A prefix broad enough to be right can also be broad enough to admit
+    a non-catalog subtree. 2 Guys' `/store/` is the correct product prefix and
+    also matches `/store/go/registry/<n>/`, gift-registry pages. The alternative
+    — inventing a tighter prefix — is the same class of guess that produced the
+    defect, and we have zero live-confirmed 2 Guys product URLs to write one
+    from. Moving the vendor to Mode B is worse still: it would drop a shared
+    prefix we *have* confirmed and force the pattern to enumerate every
+    non-product family on the site.
+  - **Standing requirement for EVERY `nonProductPathPattern`, both modes.** Each
+    top-level alternative anchored at `^`; every reserved word terminated at a
+    full segment boundary `(?:\/|$)` and **never** `\b`; no `g`/`y` flags. `\b`
+    also fires at a hyphen, which is how Small Batch's `^\/cart\b` silently ate
+    `/cart-blanche-robusto/`. The asymmetry is the reason: under-matching only
+    wastes fetches (normalize + `isCigarListing` still gate the writes), while
+    over-matching drops real products with no note, error or stat. The runtime
+    guards in `product-url.test.ts` now run on any adapter carrying a pattern,
+    in either mode; scoping them to Mode B would have shipped the first Mode-A
+    pattern unguarded.
+  - **The 2 Guys facts behind it (in-cluster probe, 2026-08-30).** robots
+    unchanged and permissive. The 2026-08-29 sitemap content variance did **not**
+    reproduce: four samples returned an identical 6,356 locs, `new=6351/0/0/0`,
+    `varied=no`. Sampling is nevertheless kept — one clean observation does not
+    disprove an intermittent behaviour, and three extra root fetches are noise
+    against a multi-hundred-page walk. The gate was the real blocker: 1,462 locs
+    passed `/store/`, and all three spread picks were registry pages with no
+    Product JSON-LD, so `parsed=0`. That `needs-attention` was **true but
+    misattributed** — it read as "this vendor has no JSON-LD" when the fault was
+    the enumeration. The crawl consequence was larger than the probe's: a seed
+    run would have fetched ~1,400 customers' registry pages at >=2.5s each, a
+    courtesy problem as much as a wasted-budget one, and the reason the fix
+    belongs in the gate rather than in the probe's sampler.
+  - **Probe diagnosability.** `--probe` now prints a **path-shape census**: the
+    commonest first-two-segment keys among the URLs the gate accepted and among
+    those it rejected, with a `(+N keys, M urls)` tail. It is pure computation
+    over URLs already fetched — no extra requests. It exists because the live
+    verification this ADR mandates costs an in-cluster Job per round-trip: the
+    census would have named `/store/go` on the first probe, and where a gate
+    admits nothing it names where the products actually live instead of
+    requiring another run to find out.

@@ -1,8 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- HAND-WRITTEN representative fixture (ADR-006): the dev pod cannot fetch the
-     live sitemap; the probe must confirm its real shape and product path. -->
+     live sitemap. Shaped from the 2026-08-30 in-cluster probe, which found the
+     `/store/` prefix dominated by a CONTIGUOUS, id-ordered block of
+     `/store/go/registry/<n>/` gift-registry pages sitting AHEAD of the products.
+
+     The block is 12 entries, ids placed so the fixture reproduces the live false
+     verdict exactly: with the exclusion removed, 14 locs pass the gate and
+     spreadIndices(14, 3) picks 2/7/11 — registry ids 1059, 4401 and 8079, the
+     three URLs that probe really sampled, none of which carries Product JSON-LD.
+     With the exclusion, only the two products remain. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://www.2guyscigars.com/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/612/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/840/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/1059/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/1783/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/2450/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/3117/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/3760/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/4401/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/5502/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/6390/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/7233/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/8079/</loc></url>
   <url><loc>https://www.2guyscigars.com/store/padron-1926-serie-no-9-maduro/</loc></url>
   <url><loc>https://www.2guyscigars.com/store/xikar-xi3-cutter/</loc></url>
   <url><loc>https://www.2guyscigars.com/about-us/</loc></url>

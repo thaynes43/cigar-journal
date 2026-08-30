@@ -53,6 +53,10 @@ export {
   filterProductUrls,
   robotsGatePath,
   productGateLabel,
+  pathShapeCensus,
+  PATH_CENSUS_TOP,
+  type PathCensus,
+  type PathCensusEntry,
 } from "./core/product-url.js";
 export {
   runProbe,

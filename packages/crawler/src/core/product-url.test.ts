@@ -3,6 +3,8 @@ import {
   filterProductUrls,
   isProductUrl,
   pathOf,
+  pathShapeCensus,
+  PATH_CENSUS_TOP,
   productGateLabel,
   robotsGatePath,
   segmentCount,
@@ -11,6 +13,7 @@ import { adapters } from "../adapters/index.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
 import { cubanLous } from "../adapters/cuban-lous.js";
 import { smallBatchCigar } from "../adapters/small-batch-cigar.js";
+import { twoGuysCigars } from "../adapters/two-guys-cigars.js";
 import { parseSitemap } from "./sitemap.js";
 import { loadFixture } from "../testing/fixtures.js";
 
@@ -45,6 +48,54 @@ describe("prefix gate (mode A)", () => {
   it("admits every loc for Cuban Lou's product-only sitemap", () => {
     const locs = parseSitemap(loadFixture("sitemap.xml", "cuban-lous")).locs;
     expect(filterProductUrls(locs, cubanLous)).toEqual(locs);
+  });
+});
+
+// The 2 Guys defect (live probe 2026-08-30): `/store/` is the right prefix and
+// still admits `/store/go/registry/<n>/`, gift-registry pages with no Product
+// JSON-LD. Mode A therefore subtracts a pattern after the prefix.
+describe("prefix gate with exclusion (mode A + pattern)", () => {
+  const accepts = [
+    "https://www.2guyscigars.com/store/padron-1926-serie-no-9-maduro/",
+    "https://www.2guyscigars.com/store/gold-label-toro/",
+    // The hyphen trap, re-armed for Mode A: a `\b` anchor after `go` would match
+    // at the hyphen and drop this product silently — the Small Batch
+    // `/cart-blanche-robusto/` bug. `(?:\/|$)` is a full segment boundary.
+    "https://www.2guyscigars.com/store/go-big-or-go-home-robusto/",
+  ];
+  const rejects = [
+    // The three URLs the live probe sampled, verbatim.
+    "https://www.2guyscigars.com/store/go/registry/1059/",
+    "https://www.2guyscigars.com/store/go/registry/4401/",
+    "https://www.2guyscigars.com/store/go/registry/8079/",
+    // The segment itself, with and without the trailing slash.
+    "https://www.2guyscigars.com/store/go/",
+    "https://www.2guyscigars.com/store/go",
+    // Siblings we have not sampled: the gate excludes the FAMILY, not one member.
+    "https://www.2guyscigars.com/store/go/wishlist/",
+    "https://www.2guyscigars.com/store/go/anything-we-have-not-seen/",
+    // Still outside the prefix — the prefix does this work, not the pattern.
+    "https://www.2guyscigars.com/about-us/",
+    "https://www.2guyscigars.com/",
+  ];
+
+  it("accepts products under the prefix, including slugs that merely start with `go`", () => {
+    for (const url of accepts) expect(isProductUrl(url, twoGuysCigars), url).toBe(true);
+  });
+
+  it("rejects the whole /store/go/ family and everything outside the prefix", () => {
+    for (const url of rejects) expect(isProductUrl(url, twoGuysCigars), url).toBe(false);
+  });
+
+  it("changes nothing for a prefix adapter that sets no pattern", () => {
+    const locs = parseSitemap(loadFixture("sitemap.xml")).locs;
+    expect(foxCigar.nonProductPathPattern).toBeUndefined();
+    expect(filterProductUrls(locs, foxCigar)).toEqual([
+      "https://foxcigar.com/shop/",
+      "https://foxcigar.com/shop/padron-1964-anniversary-maduro-torpedo/",
+      "https://foxcigar.com/shop/xikar-hp3-lighter/",
+      "https://foxcigar.com/shop/fox-5-cigar-sampler/",
+    ]);
   });
 });
 
@@ -112,6 +163,15 @@ describe("gate metadata", () => {
   it("renders a label for both modes", () => {
     expect(productGateLabel(foxCigar)).toBe("prefix /shop/");
     expect(productGateLabel(smallBatchCigar)).toMatch(/^not \/.*\/i segments 1\.\.1$/);
+    // The subtraction is printed: the probe line is how the coordinator tells a
+    // rebuilt image from a cached one.
+    expect(productGateLabel(twoGuysCigars)).toBe("prefix /store/ minus /^\\/store\\/go(?:\\/|$)/i");
+  });
+
+  it("does not let a Mode-A exclusion narrow the ROBOTS gate path", () => {
+    // robots is asked about the coarse prefix; subtracting a subtree from the URL
+    // filter must not change which path we check permission for.
+    expect(robotsGatePath(twoGuysCigars)).toBe("/store/");
   });
 });
 
@@ -159,31 +219,110 @@ describe("topLevelAlternatives", () => {
   });
 });
 
+// The census answers what the gate cannot: not "did anything pass?" but "what
+// KINDS of URL are on each side?". It is what would have named `/store/go` on
+// the first 2 Guys probe instead of a second in-cluster Job.
+describe("pathShapeCensus", () => {
+  it("keys on the first two path segments and ranks by count", () => {
+    const census = pathShapeCensus([
+      "https://x.test/store/go/registry/1/",
+      "https://x.test/store/go/registry/2/",
+      "https://x.test/store/go/wishlist/9/",
+      "https://x.test/store/padron-robusto/",
+      // Depth stops at two segments, so deeper paths collapse onto the same key.
+      "https://x.test/blog/2026/08/a-post/",
+    ]);
+    expect(census.top).toEqual([
+      { key: "/store/go", count: 3 },
+      { key: "/blog/2026", count: 1 },
+      { key: "/store/padron-robusto", count: 1 },
+    ]);
+    expect(census.total).toBe(5);
+    expect(census.otherKeys).toBe(0);
+    expect(census.otherUrls).toBe(0);
+  });
+
+  it("keys a one-segment path and the site root", () => {
+    const census = pathShapeCensus(["https://x.test/about-us/", "https://x.test/"]);
+    // Ties break on the key, so an unchanged site prints an identical line twice.
+    expect(census.top).toEqual([
+      { key: "/", count: 1 },
+      { key: "/about-us", count: 1 },
+    ]);
+  });
+
+  it("caps the top list and counts what it hid, both ways", () => {
+    const urls = [
+      ...Array.from({ length: 8 }, (_, i) => `https://x.test/a/${i}/`),
+      ...Array.from({ length: 7 }, (_, i) => `https://x.test/b/${i}/`),
+      ...Array.from({ length: 6 }, (_, i) => `https://x.test/c/${i}/`),
+      ...Array.from({ length: 5 }, (_, i) => `https://x.test/d/${i}/`),
+      ...Array.from({ length: 4 }, (_, i) => `https://x.test/e/${i}/`),
+      // Two hidden keys behind three URLs.
+      "https://x.test/f/1/",
+      "https://x.test/f/2/",
+      "https://x.test/g/1/",
+    ];
+    const census = pathShapeCensus(urls, 1);
+    expect(census.top).toHaveLength(PATH_CENSUS_TOP);
+    expect(census.top.map((e) => e.key)).toEqual(["/a", "/b", "/c", "/d", "/e"]);
+    expect(census.otherKeys).toBe(2);
+    expect(census.otherUrls).toBe(3);
+    expect(census.total).toBe(33);
+  });
+
+  it("is empty for an empty enumeration", () => {
+    expect(pathShapeCensus([])).toEqual({ top: [], otherKeys: 0, otherUrls: 0, total: 0 });
+  });
+});
+
 describe("registry invariant", () => {
-  // The types make the two gate modes mutually exclusive; this is the runtime
-  // guard behind that, so a `as VendorAdapter` cast in a future adapter cannot
-  // ship an ambiguous (or gate-less) vendor.
+  // The runtime guard behind the type union, so an `as VendorAdapter` cast in a
+  // future adapter cannot ship an ambiguous or gate-less vendor.
+  //
+  // The mode discriminator is `productPathPrefix !== undefined`, NOT "carries a
+  // pattern": since the 2026-08-30 amendment `nonProductPathPattern` is legal in
+  // both modes (required in B, optional in A), so it no longer separates them.
   it("every registered adapter declares exactly one gate mode", () => {
     for (const [slug, adapter] of Object.entries(adapters)) {
       const modeA = adapter.productPathPrefix !== undefined;
       const modeB = adapter.nonProductPathPattern !== undefined;
-      expect(modeA !== modeB, `${slug} must declare exactly one product gate mode`).toBe(true);
+      // Never gate-less: a prefix, a pattern, or both — but something.
+      expect(modeA || modeB, `${slug} must declare a product gate`).toBe(true);
       if (modeA) {
+        // Mode-B-only knobs stay Mode-B-only. A depth bound on a prefix adapter
+        // would be an unbacked guess at the vendor's product depth.
         expect(adapter.productPathSegments, slug).toBeUndefined();
         expect(adapter.robotsProbePath, slug).toBeUndefined();
       } else {
-        const pattern = adapter.nonProductPathPattern!;
-        // EVERY top-level branch anchored, not just the first — an unanchored
-        // branch matches mid-path and silently drops products (a slug containing
-        // "checkout" is not the checkout page).
-        for (const alternative of topLevelAlternatives(pattern.source)) {
-          expect(alternative.startsWith("^"), `${slug}: unanchored branch ${alternative}`).toBe(true);
-        }
-        // `g`/`y` make RegExp.test stateful via lastIndex, so consecutive
-        // matching URLs would alternate accept/reject inside filterProductUrls.
-        expect(pattern.global, slug).toBe(false);
-        expect(pattern.sticky, slug).toBe(false);
+        // Mode B without a pattern would be no gate at all.
+        expect(adapter.nonProductPathPattern, `${slug} has no prefix and no pattern`).toBeInstanceOf(RegExp);
       }
+    }
+  });
+
+  // These run on ANY adapter carrying a pattern, in EITHER mode. Scoping them to
+  // Mode B is what would let the new Mode-A pattern ship unguarded — precisely
+  // the gap that let `^\/cart\b` eat `/cart-blanche-robusto/`.
+  it("guards every non-product pattern, whichever mode declares it", () => {
+    const withPattern = Object.entries(adapters).filter(([, a]) => a.nonProductPathPattern !== undefined);
+    // If this ever reads 1 the guard has quietly stopped covering a mode.
+    expect(withPattern.length).toBeGreaterThanOrEqual(2);
+    for (const [slug, adapter] of withPattern) {
+      const pattern = adapter.nonProductPathPattern!;
+      // EVERY top-level branch anchored, not just the first — an unanchored
+      // branch matches mid-path and silently drops products (a slug containing
+      // "checkout" is not the checkout page).
+      for (const alternative of topLevelAlternatives(pattern.source)) {
+        expect(alternative.startsWith("^"), `${slug}: unanchored branch ${alternative}`).toBe(true);
+      }
+      // `\b` after a reserved word also fires at a hyphen, so `^\/cart\b` matched
+      // `/cart-blanche-robusto/`. Word boundaries are banned; use `(?:\/|$)`.
+      expect(pattern.source.includes("\\b"), `${slug}: \\b is a hyphen trap — use (?:\\/|$)`).toBe(false);
+      // `g`/`y` make RegExp.test stateful via lastIndex, so consecutive
+      // matching URLs would alternate accept/reject inside filterProductUrls.
+      expect(pattern.global, slug).toBe(false);
+      expect(pattern.sticky, slug).toBe(false);
     }
   });
 });
