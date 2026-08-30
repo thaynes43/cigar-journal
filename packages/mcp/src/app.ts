@@ -35,6 +35,20 @@ const MAX_BODY_BYTES = "100kb";
 //
 // It sits AFTER bearerAuth on purpose: before it, an unauthenticated caller could
 // write arbitrary key names into Loki.
+// A correlation handle, bounded. Strings are truncated, numbers pass through, and
+// anything else becomes its type name rather than its content — the value is only
+// ever used to join two log lines, so shape is irrelevant and unbounded input is a
+// liability.
+const MAX_LOG_SCALAR = 64;
+function scalarForLog(value: unknown): string | number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "number") return Number.isFinite(value) ? value : "<number>";
+  if (typeof value === "string") {
+    return value.length > MAX_LOG_SCALAR ? `${value.slice(0, MAX_LOG_SCALAR)}…` : value;
+  }
+  return `<${Array.isArray(value) ? "array" : typeof value}>`;
+}
+
 function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): void {
   const messages = Array.isArray(body) ? body : [body];
   for (const message of messages) {
@@ -56,8 +70,14 @@ function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): vo
     // short-lived credential; its path and query are the credential).
     mcpEvent("photo_intake_request", {
       tool: "add_smoke_photo",
-      sessionId,
-      rpcId: rpc.id,
+      // Both of these come from the caller and neither has been validated yet:
+      // `mcp-session-id` is a raw header, and `id` is any JSON value off an
+      // unparsed JSON-RPC body — an object, an array, or a megabyte of string.
+      // They are correlation handles, so a bounded scalar is all that is useful;
+      // logging them raw would let an unvalidated request write arbitrary
+      // structure into Loki.
+      sessionId: scalarForLog(sessionId),
+      rpcId: scalarForLog(rpc.id),
       // `paramKeys` is the whole point of the probe and was missing: without it the
       // record only described the two places we ALREADY look (`arguments` and
       // `params._meta`), so it could never answer "does the host put the file
@@ -148,7 +168,15 @@ export function buildApp(
   // trade that removed inline delivery from this change (photo-intake.ts).
   app.post(
     "/mcp",
-    express.json({ limit: MAX_BODY_BYTES }),
+    // `type: () => true` so EVERY content type is parsed as JSON rather than
+    // skipped. /mcp speaks only JSON-RPC, so a non-JSON body is always a bad
+    // request — but express.json()'s default type matcher SKIPS a body whose
+    // Content-Type is not application/json, leaving req.body empty and throwing
+    // nothing. The probe then saw no tools/call, the error handler never ran, and
+    // the request failed with zero server-side records: the same silent-failure
+    // class this change exists to end, one content-type header away. Parsing it
+    // turns that into an entity.parse.failed the error handler records.
+    express.json({ limit: MAX_BODY_BYTES, type: () => true }),
     bearerAuth(deps.db),
     (req, _res, next) => {
       try {
