@@ -32,8 +32,10 @@ export default async function BrandPage({ params }: { params: Promise<{ slug: st
       <header className="flex items-start gap-4">
         {brandImage ? (
           <span className="block aspect-[3/4] w-20 shrink-0 overflow-hidden rounded-card border border-line">
-            {/* Fingerprinted with the row id so a replacement busts the cache. */}
-            <img src={`/api/brand-images/${slug}?v=${brandImage.id}`} alt="" className="h-full w-full object-cover" />
+            {/* Fingerprinted with the stored object's version, not the row id:
+                the crawl job upserts one row per slug, so the id survives a
+                replacement the immutable cache has to be told about. */}
+            <img src={`/api/brand-images/${slug}?v=${brandImage.version}`} alt="" className="h-full w-full object-cover" />
           </span>
         ) : null}
         <div className="flex flex-col gap-2">

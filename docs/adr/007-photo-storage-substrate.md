@@ -90,7 +90,11 @@ runs a ready Ceph RGW object store with ObjectBucketClaim provisioning
     rendered only where its credit renders with it** — the brand page hero
     shows the full linked credit; the wall tile shows the same credit as one
     muted line of plain text (the tile body is already a link, and nested
-    anchors are invalid HTML).
+    anchors are invalid HTML). Because the invariant is *bytes and credit
+    together*, the cover URL's `?v=` fingerprint is derived from the stored
+    object key, not the row id: one row per slug means the id survives a
+    replacement that the year-long immutable cache would otherwise miss,
+    pairing old bytes with a new credit line.
   - **Licence gate before bytes.** Only `cc0` / `cc-by-*` / `cc-by-sa-*` /
     `pd-*` / public domain are downloaded; anything else, or absent licence
     metadata, records `status='blocked'` and requests nothing.

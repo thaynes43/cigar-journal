@@ -95,6 +95,28 @@ describe("brand images", () => {
       expect(covers.get(ok)?.sourceUrl).toContain("commons.wikimedia.org");
       expect(await loadBrandCovers(h.deps, [])).toEqual(new Map());
     });
+
+    it("re-fingerprints the cover when a --refresh replaces the bytes", async () => {
+      const slug = `cover-version-${tag}`;
+      await seedRow(slug);
+      const before = await loadBrandCovers(h.deps, [slug]);
+
+      // What the crawl job's --refresh replace does: one row per brand_slug, so
+      // the upsert swaps in a new object key and LEAVES THE ROW ID ALONE. The
+      // cover URL is served `max-age=31536000, immutable`, so a fingerprint taken
+      // from the row id would pin every existing viewer to the old bytes beside
+      // the new credit line for a year.
+      const rows = await h.deps.db.select().from(brandImages).where(eq(brandImages.brandSlug, slug));
+      await h.deps.db
+        .update(brandImages)
+        .set({ objectKey: `brand/${slug}/2.jpg`, thumbKey: `brand/${slug}/2.thumb.jpg` })
+        .where(eq(brandImages.brandSlug, slug));
+      const after = await loadBrandCovers(h.deps, [slug]);
+      const unchanged = await h.deps.db.select().from(brandImages).where(eq(brandImages.brandSlug, slug));
+
+      expect(unchanged[0]!.id).toBe(rows[0]!.id);
+      expect(after.get(slug)!.version).not.toBe(before.get(slug)!.version);
+    });
   });
 
   describe("setBrandImageRights", () => {

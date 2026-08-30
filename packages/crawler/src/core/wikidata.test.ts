@@ -83,6 +83,22 @@ describe("qualifyCandidates", () => {
     expect(result.candidates.map((c) => c.qid)).toEqual(["Q9100010"]);
   });
 
+  it("negative-gates a candidate that WOULD otherwise qualify on Tier A", () => {
+    // The three plain decoys carry no tobacco claim, so the tier gate alone would
+    // drop them — they cannot show the negative gate is load-bearing. Q9100014 can:
+    // a human (negative) whose P452 IS the tobacco industry (Tier A evidence).
+    const entities = entitiesOf("wbgetentities-montecristo.json");
+    const gated = qualifyCandidates("Montecristo", entities, TAXONOMY);
+    expect(gated.status).toBe("resolved");
+    expect(gated.candidates.map((c) => c.qid)).toEqual(["Q9100010"]);
+
+    // Drop the gate and the cigar roller becomes a second Tier A hit, which costs
+    // the brand its answer. This is what deleting the P31 negative check breaks.
+    const ungated = qualifyCandidates("Montecristo", entities, { ...TAXONOMY, negative: [] });
+    expect(ungated.status).toBe("ambiguous");
+    expect(ungated.candidates.map((c) => c.qid).sort()).toEqual(["Q9100010", "Q9100014"]);
+  });
+
   it("treats two tobacco-domain entities as ambiguous and keeps every candidate", () => {
     const result = qualifyCandidates("Partagas", entitiesOf("wbgetentities-ambiguous.json"), TAXONOMY);
     expect(result.status).toBe("ambiguous");

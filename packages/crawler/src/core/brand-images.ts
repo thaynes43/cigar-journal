@@ -31,8 +31,10 @@ import { WIKIDATA_TAXONOMY, taxonomyIsUnseeded, type WikidataTaxonomy } from "./
 // the walk continues, exactly like the vendor ingest's photo isolation.
 
 // Below this a slug is too short to disambiguate safely ("cao", "ep") — the name
-// gate would match unrelated entities at a rate no scoring can rescue.
-const MIN_SLUG_LENGTH = 3;
+// gate would match unrelated entities at a rate no scoring can rescue. It bounds
+// the UNATTENDED sweep only: naming a shelf with --brand is a human's own
+// disambiguation, so that path ignores it.
+const MIN_SLUG_LENGTH = 4;
 
 // How long a negative outcome (no_match / no_image / blocked / error) is honoured
 // before the job re-checks it. --refresh overrides.
@@ -74,8 +76,11 @@ export interface BrandImagesStats {
   noImage: number;
   blocked: number;
   imagesStored: number;
-  // Brands Wikimedia declined to answer for (maxlag/HTTP error). Deliberately NOT
-  // written as `no_match`: a false negative would then be cached for 30 days.
+  // Brands this run deliberately left alone: Wikimedia declined to answer
+  // (maxlag/HTTP error), or the run has no object store and the row already
+  // carries bytes. Deliberately NOT written as a row of any kind — a false
+  // negative would then be cached for 30 days, and a stripped row would orphan
+  // its objects.
   leftUnchecked: number;
   errors: number;
 }
@@ -151,12 +156,16 @@ export function selectWork(
   const bySlug = new Map(rows.map((row) => [row.brandSlug, row]));
   const cutoff = new Date(now.getTime() - RECHECK_AFTER_DAYS * 24 * 60 * 60 * 1000);
   const wanted = options.brand?.trim().toLowerCase();
+  const named = wanted != null && wanted.length > 0;
   const work: WorkItem[] = [];
 
   for (const { brand } of brands) {
-    if (wanted != null && wanted.length > 0 && brand.toLowerCase() !== wanted) continue;
+    if (named && brand.toLowerCase() !== wanted) continue;
     const slug = brandSlug(brand);
-    if (slug.length < MIN_SLUG_LENGTH) continue;
+    // "CAO" is a real brand AND a Chinese surname: the sweep will not gamble on a
+    // slug this short, but a curator who asks for it by name has already made the
+    // call, so --brand overrides the bound rather than silently ignoring them.
+    if (!named && slug.length < MIN_SLUG_LENGTH) continue;
 
     const existing = bySlug.get(slug) ?? null;
     if (existing == null) {
@@ -229,9 +238,10 @@ function reportLine(brand: string, lookup: BrandImageLookup, stored: boolean): s
   return parts.join("  ");
 }
 
-// One brand end to end. Returns the row values to upsert, or null when the brand
-// was left unchecked (Wikimedia declined) — no row is written in that case, so
-// the negative cache never learns a false negative.
+// One brand end to end: look it up, store the bytes, upsert the row. Two
+// outcomes write NOTHING and leave the brand unchecked — Wikimedia declining to
+// answer, and a storage-less run meeting a row that already carries bytes — so
+// neither the negative cache nor the bucket learns something false from them.
 async function processBrand(
   deps: BrandImagesDeps,
   item: WorkItem,
@@ -240,6 +250,18 @@ async function processBrand(
   report: string[],
 ): Promise<void> {
   const taxonomy = deps.taxonomy ?? WIKIDATA_TAXONOMY;
+
+  // A run with no object store can neither replace a stored image nor delete the
+  // one it supersedes, so it must not touch a row that already carries bytes:
+  // writing the fresh outcome would blank object_key (the CHECK forbids keeping
+  // it on a non-resolved row) and strand both objects in the bucket with nothing
+  // referencing them. Leave the row exactly as it is and spend no request on it.
+  if (deps.storage == null && item.existing?.objectKey != null) {
+    stats.leftUnchecked += 1;
+    report.push(`${item.brand}: unchecked (no object store, and the row already carries bytes)`);
+    return;
+  }
+
   let lookup: BrandImageLookup;
   try {
     // A curator already picked the entity — go straight to its image, do not
@@ -341,14 +363,18 @@ async function processBrand(
     throw error;
   }
 
-  if (stored) {
-    stats.imagesStored += 1;
-    // The replaced row's objects are now unreferenced (refresh path only).
-    const old = item.existing;
-    if (old?.objectKey && old.objectKey !== stored.objectKey) {
-      await deps.storage?.delete(old.objectKey).catch(() => {});
-      if (old.thumbKey) await deps.storage?.delete(old.thumbKey).catch(() => {});
-    }
+  if (stored) stats.imagesStored += 1;
+
+  // The row no longer points at the previous objects — whether this run REPLACED
+  // them (a --refresh that re-stored) or CLEARED them (a --refresh whose fresh
+  // lookup came back no_image/blocked/no_match/ambiguous, which the CHECK turns
+  // into object_key = NULL). Either way nothing references them again, so they go
+  // with the reference. A storage-less run never reaches here holding an old key:
+  // the guard at the top of this function returned before the lookup.
+  const old = item.existing;
+  if (old?.objectKey != null && old.objectKey !== stored?.objectKey) {
+    await deps.storage?.delete(old.objectKey).catch(() => {});
+    if (old.thumbKey) await deps.storage?.delete(old.thumbKey).catch(() => {});
   }
   report.push(reportLine(item.brand, lookup, stored != null));
 }
@@ -362,9 +388,15 @@ export async function runBrandImages(
   const report: string[] = [];
   const taxonomy = deps.taxonomy ?? WIKIDATA_TAXONOMY;
   if (taxonomyIsUnseeded(taxonomy)) {
-    report.push(
-      "taxonomy is unseeded — every brand will read no_match. Run `--brand-images --probe` from the crawl pod and commit the QIDs (see wikidata-taxonomy.ts).",
-    );
+    const guidance =
+      "taxonomy is unseeded — run `--brand-images --probe` from the crawl pod and commit the QIDs (see wikidata-taxonomy.ts).";
+    report.push(guidance);
+    // Writing is WORSE than not running. With no qualifying class every brand
+    // reads no_match, and that row IS the 30-day negative cache: the seeded
+    // follow-up run the rollout depends on would then find nothing to check and
+    // report a clean, empty, green run. Refuse instead — a failed run is visible.
+    // --dry-run writes nothing, so it stays available for inspecting the worklist.
+    if (options.dryRun !== true) return { status: "failed", stats, report, error: guidance };
   }
 
   try {
@@ -380,6 +412,16 @@ export async function runBrandImages(
         stats.errors += 1;
         report.push(`${item.brand}: error (${error instanceof Error ? error.message : String(error)})`);
       }
+    }
+
+    // Per-brand isolation is about ONE brand failing, not the substrate failing.
+    // An object store that rejects every put (expired credentials, bucket gone)
+    // errors every item and would otherwise exit 0 with the damage buried in
+    // stdout, and no row written to show anything went wrong. A run that could
+    // not complete a single item it attempted is a failed run.
+    if (work.length > 0 && stats.errors === work.length) {
+      const error = `every brand failed (${stats.errors}/${work.length}) — see the report lines above`;
+      return { status: "failed", stats, report, error };
     }
     return { status: "succeeded", stats, report };
   } catch (error) {

@@ -22,13 +22,16 @@ export function BrandPosterTile({
       ? `${imageUrl}?v=${shelf.coverProductPhotoId}`
       : imageUrl;
   // The Wikidata fallback, populated by the domain only when no member photo
-  // exists (issue 127). Its credit line is a licence condition, not chrome, so
-  // it renders wherever the image does — plain text here because the tile body is
-  // already inside a <Link> and nested anchors are invalid HTML; the linked credit
-  // lives one click away on the brand page.
+  // exists (issue 127). Fingerprinted with the cover's stored-object version, not
+  // a row id — the crawl job upserts one brand_images row per slug, so the id
+  // outlives the bytes it points at (see coverVersion in domain/brand-images.ts).
+  // Its credit line is a licence condition, not chrome, so it renders wherever the
+  // image does — plain text here because the tile body is already inside a <Link>
+  // and nested anchors are invalid HTML; the linked credit lives one click away on
+  // the brand page.
   const brandSrc =
     memberSrc == null && shelf.brandImage != null && shelf.slug != null
-      ? `/api/brand-images/${shelf.slug}/thumb?v=${shelf.brandImage.id}`
+      ? `/api/brand-images/${shelf.slug}/thumb?v=${shelf.brandImage.version}`
       : null;
   const src = memberSrc ?? brandSrc;
   const body = (

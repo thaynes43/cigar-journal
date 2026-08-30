@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
-import { brandImages, cigars, productPhotos } from "@cj/db";
+import { brandImages, cigars, productPhotos, type BrandImageRow } from "@cj/db";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
-import { runBrandImages, type BrandImagesDeps } from "./core/brand-images.js";
+import { runBrandImages, selectWork, type BrandImagesDeps } from "./core/brand-images.js";
 import { entitiesUrl, imageInfoUrl, parseImageInfo, parseSearch, searchUrl } from "./core/wikidata.js";
 import type { WikidataTaxonomy } from "./core/wikidata-taxonomy.js";
 import { createMockFetcher, fakeProcessPhoto, loadFixture, type MockFetcher, type MockRoute } from "./testing/fixtures.js";
@@ -21,6 +21,15 @@ const TAXONOMY: WikidataTaxonomy = {
   tobaccoProduct: ["Q9000200"],
   genericBrand: ["Q9000500"],
   origin: ["Q9000010"],
+};
+
+const UNSEEDED: WikidataTaxonomy = {
+  negative: [],
+  tobaccoClass: [],
+  tobaccoIndustry: [],
+  tobaccoProduct: [],
+  genericBrand: [],
+  origin: [],
 };
 
 const BRAND = "Montecristo";
@@ -242,6 +251,83 @@ describe("brand images job (embedded Postgres)", () => {
     expect(fetcher.requested.some((url) => url.includes("upload.wikimedia.org"))).toBe(false);
   });
 
+  it("refuses to run at all on an unseeded taxonomy rather than caching no_match for a month", async () => {
+    await seedBrand();
+    const fetcher = createMockFetcher(routes());
+    const unseeded = { ...deps(fetcher, createMemoryPhotoStorage()), taxonomy: UNSEEDED };
+
+    const result = await runBrandImages(unseeded, { brand: BRAND });
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("unseeded");
+    expect(fetcher.requested).toEqual([]);
+    // Nothing written: a no_match row here IS the 30-day negative cache, so the
+    // seeded follow-up run would find no work and report a clean, empty success.
+    expect(await pg.db.select().from(brandImages)).toEqual([]);
+
+    // --dry-run writes nothing, so it stays usable for inspecting the worklist.
+    const dry = await runBrandImages(unseeded, { brand: BRAND, dryRun: true });
+    expect(dry.status).toBe("succeeded");
+    expect(dry.report.some((line) => line.includes("unseeded"))).toBe(true);
+    expect(await pg.db.select().from(brandImages)).toEqual([]);
+  });
+
+  it("a storage-less run leaves a row that already carries bytes untouched", async () => {
+    await seedBrand();
+    const storage = createMemoryPhotoStorage();
+    await runBrandImages(deps(createMockFetcher(routes()), storage), { brand: BRAND });
+    const before = await row();
+
+    // The Dockerfile presents PHOTOS_S3_* as optional on this role, so a --refresh
+    // can land without an object store. It can neither re-store nor delete, so it
+    // must not blank the keys: that would strip a live cover AND orphan its two
+    // objects with nothing left pointing at them.
+    const fetcher = createMockFetcher(routes());
+    const result = await runBrandImages(deps(fetcher, null), { brand: BRAND, refresh: true });
+
+    expect(result.stats.leftUnchecked).toBe(1);
+    expect(fetcher.requested).toEqual([]);
+    const after = await row();
+    expect(after!.objectKey).toBe(before!.objectKey);
+    expect(after!.thumbKey).toBe(before!.thumbKey);
+    expect(after!.status).toBe("resolved");
+    expect(await stored(storage, before!.objectKey!)).toBe(true);
+  });
+
+  it("a refresh that disqualifies the image clears the keys AND deletes the objects", async () => {
+    await seedBrand();
+    const storage = createMemoryPhotoStorage();
+    await runBrandImages(deps(createMockFetcher(routes()), storage), { brand: BRAND });
+    const before = await row();
+    expect(before!.objectKey).not.toBeNull();
+
+    // The licence changed on Commons — the same entity, no longer servable.
+    const revoked = { ...routes(), [imageInfoUrl(COMMONS_FILE)]: { body: fixture("commons-imageinfo-unknown-license.json") } };
+    await runBrandImages(deps(createMockFetcher(revoked), storage), { brand: BRAND, refresh: true });
+
+    const after = await row();
+    expect(after!.status).toBe("blocked");
+    expect(after!.objectKey).toBeNull();
+    expect(after!.thumbKey).toBeNull();
+    // The bucket follows the row: nothing references those objects again.
+    expect(await stored(storage, before!.objectKey!)).toBe(false);
+    expect(await stored(storage, before!.thumbKey!)).toBe(false);
+  });
+
+  it("fails the run when every brand it attempted errored — a dead object store is not a green run", async () => {
+    await seedBrand();
+    const dead: PhotoStorage = {
+      ...createMemoryPhotoStorage(),
+      put: () => Promise.reject(new Error("AccessDenied")),
+    };
+
+    const result = await runBrandImages(deps(createMockFetcher(routes()), dead), { brand: BRAND });
+    expect(result.status).toBe("failed");
+    expect(result.stats.errors).toBe(1);
+    expect(result.error).toContain("every brand failed");
+    // Nothing was written, so the row is not even a record that something broke.
+    expect(await pg.db.select().from(brandImages)).toEqual([]);
+  });
+
   it("leaves a brand unchecked rather than caching a false no_match when Wikimedia declines", async () => {
     await seedBrand();
     const searchBody = fixture("wbsearchentities-montecristo.json");
@@ -255,5 +341,25 @@ describe("brand images job (embedded Postgres)", () => {
     expect(result.stats.leftUnchecked).toBe(1);
     expect(result.stats.noMatch).toBe(0);
     expect(await row()).toBeUndefined();
+  });
+});
+
+// selectWork is a pure function over the uncovered list and the existing rows —
+// no Postgres needed, so this sits outside the harness above.
+describe("selectWork", () => {
+  const now = new Date("2026-08-28T12:00:00.000Z");
+  const uncovered = [
+    { brand: "CAO", n: 3 },
+    { brand: BRAND, n: 2 },
+  ];
+  const noRows: BrandImageRow[] = [];
+
+  it("keeps a slug too short to disambiguate out of the sweep, but honours an explicit --brand", () => {
+    // "cao" is three characters and is also a Chinese surname; the unattended
+    // sweep will not gamble a wbsearchentities on it.
+    expect(selectWork(uncovered, noRows, now, {}).map((w) => w.brand)).toEqual([BRAND]);
+    // Naming the shelf IS the disambiguation, so the request is honoured rather
+    // than silently dropped.
+    expect(selectWork(uncovered, noRows, now, { brand: "CAO" }).map((w) => w.slug)).toEqual(["cao"]);
   });
 });

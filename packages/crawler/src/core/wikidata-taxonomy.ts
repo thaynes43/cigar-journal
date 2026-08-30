@@ -13,9 +13,13 @@
 // that output, decides which classes genuinely mean "cigar brand" (and which mean
 // "novel", "human", "disambiguation page"), and commits the values below.
 //
-// An empty or wrong allowlist fails SAFE: with no tobacco class recognised every
-// brand resolves to `no_match`, the wall keeps its monograms, and nothing is
-// displayed that should not be. It never fails silently-wrong.
+// An empty allowlist recognises no tobacco class, so every lookup would resolve
+// to `no_match` — and a `no_match` row IS the 30-day negative cache, which would
+// then silence the seeded follow-up run for a month. So the job REFUSES to run
+// unseeded (`taxonomyIsUnseeded` → a failed run) rather than writing that cache;
+// `--dry-run` and `--probe` write nothing and stay available. A wrong-but-narrow
+// allowlist still fails safe on display: the wall keeps its monograms and nothing
+// serves until a curator approves the row.
 
 export interface WikidataTaxonomy {
   // P31 values that disqualify a candidate outright, whatever else it claims:
@@ -50,8 +54,8 @@ export const WIKIDATA_TAXONOMY: WikidataTaxonomy = {
 };
 
 // True when the taxonomy carries no qualifying evidence at all — every lookup
-// will end `no_match`. The job prints this loudly rather than reporting a clean
-// run over an unseeded allowlist.
+// would end `no_match`. The job refuses to write on this rather than poisoning
+// its own negative cache with a month of false negatives.
 export function taxonomyIsUnseeded(taxonomy: WikidataTaxonomy): boolean {
   return taxonomy.tobaccoClass.length === 0 && taxonomy.tobaccoIndustry.length === 0 && taxonomy.tobaccoProduct.length === 0;
 }

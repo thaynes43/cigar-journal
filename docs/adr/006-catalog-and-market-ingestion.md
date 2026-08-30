@@ -151,5 +151,8 @@ LLM-created cigars accumulate until curated.
   and harsher throttling while answering nothing a claims check does not.
   The class QIDs the disambiguator runs on are **data seeded by a live
   crawl-pod `--brand-images --probe` run**, not guesses — the same
-  live-verification rule this ADR imposes on every adapter; an empty
-  allowlist fails safe (every brand reads `no_match`).
+  live-verification rule this ADR imposes on every adapter. An unseeded
+  allowlist makes the job **refuse to run** rather than write: with no
+  qualifying class every brand would read `no_match`, and that row *is* the
+  30-day negative cache, so a seeded follow-up run would then find no work and
+  report a clean, empty success. `--dry-run` writes nothing and stays available.

@@ -18,12 +18,17 @@ const base: BrandShelf = {
   brandImage: null,
 };
 
-const cover = { id: "11111111-1111-1111-1111-111111111111", creditLine: "Ana Example · CC BY-SA 4.0", sourceUrl: "https://commons.wikimedia.org/wiki/File:M.jpg" };
+const cover = {
+  // The stored object's version, not the row id — see coverVersion in @cj/domain.
+  version: "11111111-1111-1111-1111-111111111111",
+  creditLine: "Ana Example · CC BY-SA 4.0",
+  sourceUrl: "https://commons.wikimedia.org/wiki/File:M.jpg",
+};
 
 describe("BrandPosterTile", () => {
   it("renders the brand cover with its plain-text credit when no member photo exists", () => {
     const html = renderToStaticMarkup(<BrandPosterTile shelf={{ ...base, brandImage: cover }} />);
-    expect(html).toContain(`/api/brand-images/montecristo/thumb?v=${cover.id}`);
+    expect(html).toContain(`/api/brand-images/montecristo/thumb?v=${cover.version}`);
     expect(html).toContain("Ana Example · CC BY-SA 4.0");
     // Plain text, not an anchor: the tile body is already inside a <Link>.
     expect(html).not.toContain(`href="${cover.sourceUrl}"`);

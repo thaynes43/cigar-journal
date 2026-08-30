@@ -65,6 +65,20 @@ export async function getBrandImage(deps: Deps, args: { slug: string }): Promise
   return { objectKey: row.objectKey, thumbKey: row.thumbKey, contentType: row.contentType };
 }
 
+// The cache fingerprint for a cover URL, which the surfaces append as `?v=`
+// against a `max-age=31536000, immutable` response. It must change exactly when
+// the BYTES change, and the row id does not: the crawl job upserts one row per
+// brand_slug, so `brand_images.id` is stable for the life of the slug while a
+// `--refresh` replace stores new bytes under a fresh object key. The key carries
+// a uuid minted per stored image, so it is the value that tracks the bytes.
+// (Product photos differ — replaceProductPhoto deletes the row and inserts a new
+// one, which is why `?v=<photo id>` is correct there and would be wrong here.)
+function coverVersion(objectKey: string): string {
+  const name = objectKey.slice(objectKey.lastIndexOf("/") + 1);
+  const dot = name.indexOf(".");
+  return dot === -1 ? name : name.slice(0, dot);
+}
+
 // The brand-wall/hero cover lookup, batched over a whole page of slugs — ONE
 // extra query for the wall, never an N+1. Kept as a separate query (rather than a
 // join on a SQL-side slug expression) so brandSlug() stays single-sourced in TS
@@ -77,7 +91,7 @@ export async function loadBrandCovers(
   if (wanted.length === 0) return new Map();
   const rows = await deps.db
     .select({
-      id: brandImages.id,
+      objectKey: brandImages.objectKey,
       brandSlug: brandImages.brandSlug,
       creditLine: brandImages.creditLine,
       sourceUrl: brandImages.sourceUrl,
@@ -89,8 +103,12 @@ export async function loadBrandCovers(
   for (const row of rows) {
     // Belt and braces over the DB CHECK: a cover is only ever handed out with a
     // credit and a link to the file description page.
-    if (!row.creditLine || !row.sourceUrl) continue;
-    covers.set(row.brandSlug, { id: row.id, creditLine: row.creditLine, sourceUrl: row.sourceUrl });
+    if (!row.creditLine || !row.sourceUrl || !row.objectKey) continue;
+    covers.set(row.brandSlug, {
+      version: coverVersion(row.objectKey),
+      creditLine: row.creditLine,
+      sourceUrl: row.sourceUrl,
+    });
   }
   return covers;
 }

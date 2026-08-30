@@ -778,10 +778,12 @@ export interface BrandShelf {
 // A servable brand image plus the credit the surface is obliged to render with
 // it. The credit line is computed once at write time (crawl pod) so no surface
 // re-derives it; `sourceUrl` is the Commons file description page the credit
-// links to. Bytes stream from /api/brand-images/<slug>[/thumb]; `id` fingerprints
-// that URL so a replacement busts the cache.
+// links to. Bytes stream from /api/brand-images/<slug>[/thumb]; `version`
+// fingerprints that URL so a replacement busts the year-long immutable cache.
+// It is derived from the stored object key, NOT the row id — the crawl job
+// upserts one row per slug, so the row id never changes while the bytes do.
 export interface BrandImageCover {
-  id: string;
+  version: string;
   creditLine: string;
   sourceUrl: string;
 }

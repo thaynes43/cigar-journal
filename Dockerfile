@@ -226,5 +226,8 @@ ENTRYPOINT ["/sbin/tini", "--"]
 #     Fills brand-wall shelves that no member cigar photo covers. Writes NO
 #     crawl_runs row (Wikidata is not a vendor — ADR-006 amendment 2026-08-29).
 #     Requires egress to www.wikidata.org, commons.wikimedia.org and
-#     upload.wikimedia.org; without PHOTOS_S3_* it records outcomes and skips bytes.
+#     upload.wikimedia.org; without PHOTOS_S3_* it records outcomes and skips
+#     bytes, and skips any row that already carries bytes (it could neither
+#     replace nor delete them). Exits 1 on an unseeded taxonomy — seed it first —
+#     and on a run where every attempted brand errored.
 CMD ["node", "apps/web/server.js"]

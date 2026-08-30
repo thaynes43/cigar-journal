@@ -208,6 +208,78 @@
           "title": "Montecristo"
         }
       }
+    },
+    "Q9100014": {
+      "type": "item",
+      "id": "Q9100014",
+      "labels": {
+        "en": {
+          "language": "en",
+          "value": "Montecristo"
+        }
+      },
+      "descriptions": {
+        "en": {
+          "language": "en",
+          "value": "Cuban cigar roller"
+        }
+      },
+      "claims": {
+        "P31": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P31",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000900"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P452": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P452",
+              "datavalue": {
+                "value": {
+                  "entity-type": "item",
+                  "id": "Q9000100"
+                },
+                "type": "wikibase-entityid"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ],
+        "P18": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datavalue": {
+                "value": "Montecristo roller.jpg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Montecristo (roller)"
+        }
+      }
     }
   },
   "success": 1
