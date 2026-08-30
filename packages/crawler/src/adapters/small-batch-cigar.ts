@@ -1,4 +1,4 @@
-import type { VendorAdapter } from "./types.js";
+import type { ExclusionVendorAdapter } from "./types.js";
 
 // Small Batch Cigar (smallbatchcigar.com) — platform unknown, ~20k URLs
 // (ADR-006 / vendor-sources.md). Large catalog: crawl SLOWER than the floor and
@@ -15,12 +15,18 @@ import type { VendorAdapter } from "./types.js";
 //   2. sitemapUrl SHAPE: at ~20k URLs a sitemapINDEX (child sitemaps) is likely —
 //      collectSitemapUrls recurses one level, but verify the root path and that
 //      the index enumerates product URLs (not just category/blog pages).
-//   3. productPathPrefix: `/products/` is a guess (unknown platform). Confirm the
-//      real prefix from one product URL.
-//   4. Product pages embed a schema.org Product in JSON-LD.
-//   5. maxPages (below) is a SAFETY cap for the probe/dry-run era, well under the
+//   3. The exclusion gate below. Live 2026-08-29 established only that products
+//      are ROOT-LEVEL slugs (`/tatuaje-brown-label-noella/`) — there is no prefix
+//      to match, so the gate is negative. The path list is written against an
+//      UNCONFIRMED platform: under-matching only wastes fetch budget (normalize +
+//      isCigarListing still gate the writes), over-matching silently drops
+//      products. Re-probe and correct the pattern before enabling.
+//   4. Whether the sitemapindex has a product-only child. If it does, pointing
+//      sitemapUrl at that child (the Cuban Lou's fix) is sharper than any pattern.
+//   5. Product pages embed a schema.org Product in JSON-LD.
+//   6. maxPages (below) is a SAFETY cap for the probe/dry-run era, well under the
 //      ~20k catalog — raise deliberately for a full seed once the shape is known.
-export const smallBatchCigar: VendorAdapter = {
+export const smallBatchCigar: ExclusionVendorAdapter = {
   slug: "small-batch-cigar",
   name: "Small Batch Cigar",
   url: "https://www.smallbatchcigar.com",
@@ -30,7 +36,13 @@ export const smallBatchCigar: VendorAdapter = {
   approvalStatus: "owner-added",
   displayEnabled: true,
   purchaseLinkout: true,
-  productPathPrefix: "/products/",
+  // Exclusion gate (Mode B): reject the known non-product paths, then require a
+  // single path segment. The depth bound carries most of the load — `/blogs/news/x`
+  // is out on shape alone — and the pattern catches root-level non-products
+  // (`/`, `/cart.php`, `/search`).
+  nonProductPathPattern:
+    /^\/(?:$|(?:pages|blogs?|collections?|categories|brands|policies|customer|account)\/|(?:search|cart|checkout|login|logout|register|wishlist|compare|sitemap|feed|rss)\b)|\.(?:php|xml|json|txt)$/i,
+  productPathSegments: { min: 1, max: 1 },
   cigarCategoryPattern: /cigar/i,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?/i,
   excludeNamePattern: /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b/i,

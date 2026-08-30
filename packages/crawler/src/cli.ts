@@ -5,7 +5,7 @@ import { photoStorageFromEnv } from "@cj/photos";
 import { getAdapter, adapterSlugs } from "./adapters/index.js";
 import { createFetcher } from "./core/fetcher.js";
 import { runIngest, type CrawlMode, type IngestResult } from "./core/ingest.js";
-import { runProbe, formatProbe } from "./core/probe.js";
+import { runProbe, formatProbe, probeFetchBudget } from "./core/probe.js";
 import {
   parseApprovedWiki,
   diffApproved,
@@ -47,8 +47,10 @@ usage:
   --mode             seed (create catalog + offers + photos), offers (offers only,
                      no catalog creation), or enrich (drain the gap-fill queue)
   --dry-run          fetch (bounded) and print the would-write report; no DB/storage writes
-  --probe            live-verify an adapter: fetch robots.txt + sitemap root + ONE
-                     product page, parse, print a verdict; WRITES NOTHING, no DB.
+  --probe            live-verify an adapter: fetch robots.txt, the sitemap root
+                     (N samples when the adapter configures sampling) plus up to
+                     three index children, and three spread-apart product pages;
+                     parse and print a verdict. WRITES NOTHING, no DB.
                      Run this before enabling a new vendor (ADR-006 live-read rule).
   --import-approved  a LOCAL r/cubancigars online-stores wiki snapshot (markdown);
                      diff store entries against vendors.approval_status and print it.
@@ -154,6 +156,13 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
       `matches-auto=${s.matchesAuto} cigars-created=${s.cigarsCreated} offers=${s.offersWritten} ` +
       `photos=${s.photosCaptured} errors=${s.errors}`,
   ];
+  const sampling = s.sitemapSampling;
+  if (sampling) {
+    lines.push(
+      `  sitemap: samples=${sampling.samples} locs=${sampling.locsPerSample.join("/")} ` +
+        `union=${sampling.unionLocs} product=${sampling.productLocs} varied=${sampling.varied ? "yes" : "no"}`,
+    );
+  }
   if (result.error) lines.push(`  error: ${result.error}`);
   if (result.report.length > 0) {
     lines.push("would write:");
@@ -162,10 +171,11 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
   return lines.join("\n");
 }
 
-// --probe: a read-only live check, no DB. Fetcher uses the adapter's rate but a
-// tiny page cap (probe touches at most three pages regardless).
+// --probe: a read-only live check, no DB. Fetcher uses the adapter's rate and a
+// page cap DERIVED from the probe's own bounds — a hard-coded cap silently threw
+// MaxPagesExceededError once sampling and multi-child descent were added.
 async function runProbeMode(adapter: VendorAdapter): Promise<number> {
-  const fetcher = createFetcher({ minIntervalMs: adapter.minIntervalMs, maxPages: 8 });
+  const fetcher = createFetcher({ minIntervalMs: adapter.minIntervalMs, maxPages: probeFetchBudget(adapter) });
   const result = await runProbe(fetcher, adapter);
   console.log(formatProbe(result));
   return result.verdict === "ok" ? 0 : 1;

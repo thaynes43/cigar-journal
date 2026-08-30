@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- HAND-WRITTEN fixture for the OTHER response 2 Guys serves for the SAME
+     sitemap URL (live 2026-08-29): a large enumeration with ZERO /store/ product
+     locs. Paired with sitemap.xml in a sequenced mock route, it reproduces the
+     content variance sitemapSampling exists to absorb. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://www.2guyscigars.com/</loc></url>
+  <url><loc>https://www.2guyscigars.com/about-us/</loc></url>
+  <url><loc>https://www.2guyscigars.com/shipping-policy/</loc></url>
+</urlset>

@@ -11,7 +11,8 @@ import {
 import { recordPriceObservation } from "@cj/domain";
 import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedPhoto } from "@cj/photos";
 import type { VendorAdapter } from "../adapters/types.js";
-import { collectSitemapUrls } from "./sitemap.js";
+import { collectSitemapSamples, collectSitemapUrls } from "./sitemap.js";
+import { filterProductUrls, pathOf, robotsGatePath } from "./product-url.js";
 import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
 import { isCigarListing, normalizeListing, type NormalizedListing } from "./normalize.js";
 import { createCigarFromListing, findCatalogMatch, upsertListingMatch } from "./match.js";
@@ -39,6 +40,15 @@ export interface IngestStats {
   offersWritten: number;
   photosCaptured: number;
   errors: number;
+  // Present only for a vendor with sitemapSampling configured — absent keeps the
+  // JSONB byte-identical for every other vendor.
+  sitemapSampling?: {
+    samples: number;
+    locsPerSample: number[];
+    unionLocs: number;
+    productLocs: number;
+    varied: boolean;
+  };
 }
 
 export interface IngestDeps {
@@ -74,6 +84,20 @@ export class RobotsDisallowedError extends Error {
   }
 }
 
+// Scoped to vendors that opted into sitemap sampling. They opted in BECAUSE their
+// enumeration is unreliable, so a "succeeded, 0 listings" run there is a silent
+// failure that reads as healthy in crawl_runs. A non-sampling vendor with an empty
+// sitemap still succeeds-with-zero, exactly as before.
+export class SitemapEnumerationEmptyError extends Error {
+  constructor(samples: number, unionLocs: number) {
+    super(
+      `sitemap sampling (${samples} samples) enumerated ${unionLocs} URLs, 0 passing the product gate — ` +
+        "refusing to record a silent zero-listing run.",
+    );
+    this.name = "SitemapEnumerationEmptyError";
+  }
+}
+
 function emptyStats(): IngestStats {
   return {
     pagesFetched: 0,
@@ -85,14 +109,6 @@ function emptyStats(): IngestStats {
     photosCaptured: 0,
     errors: 0,
   };
-}
-
-function pathOf(url: string): string {
-  try {
-    return new URL(url).pathname;
-  } catch {
-    return url;
-  }
 }
 
 function lastSegment(path: string): string {
@@ -133,9 +149,25 @@ async function fetchRobots(deps: IngestDeps, adapter: VendorAdapter): Promise<Re
   return parseRobots(status === 200 ? body : "", CRAWLER_UA_TOKEN);
 }
 
-async function productUrls(deps: IngestDeps, adapter: VendorAdapter): Promise<string[]> {
-  const locs = await collectSitemapUrls(deps.fetcher, adapter.sitemapUrl);
-  return locs.filter((url) => pathOf(url).startsWith(adapter.productPathPrefix));
+async function productUrls(deps: IngestDeps, adapter: VendorAdapter, stats: IngestStats): Promise<string[]> {
+  if (!adapter.sitemapSampling) {
+    return filterProductUrls(await collectSitemapUrls(deps.fetcher, adapter.sitemapUrl), adapter);
+  }
+
+  const sampled = await collectSitemapSamples(deps.fetcher, adapter.sitemapUrl, {
+    samples: adapter.sitemapSampling.samples,
+    intervalMs: adapter.sitemapSampling.intervalMs,
+  });
+  const urls = filterProductUrls(sampled.urls, adapter);
+  stats.sitemapSampling = {
+    samples: sampled.samples.length,
+    locsPerSample: sampled.samples.map((sample) => sample.enumerated),
+    unionLocs: sampled.urls.length,
+    productLocs: urls.length,
+    varied: sampled.varied,
+  };
+  if (urls.length === 0) throw new SitemapEnumerationEmptyError(sampled.samples.length, sampled.urls.length);
+  return urls;
 }
 
 // --- per-listing ingest ------------------------------------------------------
@@ -285,11 +317,12 @@ async function walkListings(
 ): Promise<void> {
   const { adapter } = options;
   const robots = await fetchRobots(deps, adapter);
-  if (!robots.isAllowed(adapter.productPathPrefix)) {
-    throw new RobotsDisallowedError(adapter.productPathPrefix);
+  const gatePath = robotsGatePath(adapter);
+  if (!robots.isAllowed(gatePath)) {
+    throw new RobotsDisallowedError(gatePath);
   }
 
-  let urls = await productUrls(deps, adapter);
+  let urls = await productUrls(deps, adapter, stats);
   if (options.limit != null) urls = urls.slice(0, options.limit);
 
   for (const url of urls) {
@@ -343,11 +376,12 @@ async function drainEnrichment(
 ): Promise<void> {
   const { adapter } = options;
   const robots = await fetchRobots(deps, adapter);
-  if (!robots.isAllowed(adapter.productPathPrefix)) {
-    throw new RobotsDisallowedError(adapter.productPathPrefix);
+  const gatePath = robotsGatePath(adapter);
+  if (!robots.isAllowed(gatePath)) {
+    throw new RobotsDisallowedError(gatePath);
   }
 
-  const urls = await productUrls(deps, adapter);
+  const urls = await productUrls(deps, adapter, stats);
   const candidates = urls.map((url) => ({ url, tokens: slugTokens(lastSegment(pathOf(url))) }));
 
   const limit = options.limit ?? ENRICH_DEFAULT_LIMIT;

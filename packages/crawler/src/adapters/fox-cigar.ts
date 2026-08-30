@@ -1,4 +1,4 @@
-import type { VendorAdapter } from "./types.js";
+import type { PrefixVendorAdapter } from "./types.js";
 
 // Fox Cigar (foxcigar.com) — a WooCommerce store, the softest of the initial NC
 // vendors (ADR-006 / vendor-sources.md). One flat sitemap (~2035 locs), products
@@ -11,7 +11,7 @@ import type { VendorAdapter } from "./types.js";
 // NOT an accessory/sampler/etc. Accessories live under their own "Accessories"
 // category; samplers stay excluded on purpose (mixed-blend boxes are not a
 // single catalog cigar) — both are counted as skipped-non-cigar.
-export const foxCigar: VendorAdapter = {
+export const foxCigar: PrefixVendorAdapter = {
   slug: "fox-cigar",
   name: "Fox Cigar",
   url: "https://foxcigar.com",

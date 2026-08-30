@@ -3,7 +3,15 @@
 // objects; runs as the image's `crawl` role via src/cli.ts. Library surface here;
 // the CLI entry is src/cli.ts.
 
-export type { VendorAdapter } from "./adapters/types.js";
+export type {
+  VendorAdapter,
+  VendorAdapterBase,
+  PrefixVendorAdapter,
+  ExclusionVendorAdapter,
+  PrefixProductGate,
+  ExclusionProductGate,
+  SitemapSampling,
+} from "./adapters/types.js";
 export {
   adapters,
   getAdapter,
@@ -25,7 +33,35 @@ export {
   type FetchTextResult,
   type FetchBinaryResult,
 } from "./core/fetcher.js";
-export { parseSitemap, collectSitemapUrls, type ParsedSitemap } from "./core/sitemap.js";
+export {
+  parseSitemap,
+  collectSitemapUrls,
+  collectSitemapSamples,
+  MAX_SITEMAP_SAMPLES,
+  type ParsedSitemap,
+  type SitemapSample,
+  type SampledSitemap,
+  type SampleOptions,
+} from "./core/sitemap.js";
+export { spreadIndices } from "./core/spread.js";
+export {
+  pathOf,
+  segmentCount,
+  isProductUrl,
+  filterProductUrls,
+  robotsGatePath,
+  productGateLabel,
+} from "./core/product-url.js";
+export {
+  runProbe,
+  formatProbe,
+  probeFetchBudget,
+  MAX_PROBE_CHILDREN,
+  PRODUCT_SAMPLES,
+  REQUIRED_PARSED_SAMPLES,
+  type ProbeResult,
+  type ProbeProductSample,
+} from "./core/probe.js";
 export { extractJsonLd, type ExtractedJsonLd, type JsonLdProduct, type JsonLdOffer } from "./core/jsonld.js";
 export { normalizeListing, isCigarCategory, isCigarListing, decodeEntities, type NormalizedListing } from "./core/normalize.js";
 export {
@@ -38,6 +74,7 @@ export {
 export {
   runIngest,
   RobotsDisallowedError,
+  SitemapEnumerationEmptyError,
   type IngestDeps,
   type IngestOptions,
   type IngestResult,

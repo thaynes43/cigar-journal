@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- HAND-WRITTEN child sitemap fixture (ADR-006). -->
+<!-- HAND-WRITTEN child sitemap fixture (ADR-006). Products are ROOT-LEVEL slugs
+     (live-probed 2026-08-29) and the child mixes in the non-product paths the
+     exclusion gate has to reject. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://www.smallbatchcigar.com/products/tatuaje-brown-label-noella/</loc></url>
-  <url><loc>https://www.smallbatchcigar.com/products/xikar-hp3-lighter/</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/tatuaje-brown-label-noella/</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/xikar-xi3-cutter/</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/pages/about-us/</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/cart.php</loc></url>
 </urlset>

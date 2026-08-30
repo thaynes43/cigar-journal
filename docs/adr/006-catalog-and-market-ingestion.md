@@ -94,3 +94,29 @@ LLM-created cigars accumulate until curated.
   guard hardened: `listing_matches.decided_by` (migration 0017,
   crawler|curator|agent) makes the crawler preserve ANY non-crawler decision on
   re-crawl, not just `confirmed`.
+- **2026-08-29 — adapter crawl-shape capabilities + probe verdict rule.** Live
+  in-cluster probes turned up two vendor shapes the single `productPathPrefix`
+  field could not express, so the adapter contract gains two generic
+  capabilities (the core still branches on FIELD SHAPE, never on a vendor slug):
+  - **Product gate, two modes.** Mode A is the prefix that already existed (Fox
+    `/shop/`, Cuban Lou's `/` over a product-only sitemap). Mode B is an
+    exclusion gate — `nonProductPathPattern` plus `productPathSegments` depth
+    bounds — for a store whose products are ROOT-LEVEL slugs with no shared
+    prefix (Small Batch). The modes are mutually exclusive in the type. The
+    coarse path the robots gate is asked about is now its own concern
+    (`robotsProbePath`, default `/`), since Mode B has no prefix to reuse.
+  - **Sitemap sampling.** `sitemapSampling: { samples, intervalMs? }` unions N
+    root fetches for a vendor whose sitemap CONTENT varies per request (2 Guys:
+    1,462 `/store/` locs on one fetch, 6,356 locs with none on the next).
+    Opt-in, clamped to 8. For a sampling vendor an empty union FAILS the run
+    (`SitemapEnumerationEmptyError`) rather than recording a "succeeded, 0
+    listings" row that reads as healthy; a non-sampling vendor still
+    succeeds-with-zero.
+  - **Probe verdict.** `--probe` now samples up to three index children and
+    three spread-apart product URLs (never index 0 — the observed false
+    negatives were both position-0 index/redirect rows) and passes only when
+    robots allows the gate, the enumeration yields product URLs, and at least
+    `min(2, sampled)` product pages parse. One parse proves the JSON-LD
+    extractor works but not that the enumeration selects products; two prove
+    both, and requiring all three would re-import the false negative. The
+    fetcher's page cap for a probe is derived from those bounds, not fixed.
