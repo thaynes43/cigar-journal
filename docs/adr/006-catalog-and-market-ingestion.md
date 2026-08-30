@@ -243,16 +243,16 @@ LLM-created cigars accumulate until curated.
     amendment makes the coverage rollup the column's FIRST reader, and only as a
     negative filter: turning it off drops a vendor from the fleet, turning it on
     still does not make one run. That asymmetry is the point — it is exactly why
-    the flag can gate who is *listed* and never who has *looked*. Prod is exactly that shape — Cuban Lou's is
-    crawl-enabled with a suspended enrich CronJob and only a `seed` run — and it
-    sits in the denominator of every untyped cigar, which is 890 of 977 catalog
-    rows: never `exhausted`, therefore permanently `already_queued`, therefore
-    permanently out of `retryExhausted`'s reach. The earlier draft of this
-    amendment called liveness-as-denominator circular. It is not: **the drain
-    does not gate on liveness** — its open set admits `exhausted` rows and its
-    only per-vendor filter is that vendor's own budget — so a lane that has never
-    run still picks work up on its first night, and reopens what it has not
-    looked at. The second clause (a look already recorded here) exists because a
+    the flag can gate who is *listed* and never who has *looked*. Prod is exactly
+    that shape: Cuban Lou's is crawl-enabled with a suspended enrich CronJob and
+    only a `seed` run, and it sat in the denominator of every untyped cigar —
+    890 of 977 catalog rows. Never `exhausted`, therefore permanently
+    `already_queued`, therefore permanently out of `retryExhausted`'s reach.
+    The earlier draft of this amendment called liveness-as-denominator circular.
+    It is not: **the drain does not gate on liveness** — its open set admits
+    `exhausted` rows and its only per-vendor filter is that vendor's own budget
+    — so a lane that has never run still picks work up on its first night, and
+    reopens what it has not looked at. The second clause (a look already recorded here) exists because a
     lane's own first run is still `running` while it drains, and without it that
     first night would read as a lag in the cached status. **Live** read as
     MARKETS stays the queue gate, unchanged; it is the same predicate at a
@@ -326,6 +326,6 @@ LLM-created cigars accumulate until curated.
     drain-time check can close that; the pre-enable `--probe` and its path-shape
     census are what close it, which is why this ADR requires live verification
     before a vendor is enabled and why a gate correction never rides a ledger
-    change. Widening the rule instead — calling "nothing scored" an error — would
-    mean a vendor that simply does not stock a brand could never retire the
-    request, which is the hang this amendment exists to remove.
+    change. Widening the rule instead — calling "nothing scored" an error —
+    would mean a vendor that simply does not stock a brand could never retire
+    the request, which is the hang this amendment exists to remove.
