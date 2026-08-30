@@ -68,7 +68,7 @@ async function loadAssessment(tx: Tx, cigarId: string): Promise<{ cigar: CigarRo
 // The verdict comes from classifyEnrichmentRequest so this path and the two
 // reporting paths cannot disagree about what "already queued" means. That matters
 // since migration 0023: "open" is no longer a status-column test. A request whose
-// cached status reads `exhausted` but which a newly eligible vendor has not looked
+// cached status reads `exhausted` but which a newly live vendor has not looked
 // at is STILL open — the drain admits `exhausted` rows — so a column-based dedupe
 // would file a duplicate ask for it. A request retired at every counted lane
 // (exhausted or blocked) still re-queues here, which is the long-standing

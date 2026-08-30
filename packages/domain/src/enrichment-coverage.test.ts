@@ -471,10 +471,10 @@ describe("enrichment coverage", () => {
   });
 
   // The append-once dedupe runs on the same authority as the reporting paths. A
-  // row whose cached status reads `exhausted` while an eligible vendor has not
-  // looked at it is STILL open — the drain admits `exhausted` rows — so a
-  // status-column dedupe would file a duplicate ask for it. A row retired at every
-  // eligible vendor still re-queues, which is the long-standing behaviour.
+  // row whose cached status reads `exhausted` while a live vendor has not looked
+  // at it is STILL open — the drain admits `exhausted` rows — so a status-column
+  // dedupe would file a duplicate ask for it. A row retired at every counted lane
+  // still re-queues, which is the long-standing behaviour.
   it("maybeQueueEnrichment does not duplicate a cached-exhausted request that is still open", async () => {
     await clearFleet();
     const vendorId = await makeVendor("Dedupe", "NC");

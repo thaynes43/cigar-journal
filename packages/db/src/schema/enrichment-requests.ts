@@ -11,12 +11,14 @@ import { users } from "./users.js";
 // Three fields changed meaning with 0023, and reading them the old way misreports:
 //
 //   `status`  — a CACHE of the rollup, not the authority. `exhausted` means
-//     "every vendor ELIGIBLE for this cigar has spent its own budget, and there
-//     is at least one such vendor". Since eligibility is evaluated at rollup
-//     time, enabling a vendor silently makes a cached `exhausted` stale until the
+//     "every LANE THAT RUNS has completed its own budget of looks on this cigar,
+//     and there is at least one such lane". Since that is evaluated at rollup
+//     time, a lane going live silently makes a cached `exhausted` stale until the
 //     next finalize. Every read surface must go through @cj/domain's
 //     enrichmentCoverageForCigar / -ForRequest, which recompute from the ledger.
-//     Zero eligible vendors is NOT exhausted — nobody could look, which is a
+//     Two states are NOT exhausted and the column cannot express either: no lane
+//     counts at all, and every counted lane burned its error budget without
+//     finishing a look. Both stay `pending` here — "nobody could look" is a
 //     different fact from "we looked and found nothing".
 //
 //   `attempts` — total COMPLETED looks across all vendors. Reporting only; it is

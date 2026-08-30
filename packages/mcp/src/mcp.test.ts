@@ -2248,11 +2248,12 @@ describe("@cj/mcp adapter", () => {
       // Worklist order: deepest hole in the humidor first.
       expect(res.entries.map((e) => e.cigarId)).toEqual([deep, shallow]);
       expect(res.entries.every((e) => e.status === "queued")).toBe(true);
-      // #158: the payload carries the exhaustion DENOMINATOR, which enrichedMarkets
-      // cannot express — an eligible vendor with no enrich lane scheduled keeps every
-      // request open forever, and this is the only surface that shows it.
+      // #158: the payload names who COULD look, which enrichedMarkets cannot
+      // express. It is not the exhaustion denominator — a vendor here whose market
+      // is absent from enrichedMarkets is a lane that has never run, and counts
+      // against nothing.
       expect(res.eligibleVendors).toContain(enricherName);
-      // triedVendors rides only on `exhausted` rows; nothing has been tried here.
+      // triedVendors rides only on the retirement verdicts; nothing was tried here.
       expect(res.entries.every((e) => e.triedVendors === undefined)).toBe(true);
     });
 

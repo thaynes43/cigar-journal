@@ -1054,36 +1054,39 @@ result:
     - cigarId: cg_01j9x3
       canonicalName: Red Anchor Captain
       status: exhausted
-      triedVendors: [Fox Cigar]   # only on `exhausted`: who looked and did not carry it
+      triedVendors: [Fox Cigar]   # on `exhausted` / `vendor_unreachable`: who spent themselves here
   replayed: false
 ```
 
 `enrichedMarkets` and `eligibleVendors` answer different questions and are both
 reported. A market is **enriched** when some crawl-enabled vendor covering it has
-completed an `enrich` run — that is the enqueue gate. A vendor is **eligible**
-when it is crawl-enabled and its focus covers the row's market — that is the set
-that has to be exhausted before a request retires. A vendor enabled in the
-registry with no enrich CronJob scheduled is eligible but not live, and keeps
-every matching request open forever; `eligibleVendors` is the only surface that
-shows it.
+completed an `enrich` run — that is the enqueue gate, and the same liveness the
+exhaustion denominator uses, read as markets rather than as vendors. A vendor is
+**eligible** when it is crawl-enabled and its focus covers the row's market: who
+COULD look. Eligibility is NOT the denominator — `crawl_enabled` is a registry
+flag no crawler consults, so a vendor with a suspended enrich CronJob is listed
+in `eligibleVendors` and counts against nothing. Read the two together: a vendor
+named there whose market is missing from `enrichedMarkets` is a lane that has
+never run.
 
 The per-row `status` is `request_cigar_enrichment`'s taxonomy (`queued`,
-`already_queued`, `recently_enriched`, `not_needed`) plus three verdicts only a
+`already_queued`, `recently_enriched`, `not_needed`) plus four verdicts only a
 bulk press has:
 
 | status | meaning | how to clear it |
 | --- | --- | --- |
-| `exhausted` | **every eligible vendor** spent its own budget on this row (2 completed looks each) and none carried it; `triedVendors` names them | enable a vendor that stocks the brand — the row reopens on its own — or press with `retryExhausted: true` |
+| `exhausted` | **every lane that runs** spent its own budget on this row (2 completed looks each) and none carried it; `triedVendors` names them | bring up a lane that stocks the brand — the row reopens on its own the night it runs — or press with `retryExhausted: true` |
+| `vendor_unreachable` | every lane that runs is retired on this row, but at least one burned its error budget without finishing a look — nobody could look, so nothing was learned about any catalogue; `triedVendors` names them | fix the vendor (sitemap, adapter, product gate), then press with `retryExhausted: true` for a fresh error budget |
 | `unverified_name` | nobody has reviewed this canonical name | `rename_cigar` if it is wrong, then `verify_cigar` |
 | `no_vendor_coverage` | no crawl-enabled vendor covering that market has completed an `enrich` run | bring that market's enrich lane up |
 
 **A vendor's catalogue is PARTIAL** (ADR-006 amendment 2026-08-30). "No match at
 Fox" is evidence about Fox and about nothing else, so the budget is per
-*(request, vendor)*: each eligible vendor gets its own two completed looks, and a
-request retires only once all of them are spent. A request with no eligible
-vendor at all is NOT exhausted — nobody could look, which is a different fact
-from "we looked and found nothing" — and it reopens by itself the moment a vendor
-becomes eligible, with no reopen call and no `retryExhausted` press.
+*(request, vendor)*: each lane gets its own two completed looks, and a request
+retires only once all of them are spent. A request no lane counts against is NOT
+exhausted — nobody could look, which is a different fact from "we looked and
+found nothing" — and it reopens by itself the moment a lane runs, with no reopen
+call and no `retryExhausted` press.
 
 **Both preconditions are enforced, not advised, and neither has an override.** A
 queued request that cannot be served is not inert: every drain that looks and

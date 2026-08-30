@@ -12,9 +12,12 @@ import { vendors } from "./vendors.js";
 // from each vendor. Red Anchor is stocked by 2 Guys and not by Fox; both are NC
 // US retailers in good standing, and `vendors.focus` cannot tell them apart.
 //
-// The rollup over these rows (plus the currently-eligible vendor set) is the
-// AUTHORITY for whether a request is exhausted; enrichment_requests.status is a
-// cache of that verdict. See @cj/domain enrichment-coverage.ts.
+// The rollup over these rows (plus the lanes that actually run) is the AUTHORITY
+// for whether a request is exhausted; enrichment_requests.status is a cache of
+// that verdict. `attempts` and `errors` are NOT interchangeable there: only a
+// completed look is evidence about a catalogue, so a vendor retired on `errors`
+// alone leaves the request blocked rather than exhausted. See @cj/domain
+// enrichment-coverage.ts.
 export const enrichmentAttempts = pgTable(
   "enrichment_attempts",
   {

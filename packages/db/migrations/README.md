@@ -60,14 +60,16 @@ init container at startup (ADR-003).
   whole fleet, which retired a request after a single look from each vendor. Each
   vendor now gets its own `attempts` (completed looks) and `errors` (looks that
   could not complete, reset by any completed look), and the rollup over this
-  table plus the currently-eligible vendor set — not
-  `enrichment_requests.status` — is the authority on `exhausted`. The UNIQUE
+  table plus the lanes that actually run (crawl-enabled, focus covers the market,
+  has completed an `enrich` run) — not `enrichment_requests.status` — is the
+  authority on `exhausted`. Burning the error budget retires a (request, vendor)
+  without exhausting the request: zero completed looks is not a catalogue fact. The UNIQUE
   `(request_id, vendor_id)` doubles as the ON CONFLICT target that makes the
   increment atomic. **The ledger starts empty and that is deliberate:** the old
   counter is vendor-blind, so splitting it would mean inventing which vendor
   spent it, and the only inference available (overlapping succeeded `enrich`
   runs) credits a run that may have drained a different request entirely. It
-  costs at most `ATTEMPTS_PER_VENDOR` extra looks per open request per eligible
+  costs at most `ATTEMPTS_PER_VENDOR` extra looks per open request per live
   vendor, once. `enrichment_requests.attempts` is left as-is (a still-true count
   of looks); existing `exhausted` rows are not reset — they read as not-exhausted
   against an empty ledger and re-retire per vendor, which is the intended
