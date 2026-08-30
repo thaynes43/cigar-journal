@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.1](https://github.com/thaynes43/cigar-journal/compare/v0.27.0...v0.27.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **web:** acknowledge a display-name save and refresh the header at once ([#175](https://github.com/thaynes43/cigar-journal/issues/175)) ([ba291c4](https://github.com/thaynes43/cigar-journal/commit/ba291c484c2845289d2fb5aba56a94bd1baad089))
+
 ## [0.27.0](https://github.com/thaynes43/cigar-journal/compare/v0.26.1...v0.27.0) (2026-08-30)
 
 
