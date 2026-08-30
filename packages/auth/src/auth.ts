@@ -3,10 +3,18 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError } from "better-auth/api";
 import { eq } from "drizzle-orm";
 import { users, session, account, verification, rateLimit, type Database } from "@cj/db";
+import { hasReservedInvite, usersTableIsEmpty } from "@cj/domain";
 
-// App-owned identity (ADR-004). Local email+password only in this slice; the
-// principal is always server-derived. Better Auth maps onto @cj/db's existing
-// `users` table and its session/account/verification tables.
+// App-owned identity (ADR-004). Better Auth maps onto @cj/db's existing `users`
+// table and its session/account/verification tables; the principal is always
+// server-derived.
+//
+// Registration is invite-gated (ADR-010): the only way to create a user is to
+// redeem an invite, which shows up here as a reserved row in `invites`.
+// BOOTSTRAP_ADMIN_EMAILS survives as two narrow things and nothing more — a
+// first-RUN bootstrap (allowlisted, and only while `users` is empty) so a virgin
+// database can mint its first admin, and the idempotent admin re-assert on
+// session create that keeps the owner from ever being permanently demoted.
 
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30; // ~30 days
 const COOKIE_CACHE_MAX_AGE_SECONDS = 5 * 60;
@@ -16,8 +24,9 @@ export interface AuthConfig {
   // Fall back to Better Auth's own env resolution (BETTER_AUTH_SECRET/URL) when omitted.
   secret?: string;
   baseURL?: string;
-  // Phase 1 registration allowlist: the ONLY emails allowed to sign up, and they
-  // bootstrap to `admin`. Phase 3's invite system replaces this gate.
+  // First-run bootstrap + admin re-assert only (ADR-010). NOT a standing
+  // registration gate: an allowlisted address may register solely while the
+  // `users` table is empty.
   bootstrapAdminEmails: string[];
 }
 
@@ -59,12 +68,23 @@ export function createAuth(config: AuthConfig) {
       user: {
         create: {
           before: async (user) => {
-            // Registration allowlist (Phase 1; Phase 3 invites replace this).
-            if (!isAllowlisted(user.email)) {
-              throw new APIError("FORBIDDEN", { message: "Registration is invite-only." });
+            // The registration gate (ADR-010). A reserved invite row — burned by
+            // the redemption page, not yet claimed — is the authorization; it is
+            // state in the database, so nothing request-scoped can forge it. The
+            // hard `role: "user"` is the second belt against escalation: even a
+            // `role` smuggled into the sign-up body cannot survive it (the field
+            // is already `input: false`), and `invites` has no role column to
+            // carry one in the first place.
+            if (await hasReservedInvite(config.db, user.email)) {
+              return { data: { role: "user" } };
             }
-            // Allowlisted emails bootstrap to admin.
-            return { data: { role: "admin" } };
+            // First-run bootstrap: an allowlisted address may register only into
+            // an empty `users` table, so a fresh deploy (and the e2e harness) can
+            // mint its first admin without raw SQL.
+            if (isAllowlisted(user.email) && (await usersTableIsEmpty(config.db))) {
+              return { data: { role: "admin" } };
+            }
+            throw new APIError("FORBIDDEN", { message: "Registration is invite-only." });
           },
         },
       },

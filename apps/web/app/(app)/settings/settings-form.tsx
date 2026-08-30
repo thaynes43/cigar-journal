@@ -2,22 +2,32 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { JournalVisibility, UserSettings } from "@cj/domain";
+import type { InviteView, JournalVisibility, UserSettings } from "@cj/domain";
 import { api } from "@/lib/trpc/react";
 import { ui } from "@/lib/ui";
+import { InvitesSection } from "./invites-section";
 
 // The self-serve account settings form (DESIGN-003 §Settings): Profile (display
-// name), Journal (visibility), Time (zone). Each section owns its own mutation so
-// its wait state is isolated, PATCHes only its field, and re-reads on success via
+// name), Journal (visibility), Time (zone), plus admin-only Invites (ADR-010).
+// Each section owns its own mutation so its wait state
+// is isolated, PATCHes only its field, and re-reads on success via
 // router.refresh() — which also re-renders the layout, so a zone change re-formats
 // every date immediately. Every control follows the wait-state rule (DESIGN-002):
 // it dims and swaps to a busy label while the round-trip is in flight.
-export function SettingsForm({ initial }: { initial: UserSettings }) {
+export function SettingsForm({
+  initial,
+  invites,
+}: {
+  initial: UserSettings;
+  // Null for a non-admin: the section is absent, not disabled.
+  invites: InviteView[] | null;
+}) {
   return (
     <div className="flex flex-col gap-10">
       <ProfileSection initialName={initial.displayName} />
       <JournalSection initialVisibility={initial.journalVisibility} />
       <TimeSection initialTimezone={initial.timezone} />
+      {invites ? <InvitesSection initial={invites} /> : null}
     </div>
   );
 }
