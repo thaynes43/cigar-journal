@@ -40,10 +40,14 @@ function fixture(name: string): string {
   return loadFixture(name, "wikidata");
 }
 
+// The Commons file a later P18 edit points the entity at — a different file, a
+// different author, a different licence.
+const EDITED_FILE = "Old cigar label.jpg";
+
 // The exact bytes URL the licence gate hands the driver — derived from the
 // fixture rather than hardcoded, so a fixture edit cannot silently unhook it.
-function imageBytesUrl(): string {
-  const parsed = parseImageInfo(fixture("commons-imageinfo-ccbysa.json"), COMMONS_FILE);
+function imageBytesUrl(fixtureName = "commons-imageinfo-ccbysa.json", file = COMMONS_FILE): string {
+  const parsed = parseImageInfo(fixture(fixtureName), file);
   if (!("image" in parsed)) throw new Error("fixture should parse to an image");
   return parsed.image.downloadUrl;
 }
@@ -59,6 +63,44 @@ function routes(): Record<string, MockRoute> {
     [entitiesUrl([QID])]: { body: fixture("wbgetentities-montecristo.json") },
     [imageInfoUrl(COMMONS_FILE)]: { body: fixture("commons-imageinfo-ccbysa.json") },
     [imageBytesUrl()]: { binary: Buffer.from("montecristo-bytes"), contentType: "image/jpeg" },
+  };
+}
+
+// The same entity after someone edits its P18 to name another Commons file —
+// Wikidata is openly editable, so this is an ordinary edit, not an attack.
+function editedP18Routes(): Record<string, MockRoute> {
+  const entity = fixture("wbgetentities-montecristo.json").split(COMMONS_FILE).join(EDITED_FILE);
+  const qids = parseSearch(fixture("wbsearchentities-montecristo.json")).map((h) => h.id);
+  return {
+    ...routes(),
+    [entitiesUrl(qids)]: { body: entity },
+    [entitiesUrl([QID])]: { body: entity },
+    [imageInfoUrl(EDITED_FILE)]: { body: fixture("commons-imageinfo-pd.json") },
+    [imageBytesUrl("commons-imageinfo-pd.json", EDITED_FILE)]: {
+      binary: Buffer.from("other-bytes"),
+      contentType: "image/jpeg",
+    },
+  };
+}
+
+// A PhotoStorage that records every key it is asked to hold or drop, so a test
+// can assert the bucket holds exactly what the rows point at.
+function recordingStorage(): PhotoStorage & { putKeys: string[]; deletedKeys: string[] } {
+  const inner = createMemoryPhotoStorage();
+  const putKeys: string[] = [];
+  const deletedKeys: string[] = [];
+  return {
+    putKeys,
+    deletedKeys,
+    put(key, body, contentType) {
+      putKeys.push(key);
+      return inner.put(key, body, contentType);
+    },
+    get: (key) => inner.get(key),
+    delete(key) {
+      deletedKeys.push(key);
+      return inner.delete(key);
+    },
   };
 }
 
@@ -328,6 +370,103 @@ describe("brand images job (embedded Postgres)", () => {
     expect(await pg.db.select().from(brandImages)).toEqual([]);
   });
 
+  it("a refresh onto a different P18 file demotes the curator's approval back to pending", async () => {
+    await seedBrand();
+    const storage = createMemoryPhotoStorage();
+    await runBrandImages(deps(createMockFetcher(routes()), storage), { brand: BRAND });
+    await pg.db.update(brandImages).set({ rights: "approved" }).where(eq(brandImages.brandSlug, "montecristo"));
+    const before = await row();
+    expect(before!.commonsFile).toBe(COMMONS_FILE);
+
+    // Someone edits the entity's P18. The re-check stores a different file, by a
+    // different author, under a different licence — none of which the curator saw.
+    await runBrandImages(deps(createMockFetcher(editedP18Routes()), storage), { brand: BRAND, refresh: true });
+
+    const after = await row();
+    expect(after!.commonsFile).toBe(EDITED_FILE);
+    expect(after!.creditLine).toBe("Public domain");
+    expect(after!.objectKey).not.toBe(before!.objectKey);
+    // The approval was a verdict on the file it replaced, so it does not carry.
+    expect(after!.rights).toBe("pending");
+  });
+
+  it("a refresh that finds the same file keeps the approval — a licence re-check must not dark the wall", async () => {
+    await seedBrand();
+    const storage = createMemoryPhotoStorage();
+    await runBrandImages(deps(createMockFetcher(routes()), storage), { brand: BRAND });
+    await pg.db.update(brandImages).set({ rights: "approved" }).where(eq(brandImages.brandSlug, "montecristo"));
+    const before = await row();
+
+    await runBrandImages(deps(createMockFetcher(routes()), storage), { brand: BRAND, refresh: true });
+
+    const after = await row();
+    expect(after!.commonsFile).toBe(before!.commonsFile);
+    expect(after!.creditLine).toBe(before!.creditLine);
+    // Fresh bytes under a fresh key, same provenance: the verdict still applies.
+    expect(after!.objectKey).not.toBe(before!.objectKey);
+    expect(after!.rights).toBe("approved");
+  });
+
+  it("folds two spellings of one brand onto a single row, one lookup, and one pair of objects", async () => {
+    await seedBrand(); // "Montecristo" ×2
+    await pg.db
+      .insert(cigars)
+      .values({ canonicalName: "MONTECRISTO No. 3", brand: "MONTECRISTO", verification: "verified" });
+
+    const storage = recordingStorage();
+    const fetcher = createMockFetcher(routes());
+    const result = await runBrandImages(deps(fetcher, storage), {});
+
+    expect(result.stats.brandsUncovered).toBe(2);
+    expect(result.stats.imagesStored).toBe(1);
+    // One set of Wikidata round trips, not two.
+    expect(fetcher.requested.filter((url) => url.includes("wbsearchentities")).length).toBe(1);
+
+    const rows = await pg.db.select().from(brandImages);
+    expect(rows.length).toBe(1);
+    // The dominant spelling wins the row (uncoveredBrands orders by member count).
+    expect(rows[0]!.brandName).toBe(BRAND);
+    // Nothing orphaned: the bucket holds exactly the two objects the row names.
+    expect(storage.putKeys.sort()).toEqual([rows[0]!.objectKey, rows[0]!.thumbKey].sort());
+    expect(storage.deletedKeys).toEqual([]);
+  });
+
+  it("fails the run when every put failed, even though other brands wrote their rows fine", async () => {
+    await seedBrand();
+    await pg.db
+      .insert(cigars)
+      .values({ canonicalName: "Nonesuch Robusto", brand: "Nonesuch Cigars", verification: "verified" });
+    const dead: PhotoStorage = {
+      ...createMemoryPhotoStorage(),
+      put: () => Promise.reject(new Error("AccessDenied")),
+    };
+    const fetcher = createMockFetcher({
+      ...routes(),
+      [searchUrl("Nonesuch Cigars")]: { body: fixture("wbsearchentities-empty.json") },
+    });
+
+    const result = await runBrandImages(deps(fetcher, dead), {});
+
+    // The no_match brand writes its row against a dead object store and would
+    // otherwise carry the whole run green — most of a real sweep looks like this.
+    expect(result.status).toBe("failed");
+    expect(result.stats).toMatchObject({ resolved: 1, noMatch: 1, storeAttempts: 1, imagesStored: 0, errors: 1 });
+    expect(result.error).toContain("stored no image");
+    const rows = await pg.db.select().from(brandImages);
+    expect(rows.map((r) => r.status)).toEqual(["no_match"]);
+  });
+
+  it("stays green when a download is refused rather than broken — a blocked file is not a dead store", async () => {
+    await seedBrand();
+    const refused = { ...routes(), [imageBytesUrl()]: { status: 404 } };
+
+    const result = await runBrandImages(deps(createMockFetcher(refused), createMemoryPhotoStorage()), { brand: BRAND });
+
+    expect(result.status).toBe("succeeded");
+    expect(result.stats).toMatchObject({ storeAttempts: 1, imagesStored: 0, errors: 0 });
+    expect((await row())?.status).toBe("blocked");
+  });
+
   it("leaves a brand unchecked rather than caching a false no_match when Wikimedia declines", async () => {
     await seedBrand();
     const searchBody = fixture("wbsearchentities-montecristo.json");
@@ -361,5 +500,33 @@ describe("selectWork", () => {
     // Naming the shelf IS the disambiguation, so the request is honoured rather
     // than silently dropped.
     expect(selectWork(uncovered, noRows, now, { brand: "CAO" }).map((w) => w.slug)).toEqual(["cao"]);
+  });
+
+  it("folds spellings that share a slug into one item, in both the sweep and --brand", () => {
+    // uncoveredBrands groups on btrim(brand); brandSlug() folds case and
+    // punctuation away, so these arrive as four brands and land on TWO rows.
+    const collide = [
+      { brand: "Montecristo", n: 4 },
+      { brand: "MONTECRISTO", n: 1 },
+      { brand: "H. Upmann", n: 3 },
+      { brand: "H Upmann", n: 1 },
+    ];
+    expect(selectWork(collide, noRows, now, {}).map((w) => w.brand)).toEqual(["Montecristo", "H. Upmann"]);
+    // --brand is case-insensitive, so it matches both spellings — still one item.
+    expect(selectWork(collide, noRows, now, { brand: "montecristo" }).map((w) => w.brand)).toEqual(["Montecristo"]);
+  });
+
+  it("does not let a second spelling resurrect a slug the first one is barred from", () => {
+    const collide = [
+      { brand: "Montecristo", n: 4 },
+      { brand: "MONTECRISTO", n: 1 },
+    ];
+    const tombstone = {
+      brandSlug: "montecristo",
+      rights: "suppressed",
+      status: "no_match",
+      checkedAt: new Date("2020-01-01T00:00:00.000Z"),
+    } as BrandImageRow;
+    expect(selectWork(collide, [tombstone], now, { refresh: true })).toEqual([]);
   });
 });

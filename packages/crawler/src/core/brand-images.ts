@@ -75,6 +75,10 @@ export interface BrandImagesStats {
   noMatch: number;
   noImage: number;
   blocked: number;
+  // Brands whose licence-cleared bytes this run actually tried to put — the
+  // denominator imagesStored is counted against. Attempts with nothing stored and
+  // at least one error is a dead object store, whatever the other brands did.
+  storeAttempts: number;
   imagesStored: number;
   // Brands this run deliberately left alone: Wikimedia declined to answer
   // (maxlag/HTTP error), or the run has no object store and the row already
@@ -106,6 +110,7 @@ function emptyStats(): BrandImagesStats {
     noMatch: 0,
     noImage: 0,
     blocked: 0,
+    storeAttempts: 0,
     imagesStored: 0,
     leftUnchecked: 0,
     errors: 0,
@@ -147,6 +152,16 @@ interface WorkItem {
 // TWO STATES ARE NEVER TOUCHED, and a refactor here must keep it that way:
 //   ambiguous  — parked on a human decision; re-querying would churn candidates.
 //   suppressed — a rights takedown. It is a TOMBSTONE, never resurrected.
+//
+// AT MOST ONE ITEM PER SLUG. uncoveredBrands groups on btrim(brand), which is
+// case- and punctuation-sensitive, while brandSlug() folds both away: "Warped"
+// and "warped", "H. Upmann" and "H Upmann" arrive as separate brands and land on
+// one row. Two items would carry the SAME pre-loop `existing` snapshot, so the
+// second upsert would move the row onto a third object key while the cleanup
+// deleted only the pre-run one — orphaning the first item's objects for good, and
+// spending a second set of Wikidata round trips to do it. The first spelling wins
+// (uncoveredBrands orders by member count, so it is the dominant one) and its
+// brand_name is what the curator console shows.
 export function selectWork(
   brands: readonly UncoveredBrand[],
   rows: readonly BrandImageRow[],
@@ -158,16 +173,22 @@ export function selectWork(
   const wanted = options.brand?.trim().toLowerCase();
   const named = wanted != null && wanted.length > 0;
   const work: WorkItem[] = [];
+  const claimed = new Set<string>();
 
   for (const { brand } of brands) {
     if (named && brand.toLowerCase() !== wanted) continue;
     const slug = brandSlug(brand);
+    if (claimed.has(slug)) continue;
     // "CAO" is a real brand AND a Chinese surname: the sweep will not gamble on a
     // slug this short, but a curator who asks for it by name has already made the
     // call, so --brand overrides the bound rather than silently ignoring them.
     if (!named && slug.length < MIN_SLUG_LENGTH) continue;
 
     const existing = bySlug.get(slug) ?? null;
+    // Claimed by the first spelling that reaches the slug, whether or not it ends
+    // up as work: a slug this run deliberately skips (tombstoned, ambiguous, still
+    // inside the negative-cache window) must not be picked up by its twin.
+    claimed.add(slug);
     if (existing == null) {
       work.push({ slug, brand, existing: null });
       continue;
@@ -307,6 +328,7 @@ async function processBrand(
   let stored: StoredObjects | null = null;
   let note = lookup.note;
   if (lookup.status === "resolved" && lookup.image != null && deps.storage != null) {
+    stats.storeAttempts += 1;
     const result = await storeImage(deps, deps.storage, item.slug, lookup.image.downloadUrl);
     if ("blocked" in result) {
       note = result.blocked;
@@ -346,14 +368,39 @@ async function processBrand(
     updatedAt: now,
   };
 
+  // A curator's `approved` is a verdict on ONE image: that entity, that Commons
+  // file, under that licence, credited to that author. P18 is openly editable, so
+  // a --refresh can legitimately come back pointing at a DIFFERENT file — and
+  // republishing it under the earlier approval would put never-reviewed
+  // third-party bytes on the wall (immediately, since `?v=` tracks the object
+  // key). So the verdict lapses to `pending` when the provenance it was passed on
+  // changes, and stands when it does not — the ordinary licence re-check must not
+  // dark the wall. Written as a CASE over the LIVE row rather than computed from
+  // our pre-run snapshot, so an approval granted mid-run is demoted too, and
+  // `suppressed` — a tombstone — is left exactly as it is.
+  const reviewed = item.existing;
+  const provenanceChanged =
+    reviewed != null &&
+    (reviewed.wikidataQid !== values.wikidataQid ||
+      reviewed.commonsFile !== values.commonsFile ||
+      reviewed.sourceUrl !== values.sourceUrl ||
+      reviewed.licenseCode !== values.licenseCode ||
+      reviewed.creditLine !== values.creditLine);
+  const set = provenanceChanged
+    ? {
+        ...values,
+        rights: sql`CASE WHEN ${brandImages.rights} = 'approved' THEN 'pending' ELSE ${brandImages.rights} END`,
+      }
+    : values;
+
   try {
     await deps.db
       .insert(brandImages)
       .values(values)
       // One row per slug — a re-run overwrites the outcome in place, never
-      // duplicating. `rights` is deliberately absent from the update set: a
-      // curator's approve/suppress outranks the crawler and must survive a re-run.
-      .onConflictDoUpdate({ target: brandImages.brandSlug, set: values })
+      // duplicating. `rights` is otherwise absent from the update set: a curator's
+      // approve/suppress outranks the crawler and must survive a re-run.
+      .onConflictDoUpdate({ target: brandImages.brandSlug, set })
       .returning({ id: brandImages.id });
   } catch (error) {
     if (stored) {
@@ -415,12 +462,19 @@ export async function runBrandImages(
     }
 
     // Per-brand isolation is about ONE brand failing, not the substrate failing.
-    // An object store that rejects every put (expired credentials, bucket gone)
-    // errors every item and would otherwise exit 0 with the damage buried in
-    // stdout, and no row written to show anything went wrong. A run that could
-    // not complete a single item it attempted is a failed run.
-    if (work.length > 0 && stats.errors === work.length) {
-      const error = `every brand failed (${stats.errors}/${work.length}) — see the report lines above`;
+    // Two shapes are a failed run, and counting whole brands catches only the
+    // first: most of a real sweep is `no_match` rows, which write perfectly well
+    // against a dead object store, so "every brand errored" would essentially
+    // never fire. What identifies a dead store is the STORE path specifically —
+    // every put attempted, none landed, at least one of them by throwing. A
+    // download this run legitimately refused (404, oversize) raises no error and
+    // is not that; a run where some brand did store is not that either.
+    const everyBrandFailed = work.length > 0 && stats.errors === work.length;
+    const storePathDead = stats.storeAttempts > 0 && stats.imagesStored === 0 && stats.errors > 0;
+    if (everyBrandFailed || storePathDead) {
+      const error = everyBrandFailed
+        ? `every brand failed (${stats.errors}/${work.length}) — see the report lines above`
+        : `stored no image in ${stats.storeAttempts} attempt(s) with ${stats.errors} error(s) — see the report lines above`;
       return { status: "failed", stats, report, error };
     }
     return { status: "succeeded", stats, report };

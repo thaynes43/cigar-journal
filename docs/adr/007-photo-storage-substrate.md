@@ -106,3 +106,13 @@ runs a ready Ceph RGW object store with ObjectBucketClaim provisioning
     negative cache); `rights` is the display gate, with the same three values
     and semantics as `product_photos`. `suppressed` is both a takedown and a
     tombstone — never served, and never re-resolved by a later crawl.
+  - **An approval is a verdict on ONE image, and does not carry across a
+    change of image.** Wikidata's P18 is openly editable, so a re-check can
+    return a different Commons file, author and licence for the same brand.
+    `approved` therefore lapses back to `pending` whenever the provenance the
+    curator passed on (entity, Commons file, description page, licence,
+    credit line) changes — otherwise never-reviewed third-party bytes would
+    publish under an earlier approval, and the object-key fingerprint above
+    would push them to every cached viewer at once. A re-check that finds the
+    same image leaves the approval standing; `suppressed` is untouched either
+    way.

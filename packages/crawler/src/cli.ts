@@ -254,7 +254,7 @@ function formatBrandImages(result: BrandImagesResult, photosEnabled: boolean, dr
   const lines = [
     `brand-images  status=${result.status}${photosEnabled ? "" : "  [photos disabled]"}${dryRun ? "  [dry run]" : ""}`,
     `  uncovered=${s.brandsUncovered} checked=${s.brandsChecked} resolved=${s.resolved} ambiguous=${s.ambiguous} ` +
-      `no-match=${s.noMatch} no-image=${s.noImage} blocked=${s.blocked} stored=${s.imagesStored} ` +
+      `no-match=${s.noMatch} no-image=${s.noImage} blocked=${s.blocked} stored=${s.imagesStored}/${s.storeAttempts} ` +
       `unchecked=${s.leftUnchecked} errors=${s.errors}`,
   ];
   if (result.error) lines.push(`  error: ${result.error}`);
