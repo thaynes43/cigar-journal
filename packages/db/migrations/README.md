@@ -36,6 +36,11 @@ init container at startup (ADR-003).
   moved and full payloads of the want/favorite de-dupe deletes. Unmerge claims it
   with a conditional `undone_at` UPDATE (single-use, like `photo_upload_tokens`).
   Merges audited before this migration have no ledger and report non-reversible.
+- `0021_oauth_service_client.sql` — `oauth_client.is_service` (boolean, default
+  false) plus a partial unique index on `client_name WHERE is_service`
+  (ADR-010): marks a client an operator created to carry a long-lived service
+  token, and makes "one service client per consumer" a database invariant. DCR
+  never sets the flag, so every flow-registered client stays false.
 - `0022_invites.sql` — invite-gated registration (ADR-010, issue #46): `invites`
   binds one email to a SHA-256-hashed link token with a 7-day expiry, revocation,
   and two-phase redemption (`redeemed_at` is the atomic burn, `redeemed_by` the

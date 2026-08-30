@@ -14,8 +14,10 @@ public journal pages, and the 17-tool MCP server — is the sum of these.
   experience, DESIGN-002).
 - [`ddd/`](ddd/) — ubiquitous language, bounded contexts, aggregates.
 - [`flows/`](flows/) — cross-boundary workflows with sequence diagrams.
-- [`mcp/`](mcp/) — the MCP tool contract (schemas, errors, examples) and the
-  LLM client-compatibility matrix.
+- [`mcp/`](mcp/) — the MCP tool contract (schemas, errors, examples), the
+  LLM client-compatibility matrix, and the
+  [service-token operator runbook](mcp/service-tokens.md) (mint, rotate,
+  revoke).
 - [`security-and-observability.md`](security-and-observability.md) — threat
   model and diagnosability requirements.
 

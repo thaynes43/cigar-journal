@@ -42,6 +42,16 @@ sequenceDiagram
 - Revocation: disconnecting the connector (or the site's "connected apps"
   page) invalidates the refresh chain; access tokens are short-lived.
 
+### Service tokens (out-of-band)
+
+A client with no browser cannot run this flow. ADR-011 issues it a long-lived
+access token out of band, from the `token` role on the app image — never over
+the network. Such a token skips this diagram entirely: no consent row, no
+authorization code, no refresh token. Every invariant above still holds — the
+token's subject is the principal, it is audience-bound to `/mcp`, and its
+scopes are explicit — and it is revoked by id with the same CLI. Its service
+client registers zero redirect URIs, so it can never enter the flow above.
+
 ## Failure modes
 
 - Expired access token → refresh grant; expired/revoked refresh token → 401

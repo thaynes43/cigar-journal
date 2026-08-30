@@ -2,10 +2,10 @@
 
 # Multi-stage build for the Cigar Journal image (node:22-alpine, non-root, tini
 # for signals). One image serves multiple roles (ADR-001): `web` (default),
-# `migrate`, and `import` (one-shot legacy archive import, flow 006) today;
-# `mcp`/`crawl` attach later over the same base. The role is chosen by overriding
-# the container command in k8s — see the ROLE DISPATCH marker at the runtime
-# stage for the exact command arrays.
+# `migrate`, `import`/`ledger` (one-shot legacy archive import, flow 006), `mcp`
+# (ADR-005), `crawl` (ADR-006), and `token` (operator service tokens, ADR-011).
+# The role is chosen by overriding the container command in k8s — see the ROLE
+# DISPATCH marker at the runtime stage for the exact command arrays.
 
 FROM node:22-alpine AS base
 ENV PNPM_HOME=/pnpm CI=1
@@ -90,6 +90,19 @@ FROM build AS crawl
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm deploy --legacy --filter=@cj/crawler --prod --config.node-linker=hoisted /app/crawler
 
+# --- token: prune @cj/oauth to the production subtree the token role runs ------
+# The operator service-token CLI (ADR-011, mint | list | revoke). @cj/oauth is a
+# library package that also carries a privileged, DB-only, one-shot entrypoint —
+# the same animal as @cj/db's migrate role, and the reason the minting logic sits
+# beside the authorization-server invariants it depends on (hashToken,
+# mcpResource, SUPPORTED_SCOPES, the oauthAccessToken schema) rather than in a
+# package of its own. Same prune shape as the roles above; --legacy for the
+# non-injected workspace deps and --config.node-linker=hoisted so the raw-TS
+# @cj/db + @cj/domain sources land as real dirs tsx can resolve.
+FROM build AS token
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm deploy --legacy --filter=@cj/oauth --prod --config.node-linker=hoisted /app/token
+
 # --- runtime: minimal image; the role is selected by the container command ---
 FROM node:22-alpine AS runtime
 RUN apk add --no-cache tini
@@ -107,6 +120,8 @@ COPY --from=import /app/importer ./importer
 COPY --from=mcp /app/mcp ./mcp
 # crawl role: the pruned @cj/crawler subtree (adapters + core + its own node_modules).
 COPY --from=crawl /app/crawler ./crawler
+# token role: the pruned @cj/oauth subtree (service-token CLI + its own node_modules).
+COPY --from=token /app/token ./token
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
@@ -175,4 +190,23 @@ ENTRYPOINT ["/sbin/tini", "--"]
 #     Resolves/creates the vendor registry row, refuses to crawl a path robots.txt
 #     disallows, rate-limits every fetch (≥2.5s), and brackets the run in a
 #     crawl_runs row. Exits 0 on success, 1 on a run failure.
+#   token (operator service tokens, ADR-011 — `kubectl exec`, NOT a Job):
+#     kubectl -n frontend exec -it deploy/cigar-journal-main -c app -- \
+#       sh -c 'cd /app/token && node --import tsx src/cli.ts mint \
+#         --client-name dev-env-pod --user-email <owner-email> \
+#         --scope catalog:read --scope journal:read --scope journal:write \
+#         --reason "<why>" --yes'
+#     The `cd` is required: `--import tsx` resolves the loader from CWD and tsx
+#     lives in /app/token/node_modules. Drop --yes to print the plan (which
+#     still reads the database and runs every check the apply runs) and write
+#     nothing. Subcommands: mint | list | revoke --id <uuid>.
+#     Reads DATABASE_URL and (mint only) BETTER_AUTH_URL — the RFC 8707 audience,
+#     so a wrong origin fails fast instead of minting a token /mcp will reject.
+#     There is deliberately NO Job or CronJob for this role: `mint --yes` refuses
+#     to run unless stdout is an interactive terminal, because a container's
+#     stdout is collected into Loki and cannot carry a credential. The refusal
+#     happens before the insert, so nothing is orphaned. The mint is also NOT
+#     idempotent (`list` finds orphans, `revoke --id` kills them). Exits 0 ok,
+#     1 operational failure (unknown user or token id), 2 usage, env, or a
+#     refused delivery.
 CMD ["node", "apps/web/server.js"]
