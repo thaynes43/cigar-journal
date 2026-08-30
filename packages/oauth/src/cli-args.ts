@@ -1,5 +1,6 @@
 import {
   CURATION_SERVICE_SCOPES,
+  CURATION_SERVICE_TOKEN_TTL_DAYS,
   DEFAULT_SERVICE_TOKEN_TTL_DAYS,
   MINTABLE_SERVICE_SCOPES,
 } from "./service-tokens.js";
@@ -63,10 +64,12 @@ usage:
   --scope         repeatable, required: ${MINTABLE_SERVICE_SCOPES.join(" | ")}.
                   offline_access is always refused; ${CURATION_SERVICE_SCOPES.join(" | ")}
                   only with --allow-curation.
-  --allow-curation  admit curation:* — a year-long credential that mutates the SHARED
-                  catalog. The subject must be an admin (checked at mint time; exit 1
-                  if not). Recorded on the audit row and shown in the plan.
-  --ttl-days      default and maximum ${DEFAULT_SERVICE_TOKEN_TTL_DAYS} (it can only shorten)
+  --allow-curation  admit curation:* — a credential that mutates the SHARED catalog.
+                  The subject must be an admin (checked at mint time; exit 1 if not).
+                  Recorded on the audit row and shown in the plan. Caps the TTL at
+                  ${CURATION_SERVICE_TOKEN_TTL_DAYS} days: the widest credential is not also the longest-lived.
+  --ttl-days      default and maximum ${DEFAULT_SERVICE_TOKEN_TTL_DAYS}, or ${CURATION_SERVICE_TOKEN_TTL_DAYS} with --allow-curation
+                  (it can only shorten)
   --resource      assert the audience; must equal this server's own /mcp resource
   --reason        why this credential exists (recorded in the audit row); required on mint
   --yes           apply. Without it mint/revoke print the plan and write nothing.

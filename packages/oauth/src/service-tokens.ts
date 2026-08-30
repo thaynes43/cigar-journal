@@ -20,13 +20,34 @@ import { revokeFamily } from "./provider.js";
 
 /** The CLAUDE_CODE_OAUTH_TOKEN precedent — long enough that rotation is annual. */
 export const DEFAULT_SERVICE_TOKEN_TTL_DAYS = 365;
+/**
+ * The ceiling AND the default for a curation-elevated mint. The widest
+ * credential the system can issue must not also be the longest-lived: a
+ * curation token can rewrite the shared catalog, where an ordinary one reaches
+ * only its own subject's journal, so its exposure window is bounded tighter.
+ *
+ * This costs nothing the elevation was bought for. The failure it replaced was
+ * losing a ROTATED refresh token mid-run; a re-mint is not rotation — it is one
+ * `kubectl exec -it`, at a time the operator picks, with the old token still
+ * live until he revokes it. The cliff is watched: the daily
+ * `cigar-journal-credential-expiry` CronJob selects by lifetime (> 24h), so a
+ * 90-day token is covered by the same alert with no edit.
+ */
+export const CURATION_SERVICE_TOKEN_TTL_DAYS = 90;
 const MIN_TTL_DAYS = 1;
 /**
- * A year is the ceiling, not just the default (owner ruling 2026-08-30). The
- * previous 730 made a two-year bearer a one-flag change from any caller, which
- * is the opposite of a bound; `--ttl-days` now only ever shortens a token.
+ * A year is the ceiling for an ordinary mint, not just the default (owner ruling
+ * 2026-08-30). The previous 730 made a two-year bearer a one-flag change from
+ * any caller, which is the opposite of a bound; `--ttl-days` now only ever
+ * shortens a token. A curation elevation lowers the ceiling again — see
+ * CURATION_SERVICE_TOKEN_TTL_DAYS.
  */
 const MAX_TTL_DAYS = DEFAULT_SERVICE_TOKEN_TTL_DAYS;
+
+/** The TTL ceiling — and, absent `--ttl-days`, the default — for this scope set. */
+export function serviceTokenTtlCeiling(curationElevated: boolean): number {
+  return curationElevated ? CURATION_SERVICE_TOKEN_TTL_DAYS : DEFAULT_SERVICE_TOKEN_TTL_DAYS;
+}
 
 /**
  * The scopes a service token may carry BY DEFAULT — enforced here, not merely
@@ -104,6 +125,11 @@ export interface MintServiceTokenInput {
   allowCuration?: boolean;
   /** Why this credential exists; recorded in the audit row. */
   reason: string;
+  /**
+   * Days until expiry. Omitted, it defaults to the ceiling for the scope set —
+   * 365, or CURATION_SERVICE_TOKEN_TTL_DAYS for a curation-elevated mint — and
+   * it can only ever shorten from there.
+   */
   ttlDays?: number;
   /** Assert the audience. Must equal this server's own /mcp resource. */
   resource?: string;
@@ -237,13 +263,24 @@ function checkScopes(scopes: string[], allowCuration: boolean): string[] {
 }
 
 /**
+ * Whether a granted scope set reaches the shared catalog. Derived from the
+ * SCOPES, never from the flag: `--allow-curation` widens what may be asked for,
+ * and this answers what was actually taken — which is what the admin gate, the
+ * shorter TTL ceiling and the audit row all key on.
+ */
+function isCurationElevated(scopes: string[]): boolean {
+  return scopes.some((scope) => CURATION_SERVICE_SCOPES.includes(scope));
+}
+
+/**
  * The elevation's second gate: a curation-scoped token is only ever minted for
  * an admin subject.
  *
- * Keyed on the SCOPES ACTUALLY GRANTED, not on the flag — so the invariant is
- * about the token that exists ("every curation-scoped service token had an admin
- * subject at mint time"), and `--allow-curation` with no curation scope stays a
- * harmless no-op rather than an unrelated admin requirement.
+ * Keyed on the SCOPES ACTUALLY GRANTED, not on the flag (see
+ * isCurationElevated) — so the invariant is about the token that exists ("every
+ * curation-scoped service token had an admin subject at mint time"), and
+ * `--allow-curation` with no curation scope stays a harmless no-op rather than
+ * an unrelated admin requirement.
  *
  * The role is read from `users` inside the same transaction as the insert, and
  * every curation tool re-checks it per call (`assertAdmin` in @cj/mcp), so this
@@ -252,8 +289,10 @@ function checkScopes(scopes: string[], allowCuration: boolean): string[] {
  *
  * @returns whether this mint is a curation elevation — recorded on the audit row.
  */
-function checkCurationSubject(scopes: string[], user: { email: string; role: string }): boolean {
-  const elevated = scopes.some((scope) => CURATION_SERVICE_SCOPES.includes(scope));
+function checkCurationSubject(
+  elevated: boolean,
+  user: { email: string; role: string },
+): boolean {
   if (elevated && user.role !== "admin") {
     throw new ServiceTokenError(
       "subject_not_admin",
@@ -263,9 +302,14 @@ function checkCurationSubject(scopes: string[], user: { email: string; role: str
   return elevated;
 }
 
-function checkTtlDays(ttlDays: number): number {
-  if (!Number.isInteger(ttlDays) || ttlDays < MIN_TTL_DAYS || ttlDays > MAX_TTL_DAYS) {
-    throw invalidRequest(`ttlDays must be an integer between ${MIN_TTL_DAYS} and ${MAX_TTL_DAYS}`);
+function checkTtlDays(ttlDays: number, curationElevated: boolean): number {
+  const ceiling = serviceTokenTtlCeiling(curationElevated);
+  if (!Number.isInteger(ttlDays) || ttlDays < MIN_TTL_DAYS || ttlDays > ceiling) {
+    throw invalidRequest(
+      curationElevated
+        ? `ttlDays must be an integer between ${MIN_TTL_DAYS} and ${ceiling} for a curation-elevated mint (the ordinary ceiling is ${MAX_TTL_DAYS})`
+        : `ttlDays must be an integer between ${MIN_TTL_DAYS} and ${ceiling}`,
+    );
   }
   return ttlDays;
 }
@@ -327,7 +371,11 @@ export async function mintServiceToken(
 ): Promise<MintedServiceToken> {
   const log = input.log ?? ((message, ...rest) => console.log(message, ...rest));
   const scopes = checkScopes(input.scopes, input.allowCuration ?? false);
-  const ttlDays = checkTtlDays(input.ttlDays ?? DEFAULT_SERVICE_TOKEN_TTL_DAYS);
+  // The elevation is known from the granted scopes alone, before any query, so
+  // the TTL ceiling it lowers applies to the DEFAULT too: an elevated mint with
+  // no --ttl-days gets 90 days, not a year silently clamped.
+  const elevated = isCurationElevated(scopes);
+  const ttlDays = checkTtlDays(input.ttlDays ?? serviceTokenTtlCeiling(elevated), elevated);
   const resource = checkResource(input.resource);
   if (!input.clientName) throw invalidRequest("clientName is required");
   if (!input.reason) throw invalidRequest("reason is required");
@@ -340,7 +388,7 @@ export async function mintServiceToken(
     const user = await findPrincipal(tx, input.userEmail);
     // Inside the transaction, and before the client row: a non-admin subject
     // must leave nothing behind, not even a freshly created service client.
-    const curationElevated = checkCurationSubject(scopes, user);
+    const curationElevated = checkCurationSubject(elevated, user);
 
     // Find-or-create the service client. One client per consumer name (a partial
     // unique index enforces it), so a leak is attributable and revocable without
@@ -473,7 +521,8 @@ export async function planServiceTokenMint(
   input: MintServiceTokenInput,
 ): Promise<ServiceTokenMintPlan> {
   const scopes = checkScopes(input.scopes, input.allowCuration ?? false);
-  const ttlDays = checkTtlDays(input.ttlDays ?? DEFAULT_SERVICE_TOKEN_TTL_DAYS);
+  const elevated = isCurationElevated(scopes);
+  const ttlDays = checkTtlDays(input.ttlDays ?? serviceTokenTtlCeiling(elevated), elevated);
   const resource = checkResource(input.resource);
   if (!input.clientName) throw invalidRequest("clientName is required");
   if (!input.reason) throw invalidRequest("reason is required");
@@ -482,7 +531,7 @@ export async function planServiceTokenMint(
   // The subject's role is a database fact, so the rehearsal must read it too: a
   // plan that passed and an apply that refused would be exactly the surprise
   // the dry run exists to prevent.
-  const curationElevated = checkCurationSubject(scopes, user);
+  const curationElevated = checkCurationSubject(elevated, user);
 
   return {
     clientName: input.clientName,

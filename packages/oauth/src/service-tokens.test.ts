@@ -32,6 +32,8 @@ import {
 } from "./provider.js";
 import {
   CURATION_SERVICE_SCOPES,
+  CURATION_SERVICE_TOKEN_TTL_DAYS,
+  DEFAULT_SERVICE_TOKEN_TTL_DAYS,
   describeTokenForRevoke,
   listServiceTokens,
   mintServiceToken,
@@ -215,6 +217,62 @@ describe("service tokens", () => {
     }
   });
 
+  it("caps a curation-elevated mint below the ordinary ceiling, default included", async () => {
+    // The widest credential the system can issue must not also be the
+    // longest-lived. The elevation lowers the ceiling AND the default, so an
+    // operator who passes no --ttl-days gets the shorter window rather than a
+    // year quietly clamped to one.
+    const elevated = await mint({
+      scopes: ["curation:read", "curation:write"],
+      allowCuration: true,
+    });
+    expect(elevated.ttlDays).toBe(CURATION_SERVICE_TOKEN_TTL_DAYS);
+    expect(CURATION_SERVICE_TOKEN_TTL_DAYS).toBeLessThan(DEFAULT_SERVICE_TOKEN_TTL_DAYS);
+    const expected = Date.now() + CURATION_SERVICE_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
+    expect(Math.abs(elevated.expiresAt.getTime() - expected)).toBeLessThan(5000);
+
+    // A year is refused for this scope set — the value an ordinary mint gets by
+    // default — and the message says which ceiling bit.
+    const error = await expectOAuthError(
+      mint({
+        scopes: ["curation:write"],
+        allowCuration: true,
+        ttlDays: DEFAULT_SERVICE_TOKEN_TTL_DAYS,
+      }),
+      "invalid_request",
+    );
+    expect(error.description).toContain("curation-elevated");
+
+    // It only ever shortens, in both directions: shorter is still fine here, and
+    // the ordinary ceiling is untouched for an unelevated mint that merely
+    // carries the flag.
+    expect((await mint({ scopes: ["curation:write"], allowCuration: true, ttlDays: 7 })).ttlDays).toBe(7);
+    expect((await mint({ scopes: ["journal:read"], allowCuration: true })).ttlDays).toBe(
+      DEFAULT_SERVICE_TOKEN_TTL_DAYS,
+    );
+
+    // The rehearsal agrees with the apply, as it must for every other check.
+    const plan = await planServiceTokenMint(db, {
+      clientName: consumer(),
+      userEmail: OWNER_EMAIL,
+      scopes: ["curation:write"],
+      allowCuration: true,
+      reason: "daily curation lane",
+    });
+    expect(plan.ttlDays).toBe(CURATION_SERVICE_TOKEN_TTL_DAYS);
+    await expectOAuthError(
+      planServiceTokenMint(db, {
+        clientName: consumer(),
+        userEmail: OWNER_EMAIL,
+        scopes: ["curation:write"],
+        allowCuration: true,
+        ttlDays: DEFAULT_SERVICE_TOKEN_TTL_DAYS,
+        reason: "daily curation lane",
+      }),
+      "invalid_request",
+    );
+  });
+
   // ---- scopes ----------------------------------------------------------------
 
   it("refuses an unknown scope, an empty scope set, and offline_access", async () => {
@@ -299,7 +357,8 @@ describe("service tokens", () => {
       .from(oauthAccessToken)
       .where(eq(oauthAccessToken.id, minted.tokenId));
     expect(rows[0]!.familyId).toBeNull();
-    expect(minted.ttlDays).toBe(365);
+    // ...except the ceiling, which the elevation lowers — see the TTL test below.
+    expect(minted.ttlDays).toBe(90);
 
     // An unelevated mint is unmarked — the flag alone, with no curation scope,
     // is a no-op rather than a second meaning.

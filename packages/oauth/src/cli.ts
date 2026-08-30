@@ -9,7 +9,6 @@ import {
 import { OAuthError } from "./errors.js";
 import type { AuthEventWriter } from "./logger.js";
 import {
-  DEFAULT_SERVICE_TOKEN_TTL_DAYS,
   describeTokenForRevoke,
   listServiceTokens,
   mintServiceToken,
@@ -117,14 +116,17 @@ async function runMint(
     }
   }
 
-  const ttlDays = options.ttlDays ?? DEFAULT_SERVICE_TOKEN_TTL_DAYS;
   const input = {
     clientName: options.clientName,
     userEmail: options.userEmail,
     scopes: options.scopes,
     allowCuration: options.allowCuration,
     reason: options.reason,
-    ttlDays,
+    // Left UNRESOLVED on purpose: the default is the ceiling for the scope set,
+    // and only the mint knows whether this set is curation-elevated (90 days) or
+    // ordinary (365). Defaulting here would hand an elevated mint a year and get
+    // it refused.
+    ttlDays: options.ttlDays ?? undefined,
     resource: options.resource ?? undefined,
     correlationId: RUN_ID,
     log: NARRATE,
