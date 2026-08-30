@@ -26,6 +26,9 @@ const DOMAIN_TO_TRPC: Record<ErrorCode, TRPCErrorCode> = {
   // Photo upload links never flow through tRPC (the upload page's own route
   // handles them); mapped only to keep this record exhaustive over ErrorCode.
   upload_token_invalid: "BAD_REQUEST",
+  // Invite redemption runs through a server action, not tRPC; only the admin
+  // revoke surfaces this code (a spent/unknown invite id).
+  invite_invalid: "NOT_FOUND",
   version_conflict: "CONFLICT",
   idempotency_conflict: "CONFLICT",
   unavailable: "INTERNAL_SERVER_ERROR",

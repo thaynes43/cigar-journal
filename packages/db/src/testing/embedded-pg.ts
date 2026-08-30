@@ -29,35 +29,60 @@ function freePort(): Promise<number> {
   });
 }
 
+// `freePort` closes its probe socket before Postgres binds, so the port is only
+// probably free by the time it is used. With one instance per test FILE, vitest
+// running dozens of files in parallel loses that race often enough to be the
+// suite's standing flake (a whole file's beforeAll throws and every test in it
+// reports skipped). Retrying with a fresh port and data directory costs nothing
+// on the happy path and removes the failure class.
+const START_ATTEMPTS = 5;
+
 // A throwaway Postgres 16 instance with NO migrations applied — the empty
 // substrate. Tests that need to observe a specific migration (e.g. the 0008
 // consumption backfill running against pre-seeded rows) migrate a subset
 // themselves. Most callers want startTestPostgres (raw + migrate to head).
 export async function startRawTestPostgres(): Promise<TestPostgres> {
-  const dir = mkdtempSync(join(tmpdir(), "cj-pg-"));
-  const port = await freePort();
-  const pg = new EmbeddedPostgres({
-    databaseDir: dir,
-    port,
-    user: "postgres",
-    password: "postgres",
-    persistent: false,
-    onLog: () => {},
-    onError: () => {},
-  });
-  await pg.initialise();
-  await pg.start();
-  const url = `postgresql://postgres:postgres@127.0.0.1:${port}/postgres`;
-  const { db, pool } = createDatabase(url);
-  return {
-    db,
-    url,
-    stop: async () => {
-      await pool.end();
-      await pg.stop();
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= START_ATTEMPTS; attempt++) {
+    const dir = mkdtempSync(join(tmpdir(), "cj-pg-"));
+    const port = await freePort();
+    const pg = new EmbeddedPostgres({
+      databaseDir: dir,
+      port,
+      user: "postgres",
+      password: "postgres",
+      persistent: false,
+      onLog: () => {},
+      onError: () => {},
+    });
+
+    try {
+      await pg.initialise();
+      await pg.start();
+    } catch (error) {
+      lastError = error;
+      await pg.stop().catch(() => {});
       rmSync(dir, { recursive: true, force: true });
-    },
-  };
+      continue;
+    }
+
+    const url = `postgresql://postgres:postgres@127.0.0.1:${port}/postgres`;
+    const { db, pool } = createDatabase(url);
+    return {
+      db,
+      url,
+      stop: async () => {
+        await pool.end();
+        await pg.stop();
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  throw new Error(`embedded Postgres did not start after ${START_ATTEMPTS} attempts`, {
+    cause: lastError,
+  });
 }
 
 export async function startTestPostgres(): Promise<TestPostgres> {

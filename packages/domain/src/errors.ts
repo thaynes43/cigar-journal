@@ -13,6 +13,7 @@ export type ErrorCode =
   | "photo_not_found"
   | "photo_limit"
   | "upload_token_invalid"
+  | "invite_invalid"
   | "version_conflict"
   | "idempotency_conflict"
   | "unavailable";
@@ -157,6 +158,19 @@ export class UploadTokenInvalidError extends DomainError {
   readonly action: ErrorAction | null = null;
   constructor() {
     super("The upload link is invalid or has expired.");
+  }
+}
+
+// An invite link that is unknown, already redeemed, revoked, or expired. One
+// error for all four so nothing learns which — the same no-oracle rule as
+// UploadTokenInvalidError. The raw token IS the authorization, so a bad token is
+// simply invalid; there is no owner scope to leak.
+export class InviteInvalidError extends DomainError {
+  readonly code = "invite_invalid" as const;
+  readonly recoverable = false;
+  readonly action: ErrorAction | null = null;
+  constructor() {
+    super("The invite link is invalid or has expired.");
   }
 }
 

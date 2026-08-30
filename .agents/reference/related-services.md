@@ -12,6 +12,13 @@ journal should follow these patterns unless an ADR says otherwise.
   DB-backed sessions and rate limits (replica-safe, no in-memory state).
   Bootstrap admin via `BOOTSTRAP_ADMIN_EMAILS` on a session-create hook.
   Fail closed when OIDC env vars are unset.
+  **Two deliberate cigar-journal deviations (ADR-010), not drift to "fix":**
+  account linking is explicit-only (`disableImplicitLinking: true`, and
+  `requireLocalEmailVerified` left at its `true` default — haynesnetwork sets it
+  `false`, which together with `trustedProviders` is a takeover configuration
+  against an Authentik that asserts `email_verified: false`); and
+  `BOOTSTRAP_ADMIN_EMAILS` is first-run-only here (registration is invite-gated),
+  retaining just the session-create admin re-assert.
 - **Data:** Postgres 16 only — no SQLite/MySQL substitutes, even in tests.
   Drizzle ORM, one schema file per table, numbered raw-SQL migrations run at
   startup behind `pg_advisory_lock` (init container in k8s).

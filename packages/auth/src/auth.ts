@@ -1,12 +1,22 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { genericOAuth } from "better-auth/plugins/generic-oauth";
 import { APIError } from "better-auth/api";
 import { eq } from "drizzle-orm";
 import { users, session, account, verification, rateLimit, type Database } from "@cj/db";
+import { hasReservedInvite, usersTableIsEmpty } from "@cj/domain";
+import { AUTHENTIK_PROVIDER_ID, type OidcConfig } from "./oidc.js";
 
-// App-owned identity (ADR-004). Local email+password only in this slice; the
-// principal is always server-derived. Better Auth maps onto @cj/db's existing
-// `users` table and its session/account/verification tables.
+// App-owned identity (ADR-004). Better Auth maps onto @cj/db's existing `users`
+// table and its session/account/verification tables; the principal is always
+// server-derived.
+//
+// Registration is invite-gated (ADR-010): the only way to create a user is to
+// redeem an invite, which shows up here as a reserved row in `invites`.
+// BOOTSTRAP_ADMIN_EMAILS survives as two narrow things and nothing more — a
+// first-RUN bootstrap (allowlisted, and only while `users` is empty) so a virgin
+// database can mint its first admin, and the idempotent admin re-assert on
+// session create that keeps the owner from ever being permanently demoted.
 
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30; // ~30 days
 const COOKIE_CACHE_MAX_AGE_SECONDS = 5 * 60;
@@ -16,9 +26,13 @@ export interface AuthConfig {
   // Fall back to Better Auth's own env resolution (BETTER_AUTH_SECRET/URL) when omitted.
   secret?: string;
   baseURL?: string;
-  // Phase 1 registration allowlist: the ONLY emails allowed to sign up, and they
-  // bootstrap to `admin`. Phase 3's invite system replaces this gate.
+  // First-run bootstrap + admin re-assert only (ADR-010). NOT a standing
+  // registration gate: an allowlisted address may register solely while the
+  // `users` table is empty.
   bootstrapAdminEmails: string[];
+  // Absent/null => the OIDC plugin is never constructed and /signin renders the
+  // password form alone. Fail closed to the local path.
+  oidc?: OidcConfig | null;
 }
 
 export type Auth = ReturnType<typeof createAuth>;
@@ -28,6 +42,8 @@ export function createAuth(config: AuthConfig) {
     config.bootstrapAdminEmails.map((email) => email.trim().toLowerCase()).filter(Boolean),
   );
   const isAllowlisted = (email: string): boolean => allowlist.has(email.trim().toLowerCase());
+
+  const oidc = config.oidc ?? null;
 
   return betterAuth({
     secret: config.secret,
@@ -49,6 +65,62 @@ export function createAuth(config: AuthConfig) {
       },
     },
     emailAndPassword: { enabled: true },
+    // Authentik sign-in (ADR-010). genericOAuth registers the provider into the
+    // core social-provider list, so the client uses signIn.social / linkSocial /
+    // unlinkAccount and the callback is /api/auth/callback/authentik.
+    // `disableSignUp` is absolute: OIDC may never create a user, which is what
+    // keeps ADR-004's promise that future users need no home-lab IdP account.
+    plugins: oidc
+      ? [
+          genericOAuth({
+            config: [
+              {
+                providerId: AUTHENTIK_PROVIDER_ID,
+                clientId: oidc.clientId,
+                clientSecret: oidc.clientSecret,
+                discoveryUrl: oidc.discoveryUrl,
+                accountIssuer: oidc.issuer,
+                scopes: ["openid", "profile", "email"],
+                disableSignUp: true,
+                // Authentik may omit `name`; fall back to the username, then the
+                // address, so a linked account always has something to render.
+                mapProfileToUser: (profile) => ({
+                  name:
+                    profile.name ??
+                    (profile.preferred_username as string | undefined) ??
+                    profile.email ??
+                    undefined,
+                }),
+              },
+            ],
+          }),
+        ]
+      : [],
+    // Account linking is EXPLICIT-ONLY (ADR-010). This Authentik asserts
+    // `email_verified: false` for every identity, so a matching email proves
+    // nothing; `disableImplicitLinking` removes linking from the sign-in path
+    // entirely, leaving /api/auth/link-social — which requires a live session for
+    // the target account — as the only way an identity is ever attached.
+    // Deliberately NOT set, and not to be "restored" from the sibling apps:
+    //   requireLocalEmailVerified (stays true)  — with trustedProviders, false
+    //     would let any Authentik identity absorb a matching local account.
+    //   allowDifferentEmails (stays false)      — the link must match the session
+    //     user's address.
+    //   allowUnlinkingAll (stays false)         — never unlink the last method.
+    //   updateUserInfoOnLink (stays false)      — Authentik never overwrites the
+    //     local display name.
+    account: {
+      accountLinking: {
+        enabled: true,
+        // Required: the IdP asserts email_verified:false, so trust has to be an
+        // operator decision recorded here rather than an unverifiable claim.
+        trustedProviders: [AUTHENTIK_PROVIDER_ID],
+        disableImplicitLinking: true,
+      },
+    },
+    // OAuth callback failures redirect here with ?error=<code> rather than to
+    // Better Auth's own /error page, so an SSO refusal lands on the sign-in form.
+    onAPIError: { errorURL: "/signin" },
     session: {
       expiresIn: SESSION_MAX_AGE_SECONDS,
       cookieCache: { enabled: true, maxAge: COOKIE_CACHE_MAX_AGE_SECONDS },
@@ -59,12 +131,23 @@ export function createAuth(config: AuthConfig) {
       user: {
         create: {
           before: async (user) => {
-            // Registration allowlist (Phase 1; Phase 3 invites replace this).
-            if (!isAllowlisted(user.email)) {
-              throw new APIError("FORBIDDEN", { message: "Registration is invite-only." });
+            // The registration gate (ADR-010). A reserved invite row — burned by
+            // the redemption page, not yet claimed — is the authorization; it is
+            // state in the database, so nothing request-scoped can forge it. The
+            // hard `role: "user"` is the second belt against escalation: even a
+            // `role` smuggled into the sign-up body cannot survive it (the field
+            // is already `input: false`), and `invites` has no role column to
+            // carry one in the first place.
+            if (await hasReservedInvite(config.db, user.email, new Date())) {
+              return { data: { role: "user" } };
             }
-            // Allowlisted emails bootstrap to admin.
-            return { data: { role: "admin" } };
+            // First-run bootstrap: an allowlisted address may register only into
+            // an empty `users` table, so a fresh deploy (and the e2e harness) can
+            // mint its first admin without raw SQL.
+            if (isAllowlisted(user.email) && (await usersTableIsEmpty(config.db))) {
+              return { data: { role: "admin" } };
+            }
+            throw new APIError("FORBIDDEN", { message: "Registration is invite-only." });
           },
         },
       },

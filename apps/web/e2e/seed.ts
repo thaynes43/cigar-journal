@@ -1,28 +1,40 @@
 import { randomUUID } from "node:crypto";
 import { createDatabase, cigars, users, type NewCigarRow } from "@cj/db";
-import { saveSmoke, setWant, type Deps, type Principal } from "@cj/domain";
+import {
+  claimInvite,
+  createInvite,
+  reserveInvite,
+  revokeInvite,
+  saveSmoke,
+  setWant,
+  type Deps,
+  type Principal,
+} from "@cj/domain";
 import { createAuth } from "@cj/auth";
 
 // The e2e fixture: seed a real Postgres with catalog cigars, a signed-in admin
-// (allowlisted), a genuine non-admin (allowlisted then downgraded — the app has
-// no other way to mint a `user` role, since sign-up bootstraps every allowlisted
-// email to admin), and two extra journals (one public, one private) so the
-// public-page and admin-guard specs have deterministic data. Accounts and their
-// session cookies are minted server-side through the SAME Better Auth instance the
-// app runs, so the captured cookies verify against the live server (shared secret
-// + shared DB). Everything here is data setup — no app source is touched.
+// (the first-run bootstrap), a genuine non-admin created by MINTING AND REDEEMING
+// a real invite, spare invites in each terminal state for the redemption specs,
+// and two extra journals (one public, one private) so the public-page and
+// admin-guard specs have deterministic data. Accounts and their session cookies
+// are minted server-side through the SAME Better Auth instance the app runs, so
+// the captured cookies verify against the live server (shared secret + shared DB).
+// Everything here is data setup — no app source is touched.
 
-// Fixed accounts. The first three are allowlisted (BOOTSTRAP_ADMIN_EMAILS in
-// server.ts); `stranger` deliberately is NOT, so the sign-up-rejection spec has a
-// real non-allowlisted address. `signup` is left uncreated for the sign-up spec.
+// Fixed accounts. Only `admin` is allowlisted, and BOOTSTRAP_ADMIN_EMAILS now
+// opens registration ONLY while the users table is empty (ADR-010) — so the admin
+// must be created first, and every other account arrives by invite. `stranger` is
+// never invited, so the sign-in specs have an address with no account.
 export const ACCOUNTS = {
   admin: { email: "e2e-admin@example.com", password: "e2e-Passw0rd!" },
   nonAdmin: { email: "e2e-user@example.com", password: "e2e-Passw0rd!" },
-  signup: { email: "e2e-signup@example.com", password: "e2e-Passw0rd!" },
   stranger: { email: "e2e-stranger@example.com", password: "e2e-Passw0rd!" },
 } as const;
 
-export const ALLOWLIST = [ACCOUNTS.admin.email, ACCOUNTS.nonAdmin.email, ACCOUNTS.signup.email];
+// The password the redemption spec sets on the account it creates.
+export const INVITE_PASSWORD = "e2e-Passw0rd!";
+
+export const ALLOWLIST = [ACCOUNTS.admin.email];
 
 // A Playwright cookie, the shape a storageState file carries.
 interface StateCookie {
@@ -44,6 +56,14 @@ export interface StorageState {
 export interface Handoff {
   baseURL: string;
   accounts: typeof ACCOUNTS;
+  // Raw invite tokens. An invite is single use, so `open` carries one per
+  // possible attempt (Playwright retries once in CI) and the spec picks by retry
+  // index; `expired` and `revoked` must render the invalid state.
+  invites: {
+    open: { token: string; email: string }[];
+    expired: string;
+    revoked: string;
+  };
   cigars: {
     searchable: { id: string; name: string; query: string };
     detailWant: { id: string; name: string };
@@ -211,7 +231,8 @@ export async function seed(opts: {
       verification: "unverified",
     });
 
-    // --- Admin account (allowlisted -> admin) ------------------------------
+    // --- Admin account (first-run bootstrap -> admin) ----------------------
+    // Must be first: the allowlist only opens registration while `users` is empty.
     await auth.api.signUpEmail({
       body: { email: ACCOUNTS.admin.email, password: ACCOUNTS.admin.password, name: "E2E Admin" },
     });
@@ -237,13 +258,36 @@ export async function seed(opts: {
       journal: { title: "A reliable No. 2", narrative: "Classic Montecristo pyramid — cocoa and cedar." },
     });
 
-    // --- Non-admin account (allowlisted -> admin, then downgraded) ----------
+    // --- Non-admin account (minted and redeemed through a real invite) ------
+    // The invite path is the only way to create a user now, so the fixture uses
+    // it rather than a role downgrade — the spec's non-admin is a `user` because
+    // an invite cannot produce anything else (ADR-010).
+    const nonAdminInvite = await createInvite(deps, admin, { email: ACCOUNTS.nonAdmin.email });
+    const nonAdminReserved = await reserveInvite(deps, { token: nonAdminInvite.token });
     const nonAdminSignUp = await auth.api.signUpEmail({
       body: { email: ACCOUNTS.nonAdmin.email, password: ACCOUNTS.nonAdmin.password, name: "E2E User" },
       asResponse: true,
     });
     const nonAdminState: StorageState = { cookies: sessionCookies(nonAdminSignUp, host), origins: [] };
-    await pool.query("UPDATE users SET role = 'user' WHERE email = $1", [ACCOUNTS.nonAdmin.email]);
+    const nonAdminId = (
+      await pool.query<{ id: string }>("SELECT id FROM users WHERE email = $1", [ACCOUNTS.nonAdmin.email])
+    ).rows[0]!.id;
+    await claimInvite(deps, { inviteId: nonAdminReserved.inviteId, userId: nonAdminId });
+
+    // --- Invites for the redemption specs -----------------------------------
+    const openInvites: { token: string; email: string }[] = [];
+    for (const attempt of [0, 1]) {
+      const email = `e2e-invited-${attempt}@example.com`;
+      const minted = await createInvite(deps, admin, { email });
+      openInvites.push({ token: minted.token, email });
+    }
+    const expiredInvite = await createInvite(deps, admin, { email: "e2e-expired@example.com" });
+    // Backdated directly: expiry is a clock fact the domain service never rewinds.
+    await pool.query("UPDATE invites SET expires_at = now() - interval '1 day' WHERE id = $1", [
+      expiredInvite.inviteId,
+    ]);
+    const revokedInvite = await createInvite(deps, admin, { email: "e2e-revoked@example.com" });
+    await revokeInvite(deps, admin, { inviteId: revokedInvite.inviteId });
 
     // --- Public journal --------------------------------------------------
     const publicOwner = await insertUser(deps, "e2e-public@example.com", "public", "Public Owner");
@@ -278,6 +322,11 @@ export async function seed(opts: {
     const handoff: Handoff = {
       baseURL: opts.baseURL,
       accounts: ACCOUNTS,
+      invites: {
+        open: openInvites,
+        expired: expiredInvite.token,
+        revoked: revokedInvite.token,
+      },
       cigars: {
         searchable: { id: oliva, name: "Oliva Serie V Melanio Robusto", query: "Oliva Serie V Melanio" },
         detailWant: { id: behike, name: "Cohiba Behike 52" },

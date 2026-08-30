@@ -1441,3 +1441,36 @@ export interface CurationWorklistResult {
   matches?: WorklistMatch[]; // match_triage
   nextCursor: string | null;
 }
+
+// ---- Invites (ADR-010, issue #46) -------------------------------------------
+
+// Derived at read time, never stored: `open` is unspent/unrevoked/unexpired.
+export type InviteStatus = "open" | "redeemed" | "expired" | "revoked";
+
+export interface CreateInviteInput {
+  email: string;
+  correlationId?: string;
+}
+
+export interface RevokeInviteInput {
+  inviteId: string;
+  correlationId?: string;
+}
+
+// A minted invite. `token` is the raw link token, returned exactly once — it is
+// not recoverable from storage, which holds only its SHA-256 hash.
+export interface MintedInvite {
+  inviteId: string;
+  email: string;
+  token: string;
+  expiresAt: string; // ISO-8601 instant
+}
+
+// An invite as the admin list renders it. Carries no token and no hash.
+export interface InviteView {
+  inviteId: string;
+  email: string;
+  status: InviteStatus;
+  expiresAt: string; // ISO-8601 instant
+  createdAt: string; // ISO-8601 instant
+}

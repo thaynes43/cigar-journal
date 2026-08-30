@@ -1,13 +1,49 @@
-// @cj/auth — app-owned identity (ADR-004). Better Auth over @cj/db; local
-// email+password only in this slice. Web and MCP learn identity ONLY by deriving
-// the domain Principal from a server-side session — never from a supplied id.
+// @cj/auth — app-owned identity (ADR-004). Better Auth over @cj/db: local
+// email+password, plus Authentik OIDC when it is configured (ADR-010). Web and
+// MCP learn identity ONLY by deriving the domain Principal from a server-side
+// session — never from a supplied id.
 
-import { db } from "@cj/db";
+import { eq, asc } from "drizzle-orm";
+import { db, account, type Database } from "@cj/db";
 import type { Principal } from "@cj/domain";
 import { createAuth, type Auth } from "./auth.js";
+import { readOidcConfig } from "./oidc.js";
 
 export { createAuth } from "./auth.js";
 export type { Auth, AuthConfig } from "./auth.js";
+export { AUTHENTIK_PROVIDER_ID, readOidcConfig } from "./oidc.js";
+export type { OidcConfig } from "./oidc.js";
+
+// Is Authentik sign-in configured? Read per call rather than captured at import,
+// and false whenever any of the three env vars is missing or the discovery URL is
+// malformed — the UI then renders the password form alone, with no SSO affordance
+// and no configuration blurb.
+export function ssoEnabled(): boolean {
+  return readOidcConfig() !== null;
+}
+
+// A sign-in method as /settings renders it: one row per linked identity.
+// `accountId` is the id /api/auth/unlink-account takes.
+export interface SignInMethod {
+  accountId: string;
+  providerId: string;
+  linkedAt: string; // ISO-8601 instant
+}
+
+// The caller's linked identities, oldest first. Scoped to one user id, which the
+// caller always derives from the session — never from a request field.
+export async function listSignInMethods(client: Database, userId: string): Promise<SignInMethod[]> {
+  const rows = await client
+    .select({ id: account.id, providerId: account.providerId, createdAt: account.createdAt })
+    .from(account)
+    .where(eq(account.userId, userId))
+    .orderBy(asc(account.createdAt));
+  return rows.map((row) => ({
+    accountId: row.id,
+    providerId: row.providerId,
+    linkedAt: row.createdAt.toISOString(),
+  }));
+}
 
 function bootstrapAdminEmails(): string[] {
   return (process.env.BOOTSTRAP_ADMIN_EMAILS ?? "")
@@ -23,6 +59,7 @@ function getAuth(): Auth {
     secret: process.env.BETTER_AUTH_SECRET,
     baseURL: process.env.BETTER_AUTH_URL,
     bootstrapAdminEmails: bootstrapAdminEmails(),
+    oidc: readOidcConfig(),
   });
   return instance;
 }

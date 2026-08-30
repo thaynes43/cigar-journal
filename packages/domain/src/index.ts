@@ -147,3 +147,23 @@ export {
   type AttachProductPhotoResult,
   type ProcessProductPhoto,
 } from "./product-photos.js";
+
+// Invite-gated registration (ADR-010, issue #46). Admin mint/list/revoke, plus
+// the anonymous redemption primitives: reserve (the atomic single-use burn) →
+// claim / release around Better Auth's sign-up, with hasReservedInvite as the
+// stateless registration gate the auth create-hook reads. No role anywhere — an
+// invite has no role field to escalate. InviteInvalidError rides the shared
+// errors export.
+export {
+  INVITE_TTL_SECONDS,
+  RESERVATION_WINDOW_SECONDS,
+  createInvite,
+  listInvites,
+  revokeInvite,
+  describeOpenInvite,
+  reserveInvite,
+  claimInvite,
+  releaseInvite,
+  hasReservedInvite,
+  usersTableIsEmpty,
+} from "./invites.js";
