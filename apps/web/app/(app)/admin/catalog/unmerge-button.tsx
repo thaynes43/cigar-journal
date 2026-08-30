@@ -3,6 +3,7 @@
 import { useRef } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/trpc/react";
+import { actionErrorMessage } from "@/lib/trpc/error";
 import { ui } from "@/lib/ui";
 
 // Reverse one merge from its ledger, then refresh the console. Sits on the row
@@ -23,7 +24,9 @@ export function UnmergeButton({ mergeId }: { mergeId: string }) {
       >
         Unmerge
       </button>
-      {unmerge.error ? <span className={`text-sm ${ui.muted}`}>{unmerge.error.message}</span> : null}
+      {unmerge.error ? (
+        <span className={`text-sm ${ui.muted}`}>{actionErrorMessage(unmerge.error)}</span>
+      ) : null}
     </span>
   );
 }

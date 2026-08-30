@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { readHandoff } from "./support";
 import type { Handoff } from "./seed.js";
 
@@ -22,45 +22,61 @@ test("/curation 307-redirects to /admin/catalog", async ({ page }) => {
   expect(response.headers()["location"]).toContain("/admin/catalog");
 });
 
-// The full round trip, in one spec so the shared seed is left exactly as found:
-// the unmerge at the end restores the pair for every other spec.
-test("a merged pair appears under Recent merges and Unmerge returns it to Duplicates", async ({
-  page,
-}) => {
-  const survivor = h.duplicatePair.survivor.name;
-  const duplicate = h.duplicatePair.duplicate.name;
-  await page.goto("/admin/catalog");
+// The merge → Recent merges → Unmerge round trip. Every locator is scoped to its
+// section: the merge row names both cigars as well, so an unscoped `li` filter
+// matches it too once the merge lands.
+test.describe("merge round trip", () => {
+  const section = (page: Page, heading: string) =>
+    page.locator("section").filter({ has: page.getByRole("heading", { name: heading, exact: true }) });
 
-  // The seeded near-duplicate pair, and the Merge button on the survivor's side.
-  const pair = page
-    .locator("li")
-    .filter({ hasText: survivor })
-    .filter({ hasText: duplicate })
-    .first();
-  await expect(pair).toBeVisible();
-  await pair
-    .getByText(survivor, { exact: true })
-    .locator("xpath=..")
-    .getByRole("button", { name: "Merge into this" })
-    .click();
+  // The pair is shared seed data, and a merge tombstones the duplicate for every
+  // other spec. Restore it even when an assertion between the merge and the
+  // unmerge fails — otherwise the retry starts from a merged pair, fails on a
+  // different locator, and masks the real failure.
+  test.afterEach(async ({ page }) => {
+    await page.goto("/admin/catalog");
+    const undo = section(page, "Recent merges")
+      .locator("li")
+      .filter({ hasText: `${h.duplicatePair.duplicate.name} → ${h.duplicatePair.survivor.name}` })
+      .getByRole("button", { name: "Unmerge" });
+    if (await undo.count()) {
+      await undo.first().click();
+      await expect(undo).toHaveCount(0);
+    }
+  });
 
-  // The merge lands in its own section (a merge audit is actor 'web', so it can
-  // never appear under "Recent agent runs").
-  await expect(page.getByRole("heading", { name: "Recent merges" })).toBeVisible();
-  const mergeRow = page.locator("li").filter({ hasText: `${duplicate} → ${survivor}` });
-  await expect(mergeRow).toBeVisible();
-  // The duplicate is tombstoned, so the pair leaves the Duplicates backlog.
-  await expect(page.locator("li").filter({ hasText: duplicate }).filter({ hasText: survivor })).toHaveCount(1);
+  test("a merged pair appears under Recent merges and Unmerge returns it to Duplicates", async ({
+    page,
+  }) => {
+    const survivor = h.duplicatePair.survivor.name;
+    const duplicate = h.duplicatePair.duplicate.name;
+    await page.goto("/admin/catalog");
 
-  await mergeRow.getByRole("button", { name: "Unmerge" }).click();
-
-  await expect(mergeRow.getByText("Unmerged")).toBeVisible();
-  await expect(
-    page
+    // The seeded near-duplicate pair, and the Merge button on the survivor's side.
+    const pair = section(page, "Duplicates")
       .locator("li")
       .filter({ hasText: survivor })
-      .filter({ hasText: duplicate })
+      .filter({ hasText: duplicate });
+    await expect(pair).toHaveCount(1);
+    await pair
+      .getByText(survivor, { exact: true })
+      .locator("xpath=..")
       .getByRole("button", { name: "Merge into this" })
-      .first(),
-  ).toBeVisible();
+      .click();
+
+    // The merge lands in its own section (a merge audit is actor 'web', so it can
+    // never appear under "Recent agent runs").
+    await expect(page.getByRole("heading", { name: "Recent merges" })).toBeVisible();
+    const mergeRow = section(page, "Recent merges")
+      .locator("li")
+      .filter({ hasText: `${duplicate} → ${survivor}` });
+    await expect(mergeRow).toBeVisible();
+    // The duplicate is tombstoned, so the pair leaves the Duplicates backlog.
+    await expect(pair).toHaveCount(0);
+
+    await mergeRow.getByRole("button", { name: "Unmerge" }).click();
+
+    await expect(mergeRow.getByText("Unmerged")).toBeVisible();
+    await expect(pair.getByRole("button", { name: "Merge into this" }).first()).toBeVisible();
+  });
 });

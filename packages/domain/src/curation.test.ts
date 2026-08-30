@@ -36,6 +36,7 @@ import {
   undoCurationAction,
 } from "./curation.js";
 import { getProductPhoto } from "./product-photos.js";
+import { getMyInventory } from "./inventory.js";
 import { getCigar, searchCigars, getCigarOffers } from "./reads.js";
 import { setWant } from "./wants.js";
 import { setFavorite } from "./favorites.js";
@@ -78,10 +79,10 @@ describe("curation", () => {
     return row!.id;
   }
 
-  async function addPurchase(cigarId: string, owner = user): Promise<string> {
+  async function addPurchase(cigarId: string, owner = user, quantity?: number): Promise<string> {
     const [row] = await h.deps.db
       .insert(purchases)
-      .values({ userId: owner.userId, cigarId })
+      .values({ userId: owner.userId, cigarId, ...(quantity != null ? { quantity } : {}) })
       .returning({ id: purchases.id });
     return row!.id;
   }
@@ -793,28 +794,72 @@ describe("curation", () => {
       expect(smoke!.cigarId).toBe(source);
     });
 
-    it("counts a cross-cigar lot when a post-merge smoke consumed a returned purchase", async () => {
+    it("leaves a lot the survivor's later smoke consumed, so the humidor count stays honest", async () => {
+      // The one skip a USER feels: getMyInventory builds holdings from purchases and
+      // counts consumption by smokes.cigar_id, so returning a lot whose consumptions
+      // stay on the survivor would resurrect smoked sticks AND drop the survivor out
+      // of the humidor. Own user, so the totals are this scenario's alone.
+      const owner = await h.createUser(`humidor-${newRequestId()}@example.com`);
       const source = await seedUnverified("Cross Lot Source");
       const target = await seedUnverified("Cross Lot Target");
-      const purchaseId = await addPurchase(source);
+      const purchaseId = await addPurchase(source, owner, 10);
       const mergeId = await merge(source, target);
 
-      // A smoke recorded on the survivor after the merge, drawing from the lot that
-      // is about to go back to the source.
-      const laterSmoke = await addSmoke(target);
-      await h.deps.db.insert(smokeConsumptions).values({ smokeId: laterSmoke, purchaseId });
+      // Three smokes recorded on the survivor after the merge, each drawing from the
+      // lot the ledger would otherwise send back to the source.
+      const laterSmokes: string[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const smokeId = await addSmoke(target, owner);
+        await h.deps.db.insert(smokeConsumptions).values({ smokeId, purchaseId });
+        laterSmokes.push(smokeId);
+      }
+      const before = await getMyInventory(h.deps, owner);
+      expect(before.totalSticksRemaining).toBe(7);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.purchases).toBe(0);
+      expect(result.crossCigarLots).toBe(1);
+      expect(result.skipped).toContainEqual({
+        entity: "purchases",
+        rowId: purchaseId,
+        reason: "consumed_elsewhere",
+      });
+
+      // The lot stayed with the survivor, and the humidor reads exactly as it did.
+      const [lot] = await h.deps.db.select().from(purchases).where(eq(purchases.id, purchaseId));
+      expect(lot!.cigarId).toBe(target);
+      const after = await getMyInventory(h.deps, owner);
+      expect(after.totalSticksRemaining).toBe(7);
+      expect(after.holdings.map((holding) => holding.cigar.cigarId)).toEqual([target]);
+      expect(after.holdings[0]!.consumedCount).toBe(3);
+      // The consumption rows are untouched — the lot moved around them, never they.
+      const consumptions = await h.deps.db
+        .select()
+        .from(smokeConsumptions)
+        .where(eq(smokeConsumptions.purchaseId, purchaseId));
+      expect(consumptions).toHaveLength(3);
+      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, laterSmokes[0]!));
+      expect(smoke!.cigarId).toBe(target);
+    });
+
+    it("returns a lot only the source's own returning smokes consumed", async () => {
+      // The mirror case: every consumption belongs to a smoke coming back, so the
+      // lot is not cross-cigar and the restore is exact.
+      const owner = await h.createUser(`humidor-${newRequestId()}@example.com`);
+      const source = await seedUnverified("Own Lot Source");
+      const target = await seedUnverified("Own Lot Target");
+      const purchaseId = await addPurchase(source, owner, 5);
+      const smokeId = await addSmoke(source, owner);
+      await h.deps.db.insert(smokeConsumptions).values({ smokeId, purchaseId });
+      const mergeId = await merge(source, target);
 
       const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
       expect(result.restored.purchases).toBe(1);
-      expect(result.crossCigarLots).toBe(1);
-      // The consumption row is recorded, never rewritten.
-      const [consumption] = await h.deps.db
-        .select()
-        .from(smokeConsumptions)
-        .where(eq(smokeConsumptions.smokeId, laterSmoke));
-      expect(consumption!.purchaseId).toBe(purchaseId);
-      const [smoke] = await h.deps.db.select().from(smokes).where(eq(smokes.id, laterSmoke));
-      expect(smoke!.cigarId).toBe(target);
+      expect(result.crossCigarLots).toBe(0);
+      expect(result.skipped).toEqual([]);
+      const inventory = await getMyInventory(h.deps, owner);
+      expect(inventory.totalSticksRemaining).toBe(4);
+      expect(inventory.holdings.map((holding) => holding.cigar.cigarId)).toEqual([source]);
     });
 
     it("replays an identical retry and refuses a second, distinct request", async () => {
@@ -2013,6 +2058,48 @@ describe("curation", () => {
         auditId,
       }).catch((e: unknown) => e);
       expect(again).toBeInstanceOf(ValidationError);
+    });
+
+    it("refuses to undo a rename the cigar has moved past, and keeps the newer name", async () => {
+      // canonicalName is identity and nothing versions it: writing an older audit's
+      // prior name back would discard a NEWER rename silently. The daily agent
+      // renaming the same cigar twice is the live shape.
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Q2 Original" });
+      for (const canonicalName of ["Q2 First Fix", "Q2 Second Fix"]) {
+        await renameCigar(h.deps, admin, {
+          clientRequestId: newRequestId(),
+          cigarId,
+          canonicalName,
+          attribution: { actor: "agent", runId, confidence: 1 },
+        });
+      }
+
+      const { rows } = await agentRunRows(h.deps, admin, { runId });
+      const stale = rows.find((r) => r.summary === "Q2 Original → Q2 First Fix")!;
+      const current = rows.find((r) => r.summary === "Q2 First Fix → Q2 Second Fix")!;
+      // The console offers Undo only on the rename that is still the cigar's name.
+      expect(stale.reversible).toBe(false);
+      expect(current.reversible).toBe(true);
+
+      const error = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: stale.auditId,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields).toEqual([
+        { path: "auditId", message: "This rename is no longer the cigar's current name." },
+      ]);
+      const [untouched] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(untouched!.canonicalName).toBe("Q2 Second Fix");
+
+      // The latest rename still undoes — one step back, not all the way to raw.
+      await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: current.auditId,
+      });
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.canonicalName).toBe("Q2 First Fix");
     });
 
     it("undo of a merge with a live ledger performs the full unmerge", async () => {

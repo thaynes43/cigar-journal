@@ -108,7 +108,7 @@ export default async function CatalogReviewPage() {
                   <span className="flex flex-wrap items-center gap-1.5">
                     {merge.moved.map((m) => (
                       <span key={m.entity} className={`${ui.chipOutline} tabular-nums`}>
-                        {m.entity} {m.count}
+                        {MOVED_LABELS[m.entity] ?? m.entity} {m.count}
                       </span>
                     ))}
                     <span className="text-xs text-muted tabular-nums">
@@ -151,6 +151,19 @@ export default async function CatalogReviewPage() {
     </div>
   );
 }
+
+// Reader-facing names for the ledger slots a merge moved — the domain returns its
+// own keys, and `listingMatches 1` is not console copy (DESIGN-003 §Copy).
+const MOVED_LABELS: Record<string, string> = {
+  smokes: "Smokes",
+  purchases: "Purchases",
+  listingMatches: "Listing matches",
+  offers: "Offers",
+  productPhotos: "Photos",
+  enrichmentRequests: "Gap-fill requests",
+  wants: "Wants",
+  favorites: "Favorites",
+};
 
 // The action or state for one merge row. Undone and chain-blocked merges render
 // as state, never as a button that would error — and an undone one names its skip

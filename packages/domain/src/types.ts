@@ -980,7 +980,8 @@ export interface CurationAttribution {
 // via the mutation envelope; cigars carry no version column, so distinct-id and
 // existence checks are the safety net (see curation.ts). Neither side may already
 // be a tombstone — a merged row is unmerged first, and a merge targets the
-// survivor, never a tombstone; both keep every ledger's referent valid.
+// survivor, never a tombstone; both keep every ledger's referent valid. A survivor
+// may itself be merged later, so chains of any depth form and unwind LIFO.
 export interface MergeCigarsInput {
   clientRequestId: string;
   sourceCigarId: string; // the duplicate that goes away
@@ -1046,10 +1047,14 @@ export interface UnmergeCigarsInput {
 //                     a photo after the merge; the moved photo stays on the survivor.
 //   conflict        — the user re-marked the tombstone, so restoring would violate
 //                     wants/favorites UNIQUE(user_id, cigar_id).
+//   consumed_elsewhere — a smoke that is not returning to the source already drew
+//                     from this purchase lot; lot and consumption must stay on the
+//                     same cigar or the user's humidor count inflates, so the lot
+//                     stays with the survivor.
 export interface UnmergeSkip {
   entity: string; // the ledger slot key (smokes, wants, productPhotos, …)
   rowId: string;
-  reason: "moved_on" | "source_occupied" | "conflict";
+  reason: "moved_on" | "source_occupied" | "conflict" | "consumed_elsewhere";
 }
 
 export interface UnmergeCigarsResult {
@@ -1072,11 +1077,11 @@ export interface UnmergeCigarsResult {
   // The lifecycle status the source went back to — its pre-merge value, so a
   // cigar that was `excluded` before the merge does not come back `active`.
   restoredSourceStatus: CatalogStatus;
-  // Smoke consumptions still attributing a returned purchase lot while their smoke
-  // sits on another cigar — a post-merge smoke on the survivor that drew from a
-  // moved lot. Inventory aggregates stay correct on both cigars (acquired counts key
-  // on purchases.cigar_id, consumed on smokes.cigar_id), so the row is deliberately
-  // NOT rewritten: the count is recorded rather than a user's consumption edited.
+  // Purchase lots left with the survivor because a smoke that is not returning had
+  // already consumed them (a post-merge smoke on the survivor drawing from a moved
+  // lot). They appear in `skipped` as `consumed_elsewhere` too; the count is called
+  // out separately because it is the one skip a USER feels — returning the lot while
+  // its consumptions stay put would resurrect sticks they have already smoked.
   crossCigarLots: number;
   undoAuditId: string; // the `cigar.unmerge` audit, reverts-linked to the merge
   replayed: boolean;

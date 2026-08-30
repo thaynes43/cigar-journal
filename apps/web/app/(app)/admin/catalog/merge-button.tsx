@@ -3,6 +3,7 @@
 import { useRef } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/trpc/react";
+import { actionErrorMessage } from "@/lib/trpc/error";
 import { ui } from "@/lib/ui";
 
 // Fold the source cigar into the target (this side survives), then refresh the
@@ -30,7 +31,9 @@ export function MergeButton({
       >
         Merge into this
       </button>
-      {merge.error ? <span className={`text-sm ${ui.muted}`}>{merge.error.message}</span> : null}
+      {merge.error ? (
+        <span className={`text-sm ${ui.muted}`}>{actionErrorMessage(merge.error)}</span>
+      ) : null}
     </span>
   );
 }
