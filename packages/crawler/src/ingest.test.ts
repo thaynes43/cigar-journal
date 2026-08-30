@@ -344,6 +344,8 @@ describe("crawler ingest (embedded Postgres)", () => {
     const fulfilled = await requestRow(hitReqId);
     expect(fulfilled.status).toBe("fulfilled");
     expect(fulfilled.resolvedAt).not.toBeNull();
+    // `attempts` counts every COMPLETED look across vendors, a match included.
+    expect(fulfilled.attempts).toBe(1);
     const olivaOffers = await pg.db.select().from(offers).where(eq(offers.listingUrl, OLIVA_URL));
     expect(olivaOffers).toHaveLength(1);
 

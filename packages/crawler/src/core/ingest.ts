@@ -617,23 +617,24 @@ async function finalizeEnrichment(
   return deps.db.transaction(async (tx) => {
     await recordEnrichmentAttempt(tx, { requestId, vendorId: options.vendorId, outcome, at: now });
 
+    // `enrichment_requests.attempts` is now a REPORTING total of completed looks
+    // across every vendor — never a budget again. Incremented in SQL rather than
+    // read-modify-written, and on every COMPLETED look (miss or match, never an
+    // error), so it stays a true count and legacy pre-0023 values — which counted
+    // real looks too — keep their meaning.
+    if (outcome !== "error") {
+      await tx
+        .update(enrichmentRequests)
+        .set({ attempts: sql`${enrichmentRequests.attempts} + 1` })
+        .where(eq(enrichmentRequests.id, requestId));
+    }
+
     if (outcome === "match") {
       await tx
         .update(enrichmentRequests)
         .set({ status: "fulfilled", resolvedAt: now })
         .where(eq(enrichmentRequests.id, requestId));
       return false;
-    }
-
-    // `enrichment_requests.attempts` is now a REPORTING total of completed looks
-    // across every vendor — never a budget again. Incremented in SQL rather than
-    // read-modify-written, and only on a completed look, so it stays a true count
-    // and legacy pre-0023 values (which counted real looks too) keep their meaning.
-    if (outcome === "miss") {
-      await tx
-        .update(enrichmentRequests)
-        .set({ attempts: sql`${enrichmentRequests.attempts} + 1` })
-        .where(eq(enrichmentRequests.id, requestId));
     }
 
     const coverage = await enrichmentCoverageForRequest(tx, requestId, type);
