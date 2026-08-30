@@ -83,6 +83,8 @@ describe("migrations", () => {
 
     await pg.db.execute(sql`UPDATE invites SET redeemed_at = now() WHERE id = ${secondId}::uuid`);
     await expect(insert("hash-four")).resolves.toBeDefined();
+  });
+
   // The brand_images rights model is enforced by shape (0019): a Wikimedia image
   // may not be stored without the attribution the UI is obliged to render with
   // it. A row carrying object_key but no source_url/license_name must not exist.
