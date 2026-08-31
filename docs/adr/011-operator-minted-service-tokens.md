@@ -142,10 +142,12 @@ The elevation is **narrow and explicit**, not a widening of the default set:
   live until he revokes it. The expiry cliff is already watched: the daily
   `cigar-journal-credential-expiry` CronJob selects by lifetime (> 24h), so a
   90-day token is covered with no edit.
-- **Curation writes name the credential that made them.** `audit_log.client_id`
-  (migration 0023) records the OAuth client of the calling token on every
-  curation audit row, taken off the server-derived `Principal` and never from a
-  tool argument. Without it the "one client per consumer, so a leak is
+- **Audited writes name the credential that made them.** `audit_log.client_id`
+  (migration 0024) records the OAuth client of the calling token on every audit
+  row the application writes — curation, journal, inventory, photos, settings,
+  invites (#183) — taken off the server-derived `Principal` and never from a tool
+  argument. One shared `auditActor` helper assembles it, so a new audit insert
+  cannot quietly opt out; a source-scanning test fails the suite if one does. Without it the "one client per consumer, so a leak is
   attributable" control was untrue on the write side for exactly the scopes
   this override opens: a stolen token calling `get_curation_queue` and walking
   `set_listing_match_status` across the triage queue left history identical to

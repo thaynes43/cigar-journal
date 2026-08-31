@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { auditLog, cigars, enrichmentRequests, productPhotos, type CigarRow } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { CigarRef, ProvenanceInput, Verification } from "./types.js";
 import { resolveCigar, type ResolvedCigar } from "./cigar-resolution.js";
 import { enrichmentCoverageForCigar, type EnrichmentCoverage } from "./enrichment-coverage.js";
@@ -212,7 +213,7 @@ export async function requestCigarEnrichment(
       });
       await tx.insert(auditLog).values({
         userId: principal.userId,
-        actor: provenanceToActor(input.provenance?.source ?? "llm-conversation"),
+        ...auditActor(principal, provenanceToActor(input.provenance?.source ?? "llm-conversation")),
         action: "cigar.enrichment_request",
         smokeId: null,
         before: null,

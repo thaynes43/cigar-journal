@@ -141,7 +141,7 @@ order by created_at desc;
 ```
 
 And every write the credential subsequently makes names the client that made it
-(`audit_log.client_id`, migration 0023), which is what turns "one client per
+(`audit_log.client_id`, migration 0024), which is what turns "one client per
 consumer" into an answerable question after the fact:
 
 ```sql
@@ -161,10 +161,24 @@ order by max(created_at) desc;
 ```
 
 A null `client_id` is NOT proof of the web console. It means "no client was
-recorded", which covers three different things: a genuine console write (no OAuth
-client exists), any row written before this column shipped, and any curation write
-from a code path that does not yet carry the attribution — audit surfaces outside
-curation still do not (issue #183). Treat null as unknown, not as the console.
+recorded", which covers three different things:
+
+1. a genuine console write — a session-driven call, where no OAuth client exists;
+2. any row written before this column shipped (migration 0024);
+3. a **credential-less surface**, which records null by design: the crawler's
+   vendor approval sync (runs from a file in the repo), this CLI's own
+   mint/revoke rows, and invite redemption (no principal exists yet — that row is
+   the sign-up). Their `actor` — `import`, `system`, `web` — is their marker; a
+   pseudo-client would break the column's one useful guarantee, that a non-null
+   value is an OAuth client id you can look up in `oauth_client` and revoke.
+
+Everything else — journal, inventory, photos, settings, curation — now stamps the
+calling credential. Treat null as unknown, not as the console.
+
+Watch one trap when reading the mint/revoke rows: their `before`/`after` payloads
+carry a `clientId`, which is the client the row is *about*, not the credential
+that wrote it. That is why it is deliberately not copied into the column — doing
+so would fold every mint into that credential's own activity in the query above.
 
 What IS load-bearing: two rows for the same subject with DIFFERENT client ids are
 two different credentials, which is the question worth asking during an incident.

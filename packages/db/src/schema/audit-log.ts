@@ -17,7 +17,7 @@ export const auditLog = pgTable("audit_log", {
   before: jsonb("before"),
   after: jsonb("after"),
   correlationId: text("correlation_id"),
-  // The OAuth client whose credential drove this write (migration 0023,
+  // The OAuth client whose credential drove this write (migration 0024,
   // ADR-011); NULL for a session-driven web call, which has no client. Recorded
   // from the server-derived Principal, never from a tool argument — it is what
   // makes an elevated service token's writes separable from the lane's own.

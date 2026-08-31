@@ -543,6 +543,58 @@ describe("curation", () => {
       expect(error).toBeInstanceOf(ValidationError);
       expect((error as ValidationError).fields.some((f) => f.path === "targetCigarId")).toBe(true);
     });
+
+    it("rejects an EXCLUDED target, so lots cannot be re-pointed onto a hidden row", async () => {
+      // The exclude guard's twin (#169). Merging a held source into an excluded
+      // target would move the purchase lots onto a row no catalog read returns —
+      // the same invisibility, reached by a different door. The console cannot pose
+      // this call (its duplicate-pair query requires both sides active) but the
+      // tRPC route takes arbitrary ids.
+      const source = await seedUnverified("Excluded Target Source");
+      const hidden = await seedUnverified("Excluded Target Hidden");
+      await excludeCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId: hidden });
+
+      const error = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: hidden,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      const field = (error as ValidationError).fields[0]!;
+      expect(field.path).toBe("targetCigarId");
+      expect(field.message).toBe("Merge into an active cigar instead.");
+      // Nothing moved.
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, source));
+      expect(row!.catalogStatus).toBe("active");
+    });
+
+    it("moves every lot of a held source to the survivor, and the tombstone strands none", async () => {
+      // Merge is the sanctioned way past the exclude guard, so it must actually
+      // relocate the inventory rather than leave it on a row about to be hidden.
+      const source = await seedUnverified("Held Merge Source");
+      const target = await seedUnverified("Held Merge Target");
+      const lotA = await addPurchase(source, user, 10);
+      const lotB = await addPurchase(source, user, 13);
+
+      await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+
+      const lots = await h.deps.db.select().from(purchases).where(eq(purchases.cigarId, target));
+      expect(lots.map((l) => l.id).sort()).toEqual([lotA, lotB].sort());
+      const stranded = await h.deps.db.select().from(purchases).where(eq(purchases.cigarId, source));
+      expect(stranded).toHaveLength(0);
+
+      // …and the survivor now carries the holding, so it is itself un-excludable.
+      const error = await excludeCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: target,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]!.message).toContain("23 sticks");
+    });
   });
 
 
@@ -674,6 +726,33 @@ describe("curation", () => {
       expect(result.restoredSourceStatus).toBe("excluded");
       const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, source));
       expect(row!.catalogStatus).toBe("excluded");
+    });
+
+    it("restores no lots onto a source that was excluded before the merge", async () => {
+      // The other half of #169, asserted rather than guarded twice. Unmerge puts the
+      // source back at its PRE-merge lifecycle, so an excluded source would get its
+      // lots back on a hidden row — except that excludeCigar now refuses a cigar
+      // with any lot, so a source excluded through the service has none to move and
+      // `ledger.moved.purchases` is empty in exactly this case. Guarding unmerge as
+      // well would duplicate the invariant and break the LIFO inverse.
+      //
+      // NOT airtight, and knowingly so: recordPurchase resolves by id without
+      // consulting catalog_status, so a lot recorded against an already-excluded
+      // cigar would ride the ledger. That is the same hole the exclude guard's race
+      // note names, and closing it belongs to record_purchase, not here.
+      const source = await seedUnverified("Unmerge Excluded Held Source");
+      const target = await seedUnverified("Unmerge Excluded Held Target");
+      await excludeCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId: source });
+      const mergeId = await merge(source, target);
+
+      const [ledger] = await h.deps.db.select().from(cigarMerges).where(eq(cigarMerges.id, mergeId));
+      expect((ledger!.moves as { moved: { purchases?: string[] } }).moved.purchases ?? []).toEqual([]);
+
+      const result = await unmergeCigars(h.deps, admin, { clientRequestId: newRequestId(), mergeId });
+      expect(result.restored.purchases).toBe(0);
+      expect(result.restoredSourceStatus).toBe("excluded");
+      const backOnHidden = await h.deps.db.select().from(purchases).where(eq(purchases.cigarId, source));
+      expect(backOnHidden).toHaveLength(0);
     });
 
     it("leaves rows created on the survivor after the merge exactly where they are", async () => {
@@ -1632,6 +1711,89 @@ describe("curation", () => {
       expect(first.replayed).toBe(false);
       expect(second.replayed).toBe(true);
     });
+
+    // --- held inventory is never excludable (#169) --------------------------
+    // The regression these pin actually happened: the curate agent's first run
+    // excluded three samplers the owner held and 23 sticks left the humidor.
+
+    it("refuses a cigar with a purchase lot, names the counts, and writes nothing", async () => {
+      const cigarId = await seedUnverified("Excl Held Sampler");
+      await addPurchase(cigarId, user, 10);
+      await addPurchase(cigarId, user, 13);
+
+      const error = await excludeCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      const fields = (error as ValidationError).fields;
+      expect(fields[0]!.path).toBe("cigarId");
+      // The counts are the actionable part — a curator who only sees "held" has to
+      // go to psql to find out what they are holding.
+      expect(fields[0]!.message).toContain("2 purchase lots");
+      expect(fields[0]!.message).toContain("23 sticks");
+
+      // The whole transaction rolled back: still active, and no exclude audit.
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.catalogStatus).toBe("active");
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.exclude"));
+      expect(audits.find((a) => (a.after as { id?: string }).id === cigarId)).toBeUndefined();
+    });
+
+    it("refuses when the only lot belongs to ANOTHER user", async () => {
+      // The rule the issue turns on. A `principal.userId` filter would pass this
+      // and hide someone else's humidor — the curator is not the only owner.
+      const other = await h.createUser(`holder-${newRequestId().slice(0, 8)}@example.com`);
+      const cigarId = await seedUnverified("Excl Held By Other");
+      await addPurchase(cigarId, other, 5);
+
+      const error = await excludeCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]!.message).toContain("1 purchase lot");
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.catalogStatus).toBe("active");
+    });
+
+    it("still refuses when the lot is fully consumed", async () => {
+      // Pins "any purchases row", not "remaining > 0": `remaining` is derived and
+      // floors at zero, so a stock test would make excludability flicker as the
+      // owner smokes — and a spent lot is still a journal entry's provenance.
+      const cigarId = await seedUnverified("Excl Held Consumed");
+      const purchaseId = await addPurchase(cigarId, user, 1);
+      const smokeId = await addSmoke(cigarId, user);
+      await h.deps.db.insert(smokeConsumptions).values({ smokeId, purchaseId });
+
+      const inventory = await getMyInventory(h.deps, user);
+      const holding = inventory.holdings.find((x) => x.cigar.cigarId === cigarId)!;
+      expect(holding.remaining).toBe(0);
+
+      const error = await excludeCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.catalogStatus).toBe("active");
+    });
+
+    it("leaves the unheld happy path alone, cascade included", async () => {
+      // The guard must not cost the #126 behaviour: a cigar nobody bought still
+      // excludes AND still unmatches its 'auto' listing links in the same tx.
+      const cigarId = await h.seedCigar({ canonicalName: `Excl Unheld ${newRequestId().slice(0, 8)}` });
+      const [match] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `unheld-${newRequestId()}`, cigarId, status: "auto" })
+        .returning({ id: listingMatches.id });
+
+      const result = await excludeCigar(h.deps, admin, { clientRequestId: newRequestId(), cigarId });
+      expect(result.catalogStatus).toBe("excluded");
+      const [link] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, match!.id));
+      expect(link!.status).toBe("unmatched");
+      expect(link!.cigarId).toBeNull();
+    });
   });
 
   // --- setProductPhotoRights (DESIGN-003 §Curation) -------------------------
@@ -1850,6 +2012,19 @@ describe("curation", () => {
       const row = byId.get(active)!;
       expect(row.canonicalName).toBe("Worklist Active Entry");
       expect(row.verification).toBe("unverified");
+    });
+
+    it("reports heldLots so the agent can anticipate the exclude refusal", async () => {
+      // Without this the agent cannot tell a held row from a pile of gift cards and
+      // learns only by refusal, once per row, on every run (#169).
+      const held = await seedUnverified("Worklist Held Entry");
+      const unheld = await seedUnverified("Worklist Unheld Entry");
+      await addPurchase(held, user, 4);
+      await addPurchase(held, admin, 1); // another user's lot counts too
+
+      const byId = new Map((await drainCigars("unverified")).map((c) => [c.cigarId, c]));
+      expect(byId.get(held)!.heldLots).toBe(2);
+      expect(byId.get(unheld)!.heldLots).toBe(0);
     });
 
     it("pages by keyset with no overlap and in createdAt order", async () => {

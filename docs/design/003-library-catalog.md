@@ -231,9 +231,27 @@ gamification — automation. The console inverts from "do the work" to
   before the ledger existed reports non-reversible rather than guessing. Merge and unmerge are actor
   `web` with no `run_id`, so they get their own **Recent merges** console
   section — they can never surface under "Recent agent runs".
-- **Humans stay in the loop only for:** merges, rights takedowns,
-  exclusions that would hide an owner-held item, and any low-confidence
-  proposal. Renames are deliberately absent from that list — the agent
+- **An excluded cigar is never one anybody holds** (#169, 2026-08-30).
+  `catalog_status='excluded'` drops the row from every catalog read, so
+  excluding a cigar somebody bought hides their sticks with nothing on
+  screen to say why — which is what happened on the curate agent's first
+  run, when three samplers the owner held went out of the humidor for a
+  day (23 sticks). `excludeCigar` now refuses any cigar with a `purchases`
+  row, **for any user**, and `mergeCigars` refuses an excluded target so
+  the lots cannot be re-pointed onto a hidden survivor instead. Two
+  consequences worth stating: the guard counts lots, not remaining stock
+  (a fully-smoked lot is still a journal entry's provenance, and
+  `remaining` floors at zero, so a stock test would make excludability
+  flicker); and there is **no override** — the way past it is to remove
+  the lots, rename the entry, or merge it into the right one. That makes
+  this a one-way door for the operator on a genuinely mis-catalogued row
+  someone recorded a purchase for; accepted, because the failure it
+  replaces is silent and the failure it introduces is a message. The
+  deeper modelling answer — decomposing a sampler into its members
+  (#127) — is unchanged and still open.
+- **Humans stay in the loop only for:** merges, rights takedowns, and any
+  low-confidence proposal. Owner-held exclusions have left this list
+  because they are no longer a judgement call: the service refuses them. Renames are deliberately absent from that list — the agent
   owns name cleanup (`rename_cigar` on the MCP curation surface), the
   human owns the review and the Undo. Unmerge stays out of MCP for the
   same reason merge is: handing the agent unmerge would hand it the merge

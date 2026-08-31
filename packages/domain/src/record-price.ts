@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { auditLog, cigars, vendors } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { RecordPriceInput, RecordPriceResult } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
@@ -137,7 +138,7 @@ async function recordWithinTx(
   if (observation.inserted) {
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      actor: provenanceToActor(input.provenance?.source ?? "llm-conversation"),
+      ...auditActor(principal, provenanceToActor(input.provenance?.source ?? "llm-conversation")),
       action: "price.record",
       smokeId: null,
       before: null,

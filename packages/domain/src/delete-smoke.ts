@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { auditLog, idempotencyKeys, smokes, smokeProgression } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { DeleteSmokeInput, DeleteSmokeResult } from "./types.js";
 import { SmokeNotFoundError } from "./errors.js";
 import { smokeSnapshot } from "./mapping.js";
@@ -45,7 +46,7 @@ async function deleteWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: "web",
+    ...auditActor(principal, "web"),
     action: "smoke.deleted",
     smokeId: null,
     before,

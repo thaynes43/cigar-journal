@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { auditLog, cigars, favorites } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { SetFavoriteInput, SetFavoriteResult } from "./types.js";
 import { CigarNotFoundError } from "./errors.js";
 import { provenanceToActor } from "./mapping.js";
@@ -98,7 +99,7 @@ async function setWithinTx(
   if (changed) {
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      actor: provenanceToActor(input.provenance?.source ?? "llm-conversation"),
+      ...auditActor(principal, provenanceToActor(input.provenance?.source ?? "llm-conversation")),
       action: input.favorited ? "favorite.set" : "favorite.clear",
       smokeId: null,
       before: { cigarId: input.cigarId, favorited: wasFavorited, note: priorNote },

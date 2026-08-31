@@ -24,8 +24,8 @@ export interface Principal {
    * from the token row (`validateAccessToken`), never from an argument. Absent
    * for a session-driven web call, which has no client.
    *
-   * Curation writes stamp it on their audit row (migration 0023, ADR-011) so an
-   * operator-minted service token's writes are separable from every other
+   * Every audited write stamps it on its audit row (migration 0024, ADR-011) so
+   * an operator-minted service token's writes are separable from every other
    * credential the same subject holds.
    */
   clientId?: string;

@@ -64,7 +64,9 @@ describe("photo upload tokens", () => {
       await h.deps.db.select().from(auditLog).where(eq(auditLog.smokeId, smokeId))
     ).filter((a) => a.action === "photo_upload_token.mint");
     expect(audits).toHaveLength(1);
-    expect(audits[0]!.actor).toBe("mcp");
+    // actor + credential together (#183). The smoke-photo mint is the MCP path, so
+    // the day it runs under a service token this column is what separates it.
+    expect([audits[0]!.actor, audits[0]!.clientId]).toEqual(["mcp", null]);
   });
 
   it("consume returns the binding and stamps used_at", async () => {
@@ -155,7 +157,7 @@ describe("photo upload tokens", () => {
         await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "photo_upload_token.mint"))
       ).filter((a) => (a.after as { cigarId?: string })?.cigarId === cigarId);
       expect(audits).toHaveLength(1);
-      expect(audits[0]!.actor).toBe("web");
+      expect([audits[0]!.actor, audits[0]!.clientId]).toEqual(["web", null]);
     });
 
     it("is admin-only and rejects an unknown cigar", async () => {

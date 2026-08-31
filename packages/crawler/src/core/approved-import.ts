@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { auditLog, vendors, type Database, type VendorRow } from "@cj/db";
+import { auditActor } from "@cj/domain";
 
 // r/cubancigars online-stores wiki → vendors.approval_status, as an
 // ADMIN-REVIEWED DIFF (ADR-006: "the wiki is an input; admins decide" — not a
@@ -197,7 +198,14 @@ export async function applyApproved(
           .returning();
         await tx.insert(auditLog).values({
           userId: null,
-          actor: "import",
+          // No credential exists on this path at all — the approved-list sync runs
+          // from a file in the repo, not a request. Routed through the shared helper
+          // with an explicit `undefined` so the null is a decision in the diff, not
+          // an omission (#183). Minting a pseudo-client ("crawler") would break the
+          // column's only useful guarantee: a non-null client_id is an OAuth client
+          // id you can look up in `oauth_client` and revoke. The batch role it does
+          // have is already recorded, and it is `actor: import`.
+          ...auditActor(undefined, "import"),
           action: "vendor.approval_sync",
           smokeId: null,
           before: null,
@@ -215,7 +223,7 @@ export async function applyApproved(
         .where(eq(vendors.id, change.vendorId!));
       await tx.insert(auditLog).values({
         userId: null,
-        actor: "import",
+        ...auditActor(undefined, "import"), // credential-less batch, as above (#183)
         action: "vendor.approval_sync",
         smokeId: null,
         before: { vendorId: change.vendorId, name: change.store, approvalStatus: change.from },

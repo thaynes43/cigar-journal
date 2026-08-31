@@ -1,6 +1,14 @@
 import { and, eq } from "drizzle-orm";
 import { vendors, purchases, idempotencyKeys, auditLog } from "@cj/db";
-import { resolveCigar, fingerprint, CigarAmbiguousError, type Deps, type Principal, type Tx } from "@cj/domain";
+import {
+  resolveCigar,
+  fingerprint,
+  auditActor,
+  CigarAmbiguousError,
+  type Deps,
+  type Principal,
+  type Tx,
+} from "@cj/domain";
 import type { ParsedPurchase } from "./purchases-parse.js";
 import type { NeedsReview } from "./report.js";
 
@@ -104,7 +112,10 @@ export async function writePurchase(
 
       await tx.insert(auditLog).values({
         userId: principal.userId,
-        actor: "import",
+        // The CLI builds this principal itself and it carries no client, so the
+        // column stays null today — but it is READ from the principal, so the day
+        // the importer runs under a token the attribution is already right (#183).
+        ...auditActor(principal, "import"),
         action: "purchase.imported",
         smokeId: null,
         before: null,

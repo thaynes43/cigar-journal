@@ -6,6 +6,11 @@ export type { Deps, Principal, Tx, Queryer } from "./deps.js";
 export * from "./types.js";
 export * from "./errors.js";
 export { normalizeDescriptor, normalizeDescriptors } from "./descriptors.js";
+// The single assembler of an audit row's actor + client attribution (#183,
+// ADR-011). Exported because the crawler, importer and oauth packages write audit
+// rows of their own and must not re-derive the rule — including the deliberate
+// null at their credential-less surfaces.
+export { auditActor } from "./audit-attribution.js";
 export { fingerprint } from "./fingerprint.js";
 
 export { saveSmoke } from "./save-smoke.js";

@@ -1,5 +1,6 @@
 import { auditLog, smokes, smokeProgression } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { SaveSmokeInput, SaveSmokeResult } from "./types.js";
 import { validateSaveInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
@@ -108,7 +109,7 @@ async function saveWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: provenanceToActor(provenanceSource),
+    ...auditActor(principal, provenanceToActor(provenanceSource)),
     action: "smoke.created",
     smokeId: smoke.id,
     before: null,

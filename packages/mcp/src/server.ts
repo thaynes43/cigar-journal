@@ -1340,7 +1340,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Exclude cigar",
       description:
-        "Hide a catalog cigar from browse/search/queue without deleting it (non-cigar pollution, or an entry that should not surface) — reversible via restore_cigar; its detail page and any owner history stay reachable. Admin only. Pass runId/confidence for the run audit.",
+        "Hide a catalog cigar from browse/search/queue without deleting it (non-cigar pollution, or an entry that should not surface) — reversible via restore_cigar; its detail page and any owner history stay reachable. Refused for a cigar anybody holds (any purchase lot, any user — get_curation_queue reports heldLots): hiding it would hide their inventory, so rename or merge it instead. Admin only. Pass runId/confidence for the run audit.",
       inputSchema: excludeCigarSchema,
       outputSchema: setCatalogStatusOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Exclude cigar" },
