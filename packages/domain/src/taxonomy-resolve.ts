@@ -1,7 +1,7 @@
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, inArray } from "drizzle-orm";
 import { blends, brands, lines } from "@cj/db";
 import type { Queryer } from "./deps.js";
-import { windowKeys, fold, anchorByAlias, MIN_ANCHOR_KEY_LENGTH, type AliasCandidate } from "./taxonomy-keys.js";
+import { windowKeys, fold, anchorByAlias, registrySlugCandidates, MIN_ANCHOR_KEY_LENGTH, type AliasCandidate } from "./taxonomy-keys.js";
 import {
   parseListingTitle,
   stripPackaging,
@@ -12,7 +12,6 @@ import {
 } from "./catalog-parse.js";
 import { numbersCompatible, packagingCompatible, variantRelation, vitolaAgrees } from "./name-heuristics.js";
 import type { CigarAncestry, CigarAncestryContext } from "./cigar-ancestry.js";
-import { brandSlug } from "./catalog-browse.js";
 
 // The database half of matching v2: registry probes in, a `ListingParse` out,
 // and the scoped candidate set the match decision runs over. Everything that
@@ -526,11 +525,25 @@ export async function resolveDescribedTaxonomy(
 // unlinked cigar is a Wave 3 worklist item, a wrongly linked one is a silent
 // error. Registries are never minted here — that is curation with an audit
 // trail, not a side effect of a write.
+// ONE RULE, TWO SPELLINGS OF IT. Since mint-time slugs began folding accents,
+// a brand row wears either the folded key (minted now) or the `brandSlug()`
+// transcription (minted before, or by migration 0026). Probing one flavor would
+// leave every cigar whose `brand` text is accented unlinked from the marca that
+// was just minted for it — silently, since an unmatched spelling yields null by
+// design. `registrySlugCandidates` is the single definition of both spellings;
+// preferring the folded one keeps the result deterministic if both rows exist.
 export async function deriveBrandId(db: Queryer, brand: string | null): Promise<string | null> {
-  const slug = brandSlug((brand ?? "").trim());
-  if (slug === "") return null;
-  const rows = await db.select({ id: brands.id }).from(brands).where(eq(brands.slug, slug)).limit(1);
-  return rows[0]?.id ?? null;
+  const candidates = registrySlugCandidates(brand ?? "");
+  if (candidates.length === 0) return null;
+  const rows = await db
+    .select({ id: brands.id, slug: brands.slug })
+    .from(brands)
+    .where(inArray(brands.slug, candidates));
+  for (const slug of candidates) {
+    const hit = rows.find((row) => row.slug === slug);
+    if (hit) return hit.id;
+  }
+  return null;
 }
 
 // A registry row's own display name, for name recomposition. Loaded together

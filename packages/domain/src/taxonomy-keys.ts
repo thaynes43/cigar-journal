@@ -1,15 +1,23 @@
 import { brandSlug } from "./catalog-browse.js";
+import { HIERARCHY_UNFILED } from "./types.js";
 
 // The matching-key vocabulary shared by the registries, the crawler and the
 // journal resolver (ADR-012, migration 0026/0027).
 //
 // TWO KEYS, ONE RULE APART, and keeping them apart is the whole design:
 //
-//   brandSlug()  — the STORED key. `brands.slug`, `brand_images.brand_slug`, the
-//                  brand URL. It never folds accents, so `Padrón` is `padr-n`.
+//   brandSlug()  — the LEGACY stored key. `brand_images.brand_slug`, the legacy
+//                  brand URL, and `brands.slug` on every row migration 0026
+//                  seeded. It never folds accents, so `Padrón` is `padr-n`.
 //                  Ugly, and load-bearing: changing it breaks live URLs.
 //   fold()       — the MATCHING key. NFKD, drop the combining marks, then
 //                  brandSlug. `Padrón` and `Padron` both become `padron`.
+//
+// A registry row minted TODAY stores the folded key, not the transcription
+// (`mintRegistrySlug`, at the foot of this module) — so `brands.slug` holds both
+// flavors and `registrySlugCandidates` is what spans them. The two rules stay
+// distinct: this is a change to what NEW rows are minted with, not a change to
+// `brandSlug()`, which still owns every key that is already published.
 //
 // `brands.aliases` / `lines.aliases` / `blends.aliases` hold fold() output and
 // nothing else — the migration seeds them that way and the GIN probe is an exact
@@ -251,4 +259,76 @@ export function composeCanonicalName(parts: CanonicalNameParts): string {
   }
 
   return out.join(" ");
+}
+
+// --------------------------------------------------------------------------
+// Registry slugs — the mint rule and the lookup candidates
+// --------------------------------------------------------------------------
+
+// `unfiled` is not available as a registry slug (DESIGN-004 D-05). At every
+// level that value means IS NULL — the population with NO row here — so a row
+// wearing it would be permanently unreachable: `?line=unfiled` would select the
+// cigars that have no line, never the line called Unfiled, and the group card
+// for it would link to a screen excluding all of its own members.
+//
+// The suffix, not a refusal: "Unfiled" is a legitimate name and the catalog's
+// internal vocabulary has no business vetoing it. The slug is a derived
+// addressing key, so deriving a different one costs the row nothing — while
+// refusing would put the reserved word in front of a curator who never chose it.
+// `-1` is the conventional disambiguation suffix and cannot itself fold onto the
+// reserved word; a second row that genuinely wants `unfiled-1` still hits the
+// per-parent unique pre-check in taxonomy-writes.ts, which is where slug
+// collisions belong.
+export const RESERVED_SLUG_SUFFIX = "-1";
+
+// MINT-TIME SLUGS FOLD ACCENTS; the stored ones on existing rows do not.
+//
+// `brandSlug()` collapses every non-ASCII run to a hyphen, so `Padrón` becomes
+// `padr-n` and `Don Pepín García` becomes `don-pep-n-garc-a` — a URL key that is
+// unreadable, unguessable and unsearchable. That transcription is load-bearing
+// for the rows that already wear it (`brands.slug` is what today's brand URLs and
+// `brand_images.brand_slug` resolve through), so it is not being changed. It is
+// simply not what a NEW row should be minted with: nothing yet links to a slug
+// that does not exist, so a row minted from here can have the clean key.
+//
+// Folding FIRST is the whole change: NFKD, drop the combining marks, then slug —
+// the same `fold()` that produces every alias key, so `Don Pepín García` mints
+// `don-pepin-garcia`. Two slug flavors therefore coexist in the registry tables,
+// which is deliberate and bounded: `padr-n` and its cohort are renamed with
+// redirects in Wave 5, and until then every lookup that resolves a name to a row
+// probes both flavors (see `registrySlugCandidates`).
+//
+// A useful consequence, and the reason the alias probe did not have to grow: the
+// minted slug is now itself a folded key, so it is exactly the `fold(name)` entry
+// `aliasKeysFor` already emits. Slug and folded alias key COINCIDE for every new
+// row, so the one GIN containment probe that resolves a spelling also resolves
+// the row's own address — no second lookup against `slug`, for accented names as
+// well as ASCII ones (pinned in taxonomy-writes.test.ts).
+//
+// The two guards still bind, and bind on the FOLDED result: the `unfiled`
+// reservation this function applies (fold("Unfiled") is still `unfiled`, so it
+// is still suffixed — and so is `Unfiléd`, which only reaches the reserved word
+// BY folding), and migration 0026's `octet_length(slug) <= 2000` btree bound, which
+// folded output cannot newly breach — it is pure `[a-z0-9-]`, one byte per
+// character, from names the MCP schemas already cap at 200.
+export function mintRegistrySlug(name: string): string {
+  const slug = fold(name.trim());
+  return slug === HIERARCHY_UNFILED ? `${slug}${RESERVED_SLUG_SUFFIX}` : slug;
+}
+
+// The slugs a name could be stored under, most-preferred first: the folded key a
+// row minted today wears, and the `brandSlug()` transcription every row minted
+// before this change wears. Identical for an ASCII name, which is almost all of
+// them — hence the dedupe, so the common case stays a single-value lookup.
+//
+// Every get-or-create resolves through this rather than through one flavor. With
+// one flavor it would be wrong in both directions: probing only the folded key
+// would miss the live `padr-n` row and try to mint a duplicate marca (refused by
+// the alias rail, so a curator sees a hard error where a reuse belongs), while
+// probing only the transcription would miss a row this function itself just
+// minted, making a repeat registration of an accented name fail instead of
+// returning the row it created.
+export function registrySlugCandidates(name: string): string[] {
+  const trimmed = name.trim();
+  return [...new Set([mintRegistrySlug(trimmed), brandSlug(trimmed)])].filter((slug) => slug !== "");
 }

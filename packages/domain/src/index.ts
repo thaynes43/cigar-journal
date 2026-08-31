@@ -221,6 +221,11 @@ export {
   // it. Exported together because a caller that mints must also be able to state
   // the invariant it is minting under.
   mintRegistrySlug,
+  // The two slugs a name could be stored under — the folded key a row minted
+  // today wears, and the `brandSlug()` transcription every earlier row wears.
+  // Any resolver outside this package that maps a NAME to a registry row needs
+  // both, or it silently misses half the registry.
+  registrySlugCandidates,
   assertSlugMintable,
   RESERVED_SLUG_SUFFIX,
   type CreateLineInput,
