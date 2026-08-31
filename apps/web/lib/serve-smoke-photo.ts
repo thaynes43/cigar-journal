@@ -8,6 +8,8 @@ import {
   type SmokePhotoObject,
 } from "@cj/domain";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // Resolve the storage coordinates of a smoke photo for a viewer (issue #96).
 // Photos are journal content: the owner sees their own; anyone may see a photo on
 // a PUBLIC journal. The caller's own photo is tried first (so a private photo
@@ -20,6 +22,10 @@ export async function resolveViewablePhoto(
   principal: Principal | null,
   photoId: string,
 ): Promise<{ photo: SmokePhotoObject; isPublic: boolean }> {
+  // The id is a raw URL path segment bound for a uuid column: a non-UUID would
+  // raise Postgres 22P02, which is not a DomainError and so escapes as a 500
+  // instead of the 404 an unknown id earns. Reject the shape before the query.
+  if (!UUID_RE.test(photoId)) throw new PhotoNotFoundError();
   if (principal) {
     try {
       return { photo: await getSmokePhoto(deps, principal, { photoId }), isPublic: false };

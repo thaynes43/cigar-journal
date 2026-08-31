@@ -12,6 +12,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": webRoot,
+      // `server-only` is a build-time marker Next resolves itself; it is not in
+      // node_modules, so any server module importing it is unloadable under
+      // Vitest without this stub.
+      "server-only": `${webRoot}/test/server-only-stub.ts`,
     },
   },
 });
