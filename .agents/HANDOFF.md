@@ -1,139 +1,102 @@
-# Session handoff — 2026-08-29 night (v0.26.1: full board sweep, vendors live)
+# Session handoff — 2026-08-30 evening (v0.28.0)
 
 For a cold-start agent. The durable backlog is GitHub issues (label `backlog`);
-this file is the bridge: where the last session left prod, and what to pick up.
-Overwrite it at the next major handoff.
+this file is the bridge: where prod stands, what is in flight, and what is
+actually blocked on whom. Overwrite it at the next major handoff.
 
 ## Where prod stands
 
-- **v0.26.1** live and verified. The evening five-lane wave (all merged +
-  deployed): markdown fidelity (#146 — react-markdown whitelist, unblocks the
-  #97 flip), review console with agent-runs list + per-row Undo (#149),
-  vendor expansion (#147/#150 — decided_by re-crawl guard, purchase_linkout
-  posture, probe CLI, approved-list import), OAuth loopback fix (#144,
-  prod-verified, #140 closed), Playwright e2e suite (#148 — 17 specs, own CI
-  job). Issues #124/#125/#126/#128/#140 all closed.
-- **Crawls are LIVE** (owner directive superseded the launch gate): offers
-  weekly Sun 08:00 UTC, enrich daily 09:00 UTC (first run verified: 1 photo).
-  **Cuban Lou's crawl_enabled** (photos + price seeds, purchase_linkout=false
-  — never a buy destination, unapproved-source labeled). First seed:
-  987 pages, 890 parsed, 807 non-cigar skipped, 83 auto, 56 created, 82
-  offers, 60 photos. Catalog photos 853→914; CC 1→6; owner humidor
-  photoless 63→55 — remainder closes via curation-agent triage (1,569 in
-  queue), human merges of owner↔crawler dup pairs (console), and uploads.
-- **2 Guys DISABLED**: robots/ToS fine but its sitemap content VARIES between
-  fetches (1,462 /store/ locs, then 0) — needs variance handling (#127).
-  **Small Batch DISABLED**: root-level slugs, needs negative-prefix gate.
-  Probe nit: sample N locs, not the first (#127).
-- **v0.25.1** shipped earlier. On top of 0.24.0 (below): filter chips
-  (#136 — Brand/In stock/Smoked/Favorites, wave 6 done, #124 closed), the
-  curator product-photo upload path (#139 — direct + phone upload-link +
-  "Missing photos" worklist of the owner's 63 photoless holds), the MCP
-  curation tool surface (#138 — curation scopes, 7 tools, actor='agent'
-  attribution), and run_id→text (#141, migration 0016).
-- **The curation agent is OPERATIONAL** (dev-env-ops wo-* lane, daily 10:15
-  ET; cigar-journal #126 + haynes-ops #2659/#2662). First run 2026-08-29:
-  300/300 writes, 0 errors — 291 wrong listing matches cleared, 9 non-cigar
-  rows excluded; queue after: triage 1487, untyped 828, unbranded 532.
-  OPERATING MANUAL: memory `curation-lane-ops` (rotating token on the ops
-  PVC, requeue = kill post-mortem window + ops-SA Job, epoch CM stamps).
-  Surface gaps queued on #126 (exclude→triage cascade, get_cigar scope).
-- **OAuth loopback bug #140**: authorize normalizes incoming loopback
-  redirect_uris to localhost but matches stored literals — register clients
-  with BOTH forms until fixed.
-- **v0.24.0** shipped earlier today (web + mcp pods on the new image, health OK,
-  anonymous `/cigars` → signin, `/curation` → `/admin/catalog` 307). Ships:
-  - **DESIGN-003 waves 1–3** (docs/design/003-library-catalog.md — the
-    corrective spec after the owner rejected the v0.23 catalog IA): `/cigars`
-    is the full-bleed unified cigar grid (auto-fill minmax, labeled Own/Type/
-    Sort rails, price sort, result count, $n /stick tiles, 3:4 art, shelf
-    strips with fade + hover paddles + See all); avatar user menu (Settings ·
-    Ledger · Catalog review · Sign out); `/settings` v1 (display name,
-    journal visibility — the #97 flip now has a UI — timezone, wired into
-    LocalDate); `/admin/catalog` (renamed Catalog review); curation/rights
-    primitives (rights-honored photo reads, setListingMatchStatus,
-    catalog_status + exclude/restore, tombstone merge, audit
-    run_id/confidence/reverts + actor 'agent'; migrations 0012–0014).
-  - **add_cigar disambiguation fix** (owner-reported live MCP bug): optional
-    `confirmedDistinct` + strong-link guard tightened (one-sided model
-    numbers and packaging tokens never silently link; curation dup queue uses
-    the same guard). Additive schema change → the ChatGPT connector needs a
-    **refresh + NEW chat** before retesting (docs/mcp/client-compatibility.md).
-- **Crawler CronJobs still SUSPENDED** (owner-gated, #97). Both now pinned to
-  v0.25.1.
-- Owner's journal still `private`; public pages dark until the #97 flip
-  (which can now be done from /settings instead of raw SQL).
+- **v0.28.0 live and verified** — both pods, all four crawl CronJobs, migrations
+  through **0024** applied, `/api/health` ok. Next free migration is **0025**.
+- **SSO is live.** Authentik OIDC + invites (#46) shipped in #168; the owner
+  created the Authentik application and the 1Password fields, and
+  `cigar-journal-oidc` reports SecretSynced. `/signin` renders "Continue with
+  Authentik". Local email+password sign-in is unaffected and stays the fallback.
+- **Catalogue: 970 active, 6 excluded** (all genuinely Fox gift cards), 914
+  photos, ~1,549-row triage queue, **291 `listing_matches` with
+  `decided_by='agent'`** that must stay protected.
+- **The curation lane runs on a static service token now.** No more re-consent.
+  Token id `c62463be-004f-467f-9372-b60c28bc1597`, client `dev-env-curate`,
+  scopes `curation:read`+`curation:write`, **expires 2026-11-28** (90d — the
+  elevated ceiling). State file `~/.local/state/cigar-curation/token.json` on the
+  dev-env-ops PVC, `{access_token, expires_at, token_id}`, **read-only to the
+  lane** (haynes-ops#2692). A 401 means re-mint, never re-consent.
+- Vendors: **Fox Cigar** (NC, enrich daily 06:00 ET, offers Sun 08:00 ET) and
+  **Cuban Lou's** (CC, offers Wed 08:00 ET; **enrich CronJob SUSPENDED** — that
+  suspension is a workaround for #170, do not lift it until #170 lands).
+  2 Guys and Small Batch remain `crawlEnabled: false`.
 
-## Tomorrow morning (cold start): verify the overnight automations FIRST
+## Shipped today (v0.27.0 → v0.28.0)
 
-1. **Enrich crawl** (daily 09:00 UTC, ns frontend): `SELECT kind,status,stats
-   FROM crawl_runs ORDER BY started_at DESC` via memory `prod-db-read-access`.
-   Fox + Cuban Lou's are crawl_enabled; expect photos/offers movement.
-2. **Curation run** (daily 10:15 ET on dev-env-ops): order
-   `wo-cigar-curate-<yyyymmdd>` in CM `upgrade-work-orders` (ns
-   upgrade-agent). Ops manual: memory `curation-lane-ops` — includes the
-   requeue procedure (kill post-mortem tmux window + ops-SA Job) and the
-   rotating-token model. It now has ~1,569 triage rows incl. 82 fresh
-   Cuban Lou's matches; expect confirms to start attaching CC context.
-3. Report counts + queue depths + humidor photoless delta (was 55) to the
-   owner; surface the **duplicates queue** count — it now holds
-   owner-row↔crawler-row CC pairs and MERGES ARE HUMAN-ONLY (web console),
-   so the owner clears those on Catalog review.
-4. Then work the backlog (priorities: #127 remainder — 2 Guys
-   sitemap-variance, Small Batch negative-prefix gate, probe multi-sample,
-   Wikidata fallback; #45 unmerge bookkeeping + rename undo; #48 remainder;
-   #129 token expiry ~Sep 26 is the only dated item).
+#160 crawler sitemap sampling + root-slug gate + multi-sample probe · #162
+unmerge bookkeeping + rename undo · #163 Wikidata brand covers · #165/#178
+operator-minted service tokens (ADR-011) + `audit_log.client_id` · #166 the
+packaging-SKU exclusion batch (documented, **not applied**) · #167 bulk-enqueue
+enrichment · #168 SSO + invites · #171 measured tobacco ramp/seal/chips · #179
+2 Guys product gate · #180 the embedded-Postgres teardown race · #181 per-vendor
+enrichment budgets · #184 add_smoke_photo delivery diagnostics.
+Closed: #45, #46, #48, #49, #126, #129, #154, #158, #174.
 
-Session worktrees under ~/work/ are disposable; canonical clones are
-fetch-only. The 2026-08-29 sessions' scratch (probe dossiers etc.) is fully
-captured in issue comments + memory — nothing lives only in /tmp.
+## IN FLIGHT — check this first
 
-## Owner-gated cutover (#97) — unchanged, do not do unprompted
+A four-lane burndown workflow was running when this session ended and **was
+killed by the dev-env pod bounce**. It covers #170+#157+#155+#185,
+#169+#183, #177+#173, and #159. Before starting anything:
 
-ChatGPT connector verification · unsuspend crawl CronJobs · journal flip +
-archive cutover (53 reviews) · owner's Micallef photo.
+```bash
+git -C ~/repos/cigar-journal fetch origin --prune
+GH_TOKEN=$(cat /creds/gh_token) gh pr list --repo thaynes43/cigar-journal --state open
+GH_TOKEN=$(cat /creds/gh_token) gh pr list --repo thaynes43/haynes-ops --state open
+ls ~/work/            # orphaned worktrees: enrichment-correctness, curation-guards,
+                      # mcp-console-fixes, cj-cronjob-consolidation
+git -C ~/repos/cigar-journal branch -r | grep agent/
+```
+Any of those lanes may have pushed a branch or opened a PR before dying. Adopt
+what exists, `git worktree remove` what is stranded, and re-dispatch the rest.
+**Do not assume a lane finished because its worktree exists.**
 
-## Open backlog (rescoped 2026-08-29 — read the issues, bodies were rewritten)
+## Blocked on the owner (everything else is yours)
 
-- **#124/#125 CLOSED** (chips #136, chrome #133 — verified on prod).
-- **#126 agent enrichment** — agent RUNNING (see above). Remainder: the
-  review/undo web UI on /admin/catalog; exclude→triage cascade; get_cigar
-  scope for curation tokens; crawler `decided_by` guard (curator `unmatched`
-  survives re-crawls); unmerge bookkeeping.
-- **#127 product images** — step 1 (upload path + worklist) SHIPPED #139;
-  remainder: agent photo-attach, 2 Guys/Small Batch adapters (live robots/ToS
-  read first; CI dropped), CC sources per ADR-006, Wikidata fallback, tile
-  thumb-URL fingerprinting (Replace cache staleness, noted on the issue).
-- **#140 OAuth loopback redirect bug** — new, evidence matrix on the issue.
-- **#128 public journal markdown fidelity** — should land before the #97 flip.
-- **#129 dev-env-cli OAuth token expires ~2026-09-26** — only hard-dated item.
-- **#45** destructive-op curation surface (renameCigar still unbuilt) ·
-  **#46** SSO + invites (UI slots into /settings) · **#48** e2e suite etc. ·
-  **#49** cosmetic nits · **#50** parking lot.
+1. **#97 go-live cutover** — the actual launch: journal visibility flip, archive
+   cutover (53 reviews), ChatGPT connector verification, his Micallef photo.
+2. **The photo retest** — #184 shipped diagnostics, not a proven fix. He must
+   **refresh the connector AND start a new chat** first; per
+   `docs/mcp/client-compatibility.md` an in-flight conversation keeps serving the
+   old tool description. Whether ChatGPT's UI binds an in-chat image is not
+   testable from here — the diagnostics make the answer legible, not certain.
+3. **haynes-ops#2673** (`CIGAR_JOURNAL_TOKEN` → pod env; fixes this pod's MCP
+   401) and **#2684** (dev-env session docs). Both bounce the dev-env pod.
+4. **Two product calls**: #164 (packaged SKUs → offers vs exclude) and the deeper
+   half of #169 (should a sampler someone owns be a catalogue row at all).
 
-## How this repo is worked (verify before trusting)
+## Operational truths learned the hard way today
 
-- Coordinator mode: session agent designs/reviews/ships; Opus worktree lanes
-  build. Fetch the canonical clone BEFORE dispatching (isolation snapshots its
-  last-fetched origin/main). Landing: cherry-pick onto fresh origin/main,
-  full suite, PR, squash-merge (branch commit message drives release-please).
-- **Concurrent-lane trap (hit 2026-08-29):** two lanes minted the same
-  migration number (0012) — renumber at landing; lanes based pre-merge also
-  both edit consumption-backfill.test.ts. Check migration numbering on every
-  db-touching lane.
-- **gh token trap:** the shell's `GH_TOKEN` env goes stale between refreshes
-  and 401s; `/creds/gh_token` (mounted, 40-min refresh) is authoritative —
-  prefix gh calls with `GH_TOKEN=$(cat /creds/gh_token)`. Note: `gh api user`
-  is always 403 for the app token; test with a repo call instead.
-- **CI/local flake:** `migrations.test.ts` (embedded-PG startup under
-  parallel load) fails ~1 in 3 full runs — different file each time, always
-  green on re-run/retrigger (max 3 empty-commit retriggers per house rule).
-- Ship chain: the six hops, the exact haynes-ops bump points, and what to do
-  when GitHub drops a workflow-trigger event (the remedies differ per hop — an
-  empty commit fixes release-please and does nothing for publish-image) are in
-  [`reference/ship-chain.md`](reference/ship-chain.md).
-- UI lanes must run the local preview rig + screenshots (memory:
-  local-preview-rig); the wave-2 lane caught a real popover-clipping bug only
-  via screenshots — keep requiring them.
-- Prod DB read access for audits: memory `prod-db-read-access`
-  (kubectl -n database exec postgres16-1, db cigar_journal, SELECT only).
+- **`ops-digest.sh` was blanking every entry.** `jq -r '.[$k]'` already unwraps
+  the JSON-string; piping that into `jq 'fromjson?'` hands fromjson an
+  already-parsed object → error → `// {}`. Every digest ever sent read `[?]` /
+  "no note". Fixed haynes-ops#2690. Watch for the same shape elsewhere.
+- **The CI `test` flake is fixed** (#174/#180): `pool.end()` then `pg.stop()`
+  raised an unhandled pool `error` (pg 57P01), failing runs where every test
+  passed. A red `test` job now means a real problem — do not retrigger past one.
+- **Renovate splits the image pins.** It bumps `helmrelease.yaml` only, leaving
+  the four CronJob pins stale (happened 2026-08-30, fixed haynes-ops#2689).
+  Check all five on every bump until #159 lands.
+- **Concurrent lanes collide on migration numbers** — #178 and #181 both took
+  0023. Pre-assign a number per lane and say so in the prompt.
+- **Loki has everything**; the pod's Actions-log egress is blocked but
+  `mcp__grafana-mcp__query_loki_logs` against `{namespace="frontend"}` answers
+  most "what actually happened" questions in one query.
+- **Adversarial review is earning its cost.** It caught an SSRF guard that
+  allowed `127.evil.com` and `169.254.169.254`, a security doc claiming
+  attributability the code did not have, and a change that would have hung 890
+  of 977 catalogue rows. Do not skip the verify stage.
+
+## How this repo is worked
+
+Coordinator mode: the session agent designs, reviews and ships; worktree lanes
+build. Fetch the canonical clone BEFORE dispatching. Landing: rebase onto fresh
+`origin/main`, full suite, PR, squash-merge (the branch commit message drives
+release-please; the release PR itself takes a REGULAR merge).
+Ship chain and per-hop remedies: `.agents/reference/ship-chain.md`.
+`gh` needs `GH_TOKEN=$(cat /creds/gh_token)` — the env var is stale and 401s.
+UI lanes must produce before/after screenshots from the local preview rig.
