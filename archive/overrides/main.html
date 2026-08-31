@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+<!--
+  Archive cutover (issue #97, plan from #96). Every page of the legacy MkDocs
+  journal carries one line pointing readers at the live site.
+
+  A banner rather than a redirect: `navigation.instant` is enabled, so Material
+  swaps documents client-side and a `<meta http-equiv="refresh">` would fire only
+  on a full page load — inconsistent the moment a reader navigates within the
+  site. The banner is also the honest option: these pages are still the original
+  record and stay readable, so sending people away from them unasked would be
+  wrong. See archive/README.md.
+-->
+{% block announce %}
+  This journal has moved to
+  <a href="https://cigars.haynesnetwork.com/journal">cigars.haynesnetwork.com</a>.
+  These pages remain as the original archive.
+{% endblock %}

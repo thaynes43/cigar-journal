@@ -9,6 +9,7 @@ import { LedgerTable } from "../_components/ledger-table";
 import type { DrillHeaderProps } from "../_components/catalog-drill-header";
 import {
   CATALOG_DIMENSION_META,
+  CATALOG_GROUP_STRINGS,
   UNFILED_SLUG,
   catalogUrl,
   drillOut,
@@ -100,7 +101,7 @@ async function drillHeader(state: CatalogState): Promise<Omit<DrillHeaderProps, 
   const resolved = await caller.catalog.resolveHierarchy({ hierarchy: state.hierarchy });
   const nameOf = (dimension: keyof typeof CATALOG_DIMENSION_META): string => {
     const slug = state.hierarchy[dimension];
-    if (slug === UNFILED_SLUG) return "Unfiled";
+    if (slug === UNFILED_SLUG) return CATALOG_GROUP_STRINGS.unfiled;
     return resolved[dimension]?.name ?? slug ?? "";
   };
 

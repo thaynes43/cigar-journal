@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CatalogCigarTile } from "@cj/domain";
+import type { CatalogCigarTile, OwnershipFacet } from "@cj/domain";
 import { CigarStillTile } from "./cigar-still-tile";
 
 // One root shelf strip (DESIGN-003 §Shelves): a horizontally-scrolled lens into
@@ -19,10 +19,15 @@ export function ShelfStrip({
   heading,
   href,
   cigars,
+  own = "all",
 }: {
   heading: string;
   href: string;
   cigars: CatalogCigarTile[];
+  // The ownership facet this shelf IS, so its tiles can drop the badge the
+  // heading already states (DESIGN-002 badge-row discipline) — every tile under
+  // "Wanted" is wanted, so a want badge on each is noise.
+  own?: OwnershipFacet;
 }) {
   const scroller = useRef<HTMLUListElement | null>(null);
   const [canLeft, setCanLeft] = useState(false);
@@ -80,6 +85,7 @@ export function ShelfStrip({
             <li key={cigar.cigarId} className="w-40 shrink-0 snap-start sm:w-44">
               <CigarStillTile
                 cigar={cigar}
+                own={own}
                 imageUrl={
                   cigar.hasProductPhoto ? `/api/product-photos/${cigar.cigarId}/thumb` : undefined
                 }

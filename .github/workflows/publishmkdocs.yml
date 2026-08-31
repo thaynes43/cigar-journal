@@ -27,5 +27,11 @@ jobs:
           path: .cache
           restore-keys: |
             mkdocs-material-
-      - run: pip install mkdocs-material
+      # Pinned: the cutover banner is a theme override (archive/overrides/main.html
+      # extending base.html's `announce` block), so the build now depends on the
+      # theme's template API. An unpinned install would take that dependency
+      # against whatever ships next — and MkDocs 2.0 is slated to drop the plugin
+      # system that overrides rely on. Keeping the archive publishable is a
+      # standing rule (AGENTS.md), so the version is explicit.
+      - run: pip install 'mkdocs-material==9.7.7'
       - run: mkdocs gh-deploy --force -f archive/mkdocs.yml
