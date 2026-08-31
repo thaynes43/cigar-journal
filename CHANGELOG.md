@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/thaynes43/cigar-journal/compare/v0.29.0...v0.30.0) (2026-08-31)
+
+
+### Features
+
+* **catalog:** matching v2 — alias-anchored resolution and structured write paths (migration 0027, ADR-012 Wave 2) ([#212](https://github.com/thaynes43/cigar-journal/issues/212)) ([a7e950a](https://github.com/thaynes43/cigar-journal/commit/a7e950a452b50f440ea97ecf98e0563af5f7af93))
+
 ## [0.29.0](https://github.com/thaynes43/cigar-journal/compare/v0.28.1...v0.29.0) (2026-08-31)
 
 

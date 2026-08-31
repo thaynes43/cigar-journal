@@ -16,6 +16,7 @@ import {
   auditLog,
   favorites,
   brands,
+  type SuggestedParse,
 } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import {
@@ -37,7 +38,7 @@ import {
   agentRunRows,
   undoCurationAction,
 } from "./curation.js";
-import { assignCigarParts } from "./taxonomy-writes.js";
+import { assignCigarParts, createBlend, createLine } from "./taxonomy-writes.js";
 import { enrichmentCoverageForCigar, recordEnrichmentAttempt } from "./enrichment-coverage.js";
 import { getProductPhoto } from "./product-photos.js";
 import { getMyInventory } from "./inventory.js";
@@ -2067,7 +2068,7 @@ describe("curation", () => {
     // (other tests seed rows at 2020/2026 dates), so assertions never assume a
     // page-1 position.
     async function drainCigars(
-      kind: "unverified" | "unbranded" | "untyped" | "missing_photos",
+      kind: "unverified" | "unbranded" | "unlined" | "unblended" | "untyped" | "missing_photos",
     ): Promise<WorklistCigar[]> {
       const out: WorklistCigar[] = [];
       let cursor: string | null = null;
@@ -2154,7 +2155,7 @@ describe("curation", () => {
 
       const ub = await drainCigars("unbranded");
       expect(ub.some((c) => c.cigarId === unbranded)).toBe(true);
-      expect(ub.every((c) => c.brand === null)).toBe(true);
+      expect(ub.every((c) => c.brandId === null)).toBe(true);
 
       const ut = await drainCigars("untyped");
       expect(ut.some((c) => c.cigarId === untyped)).toBe(true);
@@ -2164,6 +2165,94 @@ describe("curation", () => {
       const mpIds = new Set(mp.map((c) => c.cigarId));
       expect(mpIds.has(noPhoto)).toBe(true);
       expect(mpIds.has(withPhoto)).toBe(false);
+    });
+
+    // `unbranded` keys on `brand_id`, NOT on the free-text `brand` (ADR-012 Wave
+    // 3). The FK is what decides whether the catalog can navigate to a row, so a
+    // row spelled `Padrón` with a null link is precisely the work this queue
+    // exists to hand out — while the same row reads as branded to a text check.
+    it("unbranded keys on the registry link rather than the free-text brand", async () => {
+      const [brand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Worklist Padrón", slug: "worklist-padr-n" })
+        .returning();
+      const spelledOnly = await h.seedCigar({ canonicalName: "WL Spelled Padrón", brand: "Padrón" });
+      const linked = await h.seedCigar({
+        canonicalName: "WL Linked Padrón",
+        brand: "Padrón",
+        brandId: brand!.id,
+      });
+
+      const ids = new Set((await drainCigars("unbranded")).map((c) => c.cigarId));
+      expect(ids.has(spelledOnly)).toBe(true);
+      expect(ids.has(linked)).toBe(false);
+    });
+
+    // The rest of the structural ladder. Each rung is "has the level above, lacks
+    // this one", so a row sits in exactly one of the three at a time and moves
+    // down as it is structured.
+    it("unlined and unblended each surface only the rung below the level above", async () => {
+      const [brand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Worklist Ladder Marca", slug: "worklist-ladder-marca" })
+        .returning();
+      const line = await createLine(h.deps, admin, { brandId: brand!.id, name: "Ladder Line" });
+      const blend = await createBlend(h.deps, admin, { lineId: line.lineId, name: "Ladder Blend" });
+
+      const noBrand = await h.seedCigar({ canonicalName: "WL Ladder No Brand" });
+      const brandOnly = await h.seedCigar({ canonicalName: "WL Ladder Brand Only", brandId: brand!.id });
+      const lineOnly = await h.seedCigar({
+        canonicalName: "WL Ladder Line Only",
+        brandId: brand!.id,
+        lineId: line.lineId,
+      });
+      const blended = await h.seedCigar({
+        canonicalName: "WL Ladder Blended",
+        brandId: brand!.id,
+        lineId: line.lineId,
+        blendId: blend.blendId,
+      });
+
+      const unlined = new Set((await drainCigars("unlined")).map((c) => c.cigarId));
+      expect(unlined.has(brandOnly)).toBe(true);
+      // A row with no marca belongs one rung up, in `unbranded`, never to both.
+      expect(unlined.has(noBrand)).toBe(false);
+      expect(unlined.has(lineOnly)).toBe(false);
+
+      const unblended = new Set((await drainCigars("unblended")).map((c) => c.cigarId));
+      expect(unblended.has(lineOnly)).toBe(true);
+      expect(unblended.has(brandOnly)).toBe(false);
+      expect(unblended.has(blended)).toBe(false);
+    });
+
+    // The structural ids ride every row because the structural kinds are unworkable
+    // without them: a row in `unlined` needs its brandId to register a line under,
+    // and the free-text `brand` cannot supply one.
+    it("carries the structural ancestry and name source on a worklist row", async () => {
+      const [brand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Worklist Facts Marca", slug: "worklist-facts-marca" })
+        .returning();
+      const line = await createLine(h.deps, admin, { brandId: brand!.id, name: "Facts Line" });
+      const blend = await createBlend(h.deps, admin, { lineId: line.lineId, name: "Facts Blend" });
+      const cigarId = await h.seedCigar({
+        canonicalName: "WL Structured Row",
+        verification: "unverified",
+        brandId: brand!.id,
+        lineId: line.lineId,
+        blendId: blend.blendId,
+        vitolaName: "Toro",
+        nameSource: "composed",
+      });
+
+      const row = (await drainCigars("unverified")).find((c) => c.cigarId === cigarId);
+      expect(row).toMatchObject({
+        brandId: brand!.id,
+        lineId: line.lineId,
+        blendId: blend.blendId,
+        vitola: "Toro",
+        nameSource: "composed",
+      });
     });
 
     it("match_triage surfaces auto matches with the listing url and matched cigar facts", async () => {
@@ -2497,6 +2586,76 @@ describe("curation", () => {
       const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, m!.id));
       expect(row!.status).toBe("auto");
       expect(row!.cigarId).toBe(cigarId);
+    });
+
+    // The undo's before-snapshot was widened to carry `unmatchedReason` and
+    // `suggestedParse` for splitCigar's sake — it clears both when it settles a
+    // link, so an undo that left them out would restore a listing to the bucket
+    // with the split's erasure still on it. Nothing about that is supposed to
+    // reach setListingMatchStatus, whose forward write names only status,
+    // cigarId and decidedBy: the widened undo hands back the same values it
+    // found, which is no change at all. This is the pin on that "no change".
+    //
+    // The fixture populates BOTH evidence columns on a linked row — louder than
+    // the resolver would write — because a null could not tell a value preserved
+    // from a value cleared.
+    it("undo of a listing_match verdict leaves the evidence fields exactly as it found them", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Undo Match Evidence" });
+      const parse: SuggestedParse = {
+        brandId: null,
+        brandName: null,
+        lineId: null,
+        lineName: null,
+        blendId: null,
+        blendName: null,
+        vitolaName: null,
+        lengthInches: null,
+        ringGauge: null,
+        cleanedName: "undo match evidence listing",
+        packaging: null,
+        sticksPerPackage: null,
+        residue: "",
+        notes: [],
+        reason: "ambiguous",
+      };
+      const [m] = await h.deps.db
+        .insert(listingMatches)
+        .values({
+          vendorId,
+          listingKey: `undo-evidence-${newRequestId()}`,
+          cigarId,
+          status: "auto",
+          unmatchedReason: "ambiguous",
+          suggestedParse: parse,
+        })
+        .returning({ id: listingMatches.id });
+
+      await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId: m!.id,
+        status: "unmatched",
+        attribution: { actor: "agent", runId, confidence: 1 },
+      });
+      // Forward: the verdict moved status/cigarId/decidedBy and nothing else. A
+      // curator unmatching a row does not get to state WHY the resolver did —
+      // both evidence fields are the resolver's to write.
+      const [decided] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, m!.id));
+      expect(decided!.status).toBe("unmatched");
+      expect(decided!.cigarId).toBeNull();
+      expect(decided!.decidedBy).toBe("agent");
+      expect(decided!.unmatchedReason).toBe("ambiguous");
+      expect(decided!.suggestedParse).toEqual(parse);
+
+      const auditId = await agentAudit(runId, "listing_match.set_status");
+      await undoCurationAction(h.deps, admin, { clientRequestId: newRequestId(), auditId });
+
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, m!.id));
+      expect(row!.status).toBe("auto");
+      expect(row!.cigarId).toBe(cigarId);
+      expect(row!.decidedBy).toBe("crawler");
+      expect(row!.unmatchedReason).toBe("ambiguous");
+      expect(row!.suggestedParse).toEqual(parse);
     });
 
     it("undo of a photo-rights change restores the prior rights", async () => {

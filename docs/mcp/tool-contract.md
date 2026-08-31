@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Twenty-six tools over the application services, client-neutral: any MCP client
+Thirty tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -40,8 +40,9 @@ catalog repair, and chat-submitted price observations). There is no
 (the same scope already gates add_cigar's lazy create and the enrichment write).
 `curation:read` (get_curation_queue) and `curation:write` (set_listing_match_status,
 set_cigar_facts, verify_cigar, exclude_cigar, restore_cigar,
-set_product_photo_rights, rename_cigar, queue_enrichment_backlog) are a SEPARATE
-pair, so a journal:write token can never reach a curation tool. get_cigar is the
+set_product_photo_rights, rename_cigar, queue_enrichment_backlog,
+register_taxonomy, update_registry_aliases, assign_cigar_taxonomy, split_cigar)
+are a SEPARATE pair, so a journal:write token can never reach a curation tool. get_cigar is the
 one any-of tool: `catalog:read` OR `curation:read`. Curation scope is necessary but
 not sufficient — every curation handler also requires an admin principal, so a
 curation-scoped token on a non-admin user is rejected exactly as the web console
@@ -149,14 +150,15 @@ Field conventions:
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - Combine related corrections into one update_smoke call rather than several.
 
-Catalog curation (admin only). The get_curation_queue read and the eight curation
+Catalog curation (admin only). The get_curation_queue read and the twelve curation
 write tools are for an operations agent maintaining the catalog — not for
 conversational journaling; a normal chat session never uses them. get_curation_queue
-pages the work by kind (unverified, duplicates, match_triage, unbranded, untyped,
-missing_photos); drain a kind with its nextCursor. A match_triage row carries a
-status: auto is a proposed link to rule on, unmatched is a listing the crawler
-linked to nothing and its reason says why — report those, they have no verdict
-tool yet. Apply only what the evidence
+pages the work by kind (unverified, duplicates, match_triage, unbranded, unlined,
+unblended, untyped, missing_photos); drain a kind with its nextCursor. A
+match_triage row carries a status: auto is a proposed link to rule on, unmatched is
+a listing the crawler linked to nothing and its reason says why: no_anchor means
+the title spelled the marca a way the registry does not know, and ambiguous means a
+brand anchored but no single entry under it settled. Apply only what the evidence
 supports: high-confidence corrections apply directly (set_cigar_facts overwrites a
 wrong brand/line/type/manufacturer; rename_cigar corrects a wrong canonical name;
 verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
@@ -176,6 +178,28 @@ written for it. Enrichment matches on the canonical name, so the way to make a r
 enqueueable is rename_cigar then verify_cigar. Pass runId (the batch id) and
 confidence (0-1) on every write so the run is auditable and reversible. Merges stay
 human-only in the web console — there is no merge tool here.
+
+Catalog structure (admin only). A cigar hangs off a brand, a line under that, a
+blend under that, with a vitola on the leaf itself. The three structural queue
+kinds are one ladder worked in order — unbranded, then unlined, then unblended —
+and a row leaving one appears in the next. For a row: decide the levels from the
+evidence, call register_taxonomy to find or mint the brand, line and blend it needs
+(finding and minting are the same call, and created says which happened), then
+assign_cigar_taxonomy with the ids it returned. Never invent a level. Unknown stays
+out, and a cigar whose line nobody knows correctly hangs off its brand alone —
+that is a finished row, not a gap. Setting nameSource composed hands the canonical
+name over to the parts; send preview true first to see the name they compose to
+before the flip. update_registry_aliases is what closes a no_anchor listing: add
+the spelling as a key on the entity it names, never loosen the match. A key some
+other entity already claims is refused and that entity is named — use it rather
+than working around it, because the refusal is usually a near-duplicate caught.
+split_cigar breaks an entry that has been standing for several products into the
+leaves it should have been and moves each product's listings onto its own; split
+only on unambiguous listing evidence, leave the rest, and expect a partial split.
+It refuses a listing a curator or agent already ruled on. A leaf it mints inherits
+the line and blend you leave out from the entry being split, and minting is
+get-or-create like register_taxonomy — parts that already name a live entry
+re-point onto it rather than growing a second copy of it.
 ```
 
 Guidance, not enforcement — the server validates every request regardless.
@@ -1284,10 +1308,12 @@ never mint registry vendor rows. Scope `journal:write`.
 
 ## Curation surface (admin only)
 
-`get_curation_queue` (read, `curation:read`) plus eight writes on `curation:write`:
+`get_curation_queue` (read, `curation:read`) plus twelve writes on `curation:write`:
 `set_listing_match_status`, `set_cigar_facts`, `verify_cigar`, `exclude_cigar`,
 `restore_cigar`, `set_product_photo_rights`, `rename_cigar`,
-`queue_enrichment_backlog`. These are for an operations agent maintaining the
+`queue_enrichment_backlog`, and the four taxonomy verbs `register_taxonomy`,
+`update_registry_aliases`, `assign_cigar_taxonomy`, `split_cigar` (ADR-012 Wave 3).
+These are for an operations agent maintaining the
 catalog (DESIGN-003 §Curation); a conversational session never uses them. Every
 write carries the mutation envelope plus `runId` and `confidence`, and the adapter
 stamps `actor: agent` server-side so the review console can group and score a run.
@@ -1295,15 +1321,60 @@ Scope alone is not enough — each handler also requires an admin principal.
 
 Every cigar in a `get_curation_queue` payload — the `cigars` rows and the cigar
 nested in a `match_triage` row — carries `heldLots`: purchase lots pointing at it
-across **all** users.
+across **all** users, and its structural ancestry, which is what the taxonomy
+verbs take.
 
 ```yaml
 cigars:
   - cigarId: cg_01j9x2
     canonicalName: Oliva Free Sampler
-    brand: null
+    brand: null                 # free text, the owner's string
+    brandId: null               # the registry link — what `unbranded` keys on
+    lineId: null
+    blendId: null
+    vitola: null
+    nameSource: freeform        # freeform | composed
     heldLots: 3                 # somebody owns this — exclude_cigar will refuse it
 ```
+
+A `match_triage` row also carries `suggestedParse` when the resolver recorded one
+(migration 0027): the brand, line and blend the title anchored to, its vitola and
+dimensions, the packaging it stripped, and `residue` — the part of the title
+nothing accounted for, which is the most useful field on an ambiguous row. It is
+**evidence, never a verdict**: an ambiguous row is ambiguous precisely because the
+parse did not settle it, so argue from it, do not apply it.
+
+```yaml
+matches:
+  - matchId: lm_01
+    status: unmatched
+    reason: ambiguous
+    suggestedParse:
+      brandName: Padrón
+      lineName: 1964 Anniversary Series
+      blendName: Maduro          # what the title named...
+      vitolaName: Exclusivo
+      cleanedName: Padrón 1964 Anniversary Series Maduro Exclusivo
+      residue: ""                # ...and nothing left unexplained
+```
+
+### The structural ladder (ADR-012 Wave 3)
+
+`unbranded`, `unlined` and `unblended` are one backlog worked in order: each kind
+is "has the level above, lacks this one", so a row sits in exactly one of them and
+moves down as it is structured.
+
+**`unbranded` keys on `brandId`, not on the free-text `brand`** — and the two
+disagree for hundreds of rows. A row spelled `Padrón` whose `brandId` is null has
+a brand a human can read and no brand the catalog can navigate to, group by, or
+match a listing against. Keying the queue on the text counted that row as done;
+keying it on the link is what makes the queue empty exactly when the structure is
+complete.
+
+Nothing here ever invents a level. A cigar whose line genuinely is not known hangs
+off its brand and is a **finished** row, not a gap — `unlined` is a queue of rows
+whose line is knowable and unrecorded, and the judgement of which is which is the
+curator's, made from evidence, one row at a time.
 
 ### exclude_cigar refuses a held cigar
 
@@ -1404,6 +1475,307 @@ misses spends one of that vendor's two attempts. Enrichment resolves by canonica
 name (slug-token ranking, then a pg_trgm similarity floor), which is why an
 unreviewed name is refused; and an untyped cigar needs BOTH markets covered,
 because enrichment is what would tell us which one it belongs to.
+
+### register_taxonomy — write, idempotent
+
+Find or mint the registry path a catalog entry needs: a brand, the line under it,
+the blend under that (ADR-012 Wave 3). **Finding and minting are the same call.**
+Structuring a brand top-down means naming the same line for the fifty-two Arturo
+Fuente rows beneath it; a create-only verb would make fifty-one of those calls
+errors, and an agent that learns to ignore "already exists" is one that ignores
+the collision refusal too. `created` says which happened at each level.
+
+```yaml
+arguments:
+  clientRequestId: 9f2c...        # required; reuse EXACTLY on a retry
+  brandId: br_01j9x2              # the marca by id, from a queue row
+  brand:                          # ...or by name. Exactly one of the two
+    name: Padrón
+    aliases: [Padron]             # other SPELLINGS, not slugs
+  line:
+    name: 1964 Anniversary Series
+  blend:
+    name: Maduro
+    wrapper: Nicaraguan Maduro    # omit any fact not known — never invent one
+    blenders: [José Orlando Padrón]
+  runId: wo-cigar-curate-20260831
+  confidence: 0.9
+
+result:
+  brand: { id: br_01j9x2, name: Padrón, slug: padr-n, aliases: [padr-n, padron], created: false }
+  line:  { id: ln_01j9x3, name: 1964 Anniversary Series, slug: 1964-anniversary-series, aliases: [...], created: true }
+  blend: { id: bl_01j9x4, name: Maduro, slug: maduro, aliases: [maduro], created: true }
+  blenders:
+    - id: bd_01j9x5
+      name: José Orlando Padrón
+      created: true               # this call minted the blender
+      credited: true              # false when the credit already existed
+  replayed: false
+```
+
+**Aliases are spellings, not keys.** Every entry is folded server-side into the
+matching key the resolver probes for (`Padrón` → `padron`). A caller that passed a
+pre-slugged string would be guessing at a normalization it cannot see, and a
+display spelling written into a key column is an alias nothing ever probes for —
+a silent failure rather than a loud one.
+
+**A refused key is a near-duplicate caught.** An alias already claimed by another
+entity at the same level is refused, naming the holder:
+
+```yaml
+error:
+  code: validation_error
+  recoverable: true
+  action: { type: fix_and_retry }
+  fields:
+    - path: aliases
+      message: "The matching key 'padron' is already claimed by 'Padrón'."
+```
+
+That is the guard that makes minting a brand safe. `brands.slug` is unique but
+does not fold accents, so `Padron` and `Padrón` slug differently and the unique
+index would admit both; their folded keys are identical, so the second is refused
+and the curator is told which marca already exists. **Use the entity named — do
+not work around the refusal.**
+
+Scoping differs by level and it is deliberate: brand and blender keys are unique
+globally, a line's within its brand, a blend's within its line. Two marcas may
+each own a `reserva` and neither has to yield the name. `blend` requires `line`,
+and naming the marca twice (or not at all) is a `validation_error`. Scope
+`curation:write`, admin only.
+
+### update_registry_aliases — write, idempotent
+
+Add or drop the spellings one registry entity answers to. **This is the tool that
+closes a `no_anchor` listing:** the vendor's title named the marca a way the
+registry does not know, and the fix is that spelling as a key — never a looser
+matcher. Loosening the match is how a flat namespace grew a parallel catalogue per
+vendor (ADR-012).
+
+```yaml
+arguments:
+  clientRequestId: 9f2c...
+  level: brand                    # brand | line | blend | blender
+  id: br_01j9x2
+  add: ["RYJ", "Romeo y Julieta"] # spellings; folded to keys server-side
+  remove: ["romeo"]               # too short to anchor safely — drop it
+  runId: wo-cigar-curate-20260831
+  confidence: 0.9
+
+result:
+  level: brand
+  id: br_01j9x2
+  name: Romeo y Julieta
+  aliases: [romeo-y-julieta, ryj]  # the full key set after the edit
+  added: [ryj]
+  removed: [romeo]                 # each reports only what actually moved
+  replayed: false
+```
+
+**Target-state over a set, with an envelope.** Adding a key already held and
+removing one already absent are both no-ops rather than errors — the lists report
+what moved — but the tool still carries a `clientRequestId`, because unlike
+`set_want` the *set* it is editing is shared: two concurrent calls adding
+different keys are two different intents, not one desired end state.
+
+Two removals are refused, and both protect findability rather than tidiness:
+
+| refusal | why |
+| --- | --- |
+| the key derived from the entity's own name | it is how the anchor reaches the row by its own name; dropping it leaves an entity that exists and cannot be found. Rename it instead — a different, audited act |
+| the last remaining key | an empty alias array is a row no probe can ever return |
+
+Scope `curation:write`, admin only.
+
+### assign_cigar_taxonomy — write, idempotent
+
+Place a catalog entry in the taxonomy and set the parts that live on the leaf.
+**The one authorized path to `lineId`/`blendId`**, and therefore the one place the
+ancestry rule has real work to do.
+
+```yaml
+arguments:
+  clientRequestId: 9f2c...
+  cigarId: cg_01j9x2
+  brand: Padrón                   # the spelling; brandId is re-derived from it
+  brandId: br_01j9x2              # ...or the id. Never both
+  lineId: ln_01j9x3               # null clears; omitted leaves untouched
+  blendId: bl_01j9x4
+  vitolaName: Exclusivo
+  edition: null
+  nameSource: composed            # freeform | composed
+  preview: false                  # true validates and computes, writes nothing
+  runId: wo-cigar-curate-20260831
+  confidence: 0.9
+
+result:
+  cigarId: cg_01j9x2
+  canonicalName: Padrón 1964 Anniversary Series Maduro Exclusivo
+  composedName: Padrón 1964 Anniversary Series Maduro Exclusivo
+  nameSource: composed
+  changedFields: [lineId, blendId, vitolaName, nameSource]
+  preview: false
+  replayed: false
+```
+
+**`composedName` is always reported, whatever `nameSource` says.** On a `freeform`
+row it is the name the entry *would* take, which is the whole question a curator
+asks before flipping it.
+
+**The preview is a dry run of this exact call.** It loads the same row, applies the
+same overlay, runs the same ancestry assertion and composes through the same
+function — then returns instead of writing. So a refusal shows up on the preview
+too, which is the point: a dry run that answered only the easy half ("what would it
+be called?") and hid the half that rejects the write is worse than none. A preview
+writes nothing and records no idempotency key, so **the same `clientRequestId`
+commits what was just previewed.**
+
+**Ancestry is checked against the row that would result, not the fields supplied.**
+Clearing `lineId` while leaving `blendId` in place describes an inconsistent cigar
+even though it named one level. A line must belong to the brand and a blend to the
+line; a violation is a `validation_error` whose `path` names the level at fault:
+
+```yaml
+fields:
+  - path: lineId
+    message: The line belongs to a different brand than the cigar.
+```
+
+**Setting the marca by name re-derives the link.** `cigars.brandId` is a
+*projection* of the free-text `brand` (ADR-012), so writing the text recomputes the
+link by the one rule every writer of that column shares. A spelling no brand
+answers to yields a null link — an unlinked row is a worklist item, a wrongly
+linked one is a silent error. Passing `brand` and `brandId` together is refused
+rather than reconciled. Flipping to `composed` with no brand at all is refused: a
+composition needs something to compose from. Scope `curation:write`, admin only.
+
+### split_cigar — write, idempotent
+
+Break a catalog entry that has been standing for several products into the leaves
+it should have been, moving each product's vendor listings onto its own. The
+collapse buckets this addresses run up to twelve listings on one row.
+
+```yaml
+arguments:
+  clientRequestId: 9f2c...
+  cigarId: cg_01j9x2              # the bucket
+  splits:
+    - listingIds: [lm_01, lm_02]  # must currently point at cigarId
+      blendId: bl_maduro          # mint a leaf under the bucket's brand...
+      vitolaName: Exclusivo
+    - listingIds: [lm_03]
+      targetCigarId: cg_01j9x9    # ...or move them onto an existing sibling
+  runId: wo-cigar-curate-20260831
+  confidence: 0.9
+
+result:
+  cigarId: cg_01j9x2
+  splits:
+    - cigarId: cg_01jab1
+      canonicalName: Padrón 1964 Anniversary Series Maduro Exclusivo
+      created: true
+      listingIds: [lm_01, lm_02]
+    - cigarId: cg_01j9x9
+      canonicalName: Padrón 1964 Anniversary Series Natural Exclusivo
+      created: false
+      listingIds: [lm_03]
+  remainingListings: 4            # listings still on the bucket
+  replayed: false
+```
+
+**Composed where composition works; one new verb where it did not.** Every
+registry row a split needs comes from `register_taxonomy`, and any leaf it does not
+mint is one `assign_cigar_taxonomy` already structured. What could not be composed
+is the last step: `set_listing_match_status` confirms or clears the link a row
+already has and has **no way to give it a different cigar** — the resolution verb
+the triage read has documented as deferred since #170. This is that verb, bounded
+to the split case, where the destination is a sibling of the row the listing is
+already on and the evidence is the listing itself.
+
+**Conservative by construction.** Listings you do not name stay where they are, so
+`remainingListings` above zero is the expected outcome, not a failure. Split only
+on unambiguous listing evidence; a bucket half-dispersed on good evidence is a
+better catalog than one fully dispersed on guesses.
+
+**A minted leaf inherits the bucket's structure; an omitted level is not a
+cleared one.** Splitting by vitola says nothing about the line, so a `lineId` or
+`blendId` you leave out is taken from the entry being split — carving `Torpedo`
+out of `Padrón 1964 Anniversary Series` yields `Padrón 1964 Anniversary Series
+Torpedo`, not `Padrón Torpedo`. This is the same omitted-vs-null distinction
+`assign_cigar_taxonomy` draws: send an explicit `null` to say the leaf genuinely
+has no line. A leaf that came out less structured than its bucket would be a
+fresh worklist item minted by the tool meant to clear them.
+
+**Minting is get-or-create, like `register_taxonomy`.** An arm whose composed
+identity already names a live entry — by its folded name, or by the same
+`{brandId, lineId, blendId, vitolaName, edition}` — re-points onto that entry and
+reports `created: false` rather than minting a second one. Two arms naming the
+same product in one call collapse onto one leaf for the same reason. The
+duplicates this prevents are the hardest kind to find: same marca, same parts,
+same name, differing only in id.
+
+Refusals, each refusing the whole call rather than half-applying it:
+
+| refusal | why |
+| --- | --- |
+| a listing that does not point at `cigarId` | a split re-points its own listings; anything else is a different operation |
+| a listing whose `decidedBy` is `curator`/`agent`, or whose status is `confirmed` | somebody already ruled on that link (ADR-006, migration 0017). Bulk evidence work does not overturn a settled verdict — the message names who decided it |
+| the same listing id in two splits | a listing names one product |
+| a new leaf with no line, blend, vitola or edition of its own | it would be the same product under a second id — the duplicate this wave exists to end, created by the tool meant to prevent it |
+| `targetCigarId` alongside any mint part | two instructions in one arm. Both-or-neither, the same rule `assign_cigar_taxonomy` applies to `brand`/`brandId` — an existing sibling already has its parts |
+| a `targetCigarId` under a different marca, or where either entry has no `brandId` | the destination is a **sibling**, which is what bounds this to the split case. Unbounded it is a general "move these listings anywhere" verb wearing a split's name. An unbranded row is not a sibling of everything; it is a row whose marca nobody has established yet |
+| a minted leaf with no marca to compose from | `Robusto` is a size every marca sells, not a cigar — a leaf named for one is a worse collapse bucket than the row being split. Name it yourself with `canonicalName` and the leaf is `freeform`, which is a curator taking responsibility for the string |
+| an arm whose parts compose to the entry being split | re-pointing the bucket's listings at the bucket is a no-op reported as a leaf that was never made |
+| parts that name more than one live entry | the duplicates are named; merge them, or pick one with `targetCigarId` |
+
+**Audited and reversible.** Each re-point is audited as `listing_match.set_status`
+with the bucket in `before`, which is the action the review console's Undo already
+inverts — so a wrong split is walked back listing by listing with no new undo path.
+The undo is a **true inverse**: it restores the decider and the resolver's
+`suggestedParse`/`unmatchedReason` alongside the cigar and status, so an undone
+listing splits again cleanly. Restoring only the cigar and status handed the
+listing back stamped `confirmed` by a curator, which the settled-link refusal
+above then reads as somebody's verdict — leaving the bucket unsplittable by the
+tool that mis-split it.
+A leaf minted in error is merged back into the bucket through the existing merge
+ledger, which carries its listings home with it (ADR-012: "reversible via the
+existing merge/unmerge ledger"). Merges themselves stay human-only in the console;
+there is still no merge tool here.
+
+**A split moves listings and nothing else.** Purchase lots and smokes stay on the
+row they were logged against — re-attributing somebody's journal entry to a leaf
+they never chose is a claim about their memory, not about the catalog. A bucket
+that carries history is still the row where a split matters most and a mistake is
+least recoverable, so the `cigar.split` audit row carries `heldLots` and `smokes`:
+a reviewer can see which splits touched the owner's own history without joining
+anything.
+
+A minted leaf is `unverified` on purpose: the curator asserted its **structure**,
+which is a different claim from having reviewed the finished entry. Scope
+`curation:write`, admin only.
+
+### Working a collapse bucket end to end
+
+The flow the three verbs compose, on a `match_triage` row reported `ambiguous`:
+
+`get_curation_queue` → `register_taxonomy` → `assign_cigar_taxonomy` →
+`split_cigar`
+
+1. `get_curation_queue kind: match_triage` returns the ambiguous row; its
+   `suggestedParse` names the blend and vitola the title actually carried, and its
+   `cigar` is the bucket every candidate collapsed into.
+2. `register_taxonomy` finds or mints the line and blend that parse names, under
+   the bucket's brand. Repeat per distinct product — it is get-or-create, so the
+   second call for a shared line finds the first one's row.
+3. `assign_cigar_taxonomy` structures the **bucket itself** onto whichever product
+   it should keep, so the row that survives is a leaf rather than a family.
+4. `split_cigar` moves the other products' listings onto their own leaves, minting
+   each from the ids step 2 returned.
+
+Steps 2-4 are separately idempotent, so a lane interrupted between them resumes by
+repeating the step it was on. Do not skip step 3: a bucket left unstructured keeps
+matching new listings for every product it used to serve, and the next crawl
+rebuilds the bucket the split just took apart.
 
 ## Errors
 

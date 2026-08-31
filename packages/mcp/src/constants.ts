@@ -6,10 +6,10 @@
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
 // The tool surface. The first seventeen are the conversational journal contract
-// (reads annotated readOnlyHint). The final nine are the admin catalog-curation
-// surface (DESIGN-003 wave 4a/4b, issue #126): the ops-agent tools, gated on
-// `curation:*` scope AND an admin-role principal — additive, existing tools and
-// scopes untouched (R-MCP-4).
+// (reads annotated readOnlyHint). The final thirteen are the admin catalog-curation
+// surface (DESIGN-003 wave 4a/4b, issue #126; the taxonomy four from ADR-012 Wave 3,
+// issue #196): the ops-agent tools, gated on `curation:*` scope AND an admin-role
+// principal — additive, existing tools and scopes untouched (R-MCP-4).
 export const TOOL_NAMES = [
   "search_cigars",
   "get_cigar",
@@ -28,7 +28,7 @@ export const TOOL_NAMES = [
   "request_cigar_enrichment",
   "update_cigar",
   "record_price",
-  // Curation surface (admin-only) — one paged read + eight curator writes.
+  // Curation surface (admin-only) — one paged read + twelve curator writes.
   "get_curation_queue",
   "set_listing_match_status",
   "set_cigar_facts",
@@ -38,6 +38,13 @@ export const TOOL_NAMES = [
   "set_product_photo_rights",
   "rename_cigar",
   "queue_enrichment_backlog",
+  // The taxonomy verbs (ADR-012 Wave 3, issue #196): find-or-mint a registry
+  // path, edit the spellings a registry row answers to, place a leaf in the
+  // structure, and split an entry that stands for several products.
+  "register_taxonomy",
+  "update_registry_aliases",
+  "assign_cigar_taxonomy",
+  "split_cigar",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -98,6 +105,10 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   // would hand a catalog agent the owner's journal — save_smoke, record_purchase,
   // set_want — for one enqueue action.
   queue_enrichment_backlog: ["curation:write"],
+  register_taxonomy: ["curation:write"],
+  update_registry_aliases: ["curation:write"],
+  assign_cigar_taxonomy: ["curation:write"],
+  split_cigar: ["curation:write"],
 };
 
 // Personal fields on catalog tools require this additional scope.
@@ -208,14 +219,15 @@ Field conventions:
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - Combine related corrections into one update_smoke call rather than several.
 
-Catalog curation (admin only). The get_curation_queue read and the eight curation
+Catalog curation (admin only). The get_curation_queue read and the twelve curation
 write tools are for an operations agent maintaining the catalog — not for
 conversational journaling; a normal chat session never uses them. get_curation_queue
-pages the work by kind (unverified, duplicates, match_triage, unbranded, untyped,
-missing_photos); drain a kind with its nextCursor. A match_triage row carries a
-status: auto is a proposed link to rule on, unmatched is a listing the crawler
-linked to nothing and its reason says why — report those, they have no verdict
-tool yet. Apply only what the evidence
+pages the work by kind (unverified, duplicates, match_triage, unbranded, unlined,
+unblended, untyped, missing_photos); drain a kind with its nextCursor. A
+match_triage row carries a status: auto is a proposed link to rule on, unmatched is
+a listing the crawler linked to nothing and its reason says why: no_anchor means
+the title spelled the marca a way the registry does not know, and ambiguous means a
+brand anchored but no single entry under it settled. Apply only what the evidence
 supports: high-confidence corrections apply directly (set_cigar_facts overwrites a
 wrong brand/line/type/manufacturer; rename_cigar corrects a wrong canonical name;
 verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
@@ -234,4 +246,26 @@ completed an enrich run; every other row comes back with the reason and nothing 
 written for it. Enrichment matches on the canonical name, so the way to make a row
 enqueueable is rename_cigar then verify_cigar. Pass runId (the batch id) and
 confidence (0-1) on every write so the run is auditable and reversible. Merges stay
-human-only in the web console — there is no merge tool here.`;
+human-only in the web console — there is no merge tool here.
+
+Catalog structure (admin only). A cigar hangs off a brand, a line under that, a
+blend under that, with a vitola on the leaf itself. The three structural queue
+kinds are one ladder worked in order — unbranded, then unlined, then unblended —
+and a row leaving one appears in the next. For a row: decide the levels from the
+evidence, call register_taxonomy to find or mint the brand, line and blend it needs
+(finding and minting are the same call, and created says which happened), then
+assign_cigar_taxonomy with the ids it returned. Never invent a level. Unknown stays
+out, and a cigar whose line nobody knows correctly hangs off its brand alone —
+that is a finished row, not a gap. Setting nameSource composed hands the canonical
+name over to the parts; send preview true first to see the name they compose to
+before the flip. update_registry_aliases is what closes a no_anchor listing: add
+the spelling as a key on the entity it names, never loosen the match. A key some
+other entity already claims is refused and that entity is named — use it rather
+than working around it, because the refusal is usually a near-duplicate caught.
+split_cigar breaks an entry that has been standing for several products into the
+leaves it should have been and moves each product's listings onto its own; split
+only on unambiguous listing evidence, leave the rest, and expect a partial split.
+It refuses a listing a curator or agent already ruled on. A leaf it mints inherits
+the line and blend you leave out from the entry being split, and minting is
+get-or-create like register_taxonomy — parts that already name a live entry
+re-point onto it rather than growing a second copy of it.`;

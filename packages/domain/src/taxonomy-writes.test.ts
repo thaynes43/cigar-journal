@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { auditLog, blendBlenders, blends, brands, cigars, lines } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { brandSlug } from "./catalog-browse.js";
 import { fold } from "./taxonomy-keys.js";
 import {
+  createBrand,
+  createBrandWithinTx,
   createLine,
   addLineAliases,
   createBlend,
@@ -115,6 +117,117 @@ describe("taxonomy writes", () => {
         expect(() => assertSlugMintable(slug, "name")).not.toThrow();
       }
     });
+
+    // Wave 3 (#214) made brands mintable from TypeScript for the first time —
+    // until then the registry was seeded only by migration 0026/0027, so the
+    // reservation had no brand-level write path to guard. It needs none of its
+    // own: every create path mints through `requireSlug`, so the new one is
+    // covered by construction. Pinned because "covered by construction" is a
+    // claim about a chokepoint, and chokepoints are exactly what a later
+    // refactor routes around.
+    it("holds on the brand path Wave 3 added", async () => {
+      const brand = await createBrand(h.deps, curator, { name: "Unfiled" });
+      expect(brand.slug).toBe(`unfiled${RESERVED_SLUG_SUFFIX}`);
+      expect(brand.slug).not.toBe("unfiled");
+    });
+  });
+
+  // The one collision the check cannot see on its own: `aliases` has no unique
+  // constraint, so two transactions claiming the same folded key can both read a
+  // clean table and both commit unless something serializes them. Both tests
+  // drive the race deliberately rather than hoping to catch it — the first
+  // transaction is held open, mid-claim and uncommitted, for exactly as long as
+  // it takes the second to park on the advisory lock.
+  describe("concurrent alias claims", () => {
+    const deferred = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((settle) => {
+        resolve = settle;
+      });
+      return { promise, resolve };
+    };
+
+    // A writer parked on an advisory lock is an ungranted row in `pg_locks`.
+    // Waiting for it is what makes the race deterministic instead of timing
+    // luck: the holder does not commit until the challenger is provably blocked,
+    // so the outcome is decided by the lock and never by which statement won a
+    // scheduling coin flip.
+    const waitForBlockedClaim = async (): Promise<boolean> => {
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const parked = await h.deps.db.execute(
+          sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`,
+        );
+        if ((parked.rows as unknown as { n: number }[])[0]!.n > 0) return true;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return false;
+    };
+
+    it(
+      "lets exactly one of two racing claims on the same folded key win",
+      async () => {
+        const claimed = deferred();
+        const commit = deferred();
+
+        const holder = h.deps.db.transaction(async (tx) => {
+          const result = await createBrandWithinTx(tx, h.deps, curator, { name: "Fóldy" });
+          claimed.resolve();
+          await commit.promise;
+          return result;
+        });
+        await claimed.promise;
+
+        // `Foldy` slugs differently from `Fóldy`, so the unique index on
+        // `brands.slug` would admit it happily. The folded key `foldy` they both
+        // derive is the whole conflict — and it is uncommitted, and therefore
+        // invisible to any SELECT, for as long as the holder stays open.
+        const challenger = createBrand(h.deps, curator, { name: "Foldy" });
+        const blocked = await waitForBlockedClaim();
+        commit.resolve();
+        const [first, second] = await Promise.allSettled([holder, challenger]);
+
+        expect(blocked).toBe(true);
+        expect(first.status).toBe("fulfilled");
+        expect(second.status).toBe("rejected");
+        const error = (second as PromiseRejectedResult).reason as ValidationError;
+        expect(error).toBeInstanceOf(ValidationError);
+        expect(error.fields[0]!.message).toBe("The matching key 'foldy' is already claimed by 'Fóldy'.");
+
+        // The point of the refusal: one key, one holder. Two would leave the key
+        // unresolvable — `anchorByAlias` drops a key claimed by more than one row.
+        const holders = await h.deps.db.execute(sql`SELECT name FROM brands WHERE aliases && ARRAY['foldy']::text[]`);
+        expect(holders.rows).toHaveLength(1);
+      },
+      20_000,
+    );
+
+    // Per key, not a global mutex: serializing every registry write behind one
+    // lock would make a curation batch a queue.
+    it(
+      "lets claims on different keys proceed side by side",
+      async () => {
+        const claimed = deferred();
+        const commit = deferred();
+
+        const holder = h.deps.db.transaction(async (tx) => {
+          await createBrandWithinTx(tx, h.deps, curator, { name: "Lockstep Alpha" });
+          claimed.resolve();
+          await commit.promise;
+        });
+        await claimed.promise;
+
+        try {
+          await expect(createBrand(h.deps, curator, { name: "Lockstep Beta" })).resolves.toMatchObject({
+            slug: "lockstep-beta",
+          });
+        } finally {
+          commit.resolve();
+          await holder;
+        }
+      },
+      20_000,
+    );
   });
 
   describe("createLine", () => {
@@ -215,7 +328,7 @@ describe("taxonomy writes", () => {
       const result = await addLineAliases(h.deps, curator, { id: line.lineId, aliases: ["Under Crown"] });
       expect(result.added).toEqual(["under-crown"]);
       expect(result.aliases).toEqual(["under-crown", "undercrown"]);
-      expect(await auditsFor("line.add_aliases")).toHaveLength(1);
+      expect(await auditsFor("line.set_aliases")).toHaveLength(1);
     });
 
     it("is a no-op when the key is already held", async () => {

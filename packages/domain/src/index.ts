@@ -184,9 +184,27 @@ export {
 } from "./taxonomy-resolve.js";
 export { vitolaAgrees, variantRelation, type VariantRelation } from "./name-heuristics.js";
 
-// Registry writes and name recomposition. Domain-level only this wave — the
-// curation surfaces that call them are Wave 3 and their MCP tools are Wave 4.
+// Registry writes and name recomposition — the audited PRIMITIVES (Wave 2). The
+// enveloped curation services that wrap them are in taxonomy-curation.ts below;
+// these stay exported because the crawler fixtures and the matching-v2 tests seed
+// registries through the same validation a curator goes through.
 export {
+  createBrand,
+  createBrandWithinTx,
+  createLineWithinTx,
+  createBlendWithinTx,
+  createBlenderWithinTx,
+  creditBlenderWithinTx,
+  assignCigarPartsWithinTx,
+  editRegistryAliases,
+  editRegistryAliasesWithinTx,
+  assertAliasesFree,
+  type CreateBrandInput,
+  type CreateBrandResult,
+  type EditAliasesInput,
+  type EditAliasesResult,
+  type RegistryLevel,
+  type AliasScope,
   createLine,
   addLineAliases,
   createBlend,
@@ -219,6 +237,32 @@ export {
   type CigarNameParts,
   type RegistryAttribution,
 } from "./taxonomy-writes.js";
+
+// THE TAXONOMY CURATION SURFACE (ADR-012 Wave 3, issue #196). The four enveloped
+// services behind the MCP curation tools: find-or-mint a registry path, edit the
+// keys a registry row answers to, structure one leaf (with a dry run), and split a
+// collapse bucket into the leaves it should always have been.
+export {
+  registerTaxonomy,
+  updateRegistryAliases,
+  assignCigarTaxonomy,
+  splitCigar,
+  type RegisterTaxonomyInput,
+  type RegisterTaxonomyResult,
+  type RegisterBrandInput,
+  type RegisterLineInput,
+  type RegisterBlendInput,
+  type RegisteredEntity,
+  type RegisteredBlender,
+  type UpdateRegistryAliasesInput,
+  type UpdateRegistryAliasesResult,
+  type AssignCigarTaxonomyInput,
+  type AssignCigarTaxonomyResult,
+  type SplitCigarInput,
+  type SplitCigarResult,
+  type SplitTargetInput,
+  type SplitOutcome,
+} from "./taxonomy-curation.js";
 
 // The single want mark (PRD-003 R-WANT). setWant sets/clears (idempotent,
 // audited); isWanted is the scalar overlay reused by record_purchase and reads.
