@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import { enrichmentRequests, productPhotos, vendors, type Database } from "@cj/db";
+import { enrichmentRequests, productPhotos, vendors, type Database, type SuggestedParse } from "@cj/db";
 import {
   recordPriceObservation,
   recordEnrichmentAttempt,
@@ -23,7 +23,7 @@ import { collectSitemapSamples, collectSitemapUrls } from "./sitemap.js";
 import { filterProductUrls, pathOf, robotsGatePath } from "./product-url.js";
 import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
 import { isCigarListing, normalizeListing, type NormalizedListing } from "./normalize.js";
-import { createCigarFromListing, findCatalogMatch, upsertListingMatch } from "./match.js";
+import { createCigarFromListing, resolveListing, toSuggestedParse, upsertListingMatch } from "./match.js";
 import { parseRobots } from "./robots.js";
 import { openCrawlRun, reclaimStrandedRuns, type SignalHost } from "./run-record.js";
 import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
@@ -64,6 +64,19 @@ export interface IngestStats {
   // Worth watching after the Cuban Lou's correction — a lane refusing a lot is
   // more likely to have a wrong `vendors.focus` than a wrong catalogue.
   linksRefusedMarket?: number;
+  // Matching v2 (ADR-012 Wave 2). Both absent when zero, on the same terms as
+  // the fields above — a run that produced neither serialises exactly as it did
+  // before they existed.
+  //
+  // `linksNoAnchor` is the number to watch after this lands: it counts listings
+  // whose title matched no brand alias, which in seed mode is precisely the
+  // population that used to be minted as new catalog rows. A high count is not a
+  // matcher failure, it is a registry gap — the fix is aliases in Wave 3
+  // curation, not a looser matcher.
+  linksNoAnchor?: number;
+  // Listings where the brand anchored and more than one of its leaves fit. A
+  // high count points at collapse buckets that still need splitting.
+  linksAmbiguous?: number;
   errors: number;
   // Present only for a vendor with sitemapSampling configured — absent keeps the
   // JSONB byte-identical for every other vendor.
@@ -414,39 +427,74 @@ async function ingestListing(
     // through the drain. A CC vendor walking its own sitemap trigram-matched an NC
     // catalogue row and auto-linked it. The guard is a pure negative filter — it
     // can only ever refuse a link, never redirect one.
-    const result = await findCatalogMatch(tx, listing.name, { vendorFocus: focus });
+    const result = await resolveListing(tx, listing.name, { vendorFocus: focus });
     let linkedCigarId: string | null = null;
     let status: "auto" | "unmatched";
     // Only ever set alongside status='unmatched'; see listing_matches.unmatched_reason.
-    let unmatchedReason: "market_refusal" | "no_match" | null = null;
+    let unmatchedReason: "market_refusal" | "no_match" | "no_anchor" | "ambiguous" | null = null;
+    // The parse rides an unresolved row into triage (0027). Null on a clean link:
+    // there is nothing for a curator to resolve, and a stale parse on a row that
+    // has since become a link reads as an open question that is not open.
+    let suggestedParse: SuggestedParse | null = null;
 
     if (result.kind === "match") {
       linkedCigarId = result.hit.cigarId;
       status = "auto";
     } else if (result.kind === "refused") {
-      // A REFUSAL DOES NOT CREATE, in seed mode either. We found a strong name
+      // A REFUSAL DOES NOT CREATE, in seed mode either. We found a strong
       // candidate and declined it on market grounds — that is an unresolved
       // question, not evidence of a new cigar. Falling through to
-      // createCigarFromListing (which is what this did) would mint a duplicate of
-      // the row we just refused every time the refusal was wrong, and a wrong
-      // refusal is exactly what a wrong `vendors.focus` produces (#170: Cuban
-      // Lou's was recorded 'CC' while selling Perdomo). A bad link is named,
-      // revisable and re-written next crawl; a duplicate catalogue row is none of
-      // those. So: leave the listing UNMATCHED, with no cigar, for the triage
-      // queue a curator already works — the same landing place `offers` mode uses.
-      // The reason rides the row (0025): without it the refusal is byte-identical
-      // to an ordinary no-match, and the queue could not show one without showing
-      // every cascade leftover too.
+      // createCigarFromListing (which is what this did before #192) would mint a
+      // duplicate of the row we just refused every time the refusal was wrong,
+      // and a wrong refusal is exactly what a wrong `vendors.focus` produces
+      // (#170: Cuban Lou's was recorded 'CC' while selling Perdomo). A bad link
+      // is named, revisable and re-written next crawl; a duplicate catalog row is
+      // none of those. So: leave the listing UNMATCHED, with no cigar, for the
+      // triage queue a curator already works.
       status = "unmatched";
       unmatchedReason = "market_refusal";
+      suggestedParse = toSuggestedParse(result.parse);
       stats.linksRefusedMarket = (stats.linksRefusedMarket ?? 0) + 1;
+    } else if (result.kind === "no_anchor") {
+      // THE CHANGE ADR-012 WAS WRITTEN FOR. No brand alias matched this title, so
+      // there is nothing to anchor identity on — and seed mode used to mint from
+      // exactly this state, which is how every new vendor grew a parallel catalog
+      // (Cuban Lou's: 56 rows over ground Fox already covered). The listing is
+      // recorded, unmatched, with the parse attached so a curator can see how far
+      // the resolver got and why it stopped.
+      status = "unmatched";
+      unmatchedReason = "no_anchor";
+      suggestedParse = toSuggestedParse(result.parse);
+      stats.linksNoAnchor = (stats.linksNoAnchor ?? 0) + 1;
+    } else if (result.kind === "sampler") {
+      // A mixed box is not one catalog cigar (docs/ddd/cigar-industry-vocabulary.md).
+      // It shares `ambiguous` as its stored reason because 0027 widened the CHECK
+      // by exactly two values and a sampler is, from the queue's point of view,
+      // the same instruction — a human decides, nothing is minted. It does NOT
+      // share the counter: `linksAmbiguous` is read as "collapse buckets still
+      // needing a split", and a shop's sampler shelf would drown that signal.
+      // The parse says which it is, in words, on the row.
+      status = "unmatched";
+      unmatchedReason = "ambiguous";
+      suggestedParse = toSuggestedParse(result.parse);
+    } else if (result.kind === "ambiguous") {
+      // The brand anchored and more than one of its leaves fits. Minting would be
+      // the collapse-bucket failure in reverse: a new row for a product the
+      // catalog already holds — possibly twice, which is why it is ambiguous.
+      status = "unmatched";
+      unmatchedReason = "ambiguous";
+      suggestedParse = toSuggestedParse(result.parse);
+      stats.linksAmbiguous = (stats.linksAmbiguous ?? 0) + 1;
     } else if (options.mode === "seed") {
-      linkedCigarId = await createCigarFromListing(tx, listing.name);
+      // The one arm that mints, and it mints a STRUCTURED row: the brand
+      // anchored, we looked under it, and this cigar is genuinely not there yet.
+      linkedCigarId = await createCigarFromListing(tx, result.parse);
       stats.cigarsCreated += 1;
       status = "auto";
     } else {
       status = "unmatched";
       unmatchedReason = "no_match";
+      suggestedParse = toSuggestedParse(result.parse);
     }
 
     const match = await upsertListingMatch(tx, {
@@ -456,9 +504,23 @@ async function ingestListing(
       status,
       now,
       unmatchedReason,
+      suggestedParse,
+      // The vendor's own breadcrumb taxonomy — parsed since the crawler was
+      // written, used for one boolean category gate, and thrown away ever since.
+      // It is the single structured taxonomy signal a vendor gives us (ADR-012),
+      // so it is now kept next to the parse it informs.
+      categoryPath: listing.categoryPath,
       runId: crawlRunId,
     });
-    if (status === "auto") stats.matchesAuto += 1;
+    // THE ROW'S OUTCOME, NOT THIS RUN'S VERDICT — the same distinction the photo
+    // path below learned the hard way. `status` is what the resolver decided;
+    // `match` is what the listing_matches row actually says after the upsert, and
+    // they disagree on every row a curator or an agent owns (591 on prod), which
+    // upsertListingMatch returns untouched. Counting the resolver's verdict
+    // reported an auto match for a listing whose row was never written and whose
+    // `cigar_id` is still null — a nightly overcount of exactly the population the
+    // guard exists to protect.
+    if (match.status === "auto" && match.cigarId != null) stats.matchesAuto += 1;
 
     // One offers write path shared with record_price — the 24h dedupe skips an
     // identical observation (ADR-009). Crawler offers link to their cigar through
@@ -798,8 +860,12 @@ async function tryEnrichCandidates(
         status: "auto",
         now,
         // The drain only ever LINKS, so any reason the row carried from a previous
-        // non-link is stale and is cleared with the write.
+        // non-link is stale and is cleared with the write — and so is any parse,
+        // which described a question this link has just answered.
         unmatchedReason: null,
+        suggestedParse: null,
+        // Evidence about the listing, kept regardless of the verdict (0027).
+        categoryPath: listing.categoryPath,
         runId: crawlRunId,
       });
       stats.matchesAuto += 1;

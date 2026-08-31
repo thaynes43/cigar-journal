@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
 import {
   createDatabase,
   vendors,
+  brands,
   cigars,
   offers,
   productPhotos,
@@ -13,11 +14,12 @@ import {
   enrichmentRequests,
   enrichmentAttempts,
   auditLog,
+  type NewCigarRow,
 } from "@cj/db";
-import { curationWorklist, enrichmentCoverageForCigar, enrichVendorFleet } from "@cj/domain";
+import { brandSlug, curationWorklist, enrichmentCoverageForCigar, enrichVendorFleet, fold } from "@cj/domain";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { runIngest, type IngestDeps } from "./core/ingest.js";
-import { findCatalogMatch, upsertListingMatch } from "./core/match.js";
+import { resolveListing, upsertListingMatch } from "./core/match.js";
 import {
   markRunTerminated,
   openCrawlRun,
@@ -35,6 +37,8 @@ import type { VendorAdapter } from "./adapters/types.js";
 // the harness needs no image bytes.
 
 const PADRON_URL = "https://foxcigar.com/shop/padron-1964-anniversary-maduro-torpedo/";
+const PADRON_BOX_URL = "https://foxcigar.com/shop/padron-1964-anniversary-maduro-torpedo-box-of-20/";
+const UNKNOWN_MARCA_URL = "https://foxcigar.com/shop/vuelta-abajo-reserva-especial-robusto/";
 const LIGHTER_URL = "https://foxcigar.com/shop/xikar-hp3-lighter/";
 const SAMPLER_URL = "https://foxcigar.com/shop/fox-5-cigar-sampler/";
 const OLIVA_URL = "https://foxcigar.com/shop/oliva-serie-v-melanio-torpedo/";
@@ -45,25 +49,86 @@ const SITEMAP = "https://foxcigar.com/sitemap.xml";
 
 const PADRON_NAME = "Padron 1964 Anniversary Maduro Torpedo";
 const OLIVA_NAME = "Oliva Serie V Melanio Torpedo";
+const UNKNOWN_MARCA_NAME = "Vuelta Abajo Reserva Especial Robusto";
 
 describe("crawler ingest (embedded Postgres)", () => {
   let pg: TestPostgres;
   let vendorId: string;
+  // The two marcas this file's fixtures sell. Matching v2 anchors on a brand
+  // alias before it reads a title as a name (ADR-012 Wave 2), so these ids are
+  // what every seed/offers case below is standing on.
+  let padronBrandId: string;
+  let olivaBrandId: string;
   const now = () => new Date("2026-08-28T12:00:00.000Z");
 
   function deps(fetcher: MockFetcher, storage: PhotoStorage | null): IngestDeps {
     return { db: pg.db, fetcher, storage, now, processPhoto: fakeProcessPhoto };
   }
 
+  // THE REGISTRY ENTRY A LISTING NEEDS BEFORE IT CAN RESOLVE TO ANYTHING.
+  // Matching v2 anchors on a brand alias first and refuses everything downstream
+  // without one — no match, and in seed mode no mint either (`no_anchor`). So a
+  // fixture listing is unresolvable until its marca is registered, which is why
+  // this exists and why migration 0026's registry is a precondition of the whole
+  // matcher rather than a lookup table beside it.
+  //
+  // `aliases` holds folded MATCHING KEYS and never display text — the convention
+  // 0026 seeds and the GIN probe is an exact array-containment test, so a
+  // source-case spelling stored here would simply never be probed for.
+  const seedBrand = async (name: string): Promise<string> => {
+    const rows = await pg.db
+      .insert(brands)
+      .values({ name, slug: brandSlug(name), aliases: [...new Set([brandSlug(name), fold(name)])] })
+      .onConflictDoNothing()
+      .returning({ id: brands.id });
+    if (rows[0]) return rows[0].id;
+    const existing = await pg.db
+      .select({ id: brands.id })
+      .from(brands)
+      .where(eq(brands.slug, brandSlug(name)))
+      .limit(1);
+    return existing[0]!.id;
+  };
+
   // `type` is explicit for the enrich cases: the drain filters on the cigar's
   // market, and an untyped row is selectable by EVERY vendor (see the untyped case
   // below), which would quietly defeat a focus assertion.
-  const seedCigar = async (canonicalName: string, type: "NC" | "CC" | null = null): Promise<string> => {
+  //
+  // `extra` carries the structural ancestry matching v2 reads. A cigar a listing
+  // must be able to FIND has to sit in the anchored brand's scope: either
+  // `brandId` set, or — the transitional bridge in `scopedLeafCandidates`, which
+  // dies with the Wave 3 backfill — its own canonical name folding to the brand's
+  // key. The cases below set `brandId` explicitly wherever the scope is the point.
+  const seedCigar = async (
+    canonicalName: string,
+    type: "NC" | "CC" | null = null,
+    extra: Partial<NewCigarRow> = {},
+  ): Promise<string> => {
     const rows = await pg.db
       .insert(cigars)
-      .values({ canonicalName, type, verification: "verified" })
+      .values({ canonicalName, type, verification: "verified", ...extra })
       .returning({ id: cigars.id });
     return rows[0]!.id;
+  };
+
+  // MATCHING V2 SCOPES CANDIDATES TO THE ANCHORED BRAND, which makes this file's
+  // habit of seeding a dozen rows all called `Oliva Serie V Melanio Torpedo`
+  // visible for the first time: under one marca they are a real ambiguity, and v2
+  // refuses to choose between them (`kind: 'ambiguous'`) rather than guessing. v1
+  // hid the same collision instead of resolving it — its exact-name lookup took
+  // `LIMIT 1` and kept whichever row Postgres handed back first — which is the
+  // only reason the cases below used to reach the guard they are actually about.
+  //
+  // A case about the MARKET guard, or about the upsert guard, needs the resolver
+  // to reach a single leaf before its own subject comes up. So it retires the
+  // namesakes it did not create: `catalog_status` is the catalog's own lifecycle
+  // gate and `scopedLeafCandidates` filters on `active`, so this removes the
+  // duplicates from the scope without touching what any earlier case asserted.
+  const soleActiveLeaf = async (canonicalName: string, keep: string): Promise<void> => {
+    await pg.db
+      .update(cigars)
+      .set({ catalogStatus: "excluded" })
+      .where(and(eq(cigars.canonicalName, canonicalName), ne(cigars.id, keep)));
   };
 
   beforeAll(async () => {
@@ -73,6 +138,11 @@ describe("crawler ingest (embedded Postgres)", () => {
       .values({ name: "Fox Cigar", url: "https://foxcigar.com", focus: "NC", crawlEnabled: true, approvalStatus: "owner-added" })
       .returning({ id: vendors.id });
     vendorId = inserted[0]!.id;
+    // Both marcas the Fox fixtures sell. Without them every fixture listing
+    // resolves `no_anchor` and the seed cases below would assert nothing —
+    // 0 created, 0 matched, everything in triage.
+    padronBrandId = await seedBrand("Padron");
+    olivaBrandId = await seedBrand("Oliva");
   }, 60_000);
 
   afterAll(async () => {
@@ -104,12 +174,40 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(first.stats.offersWritten).toBe(1);
     expect(first.stats.photosCaptured).toBe(1);
     expect(first.stats.errors).toBe(0);
+    // The brand anchored, so this is the one arm that still mints: `none` — we
+    // know the marca, we looked under it, and the leaf is genuinely not there.
+    // Absent-when-zero like their siblings, so a clean run's stats serialise into
+    // crawl_runs exactly as they did before matching v2 added the counters.
+    expect(first.stats.linksNoAnchor).toBeUndefined();
+    expect(first.stats.linksAmbiguous).toBeUndefined();
 
-    // The catalog cigar is unverified and brand-inferred to null (no prior taxonomy).
+    // The catalog cigar is unverified, and STRUCTURED. It used to be minted from
+    // the raw vendor title with `brand` left null — "no prior taxonomy" — which is
+    // how packaging SKUs became catalog rows. v2 writes what the parse actually
+    // established: the REGISTRY's spelling of the marca (not the vendor's, so the
+    // free-text column and the `brand_id` link cannot disagree the moment the row
+    // is born), the link itself, and the vitola read off the trade vocabulary.
+    // `line`/`blend` stay null because nothing seeded any — absent is never
+    // inferred (ADR-012).
     const created = await pg.db.select().from(cigars).where(eq(cigars.canonicalName, PADRON_NAME));
     expect(created).toHaveLength(1);
     expect(created[0]!.verification).toBe("unverified");
-    expect(created[0]!.brand).toBeNull();
+    expect(created[0]!.brand).toBe("Padron");
+    expect(created[0]!.brandId).toBe(padronBrandId);
+    expect(created[0]!.line).toBeNull();
+    expect(created[0]!.lineId).toBeNull();
+    expect(created[0]!.blendId).toBeNull();
+    expect(created[0]!.vitolaName).toBe("Torpedo");
+    // This title states no dimensions, so none are invented.
+    expect(created[0]!.lengthInches).toBeNull();
+    expect(created[0]!.ringGauge).toBeNull();
+    // `canonical_name` is the title with PACKAGING STRIPPED; this one carries
+    // none, so it survives verbatim. (The boxed listing next door is the case
+    // where the two differ.)
+    expect(created[0]!.canonicalName).toBe(PADRON_NAME);
+    // The NAME is still the vendor's phrasing, not a composition the catalog
+    // stands behind — composing it is curation's call (Wave 3), not a crawl's.
+    expect(created[0]!.nameSource).toBe("freeform");
     const cigarId = created[0]!.id;
 
     // One offer, priced and stocked from the JSON-LD.
@@ -126,6 +224,15 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(matches[0]!.status).toBe("auto");
     expect(matches[0]!.cigarId).toBe(cigarId);
     expect(matches[0]!.listingKey).toBe("/shop/padron-1964-anniversary-maduro-torpedo/");
+    // A clean link carries NO parse (migration 0027): there is nothing left for a
+    // curator to resolve, and a parse left on a row that has become a link reads
+    // as an open question that is not open.
+    expect(matches[0]!.suggestedParse).toBeNull();
+    // The breadcrumbs are kept whatever the verdict — they are a fact about the
+    // listing, not about the decision, and they are the one structured taxonomy
+    // signal a vendor publishes. Parsed since the crawler was written and thrown
+    // away after one boolean category gate until 0027.
+    expect(matches[0]!.categoryPath).toEqual(["Home", "Shop", "Cigars", "Padron"]);
 
     // One product photo, rights pending.
     const photos = await pg.db.select().from(productPhotos).where(eq(productPhotos.cigarId, cigarId));
@@ -170,6 +277,115 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(runs).toHaveLength(3);
     expect(runs.every((r) => r.status === "succeeded")).toBe(true);
     expect(runs.every((r) => r.finishedAt !== null && r.stats !== null)).toBe(true);
+  });
+
+  // PACKAGING IS NEVER IDENTITY (ADR-012), and this is the case that says so end
+  // to end. The same cigar, listed again as a full box: v1 read the title as a
+  // name, found `similarity('… Box of 20', '…') ` short of the floor, and minted a
+  // SECOND catalog row whose only distinguishing feature was the container it
+  // shipped in. v2 strips packaging before the title is read as a name at all, so
+  // the boxed listing resolves to the leaf that already exists — and the box
+  // itself lands where it belongs, on the offer, which is the thing that is
+  // actually sold by the box.
+  it("a boxed listing links the leaf that already exists and records the box on the offer", async () => {
+    const routes = {
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([PADRON_BOX_URL]) },
+      [PADRON_BOX_URL]: { body: loadFixture("product-padron-box.html") },
+    };
+
+    const before = await pg.db.select({ id: cigars.id }).from(cigars);
+    const run = await runIngest(deps(createMockFetcher(routes), null), {
+      adapter: foxCigar,
+      vendorId,
+      mode: "seed",
+    });
+
+    // Seed mode, a title it has never seen, and nothing is created: the marca
+    // anchored and the leaf under it was already there.
+    expect(run.stats.cigarsCreated).toBe(0);
+    expect(run.stats.matchesAuto).toBe(1);
+    expect((await pg.db.select({ id: cigars.id }).from(cigars)).length).toBe(before.length);
+    // In particular, no row is named after a container.
+    const boxNamed = await pg.db
+      .select({ id: cigars.id })
+      .from(cigars)
+      .where(eq(cigars.canonicalName, `${PADRON_NAME} Box of 20`));
+    expect(boxNamed).toHaveLength(0);
+
+    const leaf = (await pg.db.select().from(cigars).where(eq(cigars.canonicalName, PADRON_NAME)))[0]!;
+    const boxMatch = (
+      await pg.db
+        .select()
+        .from(listingMatches)
+        .where(eq(listingMatches.listingKey, "/shop/padron-1964-anniversary-maduro-torpedo-box-of-20/"))
+    )[0]!;
+    expect(boxMatch).toMatchObject({ status: "auto", cigarId: leaf.id, suggestedParse: null });
+
+    // The packaging fact was not discarded with the tokens — it moved onto the
+    // offer, which is the whole justification for stripping it out of the name.
+    const boxOffer = (await pg.db.select().from(offers).where(eq(offers.listingUrl, PADRON_BOX_URL)))[0]!;
+    expect(boxOffer.packaging).toBe("box");
+    expect(boxOffer.sticksPerPackage).toBe(20);
+    expect(Number(boxOffer.price)).toBe(460);
+  });
+
+  // THE HEADLINE BEHAVIOUR CHANGE OF MATCHING V2, asserted through the real seed
+  // walk. `no brand anchor → no mint` is the single rule ADR-012 was written for:
+  // seed mode used to create a catalog row from ANY title that failed to match,
+  // which is how a flat namespace grew a parallel copy of itself for every vendor
+  // (Cuban Lou's minted 56 rows over ground Fox already covered). A title the
+  // registry cannot anchor is now a question for a curator, and the parse rides
+  // the row so the curator inherits the reasoning instead of redoing it by eye.
+  it("a title that anchors no brand mints nothing and lands in triage carrying its parse", async () => {
+    const routes = {
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([UNKNOWN_MARCA_URL]) },
+      [UNKNOWN_MARCA_URL]: { body: loadFixture("product-unknown-marca.html") },
+    };
+
+    const run = await runIngest(deps(createMockFetcher(routes), null), {
+      adapter: foxCigar,
+      vendorId,
+      mode: "seed",
+    });
+
+    expect(run.stats.listingsParsed).toBe(1);
+    expect(run.stats.cigarsCreated).toBe(0);
+    expect(run.stats.matchesAuto).toBe(0);
+    // Counted, and counted separately from a no-match: a high `linksNoAnchor` is a
+    // REGISTRY GAP, not a matcher failure, and the fix for it is aliases in Wave 3
+    // curation rather than a looser matcher.
+    expect(run.stats.linksNoAnchor).toBe(1);
+    expect(await pg.db.select().from(cigars).where(eq(cigars.canonicalName, UNKNOWN_MARCA_NAME))).toHaveLength(0);
+
+    const triaged = (
+      await pg.db
+        .select()
+        .from(listingMatches)
+        .where(eq(listingMatches.listingKey, "/shop/vuelta-abajo-reserva-especial-robusto/"))
+    )[0]!;
+    expect(triaged).toMatchObject({ cigarId: null, status: "unmatched", unmatchedReason: "no_anchor" });
+
+    // The parse the resolver got to before it stopped. Every level is null because
+    // the anchor is the FIRST step — without a brand there is nothing to look for a
+    // line, a blend or a vitola within — and the whole title is residue, which is
+    // precisely the "part the catalog cannot explain" a curator needs to read.
+    const parse = triaged.suggestedParse!;
+    expect(parse.brandId).toBeNull();
+    expect(parse.brandName).toBeNull();
+    expect(parse.lineId).toBeNull();
+    expect(parse.blendId).toBeNull();
+    expect(parse.vitolaName).toBeNull();
+    expect(parse.cleanedName).toBe(UNKNOWN_MARCA_NAME);
+    expect(parse.residue).toBe(UNKNOWN_MARCA_NAME);
+    expect(parse.notes).toContain("No brand alias matched — nothing anchors this title.");
+    // Evidence is kept on an unresolved row exactly as on a linked one.
+    expect(triaged.categoryPath).toEqual(["Home", "Shop", "Cigars"]);
+
+    // The offer is still written. A listing we cannot identify is still a price we
+    // observed, and the offer hangs off the match row rather than off a cigar.
+    expect(run.stats.offersWritten).toBe(1);
   });
 
   it("upsertListingMatch never downgrades a confirmed match", async () => {
@@ -1209,43 +1425,69 @@ describe("crawler ingest (embedded Postgres)", () => {
   // THE SEED/OFFERS HALF, and the path BOTH live prod mis-links actually came
   // from — previously untested. A vendor walking its own sitemap must not
   // auto-link a catalogue cigar from the other market.
-  it("findCatalogMatch refuses a cross-market candidate, in both directions", async () => {
+  //
+  // Rewritten for matching v2: `findCatalogMatch` is gone and `resolveListing`
+  // stands in its place, but the property under test is #170's and is unchanged —
+  // the market guard REJECTS the candidate the resolver had already chosen, in
+  // both directions, and never re-ranks. What v2 adds is the step BEFORE it: a
+  // title resolves to nothing until a brand alias anchors it, so the arrangement
+  // now registers the marca and links its leaf. And v1's single `{kind:'none'}`
+  // has split in two — a title nothing recognises is `no_anchor`, while `none`
+  // means the marca anchored and holds no matching leaf — so both halves of "a
+  // genuine miss stays distinguishable from a refusal" are asserted below.
+  it("resolveListing refuses a cross-market candidate, in both directions", async () => {
     const nc = await makeVendor("Seed Match NC", "NC");
     await arrange([nc]);
 
-    // A name no neighbouring case seeds: findCatalogMatch resolves by canonical
-    // name, so a duplicate would make the assertion pick an arbitrary row.
-    const name = `Seed Match Subject ${randomUUID().slice(0, 8)}`;
-    const ncCigar = await seedCigar(name, null);
+    // A marca of this case's own. v2 ranks WITHIN a brand, so a namesake seeded by
+    // a neighbouring case would make the verdict `ambiguous` before the market
+    // guard ever ran; a private brand keeps the scope at exactly one leaf.
+    const marca = `Seedguard ${randomUUID().slice(0, 8)}`;
+    const brandId = await seedBrand(marca);
+    const name = `${marca} Subject`;
+    const ncCigar = await seedCigar(name, null, { brandId });
     await stock(nc, ncCigar);
 
-    // No focus supplied: unchanged behaviour, the candidate comes back.
-    expect(await findCatalogMatch(pg.db, name)).toEqual({
-      kind: "match",
-      hit: { cigarId: ncCigar, canonicalName: name },
-    });
+    // No focus supplied: unchanged behaviour, the candidate comes back. Every arm
+    // now carries the parse as well — that is what a triage row persists (0027) —
+    // so the shape is asserted rather than the whole object compared.
+    const open = await resolveListing(pg.db, name);
+    expect(open).toMatchObject({ kind: "match", hit: { cigarId: ncCigar, canonicalName: name } });
+    expect(open.parse).toMatchObject({ brandId, brandName: marca });
     // An NC vendor may link an NC-evidenced row...
-    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "NC" })).toMatchObject({
+    expect(await resolveListing(pg.db, name, { vendorFocus: "NC" })).toMatchObject({
       kind: "match",
       hit: { cigarId: ncCigar },
     });
     // ...and a CC vendor may not. The refusal NAMES the candidate it refused: that
     // is what stops the seed path reading it as "nothing matched" and creating a
     // duplicate of this very row.
-    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "CC" })).toMatchObject({
+    expect(await resolveListing(pg.db, name, { vendorFocus: "CC" })).toMatchObject({
       kind: "refused",
       hit: { cigarId: ncCigar },
       market: "NC",
     });
     // A both-market vendor has no single market to conflict with.
-    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "both" })).toMatchObject({
+    expect(await resolveListing(pg.db, name, { vendorFocus: "both" })).toMatchObject({
       kind: "match",
       hit: { cigarId: ncCigar },
     });
-    // A genuine miss stays distinguishable from a refusal.
-    expect(await findCatalogMatch(pg.db, `No Such Cigar ${randomUUID()}`, { vendorFocus: "CC" })).toEqual({
-      kind: "none",
+
+    // A genuine miss stays distinguishable from a refusal, in both of its v2
+    // shapes. First: a title no alias anchors. This is the arm that used to mint —
+    // it names no cigar we can reason about at all, so it names no cigar to
+    // create either.
+    const unanchored = await resolveListing(pg.db, `No Such Cigar ${randomUUID()}`, { vendorFocus: "CC" });
+    expect(unanchored.kind).toBe("no_anchor");
+    expect(unanchored.parse.brandId).toBeNull();
+    // Second: the marca anchored and none of its leaves fits. THIS is the only arm
+    // seed mode mints from, and the difference is the whole point — we know whose
+    // cigar it is, we looked under that name, and it is genuinely not there yet.
+    const unknownLeaf = await resolveListing(pg.db, `${marca} Zeppelin Quatrain Nine Hundred Twelve`, {
+      vendorFocus: "CC",
     });
+    expect(unknownLeaf.kind).toBe("none");
+    expect(unknownLeaf.parse.brandId).toBe(brandId);
   });
 
   // The same guard through the real seed path. This used to assert the OPPOSITE —
@@ -1260,7 +1502,12 @@ describe("crawler ingest (embedded Postgres)", () => {
     const cc = await makeVendor("Seed Walk CC", "CC");
     await arrange([nc, cc]);
 
-    const ncCigar = await seedCigar(OLIVA_NAME, null);
+    // The leaf the CC walk must find and be refused. `brandId` puts it in the
+    // Oliva scope explicitly, and `soleActiveLeaf` retires the namesakes the
+    // enrich cases above seeded — otherwise v2 stops at `ambiguous` and the market
+    // guard, which is what this case is about, never runs.
+    const ncCigar = await seedCigar(OLIVA_NAME, null, { brandId: olivaBrandId });
+    await soleActiveLeaf(OLIVA_NAME, ncCigar);
     await stock(nc, ncCigar);
     const before = (await pg.db.select({ id: cigars.id }).from(cigars)).length;
 
@@ -1273,13 +1520,20 @@ describe("crawler ingest (embedded Postgres)", () => {
     // Nothing created for the refused listing, and the refusal is counted.
     expect(run.stats.cigarsCreated).toBe(0);
     expect(run.stats.linksRefusedMarket).toBe(1);
+    // And it really was refused on MARKET grounds — not quietly declined one step
+    // earlier by the anchor or by an ambiguity, which would make every assertion
+    // below pass without the guard ever firing.
+    expect(run.stats.linksNoAnchor).toBeUndefined();
+    expect(run.stats.linksAmbiguous).toBeUndefined();
     expect((await pg.db.select({ id: cigars.id }).from(cigars)).length).toBe(before);
 
     // The listing is recorded, unmatched and pointing at no cigar — the triage
-    // queue's shape, so a curator can resolve what the crawler would not guess.
+    // queue's shape, so a curator can resolve what the crawler would not guess —
+    // and it carries the parse that got as far as naming the marca (0027).
     const ccMatches = await matchesFor(cc);
     expect(ccMatches).toHaveLength(1);
-    expect(ccMatches[0]).toMatchObject({ cigarId: null, status: "unmatched" });
+    expect(ccMatches[0]).toMatchObject({ cigarId: null, status: "unmatched", unmatchedReason: "market_refusal" });
+    expect(ccMatches[0]!.suggestedParse).toMatchObject({ brandId: olivaBrandId, brandName: "Oliva" });
 
     // The NC row is untouched: no CC listing_match points at it, and its photo
     // slot is still free.
@@ -1298,14 +1552,18 @@ describe("crawler ingest (embedded Postgres)", () => {
     const cc = await makeVendor("Triage Walk CC", "CC");
     await arrange([nc, cc]);
 
-    const ncCigar = await seedCigar(OLIVA_NAME, null);
+    // Same arrangement as the case above, and for the same reason: the guard only
+    // fires once the resolver has settled on a single leaf of the anchored marca.
+    const ncCigar = await seedCigar(OLIVA_NAME, null, { brandId: olivaBrandId });
+    await soleActiveLeaf(OLIVA_NAME, ncCigar);
     await stock(nc, ncCigar);
 
-    await runIngest(deps(createMockFetcher(hitRoutes), createMemoryPhotoStorage()), {
+    const walk = await runIngest(deps(createMockFetcher(hitRoutes), createMemoryPhotoStorage()), {
       adapter: foxCigar,
       vendorId: cc,
       mode: "seed",
     });
+    expect(walk.stats.linksRefusedMarket).toBe(1);
     const refused = (await matchesFor(cc))[0]!;
 
     const curator = { userId: randomUUID(), role: "admin" as const };
@@ -1457,7 +1715,14 @@ describe("crawler ingest (embedded Postgres)", () => {
     const stockist = await makeVendor("Agent Guard Stockist NC", "NC");
     await arrange([nc, stockist]);
 
-    const cigarId = await seedCigar(PADRON_NAME, null);
+    // The resolver must genuinely REACH this cigar, or the photo assertion below
+    // is vacuous for a second reason: under matching v2 the Padron scope also
+    // holds the row the first case minted, and two rows of one marca scoring
+    // identically is `ambiguous` — no candidate, no capture, and nothing proven
+    // about the upsert guard. So this leaf is put in the brand's scope explicitly
+    // and its namesake retired.
+    const cigarId = await seedCigar(PADRON_NAME, null, { brandId: padronBrandId });
+    await soleActiveLeaf(PADRON_NAME, cigarId);
     await stock(stockist, cigarId);
     const decided = await upsertListingMatch(pg.db, {
       vendorId: nc,
@@ -1482,6 +1747,12 @@ describe("crawler ingest (embedded Postgres)", () => {
       vendorId: nc,
       mode: "offers",
     });
+
+    // The resolver did settle on a leaf — it neither failed to anchor nor gave up
+    // on an ambiguity — so what follows is the upsert guard's doing and nothing
+    // else's.
+    expect(run.stats.linksNoAnchor).toBeUndefined();
+    expect(run.stats.linksAmbiguous).toBeUndefined();
 
     const after = (await pg.db.select().from(listingMatches).where(eq(listingMatches.id, decided.id)))[0]!;
     expect(after).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent" });

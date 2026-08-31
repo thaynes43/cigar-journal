@@ -73,13 +73,13 @@ export {
 export { extractJsonLd, type ExtractedJsonLd, type JsonLdProduct, type JsonLdOffer } from "./core/jsonld.js";
 export { normalizeListing, isCigarCategory, isCigarListing, decodeEntities, type NormalizedListing } from "./core/normalize.js";
 export {
-  findCatalogMatch,
+  resolveListing,
   upsertListingMatch,
   createCigarFromListing,
-  MATCH_THRESHOLD,
+  toSuggestedParse,
   type CatalogHit,
-  type CatalogMatchResult,
-  type FindCatalogMatchOptions,
+  type ListingResolution,
+  type ResolveListingOptions,
 } from "./core/match.js";
 // The crawl_runs row's lifecycle and the per-(vendor, mode) lane lock (#155,
 // #157). Exported because the CLI is the only production caller and it lives
