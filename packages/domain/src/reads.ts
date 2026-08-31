@@ -8,6 +8,11 @@ import {
   productPhotos,
   wants,
   favorites,
+  brands,
+  lines,
+  blends,
+  blenders,
+  blendBlenders,
   type CigarRow,
   type SmokeRow,
   type SmokeProgressionRow,
@@ -34,7 +39,9 @@ import type {
   CigarPricePoint,
   OfferHistory,
   PriceType,
+  CigarHierarchy,
 } from "./types.js";
+import { brandSlug } from "./catalog-browse.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
 import { normalizeDescriptor } from "./descriptors.js";
 import { toSmokePhotoView } from "./mapping.js";
@@ -575,6 +582,82 @@ function computeProfile(
   };
 }
 
+// The leaf's structural ancestry (ADR-012, DESIGN-004 D-08) — the registry rows
+// its three nullable FKs point at, plus the vitola label the leaf carries itself.
+//
+// Two queries, not four: one LEFT-JOINed row for the three registry levels (all
+// 1:1 by primary key, so joining them costs a single index probe each), and one
+// for the credited blenders, asked only when there is a blend to credit. Every
+// level is independently nullable and an absent level comes back null — the
+// breadcrumb then renders nothing for it, which is how "no level ever renders as
+// Unknown" stays enforced by shape rather than by discipline at the call site.
+async function loadCigarHierarchy(deps: Deps, cigar: CigarRow): Promise<CigarHierarchy> {
+  const rows = await deps.db
+    .select({
+      brandName: brands.name,
+      brandSlugValue: brands.slug,
+      lineName: lines.name,
+      lineSlugValue: lines.slug,
+      blendName: blends.name,
+      blendSlugValue: blends.slug,
+      wrapper: blends.wrapper,
+      binder: blends.binder,
+      filler: blends.filler,
+      strength: blends.strength,
+    })
+    .from(cigars)
+    .leftJoin(brands, eq(brands.id, cigars.brandId))
+    .leftJoin(lines, eq(lines.id, cigars.lineId))
+    .leftJoin(blends, eq(blends.id, cigars.blendId))
+    .where(eq(cigars.id, cigar.id))
+    .limit(1);
+  const row = rows[0];
+
+  // The blender credit (ADR-012 amendment). An empty list is a FACT, not a gap —
+  // Cuban blends credit the marca rather than a person — so no query runs and no
+  // placeholder is invented when the leaf has no blend at all.
+  const blenderRows = cigar.blendId
+    ? await deps.db
+        .select({ name: blenders.name, slug: blenders.slug })
+        .from(blendBlenders)
+        .innerJoin(blenders, eq(blenders.id, blendBlenders.blenderId))
+        .where(eq(blendBlenders.blendId, cigar.blendId))
+        .orderBy(asc(blenders.name))
+    : [];
+
+  // A vitola has no registry row (ADR-012 rejects a global vitolas table), so its
+  // slug is derived with the same rule brandSlug() applies everywhere else. A
+  // blank name has no level; so does a punctuation-only one, which slugs to the
+  // empty string and would produce an unaddressable `?vitola=` link — the same
+  // guard the SQL side applies in VITOLA_SLUG.
+  const vitolaName = cigar.vitolaName?.trim() ?? "";
+  const vitolaSlug = vitolaName !== "" ? brandSlug(vitolaName) : "";
+
+  return {
+    brand:
+      row?.brandName != null && row.brandSlugValue != null
+        ? { name: row.brandName, slug: row.brandSlugValue }
+        : null,
+    line:
+      row?.lineName != null && row.lineSlugValue != null
+        ? { name: row.lineName, slug: row.lineSlugValue }
+        : null,
+    blend:
+      row?.blendName != null && row.blendSlugValue != null
+        ? {
+            name: row.blendName,
+            slug: row.blendSlugValue,
+            wrapper: row.wrapper,
+            binder: row.binder,
+            filler: row.filler,
+            strength: row.strength,
+          }
+        : null,
+    vitola: vitolaSlug !== "" ? { name: vitolaName, slug: vitolaSlug } : null,
+    blenders: blenderRows.map((b) => ({ name: b.name, slug: b.slug })),
+  };
+}
+
 // Full catalog detail plus the caller's Personal Profile (null if never smoked).
 export async function getCigar(
   deps: Deps,
@@ -633,6 +716,9 @@ export async function getCigar(
   const hasProductPhoto = productPhotoId != null;
   const enrichmentFields = assessEnrichmentFields(cigar, hasProductPhoto);
   const pricing = await getCigarPricing(deps, args.cigarId);
+  // The structural ancestry behind the D-08 breadcrumb and facts rows.
+  // Catalog-scoped, like enrichment and pricing — the same for every viewer.
+  const hierarchy = await loadCigarHierarchy(deps, cigar);
 
   return {
     cigar: toCigarView(cigar),
@@ -649,6 +735,7 @@ export async function getCigar(
     wantNote: wantRows[0]?.note ?? null,
     favorited: favoriteRows.length > 0,
     favoriteNote: favoriteRows[0]?.note ?? null,
+    hierarchy,
   };
 }
 

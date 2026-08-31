@@ -99,7 +99,24 @@ export {
   type BrandImageObject,
 } from "./brand-images.js";
 export { getMyInventory, deriveHoldingSummary, getHoldingForCigar } from "./inventory.js";
-export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
+export { browseBrands, getBrand, browseCatalog, browseCatalogGroups, catalogFacetOptions, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
+
+// The hierarchy's SQL vocabulary (ADR-012, DESIGN-004 D-01/D-05/D-06) plus the
+// drill-header resolver. Exported so any future catalog read composes the SAME
+// level predicates the grid, the group cards and the chips already share — a
+// second transcription of the slug rule is exactly how a card's count and its
+// drill drift apart.
+export {
+  HIERARCHY_JOINS,
+  VITOLA_SLUG,
+  hierarchyConditions,
+  hierarchyActive,
+  dimensionSpec,
+  resolveCatalogHierarchy,
+  type DimensionSpec,
+  type ResolvedHierarchyLevel,
+  type ResolvedCatalogHierarchy,
+} from "./catalog-hierarchy.js";
 
 // Ancestry consistency for the catalog taxonomy (ADR-012, migration 0026). The
 // database holds the three nullable FKs but not their agreement; this is where

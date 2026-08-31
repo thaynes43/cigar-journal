@@ -8,6 +8,11 @@ import { ShelfStrip } from "./shelf-strip";
 // reuse the same faceted browse the grid runs, so shelf membership and the
 // destination can never disagree. The interactive strip (scroll affordances) is
 // the client ShelfStrip; this component is the server data fetcher.
+//
+// The `See all` hrefs carry the CANONICAL `field:dir` sort token (DESIGN-004
+// D-04) so a shelf link and the toolbar emit the same URL for the same state. A
+// bare `?sort=my-rating` still parses — it enters at that key's best-first
+// direction — so pre-wave links keep working.
 
 const SHELF_LIMIT = 12;
 
@@ -20,7 +25,7 @@ interface ShelfDef {
 const SHELVES: readonly ShelfDef[] = [
   {
     heading: "In your humidor",
-    href: "/cigars?own=have&sort=my-rating",
+    href: "/cigars?own=have&sort=my-rating%3Adesc",
     args: { own: "have", sort: "my-rating", limit: SHELF_LIMIT },
   },
   {
@@ -30,7 +35,7 @@ const SHELVES: readonly ShelfDef[] = [
   },
   {
     heading: "Recently added",
-    href: "/cigars?sort=recently-added",
+    href: "/cigars?sort=recently-added%3Adesc",
     args: { sort: "recently-added", limit: SHELF_LIMIT },
   },
 ];

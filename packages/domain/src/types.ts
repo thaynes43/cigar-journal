@@ -1,4 +1,4 @@
-import type { Tobacco, SmokeContext, SmokePhotoKind } from "@cj/db";
+import type { Tobacco, SmokeContext, SmokePhotoKind, CigarNameSource } from "@cj/db";
 
 // Domain vocabulary — mirrors docs/ddd/ubiquitous-language.md. Value objects are
 // plain interfaces; the Smoke aggregate is assembled by the services below.
@@ -15,7 +15,7 @@ export type SmokeOutput = "low" | "medium" | "high";
 // Price-observation classification (ADR-009). `retail` is the default.
 export type PriceType = "retail" | "msrp" | "sale";
 
-export type { Tobacco, SmokeContext, SmokePhotoKind };
+export type { Tobacco, SmokeContext, SmokePhotoKind, CigarNameSource };
 
 export interface SmokedAt {
   value: string | null; // ISO-8601 instant (stored as timestamptz), null when unknown
@@ -689,6 +689,41 @@ export interface GetCigarResult {
   // Principal-scoped — never another user's mark.
   favorited: boolean;
   favoriteNote: string | null;
+  // The leaf's structural ancestry (ADR-012, DESIGN-004 D-08): the registry rows
+  // its brand_id/line_id/blend_id point at, plus the vitola label carried on the
+  // leaf itself. Every level is independently nullable — an unknown level is
+  // absent, never a placeholder — and the detail page's breadcrumb renders only
+  // the levels that are actually there.
+  hierarchy: CigarHierarchy;
+}
+
+// The structural ancestry of one leaf cigar, in display form. Each level carries
+// the name to render and the slug its drill URL uses; a level whose FK is NULL is
+// null here, which is what makes "nothing renders as Unknown" enforceable by
+// shape rather than by discipline at the call site.
+export interface CigarHierarchy {
+  brand: { name: string; slug: string } | null;
+  line: { name: string; slug: string } | null;
+  // The blend carries the level facts ADR-012 homes on it: filler/binder/wrapper
+  // (a required documentation target — NULL means "not yet known", never a value
+  // to invent) and strength. DESIGN-004 D-08 renders each as its own facts row,
+  // absent when empty.
+  blend: {
+    name: string;
+    slug: string;
+    wrapper: string | null;
+    binder: string | null;
+    filler: string | null;
+    strength: string | null;
+  } | null;
+  // A vitola is a size label within a blend, not an entity (ADR-012 rejects a
+  // global vitolas table), so its `slug` is derived from the name with the same
+  // rule brandSlug() uses rather than read from a registry row.
+  vitola: { name: string; slug: string } | null;
+  // The blenders credited with this blend (ADR-012 amendment). Empty for a blend
+  // with no credit — the normal case for Cuban blends, which credit the marca
+  // rather than a person (ADR-013), so an empty list is a fact, not a gap.
+  blenders: { name: string; slug: string }[];
 }
 
 // One vendor's latest market listing for a cigar (Market context). The offers
@@ -842,6 +877,19 @@ export interface CatalogCigarTile extends CatalogCigar {
   // Price-at-a-glance: the best current offer for the cigar, or null when none
   // is recorded (PRD-003 R-PRICE-2, ADR-009). Catalog/market-scoped, not personal.
   price: CatalogTilePrice | null;
+  // Whether `canonicalName` is authoritative text (`freeform` — every row before
+  // the taxonomy waves) or a projection recomposed from the structural parts
+  // (`composed`). DESIGN-004 D-07 elides a COMPOSED caption inside a drill down
+  // to the parts below the drilled level; a freeform row always renders its
+  // canonical name raw, because truncated honesty beats wrong parsing.
+  nameSource: CigarNameSource;
+  // The structural parts behind a composed name, from the registry rows the leaf
+  // points at. Each is null when that level is unset. `structuralLine` and
+  // `structuralBlend` are deliberately separate from the free-text `line` above:
+  // that column stays authoritative for freeform rows until Wave 5 retires it.
+  structuralBrand: string | null;
+  structuralLine: string | null;
+  structuralBlend: string | null;
 }
 
 // One line's cigars within a brand page — the haynesnetwork "season".
@@ -885,13 +933,46 @@ export type CatalogSort = "name" | "my-rating" | "recently-added" | "price";
 // independent booleans (DESIGN-002), the web toolbar as one exclusive control.
 export type OwnershipFacet = "all" | "have" | "want" | "dont";
 
+// ---- The hierarchy (ADR-012 / DESIGN-004) ---------------------------------
+
+// The four levels the catalog is organized by, in descent order. `vitola` is the
+// odd one out: it has no registry table (ADR-012), so it keys off the slugged
+// `cigars.vitola_name` rather than a row's stored slug.
+export type CatalogDimension = "brand" | "line" | "blend" | "vitola";
+
+export const CATALOG_DIMENSIONS = ["brand", "line", "blend", "vitola"] as const satisfies readonly CatalogDimension[];
+
+// The reserved hierarchy slug (DESIGN-004 D-05): `unfiled` at a level means IS
+// NULL at that level, beneath whatever ancestor levels are also set. It is a
+// deliberate divergence from haynesnetwork, which skips null group keys outright
+// (books-query.ts:192-209) — ported as-is that rule would hide most of this
+// catalog while the Wave 3 backfill is still running.
+export const HIERARCHY_UNFILED = "unfiled";
+
+// One slug per level; `HIERARCHY_UNFILED` selects that level's null population.
+// A slug matching no row is an EMPTY scope, not an absent filter — a drill into
+// a group that no longer exists must show nothing rather than silently showing
+// everything.
+export type CatalogHierarchyFilter = Partial<Record<CatalogDimension, string>>;
+
+// A sort key plus the direction it is applied in (DESIGN-004 D-04). Direction is
+// part of the URL contract (`?sort=field:dir`) and therefore part of the keyset
+// cursor's identity: a cursor minted under one direction is rejected when the
+// direction flips, so the page restarts cleanly instead of paging garbage.
+export type CatalogSortDir = "asc" | "desc";
+
 export interface BrowseCatalogArgs {
   q?: string;
   // Exact brand match, case-insensitive (MCP browse_catalog); distinct from the
-  // free-text `q`, which also matches name/line. Omitted applies no brand filter.
+  // free-text `q`, which also matches name/line, and distinct from the structural
+  // `hierarchy.brand` slug the web drills on. Omitted applies no brand filter.
   brand?: string;
+  // The structural hierarchy scope (DESIGN-004 D-01). Composes with everything
+  // else by AND, so a drill is just another filter.
+  hierarchy?: CatalogHierarchyFilter;
   type?: CigarType;
   sort?: CatalogSort;
+  sortDir?: CatalogSortDir;
   // The caller's exclusive ownership overlay filter (web toolbar); omitted or
   // `all` applies no filter. The web uses this ONE segmented control.
   own?: OwnershipFacet;
@@ -923,6 +1004,90 @@ export interface BrowseCatalogResult {
   cigars: CatalogCigarTile[];
   nextCursor: string | null; // opaque keyset cursor; null when the page is the last
   totalCount: number; // total matching the q/type filters, ignoring the cursor
+}
+
+// ---- Grouped views (DESIGN-004 D-03) --------------------------------------
+
+// One aggregate group card: a whole-screen swap replaces the leaf grid with a
+// grid of these, never section headers and never per-group sub-grids (port of
+// the haynesnetwork grouping mechanic, library-client.tsx:1089-1104 /
+// group-card.tsx).
+export interface CatalogGroupCard {
+  dimension: CatalogDimension;
+  // The drill key — what the click writes into that level's URL param.
+  slug: string;
+  // The card's label.
+  name: string;
+  // The immediate parent's name (line → its brand, blend → its line), for the
+  // sub-label line and blend cards carry at root: those names collide across
+  // brands, so the label alone is ambiguous (D-03). Null when the parent level is
+  // already pinned by the hierarchy (the drill header already says it) or when
+  // the dimension has no parent.
+  parentName: string | null;
+  cigarCount: number;
+  // The badge-row facts, same grammar as the leaf tile: `N in humidor` (ok tone),
+  // `N wanted` (warn tone), each absent when zero. Principal-scoped.
+  inHumidorCount: number;
+  wantedCount: number;
+  // Up to three member product photos for the rotated cover fan, in the group's
+  // canonical-name order so the sample is deterministic (port:
+  // aggregateBookGroups' pre-sort). Empty when no member has a servable photo —
+  // the card then renders the themed glyph tile. Always empty for the `vitola`
+  // dimension: an abstract dimension never gets fake art (the hnet
+  // WallGroupingArt rule).
+  covers: { cigarId: string; productPhotoId: string }[];
+}
+
+// The null-key population at the grouped level (DESIGN-004 D-05). Rendered as
+// one trailing muted glyph card labelled `Unfiled`, last regardless of sort, and
+// never when the count is zero — which is why this is null rather than a
+// zero-count row.
+export interface CatalogUnfiledGroup {
+  cigarCount: number;
+  inHumidorCount: number;
+  wantedCount: number;
+}
+
+export interface BrowseCatalogGroupsArgs extends Omit<BrowseCatalogArgs, "sort" | "sortDir" | "cursor" | "limit"> {
+  // Which level to group by. Must be a level the active hierarchy does not
+  // already pin — the web registry enforces that; the domain treats a pinned
+  // dimension's grouping as a single-card view rather than erroring.
+  by: CatalogDimension;
+  // Group cards sort by their own two facts, not the leaf set (D-04).
+  groupSort?: { field: "name" | "count"; dir: CatalogSortDir };
+}
+
+export interface BrowseCatalogGroupsResult {
+  groups: CatalogGroupCard[];
+  unfiled: CatalogUnfiledGroup | null;
+}
+
+// ---- Facet options (DESIGN-004 D-06) --------------------------------------
+
+// One option in a hierarchy chip's popover. `count` is computed against the
+// OTHER active facets — the dimension's own current value is excluded from the
+// filter set, so the number answers "how many would I get if I picked this",
+// which is the only question a picker is asked.
+export interface CatalogFacetOption {
+  slug: string;
+  name: string;
+  // The parent's name, for the same collision reason as the group card's
+  // sub-label; null when the parent level is already pinned.
+  parentName: string | null;
+  count: number;
+}
+
+export interface CatalogFacetOptionsArgs extends Omit<BrowseCatalogArgs, "sort" | "sortDir" | "cursor" | "limit"> {
+  dimension: CatalogDimension;
+  limit?: number;
+}
+
+// An empty `options` array is the signal the chip HIDES at this scope (the
+// books-wall rule — with sparse data an explain-yourself chip row would dominate
+// the toolbar; the hnet *arr "render it dead with a message" rule is noted and
+// not taken).
+export interface CatalogFacetOptionsResult {
+  options: CatalogFacetOption[];
 }
 
 // One acquisition record (a purchases row) in an inventory holding. Dates are ISO
