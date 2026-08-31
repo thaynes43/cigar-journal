@@ -1620,10 +1620,13 @@ describe("crawler ingest (embedded Postgres)", () => {
   });
 
   // THE UN-SEAL IS STRUCTURAL, NOT CIRCUMSTANTIAL. Correcting Cuban Lou's removes
-  // today's seal; it does not stop the next one. `approved-import` stamps
-  // `focus='CC'` on every vendor it adds (#210), so the next approved Cuban shop
-  // re-forms the seal the day it lands — "no CC-focus vendor exists right now" is a
-  // fact about the registry, not a property of the design. Evidence is therefore
+  // today's seal; it does not stop the next one. `approved-import` used to stamp
+  // `focus='CC'` on every vendor it added — removed in #210, it mints NULL now —
+  // so the next approved Cuban shop would have re-formed the seal the day it
+  // landed. That path is narrower now, not closed: curation and evidence still set
+  // focus, and a truly CC-focused shop is a row the registry must be able to hold.
+  // "No CC-focus vendor exists right now" is a fact about the registry, not a
+  // property of the design. Evidence is therefore
   // read only from CRAWL-ENABLED vendors: a lane that cannot be asked cannot be
   // evidence, and the disable lever ADR-006 already promises finally does what the
   // ADR says it does. Without the `crawl_enabled` clause in evidencedMarketSql the

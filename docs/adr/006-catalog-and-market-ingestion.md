@@ -393,10 +393,14 @@ LLM-created cigars accumulate until curated.
     (`focus='both'` already contributes no evidence).
   - **Evidence comes only from crawl-enabled vendors, and that is what un-seals
     it** (added 2026-08-31). Correcting the one row above removes today's seal but
-    does not stop the next one: `approved-import` stamps `focus='CC'` on every
-    vendor it adds (#210), so the next approved Cuban shop would re-form the seal
-    the day it lands. "No CC-focus vendor exists right now" is a fact about the
-    registry, not a property of the design. The structural statement is instead:
+    does not stop the next one: `approved-import` stamped `focus='CC'` on every
+    vendor it added (removed in #210 — it mints `NULL`, unknown, since appearing on
+    the wiki is not evidence of what a shop stocks), so the next approved Cuban shop
+    would have re-formed the seal the day it landed. Removing that stamp narrows the
+    path without closing it — curation and crawled evidence still set `focus`, and a
+    genuinely CC-focused shop is a row the registry is *supposed* to hold. "No
+    CC-focus vendor exists right now" is a fact about the registry, not a property
+    of the design. The structural statement is instead:
     *linkage evidence is read only from vendors with `crawl_enabled = true`* — the
     same set the fleet is drawn from, because a vendor that cannot be asked cannot
     be evidence either. Two consequences, and both are the point: a mis-focused

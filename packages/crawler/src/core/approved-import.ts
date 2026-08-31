@@ -103,11 +103,14 @@ export interface ApprovalDiff {
 
 // Diff the parsed wiki against vendors.approval_status. A wiki store maps to a
 // registry row by host (vendors.url) first, then normalized name.
-//   add     — a wiki store with no registry row → a new 'approved' CC vendor.
-//   approve — an existing row not yet 'approved' → 'approved'.
-//   revoke  — a currently-'approved' CC/both row absent from the wiki →
-//             'unapproved' (dropped from the list). NC/owner-added rows are never
-//             touched — only previously wiki-approved Cuban vendors can be revoked.
+//   add     — a wiki store with no registry row → a new 'approved' vendor with
+//             no focus (NULL = unknown; the wiki is not market evidence, #210).
+//   approve — an existing row not yet 'approved' → 'approved'. An existing row's
+//             focus is left exactly as the registry has it — approving a shop
+//             says nothing about what it stocks.
+//   revoke  — a row this importer approved (approval_note stamped) absent from
+//             the wiki → 'unapproved' (dropped from the list). Owner-approved
+//             rows are never touched — the wiki can revoke only what it granted.
 //
 // SCOPED TO `kind = 'vendor'` (ADR-013 §4, migration 0028). The r/cubancigars
 // wiki is a list of SHOPS, so the only rows it can have an opinion about are
@@ -157,12 +160,24 @@ export async function diffApproved(db: Database, stores: ParsedStore[]): Promise
   }
 
   // Revocations: a row previously wiki-approved (approval_status='approved') that
-  // this snapshot no longer lists. Scoped to CC/both so NC vendors and
-  // owner-added rows are structurally excluded.
+  // this snapshot no longer lists.
+  //
+  // Scoped by PROVENANCE, not by focus. `approval_note` is stamped with the
+  // attribution on every approval this importer makes (add and approve alike)
+  // and cleared on revoke, and this module is the only writer of that column —
+  // so it is an exact marker for "the wiki granted this approval", and the wiki
+  // may take back only what the wiki gave. Rows approved by the owner, and rows
+  // this importer never touched, carry no note and are structurally excluded.
+  //
+  // This used to test `focus` for CC/both, which was wrong in both directions:
+  // it revoked hand-approved Cuban vendors the wiki never listed, and — once
+  // this importer stopped asserting a focus it has no evidence for (#210) — it
+  // would have skipped the NULL-focus rows the importer itself mints, stranding
+  // them 'approved' forever after the wiki dropped them.
   for (const row of rows) {
     if (matchedVendorIds.has(row.id)) continue;
     if (row.approvalStatus !== "approved") continue;
-    if (row.focus !== "CC" && row.focus !== "both") continue;
+    if (row.approvalNote !== APPROVED_LIST_ATTRIBUTION) continue;
     changes.push({
       kind: "revoke",
       store: row.name,
@@ -205,7 +220,15 @@ export async function applyApproved(
             // rather than left to the column default so the row this path mints
             // says what it is (ADR-013 §4).
             kind: "vendor",
-            focus: "CC",
+            // NULL = unknown, deliberately. Appearing on the r/cubancigars wiki
+            // is evidence a shop is *listed there*, not evidence of what it
+            // stocks: the list carries Cuban-market shops, NC-heavy shops that
+            // also carry CC, and shops whose mix has since changed. Stamping
+            // 'CC' here is how Cuban Lou's — a both-market shop — acquired a
+            // Cuban focus the registry had never observed, which #170/#192 had
+            // to unwind (#210). Focus is set from crawled evidence or by a
+            // deliberate curation call; an importer asserts nothing.
+            focus: null,
             crawlEnabled: false,
             displayEnabled: false,
             purchaseLinkout: true,
