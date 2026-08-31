@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.0](https://github.com/thaynes43/cigar-journal/compare/v0.31.1...v0.32.0) (2026-08-31)
+
+
+### Features
+
+* **reviews:** review observations, source kinds, blend aggregates (migration 0028, ADR-013 slice 1) ([#222](https://github.com/thaynes43/cigar-journal/issues/222)) ([dcebdb1](https://github.com/thaynes43/cigar-journal/commit/dcebdb1531971136965842e0b6960c0d681e1982))
+
 ## [0.31.1](https://github.com/thaynes43/cigar-journal/compare/v0.31.0...v0.31.1) (2026-08-31)
 
 
