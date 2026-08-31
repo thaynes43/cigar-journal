@@ -1067,9 +1067,18 @@ const curationClientRequestId = z
 export const getCurationQueueSchema = z
   .object({
     kind: z
-      .enum(["unverified", "duplicates", "match_triage", "unbranded", "untyped", "missing_photos"])
+      .enum([
+        "unverified",
+        "duplicates",
+        "match_triage",
+        "unbranded",
+        "unlined",
+        "unblended",
+        "untyped",
+        "missing_photos",
+      ])
       .describe(
-        "Which backlog to page: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only), match_triage (vendor listings the crawler has not settled: auto rows to confirm/unmatch, and unmatched rows it produced no link for, each carrying a reason), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo).",
+        "Which backlog to page: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only), match_triage (vendor listings the crawler has not settled: auto rows to confirm/unmatch, and unmatched rows it produced no link for, each carrying a reason), unbranded (no brand linked), unlined (on a brand, no line), unblended (on a line, no blend), untyped (null NC/CC), missing_photos (no product photo). The three structural kinds are one ladder worked in order — a row leaving unbranded appears in unlined.",
       ),
     cursor: z
       .string()
@@ -1267,6 +1276,214 @@ export const queueEnrichmentBacklogOutput = z
     enrichedMarkets: z.array(z.string()),
     eligibleVendors: z.array(z.string()),
     entries: z.array(looseObject),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+// ---- taxonomy curation (ADR-012 Wave 3, issue #196) -------------------------
+//
+// The registry-shaped half of the curation surface: find-or-mint a brand → line →
+// blend path, edit the spellings a registry row answers to, attach a leaf to its
+// place in that structure, and split an entry that has been standing for several
+// products. Same envelope and same attribution as the rest of the surface.
+//
+// Aliases are accepted as SPELLINGS everywhere, never as pre-folded keys: the
+// server derives the matching key, because a caller that passed a display string
+// into a key column would create an alias nothing can ever probe for. That is why
+// no schema here validates an alias's shape — there is no wrong spelling to
+// reject, only a wrong assumption about who normalizes it.
+
+const registryAliases = z
+  .array(z.string())
+  .optional()
+  .describe("Other spellings this entity answers to, e.g. ['RYJ'] or ['Padron']. Written as matching keys server-side — pass the spelling, not a slug.");
+
+export const registerTaxonomySchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    brandId: z
+      .string()
+      .optional()
+      .describe("The marca, when a queue row or a prior result already carries its id. Use this or brand, never both."),
+    brand: z
+      .object({
+        name: z.string().describe("The marca as the trade writes it, e.g. 'Padrón', 'Arturo Fuente'."),
+        aliases: registryAliases,
+        country: z.string().nullish().describe("Country of origin, if known. Omit rather than guess."),
+        website: z.string().nullish().describe("Official site, if known. Omit rather than guess."),
+      })
+      .strict()
+      .optional()
+      .describe("The marca by name — resolved by slug, minted only if genuinely new. Use this or brandId, never both."),
+    line: z
+      .object({
+        name: z.string().describe("The family within the brand, e.g. 'Liga Privada', '1964 Anniversary Series'."),
+        aliases: registryAliases,
+        description: z.string().nullish().describe("A sentence about the line, if known."),
+      })
+      .strict()
+      .optional()
+      .describe("The line to find or mint under the brand. Omit when the line is unknown — never invent one."),
+    blend: z
+      .object({
+        name: z.string().describe("The recipe within the line, e.g. 'No. 9', 'Maduro'. Wrapper variants sold as separate products are separate blends."),
+        aliases: registryAliases,
+        wrapper: z.string().nullish().describe("Wrapper leaf, e.g. 'Connecticut Broadleaf', 'Corojo 99'. Omit if not known."),
+        binder: z.string().nullish().describe("Binder leaf. Omit if not known."),
+        filler: z.string().nullish().describe("Filler leaves. Omit if not known."),
+        strength: z.string().nullish().describe("Marketed strength, e.g. 'medium-full'. Omit if not known."),
+        blendNotes: z.string().nullish().describe("What the maker says about the blend. Omit if not known."),
+        blenders: z
+          .array(z.string())
+          .optional()
+          .describe("People credited with this blend, by name, e.g. ['Steve Saka']. Minted and credited as needed. Cuban blends credit no individual — omit rather than guess."),
+      })
+      .strict()
+      .optional()
+      .describe("The blend to find or mint under the line. Requires line. Omit when the blend is unknown."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type RegisterTaxonomyArgs = z.infer<typeof registerTaxonomySchema>;
+
+const registeredEntityOutput = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    slug: z.string(),
+    aliases: z.array(z.string()),
+    created: z.boolean(),
+  })
+  .passthrough();
+
+export const registerTaxonomyOutput = z
+  .object({
+    brand: registeredEntityOutput,
+    line: registeredEntityOutput.nullable(),
+    blend: registeredEntityOutput.nullable(),
+    blenders: z.array(looseObject),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const updateRegistryAliasesSchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    level: z
+      .enum(["brand", "line", "blend", "blender"])
+      .describe("Which registry the id belongs to."),
+    id: z.string().describe("The entity's id, from a register_taxonomy result or a get_curation_queue row."),
+    add: z
+      .array(z.string())
+      .optional()
+      .describe("Spellings to start answering to, e.g. ['RYJ']. Refused when another entity at this level already claims the key."),
+    remove: z
+      .array(z.string())
+      .optional()
+      .describe("Spellings to stop answering to. The entity's own name cannot be removed — rename it instead."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type UpdateRegistryAliasesArgs = z.infer<typeof updateRegistryAliasesSchema>;
+
+export const updateRegistryAliasesOutput = z
+  .object({
+    level: z.string(),
+    id: z.string(),
+    name: z.string(),
+    aliases: z.array(z.string()),
+    added: z.array(z.string()),
+    removed: z.array(z.string()),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const assignCigarTaxonomySchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    cigarId: z.string().describe("Catalog id of the cigar to place, from a get_curation_queue row."),
+    brand: z
+      .string()
+      .nullish()
+      .describe("The marca as a spelling, e.g. 'Padrón'. brandId is re-derived from it. Use this or brandId, never both. null clears; omit to leave untouched."),
+    brandId: z
+      .string()
+      .nullish()
+      .describe("The marca by id, from a register_taxonomy result. Use this or brand, never both. null clears; omit to leave untouched."),
+    lineId: z.string().nullish().describe("Line id; must belong to the brand. null clears; omit to leave untouched."),
+    blendId: z.string().nullish().describe("Blend id; must belong to the line. null clears; omit to leave untouched."),
+    vitolaName: z.string().nullish().describe("The size's name as the maker sells it, e.g. 'Robusto', 'No. 2'. null clears; omit to leave untouched."),
+    edition: z.string().nullish().describe("Limited/regional release marking, e.g. 'Edición Limitada 2024'. null clears; omit to leave untouched."),
+    nameSource: z
+      .enum(["freeform", "composed"])
+      .optional()
+      .describe("composed hands the canonical name to the parts and recomposes it now and on every later part change; freeform keeps the stored string."),
+    preview: z
+      .boolean()
+      .optional()
+      .describe("true computes and validates the same write and returns what would change, without writing. Reuse the same clientRequestId to commit it."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type AssignCigarTaxonomyArgs = z.infer<typeof assignCigarTaxonomySchema>;
+
+export const assignCigarTaxonomyOutput = z
+  .object({
+    cigarId: z.string(),
+    canonicalName: z.string(),
+    composedName: z.string(),
+    nameSource: z.string(),
+    changedFields: z.array(z.string()),
+    preview: z.boolean(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const splitCigarSchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    cigarId: z.string().describe("Catalog id of the entry to split — the one standing for several products."),
+    splits: z
+      .array(
+        z
+          .object({
+            listingIds: z
+              .array(z.string())
+              .describe("Listing-match ids belonging to THIS product. Every one must currently point at cigarId."),
+            targetCigarId: z
+              .string()
+              .optional()
+              .describe("An existing sibling to move these listings onto. Omit to mint a new leaf from the parts below."),
+            lineId: z.string().nullish().describe("Line for a newly minted leaf; must belong to the split cigar's brand."),
+            blendId: z.string().nullish().describe("Blend for a newly minted leaf; must belong to the line."),
+            vitolaName: z.string().nullish().describe("Vitola for a newly minted leaf, e.g. 'Robusto'."),
+            edition: z.string().nullish().describe("Edition marking for a newly minted leaf."),
+            canonicalName: z
+              .string()
+              .nullish()
+              .describe("Overrides the name composed from the parts. Omit it and the leaf's name follows its parts, which is almost always right."),
+          })
+          .strict(),
+      )
+      .describe("One entry per product the listings actually name. Listings left unnamed stay on the original entry."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type SplitCigarArgs = z.infer<typeof splitCigarSchema>;
+
+export const splitCigarOutput = z
+  .object({
+    cigarId: z.string(),
+    splits: z.array(looseObject),
+    remainingListings: z.number(),
     replayed: z.boolean(),
   })
   .passthrough();

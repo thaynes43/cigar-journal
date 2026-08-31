@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import {
   auditLog,
   cigars,
@@ -21,6 +21,7 @@ import {
   type NewCigarRow,
   type Database,
 } from "@cj/db";
+import type { CigarNameSource, SuggestedParse } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
 import { assertCigarAncestry } from "./cigar-ancestry.js";
@@ -1945,6 +1946,11 @@ interface CigarFactsRow {
   canonicalName: string;
   brand: string | null;
   line: string | null;
+  brandId: string | null;
+  lineId: string | null;
+  blendId: string | null;
+  vitolaName: string | null;
+  nameSource: CigarNameSource;
   type: "NC" | "CC" | null;
   manufacturer: string | null;
   verification: "verified" | "unverified";
@@ -1971,6 +1977,11 @@ function toWorklistCigar(row: CigarFactsRow): WorklistCigar {
     canonicalName: row.canonicalName,
     brand: row.brand,
     line: row.line,
+    brandId: row.brandId,
+    lineId: row.lineId,
+    blendId: row.blendId,
+    vitola: row.vitolaName,
+    nameSource: row.nameSource,
     type: row.type,
     manufacturer: row.manufacturer,
     verification: row.verification,
@@ -2002,6 +2013,11 @@ async function cigarWorklistPage(
       canonicalName: cigars.canonicalName,
       brand: cigars.brand,
       line: cigars.line,
+      brandId: cigars.brandId,
+      lineId: cigars.lineId,
+      blendId: cigars.blendId,
+      vitolaName: cigars.vitolaName,
+      nameSource: cigars.nameSource,
       type: cigars.type,
       manufacturer: cigars.manufacturer,
       verification: cigars.verification,
@@ -2067,12 +2083,13 @@ async function matchTriagePage(
   // cigarWorklistPage note on the ms-truncation trap).
   const result = await db.execute(sql`
     SELECT lm.id AS match_id, lm.listing_key, lm.created_at::text AS match_created_at_text,
-           lm.status, lm.unmatched_reason,
+           lm.status, lm.unmatched_reason, lm.suggested_parse,
            v.name AS vendor_name,
            (SELECT o.listing_url FROM offers o
               WHERE o.listing_match_id = lm.id
               ORDER BY o.seen_at DESC LIMIT 1) AS listing_url,
            c.id AS cigar_id, c.canonical_name, c.brand, c.line, c.type,
+           c.brand_id, c.line_id, c.blend_id, c.vitola_name, c.name_source,
            c.manufacturer, c.verification, c.created_at AS cigar_created_at,
            -- Same held-lot count the other worklist kinds carry (#169), so a
            -- match_triage row reports it too and WorklistCigar has one shape
@@ -2099,12 +2116,18 @@ async function matchTriagePage(
     match_created_at_text: string;
     status: "auto" | "unmatched";
     unmatched_reason: "market_refusal" | "no_match" | "no_anchor" | "ambiguous" | null;
+    suggested_parse: SuggestedParse | null;
     vendor_name: string;
     listing_url: string | null;
     cigar_id: string | null;
     canonical_name: string | null;
     brand: string | null;
     line: string | null;
+    brand_id: string | null;
+    line_id: string | null;
+    blend_id: string | null;
+    vitola_name: string | null;
+    name_source: CigarNameSource | null;
     type: "NC" | "CC" | null;
     manufacturer: string | null;
     verification: "verified" | "unverified" | null;
@@ -2126,6 +2149,9 @@ async function matchTriagePage(
     // Absent on an `auto` row rather than null: an unmatched row always has one
     // (the read admits no other kind), so present-vs-absent tracks the two shapes.
     ...(r.unmatched_reason != null ? { reason: r.unmatched_reason } : {}),
+    // Absent rather than null when the resolver recorded none, matching how
+    // `reason` distinguishes "no value" from "not applicable" on this row.
+    ...(r.suggested_parse != null ? { suggestedParse: r.suggested_parse } : {}),
     cigar:
       r.cigar_id != null
         ? {
@@ -2133,6 +2159,11 @@ async function matchTriagePage(
             canonicalName: r.canonical_name ?? "",
             brand: r.brand,
             line: r.line,
+            brandId: r.brand_id,
+            lineId: r.line_id,
+            blendId: r.blend_id,
+            vitola: r.vitola_name,
+            nameSource: r.name_source ?? "freeform",
             type: r.type,
             manufacturer: r.manufacturer,
             verification: r.verification ?? "unverified",
@@ -2220,8 +2251,32 @@ export async function curationWorklist(
       const page = await cigarWorklistPage(db, eq(cigars.verification, "unverified"), cursor, limit);
       return { kind: input.kind, cigars: page.cigars, nextCursor: page.nextCursor };
     }
+    // THE STRUCTURAL LADDER (ADR-012 Wave 3). Each rung is "has the level above,
+    // lacks this one", so a row appears in exactly one of the three at a time and
+    // moves down as it is structured. `unbranded` keys on `brand_id`, NOT on the
+    // free-text `brand`: the column that decides whether the catalog can navigate
+    // to the row is the FK, and a row spelled `Padrón` with a null link is exactly
+    // the work this queue exists to hand out.
     case "unbranded": {
-      const page = await cigarWorklistPage(db, isNull(cigars.brand), cursor, limit);
+      const page = await cigarWorklistPage(db, isNull(cigars.brandId), cursor, limit);
+      return { kind: input.kind, cigars: page.cigars, nextCursor: page.nextCursor };
+    }
+    case "unlined": {
+      const page = await cigarWorklistPage(
+        db,
+        and(isNotNull(cigars.brandId), isNull(cigars.lineId))!,
+        cursor,
+        limit,
+      );
+      return { kind: input.kind, cigars: page.cigars, nextCursor: page.nextCursor };
+    }
+    case "unblended": {
+      const page = await cigarWorklistPage(
+        db,
+        and(isNotNull(cigars.lineId), isNull(cigars.blendId))!,
+        cursor,
+        limit,
+      );
       return { kind: input.kind, cigars: page.cigars, nextCursor: page.nextCursor };
     }
     case "untyped": {
@@ -2635,6 +2690,45 @@ function summarizeAudit(action: string, before: Record<string, unknown>, after: 
         .map((k) => `${k}: ${fmtValue(before[k])} → ${fmtValue(after[k])}`);
       return parts.length > 0 ? parts.join("; ") : null;
     }
+    // The taxonomy registry (ADR-012). Wave 2 wrote these actions with no console
+    // case, so every registry write rendered as a blank row — invisible in exactly
+    // the surface a curation run is reviewed through. Wave 3 turns them on.
+    case "brand.create":
+    case "line.create":
+    case "blend.create":
+    case "blender.create":
+      return `minted ${fmtValue(after.name)}`;
+    case "brand.set_aliases":
+    case "line.set_aliases":
+    case "blend.set_aliases":
+    case "blender.set_aliases": {
+      const added = Array.isArray(after.added) ? after.added.map(fmtValue) : [];
+      const removed = Array.isArray(after.removed) ? after.removed.map(fmtValue) : [];
+      const parts = [
+        ...(added.length > 0 ? [`+${added.join(" +")}`] : []),
+        ...(removed.length > 0 ? [`-${removed.join(" -")}`] : []),
+      ];
+      return parts.length > 0 ? `${fmtValue(after.name)}: ${parts.join(" ")}` : null;
+    }
+    case "blend.credit_blender":
+      return "blender credited";
+    case "cigar.assign_parts": {
+      const parts = Object.keys(after)
+        .filter((k) => k !== "id" && k !== "canonicalName")
+        .map((k) => `${k}: ${fmtValue(before[k])} → ${fmtValue(after[k])}`);
+      const renamed =
+        before.canonicalName !== after.canonicalName
+          ? `name: ${fmtValue(before.canonicalName)} → ${fmtValue(after.canonicalName)}`
+          : null;
+      const all = [...parts, ...(renamed != null ? [renamed] : [])];
+      return all.length > 0 ? all.join("; ") : null;
+    }
+    case "cigar.split": {
+      const splits = Array.isArray(after.splits) ? after.splits : [];
+      return `${fmtValue(before.canonicalName)} → ${splits.length} leaves, ${fmtValue(after.remainingListings)} listings left`;
+    }
+    case "cigar.split_leaf":
+      return `${fmtValue(before.canonicalName)} → ${fmtValue(after.canonicalName)}`;
     default:
       return null;
   }

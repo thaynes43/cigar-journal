@@ -138,7 +138,7 @@ describe("taxonomy writes", () => {
       const result = await addLineAliases(h.deps, curator, { id: line.lineId, aliases: ["Under Crown"] });
       expect(result.added).toEqual(["under-crown"]);
       expect(result.aliases).toEqual(["under-crown", "undercrown"]);
-      expect(await auditsFor("line.add_aliases")).toHaveLength(1);
+      expect(await auditsFor("line.set_aliases")).toHaveLength(1);
     });
 
     it("is a no-op when the key is already held", async () => {
