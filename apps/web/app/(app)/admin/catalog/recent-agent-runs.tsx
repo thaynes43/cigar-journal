@@ -11,7 +11,7 @@ import { LocalDate } from "../../_components/local-date";
 // The "Recent agent runs" review (DESIGN-003 §Curation, issue 126): agent audit work
 // grouped by run, newest first — run key, action tally, span — each expandable to
 // its rows with a per-row Undo where a true inverse exists. Runs are fetched
-// server-side and passed in; a run's rows lazy-load on expand.
+// server-side and passed in; a run's rows lazy-load on expand and page on demand.
 export function RecentAgentRuns({ runs }: { runs: AgentRunSummary[] }) {
   if (runs.length === 0) {
     return <p className="font-serif text-muted">No agent runs yet.</p>;
@@ -64,22 +64,48 @@ function RunCard({ run }: { run: AgentRunSummary }) {
   );
 }
 
+// A run's rows, keyset-paged. `agentRunRows` has always returned a `nextCursor`;
+// the console used to render "Showing the first 100 rows." and stop, which made a
+// run bigger than one page partly unreadable — a bulk enqueue (issue 154) writes up to
+// 100 audit rows on a single press, so one ordinary action after it pushes the
+// enqueue rows off the page (issue 173).
+//
+// Deliberately NO IntersectionObserver sentinel, unlike journal-list and
+// catalog-all-grid: infinite scroll is the reading model there, but this list
+// lives inside a collapsible admin card, where a sentinel would fetch merely
+// because an expanded card drifted near the viewport. The ask is a control, and a
+// button is the control.
 function RunRows({ runId }: { runId: string }) {
-  const rows = api.curation.agentRunRows.useQuery({ runId });
-  if (rows.isPending) {
+  const query = api.curation.agentRunRows.useInfiniteQuery(
+    { runId },
+    { getNextPageParam: (last) => last.nextCursor },
+  );
+  if (query.isPending) {
     return <p className="pt-4 text-sm text-muted">Loading rows…</p>;
   }
-  if (rows.error) {
-    return <p className={`pt-4 text-sm ${ui.muted}`}>{actionErrorMessage(rows.error)}</p>;
+  if (query.error) {
+    return <p className={`pt-4 text-sm ${ui.muted}`}>{actionErrorMessage(query.error)}</p>;
   }
-  const data = rows.data;
+  // audit_log is append-only and an Undo writes actor 'web' with no run_id (which
+  // this read excludes), so cursors stay valid across a page's lifetime — pages
+  // can be concatenated without a de-dupe pass.
+  const rows = query.data?.pages.flatMap((page) => page.rows) ?? [];
   return (
     <ul className="mt-4 flex flex-col divide-y divide-line/60 border-t border-line/60">
-      {data.rows.map((row) => (
+      {rows.map((row) => (
         <RowItem key={row.auditId} row={row} />
       ))}
-      {data.nextCursor ? (
-        <li className="pt-3 text-xs text-muted">Showing the first {data.rows.length} rows.</li>
+      {query.hasNextPage ? (
+        <li className="pt-3">
+          <button
+            type="button"
+            className={ui.button}
+            disabled={query.isFetchingNextPage}
+            onClick={() => void query.fetchNextPage()}
+          >
+            {query.isFetchingNextPage ? "Loading…" : "Load more"}
+          </button>
+        </li>
       ) : null}
     </ul>
   );
@@ -91,6 +117,9 @@ function RowItem({ row }: { row: AgentRunRow }) {
   const requestId = useRef(crypto.randomUUID());
   const undo = api.curation.undo.useMutation({
     onSuccess: async () => {
+      // No-argument invalidate matches BOTH the query and infinite cache entries for
+      // the procedure, so the reverted row repaints on a paged list too; react-query
+      // then refetches every loaded page of this run (bounded: admin-only, one user).
       await Promise.all([utils.curation.agentRunRows.invalidate(), utils.curation.agentRuns.invalidate()]);
       router.refresh();
     },

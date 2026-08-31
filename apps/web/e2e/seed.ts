@@ -85,6 +85,10 @@ export interface Handoff {
   // cigar name (issue #49). Prod has none, so only the fixture exercises it.
   untitledSmoke: { id: string; cigarId: string; cigarName: string };
   untitledPublicSmoke: { id: string; cigarName: string };
+  // An agent run whose rows overflow the console's 100-row page, so the "Load
+  // more" control has something to reveal (#173). `oldestRowLabel` is the row
+  // that is only reachable on the second page.
+  overflowRun: { runId: string; rows: number; newestRowLabel: string; oldestRowLabel: string };
 }
 
 // Parse a session cookie out of a Better Auth response and shape it for a
@@ -381,6 +385,30 @@ export async function seed(opts: {
       journal: { narrative: "A short story with no title of its own." },
     });
 
+    // --- An agent run that overflows one page of rows (#173) ---------------
+    // Written as raw audit rows rather than through the curation services: the
+    // fixture only has to be READABLE, and 101 real curation writes would mutate
+    // 101 catalog rows that every other admin spec then sees.
+    //
+    // Deliberately inert. `cigar.enrichment_request` is NOT in REVERSIBLE_ACTIONS,
+    // so the run renders with no Undo buttons for a stray locator to hit, and no
+    // enrichment_requests row is written — the "Queue enrichment" spec's counts are
+    // untouched. `after` carries no cigarId, so `targetName` falls back to
+    // `before.listingKey` and each row's visible label is its own index. created_at
+    // is staggered a second apart so the newest→oldest order is deterministic:
+    // e2e-row-1 is newest (first page), e2e-row-101 oldest (second page only).
+    const overflowRunId = "wo-e2e-overflow-run";
+    const OVERFLOW_ROWS = 101;
+    await pool.query(
+      `INSERT INTO audit_log (user_id, actor, action, before, after, run_id, confidence, created_at)
+       SELECT $1, 'agent', 'cigar.enrichment_request',
+              jsonb_build_object('listingKey', 'e2e-row-' || i),
+              jsonb_build_object('reason', 'e2e overflow fixture'),
+              $2, 1, now() - (i || ' seconds')::interval
+       FROM generate_series(1, $3) AS i`,
+      [adminId, overflowRunId, OVERFLOW_ROWS],
+    );
+
     // --- Private journal (for the 404-parity spec) -------------------------
     const privateOwner = await insertUser(deps, "e2e-private@example.com", "private", "Private Owner");
     const privateSave = await saveSmoke(deps, privateOwner, {
@@ -426,6 +454,12 @@ export async function seed(opts: {
       untitledPublicSmoke: {
         id: untitledPublicSave.smoke.smokeId,
         cigarName: "Arturo Fuente Hemingway Short Story",
+      },
+      overflowRun: {
+        runId: overflowRunId,
+        rows: OVERFLOW_ROWS,
+        newestRowLabel: "e2e-row-1",
+        oldestRowLabel: `e2e-row-${OVERFLOW_ROWS}`,
       },
     };
 

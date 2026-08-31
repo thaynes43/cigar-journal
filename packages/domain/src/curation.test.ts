@@ -2394,6 +2394,58 @@ describe("curation", () => {
       expect(sourceRow!.catalogStatus).toBe("merged");
     });
 
+    it("pages a run bigger than one page without skipping or repeating a row", async () => {
+      // The exact shape issue #173 is about, and the one that could break keyset
+      // paging: queueEnrichmentBacklog (#154) writes up to 100 audit rows in ONE
+      // transaction, and audit_log.created_at defaults to now() — TRANSACTION time
+      // — so every row of a bulk press carries an IDENTICAL timestamp with random
+      // v4 ids. Ordering on created_at alone would be non-deterministic across that
+      // tie and a cursor could skip or repeat rows; the (created_at, id) tuple makes
+      // the order total. 101 rows so the default page of 100 must overflow by one.
+      const runId = `${RUN}-page-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: `Paged Run ${newRequestId().slice(0, 6)}` });
+      const TOTAL = 101;
+      await h.deps.db.transaction(async (tx) => {
+        await tx.insert(auditLog).values(
+          Array.from({ length: TOTAL }, (_, i) => ({
+            userId: admin.userId,
+            actor: "agent" as const,
+            action: "cigar.enrichment_request",
+            before: null,
+            after: { cigarId, reason: `row-${i}` },
+            runId,
+            confidence: 1,
+          })),
+        );
+      });
+      // Precondition: the tie is real. If a future default made created_at per-row,
+      // this test would silently stop covering the case it was written for.
+      const written = (await h.deps.db.select().from(auditLog).where(eq(auditLog.runId, runId))).map(
+        (r) => r.createdAt.toISOString(),
+      );
+      expect(new Set(written).size).toBe(1);
+
+      const first = await agentRunRows(h.deps, admin, { runId });
+      expect(first.rows).toHaveLength(100);
+      expect(first.nextCursor).not.toBeNull();
+
+      const second = await agentRunRows(h.deps, admin, { runId, cursor: first.nextCursor });
+      expect(second.rows).toHaveLength(TOTAL - 100);
+      expect(second.nextCursor).toBeNull();
+
+      // No skip and no duplicate across the tie: the union is every row, once.
+      const seen = [...first.rows, ...second.rows].map((r) => r.auditId);
+      expect(new Set(seen).size).toBe(TOTAL);
+      const all = new Set(
+        (await h.deps.db.select().from(auditLog).where(eq(auditLog.runId, runId))).map((r) => r.id),
+      );
+      expect(new Set(seen)).toEqual(all);
+      // Strictly descending by the keyset tuple, which on an all-equal timestamp
+      // reduces to descending id — the property the cursor comparison relies on.
+      const ids = seen;
+      expect([...ids].sort().reverse()).toEqual(ids);
+    });
+
     it("rejects a non-admin principal", async () => {
       const error = await undoCurationAction(h.deps, user, {
         clientRequestId: newRequestId(),

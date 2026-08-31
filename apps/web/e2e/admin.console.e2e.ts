@@ -109,3 +109,39 @@ test("Queue enrichment enqueues the Missing photos worklist, and a further press
   await page.getByRole("button", { name: "Queue enrichment" }).click();
   await expect(page.getByText(/Queued 0 · skipped [1-9]\d*/)).toBeVisible();
 });
+
+// Paging a run past the first 100 rows (#173). The seeded overflow run is inert —
+// `cigar.enrichment_request` is not reversible, so the rows carry no Undo — and the
+// spec only READS, which makes it retry-safe on the suite's one shared database.
+test("a run larger than one page reveals the rest through Load more", async ({ page }) => {
+  await page.goto("/admin/catalog");
+
+  const runs = page
+    .locator("section")
+    .filter({ has: page.getByRole("heading", { name: "Recent agent runs", exact: true }) });
+  const card = runs.locator("> ul > li").filter({ hasText: h.overflowRun.runId });
+  await expect(card).toHaveCount(1);
+
+  // The card's first button is its expand toggle; rows lazy-load on expand.
+  await card.getByRole("button").first().click();
+
+  // Exact matching throughout: "e2e-row-1" is a prefix of "e2e-row-10" and
+  // "e2e-row-101", so a substring locator would pass for the wrong reason.
+  const newest = card.getByText(h.overflowRun.newestRowLabel, { exact: true });
+  const oldest = card.getByText(h.overflowRun.oldestRowLabel, { exact: true });
+  const loadMore = card.getByRole("button", { name: "Load more" });
+
+  // Page one is the newest 100 rows; the oldest is over the page boundary — the
+  // state that used to be a dead end reading "Showing the first 100 rows."
+  await expect(newest).toBeVisible();
+  await expect(oldest).toHaveCount(0);
+  await expect(loadMore).toBeVisible();
+
+  await loadMore.click();
+
+  // The cursor resolved: the last row is reachable, and with nothing left to
+  // fetch the control retires rather than pressing into an empty page.
+  await expect(oldest).toBeVisible();
+  await expect(newest).toBeVisible();
+  await expect(loadMore).toHaveCount(0);
+});
