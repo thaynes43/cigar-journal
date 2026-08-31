@@ -12,6 +12,10 @@ actually blocked on whom. Overwrite it at the next major handoff.
   created the Authentik application and the 1Password fields, and
   `cigar-journal-oidc` reports SecretSynced. `/signin` renders "Continue with
   Authentik". Local email+password sign-in is unaffected and stays the fallback.
+- **THE SITE IS LIVE AND THE OWNER'S REVIEWS ARE PUBLIC** (flipped 2026-08-30).
+  `users.journal_visibility = 'public'`; `/journal` and `/smokes/<id>` serve
+  anonymously and review photos serve at `/api/photos/<id>`. Treat every change
+  to those surfaces as user-facing from now on.
 - **Catalogue: 970 active, 6 excluded** (all genuinely Fox gift cards), 914
   photos, ~1,549-row triage queue, **291 `listing_matches` with
   `decided_by='agent'`** that must stay protected.
@@ -131,19 +135,57 @@ selector must not touch anything the owner holds a lot for).
 - On any image bump, check ALL FIVE pins — the HelmRelease anchor and the four
   CronJobs. Renovate bumps only the HelmRelease (#2689).
 
-## Blocked on the owner (everything else is yours)
+## Blocked on the owner — ONE thing
 
-1. **#97 go-live cutover** — the actual launch: journal visibility flip, archive
-   cutover (53 reviews), ChatGPT connector verification, his Micallef photo.
-2. **The photo retest** — #184 shipped diagnostics, not a proven fix. He must
-   **refresh the connector AND start a new chat** first; per
-   `docs/mcp/client-compatibility.md` an in-flight conversation keeps serving the
-   old tool description. Whether ChatGPT's UI binds an in-chat image is not
-   testable from here — the diagnostics make the answer legible, not certain.
-3. **haynes-ops#2673** (`CIGAR_JOURNAL_TOKEN` → pod env; fixes this pod's MCP
-   401) and **#2684** (dev-env session docs). Both bounce the dev-env pod.
-4. **Two product calls**: #164 (packaged SKUs → offers vs exclude) and the deeper
-   half of #169 (should a sampler someone owns be a catalogue row at all).
+**Merge the dev-env PRs.** That is the entire list.
+- haynes-ops **#2673** — `CIGAR_JOURNAL_TOKEN` into the pod env; fixes the dev pod's
+  MCP 401 (the header currently registers as an empty `Bearer `).
+- haynes-ops **#2684** — dev-env session docs.
+- haynes-ops **#2683** — Renovate, dev-env image toolchain. Not ours, but it
+  rebuilds the image, so take it in the same window.
+
+All three bounce the dev-env pod, which is the only reason they are drafts.
+
+Everything else that used to sit on him is DONE or reassigned to the agent:
+
+- **Micallef photo — DONE.** He uploaded it. It is a `smoke_photos` row on
+  `Micallef Orange Robusto` (a REVIEW photo). That cigar has no catalogue photo,
+  which is correct and unrelated — the two are different tables and different
+  things. Do not "fix" it by attaching the review photo to the catalogue.
+- **Journal flip — DONE 2026-08-30.** `users.journal_visibility = 'public'`.
+  Verified anonymously: `/journal` and `/smokes/<id>` went 404 → 200, a real
+  browser renders the full review list with ratings, notes, descriptors and a
+  working "Load more", and review photos serve at `/api/photos/<id>` and
+  `/thumb` (200, image/jpeg). **His reviews are public now.** The only console
+  error is the Cloudflare Insights beacon failing to resolve from this pod's
+  egress allowlist — not a site defect.
+- **MCP go-live verification (#97)** — drive it with **codex** as the ChatGPT
+  proxy (the repo's testing standard) rather than asking him. Same for the #184
+  photo-path validation. Codex cannot prove ChatGPT's UI binds an in-chat image;
+  say so plainly instead of implying coverage.
+- **#164 and #169's deeper half** — decide them yourself, conservatively,
+  and write the reasoning into the issue so he can veto rather than author.
+
+### #97 — what is actually left (all yours)
+
+The flip was never the whole cutover. Remaining, from the issue:
+1. Sweep the shipped surfaces against `docs/design/002-go-live-experience.md` —
+   composition order, absent-when-empty sections, badge-row caps, facet/URL
+   behaviour, mobile toolbar panning, `/inventory` redirects. File deltas, fix
+   the small ones.
+2. Empty-state audit: every surface degrades per the design doc (no offers / no
+   holdings / no photo / zero-match facet) with the approved strings only.
+3. MCP go-live verification: the DESIGN-002 conversation set green on the
+   production connector, matrix dated in `docs/mcp/client-compatibility.md`.
+4. Archive cutover: execute #96's plan — point MkDocs readers at the new site,
+   verify every archived review renders (a PRD-001 success criterion), and keep
+   the archive publishable until he retires it (AGENTS.md).
+5. Docs: README + docs/README describe the launched product; remove stale
+   "designed, unbuilt" claims.
+
+Already satisfied and struck: the journal load-more past the 25 cap (#120 —
+`public-journal-list.tsx` has it, confirmed live), per-user timezone (#120), and
+the MCP Gatus probe (haynes-ops#2628).
 
 ## Operational truths learned the hard way today
 
