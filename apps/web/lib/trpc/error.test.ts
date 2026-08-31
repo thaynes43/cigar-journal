@@ -41,6 +41,24 @@ describe("actionErrorMessage", () => {
     expect(actionErrorMessage(stale as never)).toBe("This rename is no longer the cigar's current name.");
   });
 
+  it("carries the held-inventory refusal a curator must be able to act on", () => {
+    // #169: the console's Exclude path throws this, and the whole point of the
+    // refusal is the counts it names. A raw `.message` render would collapse it to
+    // "One or more fields are invalid." and the curator would have no idea their
+    // own humidor was what stopped the click.
+    const held = wireError(
+      new ValidationError([
+        {
+          path: "cigarId",
+          message:
+            "This cigar is held: 3 purchase lots (23 sticks). Excluding it would hide inventory from its owner — rename or merge it instead.",
+        },
+      ]),
+    );
+    expect(actionErrorMessage(held as never)).toContain("3 purchase lots (23 sticks)");
+    expect(actionErrorMessage(held as never)).not.toBe("One or more fields are invalid.");
+  });
+
   it("falls back to the thrown message for a non-validation error", () => {
     const error = { message: "Not authorized.", data: { domain: null } };
     expect(fieldMessages(error as never)).toEqual([]);

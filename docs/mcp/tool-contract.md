@@ -1189,6 +1189,45 @@ write carries the mutation envelope plus `runId` and `confidence`, and the adapt
 stamps `actor: agent` server-side so the review console can group and score a run.
 Scope alone is not enough — each handler also requires an admin principal.
 
+Every cigar in a `get_curation_queue` payload — the `cigars` rows and the cigar
+nested in a `match_triage` row — carries `heldLots`: purchase lots pointing at it
+across **all** users.
+
+```yaml
+cigars:
+  - cigarId: cg_01j9x2
+    canonicalName: Oliva Free Sampler
+    brand: null
+    heldLots: 3                 # somebody owns this — exclude_cigar will refuse it
+```
+
+### exclude_cigar refuses a held cigar
+
+`exclude_cigar` returns `validation_error` with a `cigarId` field message when the
+target has **any** `purchases` row, for **any** user:
+
+```yaml
+error:
+  code: validation_error
+  recoverable: true
+  action: { type: fix_and_retry }
+  fields:
+    - path: cigarId
+      message: >-
+        This cigar is held: 3 purchase lots (23 sticks). Excluding it would hide
+        inventory from its owner — rename or merge it instead.
+```
+
+**Enforced, not advised, and there is no override.** An excluded cigar leaves every
+catalog read, so excluding one somebody bought hides their inventory with nothing
+on screen to explain it (#169). Any lot blocks, not just lots with stock left — a
+fully-smoked lot is still a journal entry's provenance. `heldLots` is on the
+worklist precisely so this is anticipable: skip the row rather than call and be
+refused. `mergeCigars` refuses an excluded **target** for the same reason (merge is
+console-only; there is no merge tool here), so lots cannot be re-pointed onto a
+hidden survivor instead. `fix_and_retry` here means fixing the world, not the
+arguments: remove the lots, rename the entry, or merge it into the right one.
+
 ### queue_enrichment_backlog — write, idempotent
 
 Enqueue the caller's **photoless holdings** — cigars they hold with no servable

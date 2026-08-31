@@ -102,6 +102,12 @@ const UNVERIFIED_CAP = 200;
 // owner's real gap (the 46 CC humidor + a handful of NC) sits well under this.
 const MISSING_PHOTOS_CAP = 500;
 
+// "1 purchase lot" / "3 purchase lots". A refusal that names what it counted lets a
+// curator act on it; one that only says "held" sends them to psql.
+function countOf(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
 function assertCurator(principal: Principal): void {
   if (principal.role !== "admin") {
     throw new UnauthorizedError("Curation is restricted to catalog curators.");
@@ -290,6 +296,17 @@ async function mergeWithinTx(
   }
   if (target.catalogStatus === "merged") {
     throw new ValidationError([{ path: "targetCigarId", message: "Merge into the surviving cigar instead." }]);
+  }
+  // ...and the survivor must be VISIBLE, not merely un-tombstoned (#169). Merging a
+  // held source into an EXCLUDED target re-points the source's purchase lots onto a
+  // row that no catalog read returns — the same silent inventory loss the exclude
+  // guard below refuses, reached through a different door. The console cannot pose
+  // this call (its duplicate-pair query requires both sides active), but the tRPC
+  // route takes arbitrary ids. Written as `!== "active"` rather than
+  // `=== "excluded"` so a lifecycle value added later is refused by default instead
+  // of silently admitted.
+  if (target.catalogStatus !== "active") {
+    throw new ValidationError([{ path: "targetCigarId", message: "Merge into an active cigar instead." }]);
   }
 
   const before = { source: cigarSnapshot(source), target: cigarSnapshot(target) };
@@ -1241,6 +1258,64 @@ async function excludeWithinTx(
     throw new ValidationError([{ path: "cigarId", message: "A merged cigar cannot be excluded." }]);
   }
 
+  // HELD INVENTORY IS NEVER EXCLUDABLE (#169). catalog_status='excluded' drops the
+  // row out of every catalog-facing read, so excluding a cigar somebody bought
+  // hides their sticks with nothing on screen saying why. That is not hypothetical:
+  // on 2026-08-29 the curation agent excluded three samplers the owner held and 23
+  // sticks left the humidor until a hand-restore the next day. The agent's manual
+  // has since been tightened, but guidance is not enforcement — this is.
+  //
+  // ANY purchases row blocks, for ANY user:
+  //   - any row, not "rows with stock left". `remaining` is derived (total acquired
+  //     minus consumption links, ADR-008) and floors at zero, so a "remaining > 0"
+  //     test would make excludability flicker as the owner smokes, and a
+  //     fully-consumed lot is still the provenance of a journal entry.
+  //   - any user, not `principal.userId`. Someone else's inventory is no more
+  //     excludable than the curator's own, and the curator is by definition not the
+  //     only person whose humidor an exclusion can empty.
+  //
+  // No override argument, deliberately — the same house rule as
+  // queue_enrichment_backlog's preconditions: the way past a precondition is to do
+  // the thing it asserts (remove the lots, rename the entry, or merge it into the
+  // right one), and a flag would just be the old footgun with a longer name.
+  //
+  // ONE-DIRECTIONAL, deliberately. This refuses the exclude of a held cigar; it
+  // does NOT stop a lot from landing on an already-excluded one. recordPurchase
+  // resolves by id and never consults catalog_status, so an explicit cigarId held
+  // from before the exclusion still buys, and — the same mechanism at a smaller
+  // scale — a record_purchase committing between this SELECT and the UPDATE below
+  // is invisible under READ COMMITTED. Locking the race would need
+  // SELECT ... FOR UPDATE here plus a matching FOR SHARE in record-purchase.ts,
+  // which does not touch `cigars` at all today, and locking the general case means
+  // a new refusal on the journal's hottest write. Neither is bought here: this
+  // guard exists to stop a deliberate agent/console decision, the resulting state
+  // is visible in the humidor (getMyInventory does not filter catalog_status) and
+  // recoverable with restoreCigar.
+  const [held] = await tx
+    .select({
+      lots: sql<number>`count(*)::int`,
+      // Nullable and occasionally negative (correction rows) — coalesced so the
+      // refusal always has a number to name, never a null.
+      sticks: sql<number>`coalesce(sum(${purchases.quantity}), 0)::int`,
+    })
+    .from(purchases)
+    .where(eq(purchases.cigarId, current.id));
+  if (held && held.lots > 0) {
+    // The counts ride the prose, not a structured payload: every peer curation
+    // refusal is a field-pathed ValidationError, and `validation_error` is the code
+    // the published tool contract already documents for them. A dedicated
+    // `cigar_held` code would let a client branch programmatically, but the only
+    // correct client response here is "tell the operator", which prose serves.
+    throw new ValidationError([
+      {
+        path: "cigarId",
+        message:
+          `This cigar is held: ${countOf(held.lots, "purchase lot")} (${countOf(held.sticks, "stick")}). ` +
+          `Excluding it would hide inventory from its owner — rename or merge it instead.`,
+      },
+    ]);
+  }
+
   const before = cigarSnapshot(current);
   await tx
     .update(cigars)
@@ -1821,7 +1896,21 @@ interface CigarFactsRow {
   manufacturer: string | null;
   verification: "verified" | "unverified";
   createdAt: Date;
+  heldLots: number;
 }
+
+// Purchase lots pointing at a cigar, all users (#169). Every worklist row carries
+// it so the exclude guard is ANTICIPABLE: without it the agent cannot tell a held
+// row from a pile of gift cards and only learns by refusal, once per row, every
+// run. A correlated subquery rather than a join — the page is bounded by `limit`,
+// and a join would need a GROUP BY over the whole predicate.
+//
+// The outer column is written with sql.identifier, NOT `${cigars.id}`: in a SELECT
+// LIST position drizzle renders a column reference UNQUALIFIED ("id"), which inside
+// this subquery binds to `purchases p`.`id` instead of the cigar — a correlated
+// subquery that silently counts nothing. (It qualifies correctly in a WHERE, which
+// is what makes the bug easy to miss.) Verified against the embedded Postgres.
+const heldLotsSql = sql<number>`(SELECT count(*) FROM purchases p WHERE p.cigar_id = ${sql.identifier("cigars")}.${sql.identifier("id")})::int`;
 
 function toWorklistCigar(row: CigarFactsRow): WorklistCigar {
   return {
@@ -1833,6 +1922,7 @@ function toWorklistCigar(row: CigarFactsRow): WorklistCigar {
     manufacturer: row.manufacturer,
     verification: row.verification,
     createdAt: row.createdAt.toISOString(),
+    heldLots: row.heldLots,
   };
 }
 
@@ -1864,6 +1954,7 @@ async function cigarWorklistPage(
       verification: cigars.verification,
       createdAt: cigars.createdAt,
       createdAtText: sql<string>`${cigars.createdAt}::text`,
+      heldLots: heldLotsSql,
     })
     .from(cigars)
     .where(and(eq(cigars.catalogStatus, "active"), predicate, keyset))
@@ -1898,7 +1989,11 @@ async function matchTriagePage(
               WHERE o.listing_match_id = lm.id
               ORDER BY o.seen_at DESC LIMIT 1) AS listing_url,
            c.id AS cigar_id, c.canonical_name, c.brand, c.line, c.type,
-           c.manufacturer, c.verification, c.created_at AS cigar_created_at
+           c.manufacturer, c.verification, c.created_at AS cigar_created_at,
+           -- Same held-lot count the other worklist kinds carry (#169), so a
+           -- match_triage row reports it too and WorklistCigar has one shape
+           -- everywhere rather than a field that is sometimes absent.
+           (SELECT count(*) FROM purchases p WHERE p.cigar_id = c.id)::int AS held_lots
     FROM listing_matches lm
     JOIN vendors v ON v.id = lm.vendor_id
     LEFT JOIN cigars c ON c.id = lm.cigar_id
@@ -1923,6 +2018,7 @@ async function matchTriagePage(
     manufacturer: string | null;
     verification: "verified" | "unverified" | null;
     cigar_created_at: Date | null;
+    held_lots: number | null;
   }[];
 
   const hasMore = rows.length > limit;
@@ -1946,6 +2042,7 @@ async function matchTriagePage(
             manufacturer: r.manufacturer,
             verification: r.verification ?? "unverified",
             createdAt: r.cigar_created_at ? new Date(r.cigar_created_at).toISOString() : "",
+            heldLots: r.held_lots ?? 0,
           }
         : null,
   }));

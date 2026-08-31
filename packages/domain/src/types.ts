@@ -1601,6 +1601,11 @@ export interface WorklistCigar {
   manufacturer: string | null;
   verification: Verification;
   createdAt: string; // ISO-8601 instant
+  // Purchase lots pointing at this cigar, across ALL users (#169). Non-zero means
+  // exclude_cigar will refuse the row, so the agent can skip it instead of
+  // learning by refusal once per row on every run. Counted, not derived stock:
+  // the guard blocks on any lot, including fully-smoked ones.
+  heldLots: number;
 }
 
 // A vendor listing→cigar auto-match awaiting a verdict: the listing on one side

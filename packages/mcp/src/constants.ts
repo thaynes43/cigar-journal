@@ -216,7 +216,11 @@ verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
 non-cigar pollution, restore_cigar to undo; set_product_photo_rights
 approved/suppressed); low-confidence cases are skipped and
 reported, never guessed — leave an uncertain brand or type null rather than invent
-one. queue_enrichment_backlog is the operator's bulk enqueue of the photoless
+one. exclude_cigar never applies to a cigar anybody holds: a worklist row whose
+heldLots is above zero has purchase lots pointing at it, and the server refuses the
+exclude outright — enforced, not advised, and there is no override. Skip such a row
+or rename it; a sampler someone bought is a catalog entry, not pollution.
+queue_enrichment_backlog is the operator's bulk enqueue of the photoless
 holdings, NOT part of a curation run: do not call it on your own initiative — report
 the worklist and leave the press to the operator. It queues a cigar only once its
 canonical name is verified and a crawl-enabled vendor covering that market has
