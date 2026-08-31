@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
 import {
+  createDatabase,
   vendors,
   cigars,
   offers,
@@ -11,10 +12,19 @@ import {
   listingMatches,
   enrichmentRequests,
   enrichmentAttempts,
+  auditLog,
 } from "@cj/db";
+import { curationWorklist, enrichmentCoverageForCigar, enrichVendorFleet } from "@cj/domain";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { runIngest, type IngestDeps } from "./core/ingest.js";
-import { upsertListingMatch } from "./core/match.js";
+import { findCatalogMatch, upsertListingMatch } from "./core/match.js";
+import {
+  markRunTerminated,
+  openCrawlRun,
+  reclaimStrandedRuns,
+  withVendorLaneLock,
+  type SignalHost,
+} from "./core/run-record.js";
 import { foxCigar } from "./adapters/fox-cigar.js";
 import { smallBatchCigar } from "./adapters/small-batch-cigar.js";
 import { createMockFetcher, urlsetXml, loadFixture, fakeProcessPhoto, type MockFetcher } from "./testing/fixtures.js";
@@ -244,6 +254,53 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(recrawl.decidedBy).toBe("curator");
   });
 
+  // AN UNLINK MUST BE ATTRIBUTABLE. Every other path that clears a listing→cigar
+  // link writes an audit row with a before snapshot — setListingMatchStatus for a
+  // curator or an agent, excludeCigar for the cascade. The crawler's own market
+  // downgrade, which is the one write #170 exists to perform (the `Romeo y Julieta
+  // 1875` unlink), was a bare UPDATE: the row simply changed and nothing anywhere
+  // recorded that it had.
+  it("upsertListingMatch audits a downgrade that unlinks a cigar, and only a real one", async () => {
+    const cigar = await seedCigar(`Downgrade Audit ${randomUUID().slice(0, 8)}`);
+    const listingKey = `/shop/downgrade-audit-${randomUUID().slice(0, 8)}/`;
+    const auto = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+
+    await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: null,
+      status: "unmatched",
+      unmatchedReason: "market_refusal",
+      runId: "crawl-run-downgrade",
+      now: now(),
+    });
+
+    const audited = async () =>
+      pg.db.select().from(auditLog).where(eq(auditLog.action, "listing_match.set_status"));
+    const rows = await audited();
+    const row = rows.find((a) => (a.before as { id?: string }).id === auto.id);
+    expect(row).toBeTruthy();
+    // The crawler's shape: no signed-in principal, no OAuth client, the run named.
+    expect(row!.actor).toBe("import");
+    expect(row!.userId).toBeNull();
+    expect(row!.runId).toBe("crawl-run-downgrade");
+    expect((row!.before as { cigarId: string | null }).cigarId).toBe(cigar);
+    expect((row!.after as { cigarId: string | null }).cigarId).toBeNull();
+
+    // ...and ONLY a real transition. A re-crawl rewrites every match row nightly —
+    // 1,284 of them on prod — and an audit log that records "unchanged" that many
+    // times a run is an audit log nobody reads.
+    await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: null,
+      status: "unmatched",
+      unmatchedReason: "market_refusal",
+      now: now(),
+    });
+    expect(await audited()).toHaveLength(rows.length);
+  });
+
   it("upsertListingMatch preserves an agent decision", async () => {
     const cigar = await seedCigar("Decided Agent Verdict");
     const listingKey = "/shop/decided-agent/";
@@ -303,12 +360,22 @@ describe("crawler ingest (embedded Postgres)", () => {
     return id;
   }
 
-  // `createdAt` is explicit where a case depends on drain ORDER (the queue is
+  // Requests default to an instant BEFORE the fixture's `now()`, which is when
+  // makeVendor dates a lane's prior enrich run. That ordering is load-bearing
+  // since #185: a lane counts against a request only if it has already looked at
+  // it OR started a succeeded enrich run since the request was created. Left at
+  // the column default (real wall-clock now) every seeded lane would post-date
+  // every request and count against nothing, so a fleet case would exhaust on one
+  // vendor. The cases that are ABOUT #185 set the two instants explicitly.
+  //
+  // `createdAt` is also explicit where a case depends on drain ORDER (the queue is
   // drained oldest-first), so the assertion does not ride on insert timing.
-  async function seedRequest(cigarId: string, createdAt?: Date): Promise<string> {
+  const REQUEST_AT = new Date("2026-08-26T00:00:00.000Z");
+
+  async function seedRequest(cigarId: string, createdAt: Date = REQUEST_AT): Promise<string> {
     const rows = await pg.db
       .insert(enrichmentRequests)
-      .values({ cigarId, status: "pending", ...(createdAt ? { createdAt } : {}) })
+      .values({ cigarId, status: "pending", createdAt })
       .returning({ id: enrichmentRequests.id });
     return rows[0]!.id;
   }
@@ -908,5 +975,856 @@ describe("crawler ingest (embedded Postgres)", () => {
       .where(eq(crawlRuns.status, "failed"));
     expect(failed.length).toBeGreaterThanOrEqual(1);
     expect(failed.some((r) => (r.error ?? "").includes("robots.txt disallows"))).toBe(true);
+  });
+
+  // --- #170: the evidenced market, and write authority ------------------------
+  //
+  // #181 put coversMarketSql in the drain's open set, which closes #170 only for
+  // cigars whose `type` is set. On prod 884 of 971 active cigars are untyped and
+  // the predicate admits an unknown market BY DESIGN, so it is inert for 91% of
+  // the catalogue. These cases are about the other 91%: the market EVIDENCED by
+  // the links the crawler has already written.
+
+  // A vendor's listing, standing as a market claim about the cigar it links to.
+  const stock = (vendor: string, cigarId: string) =>
+    upsertListingMatch(pg.db, {
+      vendorId: vendor,
+      listingKey: `/shop/stock-${randomUUID().slice(0, 8)}/`,
+      cigarId,
+      status: "auto",
+      now: now(),
+    });
+
+  const photosFor = (cigarId: string) =>
+    pg.db.select().from(productPhotos).where(eq(productPhotos.cigarId, cigarId));
+
+  const matchesFor = (vendor: string) =>
+    pg.db.select().from(listingMatches).where(eq(listingMatches.vendorId, vendor));
+
+  // THE HEADLINE OF THE LANE, and the case #181 leaves open. 821 of prod's 884
+  // untyped rows are stocked by Fox and nobody else; on `cigars.type` alone a CC
+  // lane may select every one of them. Their links say otherwise.
+  it("a CC lane does not select an untyped cigar that a single-market NC vendor already stocks", async () => {
+    const nc = await makeVendor("Evidence NC Lane", "NC");
+    const cc = await makeVendor("Evidence CC Lane", "CC");
+    await arrange([nc, cc]);
+
+    const cigarId = await seedCigar(`Untyped But Stocked ${randomUUID().slice(0, 8)}`, null);
+    const requestId = await seedRequest(cigarId);
+    await stock(nc, cigarId);
+
+    const run = await enrichRun(cc, missRoutes);
+    expect(run.stats.enrich!.requests).toBe(0);
+    // Nothing spent: a refusal at the open set is not a look, so no ledger row and
+    // no attempt counter moves. That is what keeps the rollup honest.
+    expect(await ledgerRows(requestId)).toHaveLength(0);
+    expect((await requestRow(requestId)).status).toBe("pending");
+  });
+
+  // The guard against OVER-tightening. Where there is genuinely no evidence the
+  // liberal negative filter must survive intact, or an untyped, unstocked cigar
+  // becomes unreachable by every lane and hangs forever.
+  it("a CC lane still selects an untyped cigar that nobody stocks", async () => {
+    const nc = await makeVendor("Unstocked NC Lane", "NC");
+    const cc = await makeVendor("Unstocked CC Lane", "CC");
+    await arrange([nc, cc]);
+
+    const cigarId = await seedCigar(`Untyped And Unstocked ${randomUUID().slice(0, 8)}`, null);
+    const requestId = await seedRequest(cigarId);
+
+    const run = await enrichRun(cc, missRoutes);
+    expect(run.stats.enrich!.requests).toBe(1);
+    expect(await ledgerRows(requestId)).toHaveLength(1);
+  });
+
+  // `cigars.type` OVERRIDES linkage evidence, so a curator always has the last
+  // word — the live `Petit Royales Romeo y Julieta` shape: a CC cigar the crawler
+  // auto-linked to an NC vendor's Altadis listing. The wrong link is evidence for
+  // NC; the recorded type is CC; CC wins and the NC lane is refused.
+  it("cigars.type overrides linkage evidence: an NC lane is refused a CC cigar it already mis-linked", async () => {
+    const nc = await makeVendor("Override NC Lane", "NC");
+    await arrange([nc]);
+
+    const cigarId = await seedCigar(`Petit Royales Shape ${randomUUID().slice(0, 8)}`, "CC");
+    const requestId = await seedRequest(cigarId);
+    await stock(nc, cigarId);
+
+    const run = await enrichRun(nc, missRoutes);
+    expect(run.stats.enrich!.requests).toBe(0);
+    expect(await ledgerRows(requestId)).toHaveLength(0);
+  });
+
+  // SELF-EVIDENCING (option A). The photo guard must cost the working lane
+  // nothing: a single-market vendor that links a cigar nobody else stocks becomes
+  // its own sole evidence, so the market is known by the time the slot is filled.
+  it("a lane that links a previously unlinked untyped cigar DOES fill the photo slot", async () => {
+    const nc = await makeVendor("Self Evidence NC", "NC");
+    await arrange([nc]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    const requestId = await seedRequest(cigarId);
+
+    const run = await enrichRun(nc, hitRoutes, createMemoryPhotoStorage());
+    expect(run.stats.enrich).toMatchObject({ requests: 1, matched: 1 });
+    // Both refusal counters are absent-when-zero, like their run-level siblings, so
+    // a run that refused nothing serialises byte-identically into crawl_runs.
+    expect(run.stats.enrich!.skippedMarket).toBeUndefined();
+    expect(run.stats.enrich!.photoRefused).toBeUndefined();
+    expect(run.stats.photosCaptured).toBe(1);
+    expect(run.stats.photosSkippedMarket).toBeUndefined();
+    expect(await photosFor(cigarId)).toHaveLength(1);
+    expect((await requestRow(requestId)).status).toBe("fulfilled");
+  });
+
+  // THE PHOTO SLOT IS UNIQUE(cigar_id), written onConflictDoNothing, and never
+  // deleted by anything in the crawler: one global slot, first write wins,
+  // forever. So on CONFLICTING evidence — the shape both live prod mis-links left
+  // behind — a single-market vendor may still LINK (revisable, named, re-written
+  // next crawl) and must NOT photograph.
+  it("on conflicting evidence a lane writes the match and the offer but leaves the photo slot empty", async () => {
+    const nc = await makeVendor("Conflict NC", "NC");
+    const cc = await makeVendor("Conflict CC", "CC");
+    const drainer = await makeVendor("Conflict Drainer CC", "CC");
+    await arrange([nc, cc, drainer]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    const requestId = await seedRequest(cigarId);
+    // Two single-market vendors of OPPOSITE markets already stock it, so the
+    // evidence disagrees and resolves to unknown — the conservative answer.
+    await stock(nc, cigarId);
+    await stock(cc, cigarId);
+
+    const run = await enrichRun(drainer, hitRoutes, createMemoryPhotoStorage());
+    // Unknown market cannot rule the lane out, so it looks and it links...
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, photoRefused: 1 });
+    expect(run.stats.offersWritten).toBe(1);
+    expect((await matchesFor(drainer)).some((m) => m.cigarId === cigarId)).toBe(true);
+    // ...and the one permanent slot stays empty, which is the point of the issue.
+    expect(await photosFor(cigarId)).toHaveLength(0);
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(run.stats.photosSkippedMarket).toBe(1);
+
+    // AND THE ASK IS NOT FULFILLED (#209). It used to be: capturePhoto returned
+    // void, the drain read "no throw" as a match, and the request went terminal
+    // with the slot still empty — the photo was the whole point of the ask. This
+    // assertion asserted `fulfilled`; it was asserting the defect.
+    expect((await requestRow(requestId)).status).toBe("pending");
+
+    // Nor does the refusal spend the vendor. `attempts` reaching its budget is what
+    // licenses `exhausted` — "we read this catalogue and it is not there" — which
+    // this vendor's own link disproves. The ledger records WHAT happened without
+    // moving the ask toward a verdict that would be false.
+    const ledger = await ledgerRows(requestId);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]).toMatchObject({ attempts: 0, errors: 0, lastOutcome: "photo_refused" });
+  });
+
+  // THE GUARD IS THE INSERT, NOT THE READ BEFORE IT. The authority used to be read
+  // into JS and then trusted across a whole image download — seconds of third-party
+  // HTTP — and the lane lock does not close that window, because locks are per
+  // (vendor, mode): a `both` lane and a focused lane run concurrently BY DESIGN,
+  // and a focused link is exactly what revokes a `both` lane's authority. So the
+  // predicate is re-stated as the INSERT's own WHERE clause and evaluated in the
+  // write's snapshot. `processPhoto` stands in for the window here, because it is
+  // the one seam that is deterministically inside it.
+  it("the photo slot guard is evaluated at the INSERT, not before the download", async () => {
+    const nc = await makeVendor("Toctou NC", "NC");
+    const cc = await makeVendor("Toctou CC", "CC");
+    await arrange([nc, cc]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    const requestId = await seedRequest(cigarId);
+
+    const racing: IngestDeps = {
+      ...deps(createMockFetcher(hitRoutes), createMemoryPhotoStorage()),
+      processPhoto: async (input, contentType) => {
+        // Mid-download: a CC lane links the same cigar. The evidence now disagrees
+        // and resolves to unknown, so this NC lane's authority is gone — after its
+        // pre-flight read said it had one.
+        await stock(cc, cigarId);
+        return fakeProcessPhoto(input, contentType);
+      },
+    };
+    const run = await runIngest(racing, { adapter: foxCigar, vendorId: nc, mode: "enrich" });
+
+    // The pre-flight passed (the lane was self-evidencing when it read), so a guard
+    // that only ran there would have written the slot.
+    expect(await photosFor(cigarId)).toHaveLength(0);
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(run.stats.photosSkippedMarket).toBe(1);
+    expect((await requestRow(requestId)).status).toBe("pending");
+  });
+
+  // The same refusal in the other direction, so the guard is not accidentally
+  // one-sided: an NC lane on the same conflicted row is refused the slot too.
+  it("the photo refusal is symmetric: an NC lane is refused the slot on the same conflicted row", async () => {
+    const nc = await makeVendor("Symmetric NC", "NC");
+    const cc = await makeVendor("Symmetric CC", "CC");
+    const drainer = await makeVendor("Symmetric Drainer NC", "NC");
+    await arrange([nc, cc, drainer]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    await seedRequest(cigarId);
+    await stock(nc, cigarId);
+    await stock(cc, cigarId);
+
+    const run = await enrichRun(drainer, hitRoutes, createMemoryPhotoStorage());
+    expect(run.stats.enrich).toMatchObject({ looked: 1, matched: 0, photoRefused: 1 });
+    expect(await photosFor(cigarId)).toHaveLength(0);
+    expect(run.stats.photosSkippedMarket).toBe(1);
+  });
+
+  // THE LIVE `Romeo y Julieta Mini Red Aroma` SHAPE, replayed. A Fox-created
+  // untyped row picked up a Cuban Lou's listing_match and offer on CL's single
+  // seed run; only the already-taken photo slot kept a Habanos image out of an NC
+  // cigar. Now the CC lane never reaches the row at all — the evidence Fox's own
+  // link supplies rules it out one step earlier, so the slot is not the last line
+  // of defence.
+  it("a Fox photo is not at risk from a later Cuban Lou's drain: the row is never selected", async () => {
+    const fox = await makeVendor("Red Aroma Fox", "NC");
+    const cubanLous = await makeVendor("Red Aroma Cuban Lous", "CC");
+    await arrange([fox, cubanLous]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    const requestId = await seedRequest(cigarId);
+
+    const first = await enrichRun(fox, hitRoutes, createMemoryPhotoStorage());
+    expect(first.stats.photosCaptured).toBe(1);
+    const [photo] = await photosFor(cigarId);
+
+    // Re-open the ask the way a curator would, then let the CC lane run.
+    await pg.db
+      .update(enrichmentRequests)
+      .set({ status: "pending", resolvedAt: null })
+      .where(eq(enrichmentRequests.id, requestId));
+    const second = await enrichRun(cubanLous, hitRoutes, createMemoryPhotoStorage());
+    expect(second.stats.enrich!.requests).toBe(0);
+
+    const after = await photosFor(cigarId);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.id).toBe(photo!.id);
+    expect(after[0]!.vendorId).toBe(fox);
+  });
+
+  // THE SEED/OFFERS HALF, and the path BOTH live prod mis-links actually came
+  // from — previously untested. A vendor walking its own sitemap must not
+  // auto-link a catalogue cigar from the other market.
+  it("findCatalogMatch refuses a cross-market candidate, in both directions", async () => {
+    const nc = await makeVendor("Seed Match NC", "NC");
+    await arrange([nc]);
+
+    // A name no neighbouring case seeds: findCatalogMatch resolves by canonical
+    // name, so a duplicate would make the assertion pick an arbitrary row.
+    const name = `Seed Match Subject ${randomUUID().slice(0, 8)}`;
+    const ncCigar = await seedCigar(name, null);
+    await stock(nc, ncCigar);
+
+    // No focus supplied: unchanged behaviour, the candidate comes back.
+    expect(await findCatalogMatch(pg.db, name)).toEqual({
+      kind: "match",
+      hit: { cigarId: ncCigar, canonicalName: name },
+    });
+    // An NC vendor may link an NC-evidenced row...
+    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "NC" })).toMatchObject({
+      kind: "match",
+      hit: { cigarId: ncCigar },
+    });
+    // ...and a CC vendor may not. The refusal NAMES the candidate it refused: that
+    // is what stops the seed path reading it as "nothing matched" and creating a
+    // duplicate of this very row.
+    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "CC" })).toMatchObject({
+      kind: "refused",
+      hit: { cigarId: ncCigar },
+      market: "NC",
+    });
+    // A both-market vendor has no single market to conflict with.
+    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "both" })).toMatchObject({
+      kind: "match",
+      hit: { cigarId: ncCigar },
+    });
+    // A genuine miss stays distinguishable from a refusal.
+    expect(await findCatalogMatch(pg.db, `No Such Cigar ${randomUUID()}`, { vendorFocus: "CC" })).toEqual({
+      kind: "none",
+    });
+  });
+
+  // The same guard through the real seed path. This used to assert the OPPOSITE —
+  // that a refusal fell through to createCigarFromListing, on the reasoning that a
+  // listing contradicting its best match is a different cigar. That holds only when
+  // the market evidence is right, and #170's own evidence was wrong often enough to
+  // sink it (Cuban Lou's recorded 'CC' while stocking Perdomo). When a refusal is
+  // false, creating turns a recoverable bad link into a permanent duplicate. So the
+  // refusal now leaves the listing UNMATCHED for triage and creates nothing.
+  it("a CC seed run leaves a refused listing unmatched instead of minting a duplicate", async () => {
+    const nc = await makeVendor("Seed Walk NC", "NC");
+    const cc = await makeVendor("Seed Walk CC", "CC");
+    await arrange([nc, cc]);
+
+    const ncCigar = await seedCigar(OLIVA_NAME, null);
+    await stock(nc, ncCigar);
+    const before = (await pg.db.select({ id: cigars.id }).from(cigars)).length;
+
+    const run = await runIngest(deps(createMockFetcher(hitRoutes), createMemoryPhotoStorage()), {
+      adapter: foxCigar,
+      vendorId: cc,
+      mode: "seed",
+    });
+
+    // Nothing created for the refused listing, and the refusal is counted.
+    expect(run.stats.cigarsCreated).toBe(0);
+    expect(run.stats.linksRefusedMarket).toBe(1);
+    expect((await pg.db.select({ id: cigars.id }).from(cigars)).length).toBe(before);
+
+    // The listing is recorded, unmatched and pointing at no cigar — the triage
+    // queue's shape, so a curator can resolve what the crawler would not guess.
+    const ccMatches = await matchesFor(cc);
+    expect(ccMatches).toHaveLength(1);
+    expect(ccMatches[0]).toMatchObject({ cigarId: null, status: "unmatched" });
+
+    // The NC row is untouched: no CC listing_match points at it, and its photo
+    // slot is still free.
+    expect(ccMatches.every((m) => m.cigarId !== ncCigar)).toBe(true);
+    expect(await photosFor(ncCigar)).toHaveLength(0);
+  });
+
+  // ...AND THE TRIAGE QUEUE ACTUALLY SHOWS IT. The claim above — "the triage queue
+  // a curator already works" — was made by the code comments, the CLI summary and
+  // the PR body, and was false in all three: `matchTriagePage` read `status='auto'`
+  // only, so every refusal landed somewhere nobody could see. Asserted end to end
+  // through the real curation read rather than against the row, because the row was
+  // never the thing in doubt.
+  it("a refused seed listing is visible in match_triage, marked as a market refusal", async () => {
+    const nc = await makeVendor("Triage Walk NC", "NC");
+    const cc = await makeVendor("Triage Walk CC", "CC");
+    await arrange([nc, cc]);
+
+    const ncCigar = await seedCigar(OLIVA_NAME, null);
+    await stock(nc, ncCigar);
+
+    await runIngest(deps(createMockFetcher(hitRoutes), createMemoryPhotoStorage()), {
+      adapter: foxCigar,
+      vendorId: cc,
+      mode: "seed",
+    });
+    const refused = (await matchesFor(cc))[0]!;
+
+    const curator = { userId: randomUUID(), role: "admin" as const };
+    let found;
+    let cursor: string | null = null;
+    for (let i = 0; i < 500 && !found; i++) {
+      const page = await curationWorklist({ db: pg.db, now }, curator, {
+        kind: "match_triage",
+        limit: 200,
+        cursor,
+      });
+      found = page.matches!.find((m) => m.matchId === refused.id);
+      cursor = page.nextCursor;
+      if (!cursor) break;
+    }
+
+    expect(found).toBeTruthy();
+    // Marked distinguishably from an auto proposal: there is no cigar to confirm,
+    // and the reason says a candidate WAS found and declined — which is the signal
+    // that this vendor's recorded focus may be the thing that is wrong.
+    expect(found).toMatchObject({ status: "unmatched", reason: "market_refusal", cigar: null });
+  });
+
+  // --- the `both`-focus vendor: evidence, and the seal that used to close ------
+  //
+  // Cuban Lou's is recorded `focus='both'` from migration 0025, because measured
+  // against its live catalogue it sells Perdomo, Gurkha, CAO, Rocky Patel and
+  // Dominican/Nicaraguan bundles alongside genuine Habanos. These three cases pin
+  // what that value has to mean, since the whole correctness of #170 now rests on
+  // it rather than on the algorithm.
+
+  // THE SELF-SEALING SCENARIO, and the reason the vendor row had to change rather
+  // than the predicate. While Cuban Lou's said 'CC', its listing on a Perdomo made
+  // that row evidenced-CC; coversMarketSql then dropped Fox — the ONLY live enrich
+  // lane — from the row's fleet, so the one vendor that could have contradicted the
+  // claim could never be asked, and the wrong inference was permanent. As 'both'
+  // the shop asserts no market, the row stays unknown, and Fox keeps its reach.
+  it("a both-market vendor stocking a cigar is not evidence: an NC lane can still be asked (the Cuban Lou's sells Perdomo case)", async () => {
+    const cubanLous = await makeVendor("Perdomo Case Cuban Lous", "both");
+    const fox = await makeVendor("Perdomo Case Fox", "NC");
+    await arrange([cubanLous, fox]);
+
+    // A Nicaraguan cigar, untyped, that only the both-market shop stocks — the
+    // shape of all 57 such rows in prod.
+    const cigarId = await seedCigar(`Perdomo Artesanal Sumatra ${randomUUID().slice(0, 8)}`, null);
+    const requestId = await seedRequest(cigarId);
+    await stock(cubanLous, cigarId);
+
+    // Had the shop stayed 'CC' this would be 0: the row would read as evidenced-CC
+    // and the NC lane would be filtered out of its own open set.
+    const run = await enrichRun(fox, missRoutes);
+    expect(run.stats.enrich!.requests).toBe(1);
+    expect(await ledgerRows(requestId)).toHaveLength(1);
+  });
+
+  // THE UN-SEAL IS STRUCTURAL, NOT CIRCUMSTANTIAL. Correcting Cuban Lou's removes
+  // today's seal; it does not stop the next one. `approved-import` stamps
+  // `focus='CC'` on every vendor it adds (#210), so the next approved Cuban shop
+  // re-forms the seal the day it lands — "no CC-focus vendor exists right now" is a
+  // fact about the registry, not a property of the design. Evidence is therefore
+  // read only from CRAWL-ENABLED vendors: a lane that cannot be asked cannot be
+  // evidence, and the disable lever ADR-006 already promises finally does what the
+  // ADR says it does. Without the `crawl_enabled` clause in evidencedMarketSql the
+  // second assertion is 0 — the shop is out of the fleet and its evidence still
+  // holds the row shut.
+  it("disabling a mis-focused shop frees the rows its links sealed", async () => {
+    const misfocused = await makeVendor("Unseal Import CC", "CC");
+    const fox = await makeVendor("Unseal Fox", "NC");
+    await arrange([misfocused, fox]);
+
+    const cigarId = await seedCigar(`Unseal Perdomo ${randomUUID().slice(0, 8)}`, null);
+    await seedRequest(cigarId);
+    await stock(misfocused, cigarId);
+
+    // Sealed: the CC shop's link is the only evidence, the row reads evidenced-CC,
+    // and the NC lane is filtered out of its own open set.
+    expect((await enrichRun(fox, missRoutes)).stats.enrich!.requests).toBe(0);
+
+    // The lever, pulled. Nothing else changes — no migration, no re-crawl, no
+    // touching the sealed rows.
+    await setFleet([fox]);
+    expect((await enrichRun(fox, missRoutes)).stats.enrich!.requests).toBe(1);
+  });
+
+  // WRITE AUTHORITY FOR A VENDOR WITH NO MARKET. `mayWriteCatalogPhoto('both', …)`
+  // used to return true unconditionally, which made `both` the most privileged
+  // focus a vendor could hold: it could take the one permanent slot on any cigar,
+  // including one a focused vendor already stocks. It may not pre-empt that vendor.
+  it("a both-market lane does not pre-empt a focused vendor's photo slot", async () => {
+    const fox = await makeVendor("Preempt Fox", "NC");
+    const cubanLous = await makeVendor("Preempt Cuban Lous", "both");
+    await arrange([fox, cubanLous]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    const requestId = await seedRequest(cigarId);
+    await stock(fox, cigarId);
+
+    const run = await enrichRun(cubanLous, hitRoutes, createMemoryPhotoStorage());
+    // 'both' covers every market, so the lane is eligible, looks, and LINKS — the
+    // link is named, revisable and re-written next crawl.
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, photoRefused: 1 });
+    expect((await matchesFor(cubanLous)).some((m) => m.cigarId === cigarId)).toBe(true);
+    // ...and the permanent slot is left for the vendor whose focus covers the row.
+    expect(await photosFor(cigarId)).toHaveLength(0);
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(run.stats.photosSkippedMarket).toBe(1);
+
+    // The ask stays OPEN for the vendor that may actually write the slot (#209).
+    // This is the case that mattered most: the refusal here is structural — Fox
+    // stocks the row and always will — so marking the ask fulfilled retired it
+    // permanently with an empty slot and no vendor left to ask.
+    expect((await requestRow(requestId)).status).toBe("pending");
+    const ledger = await ledgerRows(requestId);
+    expect(ledger[0]).toMatchObject({ attempts: 0, lastOutcome: "photo_refused" });
+
+    // And the ask says WHO is holding it open. Without this the row is an
+    // `already_queued` indistinguishable from one a lane has simply not reached.
+    const coverage = await enrichmentCoverageForCigar(pg.db, cigarId, null);
+    expect(coverage.photoRefused.map((v) => v.vendorId)).toEqual([cubanLous]);
+  });
+
+  // The other half, or the guard would just be "a `both` vendor never photographs
+  // anything" — which would strand the 57 rows only this shop carries with an empty
+  // slot forever. With nothing focused to pre-empt, its own product page wins.
+  it("a both-market lane DOES fill a slot no focused vendor competes for", async () => {
+    const cubanLous = await makeVendor("Sole Source Cuban Lous", "both");
+    await arrange([cubanLous]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    await seedRequest(cigarId);
+
+    const run = await enrichRun(cubanLous, hitRoutes, createMemoryPhotoStorage());
+    expect(run.stats.photosCaptured).toBe(1);
+    expect(run.stats.photosSkippedMarket).toBeUndefined();
+    expect(await photosFor(cigarId)).toHaveLength(1);
+  });
+
+  // The 291 `decided_by='agent'` rows in prod are the highest-value data in
+  // `listing_matches` and the market guard must not be able to touch them. It only
+  // ever refuses a write, and upsertListingMatch's protection is unchanged — but
+  // #170 changes findCatalogMatch's signature and therefore this exact path, so
+  // the property is asserted through the real seed walk rather than assumed.
+  it("an agent decision survives a focus-aware seed walk untouched", async () => {
+    const nc = await makeVendor("Agent Guard NC", "NC");
+    // A second NC lane stocks the cigar, so its evidenced market is KNOWN and the
+    // photo guard would PERMIT the capture. Without it the guard refuses on its own
+    // and the photo assertion below passes whatever the capture is aimed at —
+    // vacuously, which is exactly how this defect stayed invisible.
+    const stockist = await makeVendor("Agent Guard Stockist NC", "NC");
+    await arrange([nc, stockist]);
+
+    const cigarId = await seedCigar(PADRON_NAME, null);
+    await stock(stockist, cigarId);
+    const decided = await upsertListingMatch(pg.db, {
+      vendorId: nc,
+      listingKey: "/shop/padron-1964-anniversary-maduro-torpedo/",
+      cigarId,
+      status: "auto",
+      now: now(),
+    });
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "unmatched", cigarId: null, decidedBy: "agent" })
+      .where(eq(listingMatches.id, decided.id));
+
+    const routes = {
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([PADRON_URL]) },
+      [PADRON_URL]: { body: loadFixture("product-padron.html") },
+      [PADRON_IMG]: { binary: Buffer.from("padron-image"), contentType: "image/jpeg" },
+    };
+    const run = await runIngest(deps(createMockFetcher(routes), createMemoryPhotoStorage()), {
+      adapter: foxCigar,
+      vendorId: nc,
+      mode: "offers",
+    });
+
+    const after = (await pg.db.select().from(listingMatches).where(eq(listingMatches.id, decided.id)))[0]!;
+    expect(after).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent" });
+
+    // AND THE REJECTION HOLDS FOR THE PHOTO TOO. The link was correctly declined
+    // and the capture fired anyway: ingestListing returned the cigar the resolver
+    // had just picked rather than the one the committed row names, so every crawl
+    // re-tempted the one permanent artifact against a cigar an agent had rejected —
+    // 591 rows on prod, nightly. Reading `match.cigarId` makes a declined upsert
+    // yield null, and null captures nothing.
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(await photosFor(cigarId)).toHaveLength(0);
+  });
+
+  // §2c, THE COUPLING. The drain's open set has to be the exact complement of the
+  // rollup's denominator over the SAME market value. If the drain filtered on the
+  // evidenced market while the rollup filtered on `cigars.type`, the CC lane here
+  // would sit in the denominator of a request it will never be sent — and the row
+  // would hang forever, which is #185's failure mode arriving by another door.
+  it("a request the drain refuses to send to a lane does not count that lane in its denominator", async () => {
+    const nc = await makeVendor("Coupling NC", "NC");
+    const cc = await makeVendor("Coupling CC", "CC");
+    await arrange([nc, cc]);
+
+    const cigarId = await seedCigar(`Coupled Untyped ${randomUUID().slice(0, 8)}`, null);
+    const requestId = await seedRequest(cigarId);
+    await stock(nc, cigarId); // evidenced NC
+
+    // The CC lane is refused the row...
+    expect((await enrichRun(cc, missRoutes)).stats.enrich!.requests).toBe(0);
+    // ...and is therefore NOT in the denominator, so the NC lane's own budget is
+    // enough to retire it.
+    await enrichRun(nc, missRoutes);
+    expect((await requestRow(requestId)).status).toBe("pending");
+    await enrichRun(nc, missRoutes);
+    expect((await requestRow(requestId)).status).toBe("exhausted");
+    expect((await ledgerRows(requestId)).map((r) => r.vendorId)).toEqual([nc]);
+  });
+
+  // --- #157: one runner per (vendor, mode) ------------------------------------
+
+  // A pool of our own: the harness hands out a Database, and the advisory lock
+  // needs a CLIENT it can hold for the length of a run. Ended in the case that
+  // opens it, so nothing leaks into a neighbour.
+  const withPool = async <T,>(fn: (pool: ReturnType<typeof createDatabase>["pool"]) => Promise<T>): Promise<T> => {
+    const { pool } = createDatabase(pg.url);
+    try {
+      return await fn(pool);
+    } finally {
+      await pool.end();
+    }
+  };
+
+  const runsFor = (vendor: string, kind: "seed" | "offers" | "enrich") =>
+    pg.db.select().from(crawlRuns).where(and(eq(crawlRuns.vendorId, vendor), eq(crawlRuns.kind, kind)));
+
+  // #181 made the attempt increment atomic, so no look is lost any more. What
+  // remained: two overlapping same-vendor runs SELECT the same rows and fetch them
+  // twice — burning both nights of ATTEMPTS_PER_VENDOR in one evening and doubling
+  // the polite load on the vendor. Neither is corruption; both defeat the "two
+  // nights of evidence" the budget exists for.
+  it("two same-vendor enrich runs cannot overlap: the second is refused and writes no run row", async () => {
+    // No seeded run: this case COUNTS crawl_runs rows, and makeVendor's default
+    // fixture row is itself a `succeeded` enrich run.
+    const only = await makeVendor("Lane Lock", "NC", { enrichRun: false });
+    await arrange([only]);
+    const cigarId = await seedCigar("Nonexistent Phantom Cigar Lock", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    await withPool(async (pool) => {
+      let innerAcquired: boolean | null = null;
+      const outer = await withVendorLaneLock(pool, only, "enrich", async () => {
+        const inner = await withVendorLaneLock(pool, only, "enrich", async () => "ran");
+        innerAcquired = inner.acquired;
+        return enrichRun(only, missRoutes);
+      });
+
+      expect(innerAcquired).toBe(false);
+      expect(outer.acquired).toBe(true);
+    });
+
+    // Exactly one run row, and one look on the ledger — not two.
+    expect(await runsFor(only, "enrich")).toHaveLength(1);
+    const ledger = await ledgerRows(requestId);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]!.attempts).toBe(1);
+  });
+
+  // PER (VENDOR, MODE), not per vendor. Fox's `offers` lane starts at 04:00 with a
+  // 9,000 s deadline and can still be running when the 06:00 `enrich` lane starts;
+  // a per-vendor lock would make a correctness fix silently cancel a nightly job.
+  it("the lock is per (vendor, mode): an offers run in flight does not block the enrich lane", async () => {
+    const both = await makeVendor("Two Lane", "NC");
+    await arrange([both]);
+
+    await withPool(async (pool) => {
+      const outer = await withVendorLaneLock(pool, both, "offers", async () => {
+        const enrich = await withVendorLaneLock(pool, both, "enrich", async () => "enrich ran");
+        expect(enrich).toEqual({ acquired: true, value: "enrich ran" });
+        // ...and its OWN mode is still exclusive.
+        const offers = await withVendorLaneLock(pool, both, "offers", async () => "offers ran");
+        expect(offers.acquired).toBe(false);
+        return "offers held";
+      });
+      expect(outer).toEqual({ acquired: true, value: "offers held" });
+    });
+  });
+
+  // The stated, bounded cost of a session-level lock: a pod lost with its node can
+  // leave a half-open connection holding it until Postgres reaps the backend, and
+  // that lane skips until then. Correctness never depends on it — the run simply
+  // does not happen — and the NEXT run proceeds once the holder is gone.
+  it("a lock held elsewhere makes the lane skip, and the next run proceeds once it is released", async () => {
+    const skipping = await makeVendor("Skipped Lane", "NC", { enrichRun: false });
+    await arrange([skipping]);
+
+    await withPool(async (holder) => {
+      const held = await holder.connect();
+      try {
+        const key = `cj:crawl:${skipping}:enrich`;
+        await held.query("SELECT pg_advisory_lock(hashtext($1))", [key]);
+
+        await withPool(async (pool) => {
+          const refused = await withVendorLaneLock(pool, skipping, "enrich", async () => "must not run");
+          expect(refused.acquired).toBe(false);
+        });
+        expect(await runsFor(skipping, "enrich")).toHaveLength(0);
+
+        await held.query("SELECT pg_advisory_unlock(hashtext($1))", [key]);
+      } finally {
+        held.release();
+      }
+
+      await withPool(async (pool) => {
+        const next = await withVendorLaneLock(pool, skipping, "enrich", () => enrichRun(skipping, missRoutes));
+        expect(next.acquired).toBe(true);
+      });
+    });
+    expect(await runsFor(skipping, "enrich")).toHaveLength(1);
+  });
+
+  // --- #155: stranded runs ----------------------------------------------------
+
+  // A fake `process`, so a case can drive the handler without signalling — or
+  // exiting — the vitest worker. The real one is wired in production.
+  function fakeSignalHost() {
+    const handlers = new Map<string, Set<() => void>>();
+    const exits: number[] = [];
+    let resolveExit: (() => void) | null = null;
+    const exited = new Promise<void>((resolve) => {
+      resolveExit = resolve;
+    });
+    const host: SignalHost = {
+      on(signal, handler) {
+        const set = handlers.get(signal) ?? new Set<() => void>();
+        set.add(handler);
+        handlers.set(signal, set);
+      },
+      off(signal, handler) {
+        handlers.get(signal)?.delete(handler);
+      },
+      exit(code) {
+        exits.push(code);
+        resolveExit?.();
+      },
+    };
+    return {
+      host,
+      exits,
+      exited,
+      listeners: (signal: string) => handlers.get(signal)?.size ?? 0,
+      fire: (signal: "SIGTERM" | "SIGINT") => {
+        for (const handler of [...(handlers.get(signal) ?? [])]) handler();
+      },
+    };
+  }
+
+  const runRow = async (id: string) => (await pg.db.select().from(crawlRuns).where(eq(crawlRuns.id, id)))[0]!;
+
+  // THE REPORTED TRIGGER: `activeDeadlineSeconds` fires, Kubernetes sends SIGTERM
+  // and waits out the grace period, and the row stays `running` forever because
+  // nothing owned closing it.
+  it("SIGTERM during a drain marks the open run failed and leaves the request unstranded", async () => {
+    // No seeded run: the case reads the ONE crawl_runs row this drain opens.
+    const signalled = await makeVendor("Signalled", "NC", { enrichRun: false });
+    await arrange([signalled]);
+    const cigarId = await seedCigar("Nonexistent Phantom Cigar Signal", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    const signals = fakeSignalHost();
+    const base = createMockFetcher(missRoutes);
+    let fired = false;
+    let midRun: { status: string; error: string | null; finishedAt: Date | null } | null = null;
+
+    // The sitemap fetch is the first thing the drain does after opening its run
+    // row, so the signal lands with the row `running` and work still to do.
+    const interrupting: MockFetcher = {
+      requested: base.requested,
+      get pagesFetched() {
+        return base.pagesFetched;
+      },
+      fetchText: async (url: string) => {
+        const response = await base.fetchText(url);
+        if (!fired && url === SITEMAP) {
+          fired = true;
+          signals.fire("SIGTERM");
+          // In production `process.exit(1)` ends the process right here and the
+          // success UPDATE never runs. A fake host cannot stop the run, so the row
+          // is read at the moment the handler's UPDATE committed — which is the
+          // state a killed pod would leave behind.
+          await signals.exited;
+          const row = (await runsFor(signalled, "enrich"))[0]!;
+          midRun = { status: row.status, error: row.error, finishedAt: row.finishedAt };
+        }
+        return response;
+      },
+      fetchBinary: base.fetchBinary,
+    };
+
+    await runIngest(
+      {
+        db: pg.db,
+        fetcher: interrupting,
+        storage: null,
+        now,
+        processPhoto: fakeProcessPhoto,
+        signalHost: signals.host,
+      },
+      { adapter: foxCigar, vendorId: signalled, mode: "enrich" },
+    );
+
+    expect(signals.exits).toEqual([1]);
+    expect(midRun).toMatchObject({ status: "failed", error: "terminated: SIGTERM" });
+    expect(midRun!.finishedAt).not.toBeNull();
+    // The handler is removed once it has fired, so a second signal cannot start a
+    // second UPDATE against a connection the process is about to lose.
+    expect(signals.listeners("SIGTERM")).toBe(0);
+    // The request itself is left OPEN and reachable — no `in_progress` claim to
+    // strand it, which is what #181 removed and this must not reintroduce.
+    expect((await requestRow(requestId)).status).toBe("pending");
+  });
+
+  // `AND status = 'running'` is the whole of the race safety: a signal arriving
+  // after the success UPDATE has committed matches nothing and flips nothing.
+  it("a signal arriving after normal completion cannot flip a succeeded run to failed", async () => {
+    const finishing = await makeVendor("Finishing", "NC");
+    await arrange([finishing]);
+
+    const signals = fakeSignalHost();
+    const open = await openCrawlRun(pg.db, { vendorId: finishing, kind: "enrich", now, host: signals.host });
+    expect(signals.listeners("SIGTERM")).toBe(1);
+
+    await open.close("succeeded", { stats: { pagesFetched: 0 } });
+    // close() disarms, so the real handler is already gone...
+    expect(signals.listeners("SIGTERM")).toBe(0);
+    signals.fire("SIGTERM");
+    expect(signals.exits).toEqual([]);
+
+    // ...and even called directly, the guard refuses the row.
+    expect(await markRunTerminated(pg.db, open.crawlRunId, "terminated: SIGTERM")).toBe(0);
+    expect((await runRow(open.crawlRunId)).status).toBe("succeeded");
+  });
+
+  // SIGKILL, OOM and node loss run no handler at all. The sweep is the backstop,
+  // and it is scoped to (vendor, kind) for the same reason the lock is.
+  it("the startup sweep reclaims this lane's stranded rows and leaves every other lane alone", async () => {
+    const swept = await makeVendor("Swept", "NC");
+    const neighbour = await makeVendor("Neighbour", "NC");
+    await arrange([swept]);
+
+    const stranded = await pg.db
+      .insert(crawlRuns)
+      .values({ vendorId: swept, kind: "enrich", status: "running", startedAt: now() })
+      .returning({ id: crawlRuns.id });
+    const otherMode = await pg.db
+      .insert(crawlRuns)
+      .values({ vendorId: swept, kind: "offers", status: "running", startedAt: now() })
+      .returning({ id: crawlRuns.id });
+    const otherVendor = await pg.db
+      .insert(crawlRuns)
+      .values({ vendorId: neighbour, kind: "enrich", status: "running", startedAt: now() })
+      .returning({ id: crawlRuns.id });
+
+    await enrichRun(swept, missRoutes);
+
+    const reclaimed = await runRow(stranded[0]!.id);
+    expect(reclaimed.status).toBe("failed");
+    expect(reclaimed.error).toMatch(/no completion recorded/);
+    expect(reclaimed.finishedAt).not.toBeNull();
+    // Fox's 04:00 offers lane can still be running at 06:00, and another vendor's
+    // lane is none of this run's business.
+    expect((await runRow(otherMode[0]!.id)).status).toBe("running");
+    expect((await runRow(otherVendor[0]!.id)).status).toBe("running");
+  });
+
+  // WHY THE SWEEP NEEDS NO AGE CEILING. It cannot meet a genuinely concurrent run,
+  // because a concurrent run is refused the lane lock BEFORE it can reach the
+  // sweep. The issue asked for "a sane ceiling"; a lock is exact, and a ceiling
+  // would be a constant that has to track the slowest legitimate run.
+  it("a concurrent run is refused the lock before any sweep can execute", async () => {
+    const contested = await makeVendor("Contested", "NC");
+    await arrange([contested]);
+
+    await withPool(async (pool) => {
+      const held = await pool.connect();
+      try {
+        await held.query("SELECT pg_advisory_lock(hashtext($1))", [`cj:crawl:${contested}:enrich`]);
+
+        const inFlight = await pg.db
+          .insert(crawlRuns)
+          .values({ vendorId: contested, kind: "enrich", status: "running", startedAt: now() })
+          .returning({ id: crawlRuns.id });
+
+        await withPool(async (second) => {
+          const refused = await withVendorLaneLock(second, contested, "enrich", () =>
+            enrichRun(contested, missRoutes),
+          );
+          expect(refused.acquired).toBe(false);
+        });
+
+        // The run that is genuinely in flight is untouched.
+        expect((await runRow(inFlight[0]!.id)).status).toBe("running");
+        await held.query("SELECT pg_advisory_unlock(hashtext($1))", [`cj:crawl:${contested}:enrich`]);
+      } finally {
+        held.release();
+      }
+    });
+  });
+
+  // #155 must not be able to corrupt #185's denominator. A stranded row is
+  // `running` and a reclaimed one is `failed`; liveness reads only `succeeded`, so
+  // the sweep moves a row between two equally uncounted states.
+  it("a reclaimed run does not make a vendor live", async () => {
+    const reclaimedLane = await makeVendor("Reclaimed Lane", "NC", { enrichRun: false });
+    await arrange([reclaimedLane]);
+    await pg.db
+      .insert(crawlRuns)
+      .values({ vendorId: reclaimedLane, kind: "enrich", status: "running", startedAt: now() });
+
+    expect(await reclaimStrandedRuns(pg.db, { vendorId: reclaimedLane, kind: "enrich" })).toBe(1);
+
+    const fleet = await enrichVendorFleet(pg.db, "NC");
+    const entry = fleet.find((v) => v.vendorId === reclaimedLane)!;
+    expect(entry.lastEnrichStartedAt).toBeNull();
   });
 });

@@ -16,11 +16,14 @@
 4. `multiple_matches` → several fuzzy candidates and no clean winner; the model
    disambiguates *conversationally* (vitola usually settles it). Never guesses.
 5. `no_match` → no interruption mid-smoke; at finalize, `save_smoke` carries
-   `described` attributes — `canonicalName` as the user knows it, other
-   taxonomy only if actually known — and the server creates an `unverified`
-   catalog entry inside the save transaction (catalog invariant,
-   ADR-002/006). The curation queue picks it up later. No line, vitola, or
-   blend detail is ever invented to satisfy structure.
+   `described` attributes — `canonicalName` as the user knows it, plus brand,
+   line, blend, and vitola only where the user actually stated them — and the
+   server creates an `unverified` catalog entry inside the save transaction
+   (catalog invariant, ADR-002/006). Stated levels resolve against the brand
+   and line registries by alias (ADR-012); unstated levels stay NULL and the
+   row stays `freeform` until curation composes it. The curation queue picks
+   it up later. No line, blend, or vitola detail is ever invented to fill a
+   level.
 
 ```mermaid
 sequenceDiagram

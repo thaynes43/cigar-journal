@@ -21,6 +21,14 @@ user:
 
 ## Cigar — well-known product with blend data
 
+The two Cigar blocks below predate ADR-012 and still show `brand`/`line` as
+flat strings. Under ADR-012 the leaf is one blend in one vitola: `brand`,
+`line`, and `blend` become nullable references to reference entities, the
+blend owns wrapper/binder/filler and strength, and `name_source` says whether
+`canonicalName` is authoritative (`freeform`) or recomposed from the parts
+(`composed`). The blocks are re-cut when the Wave 1 schema lands (#196) —
+decomposing a real product into levels is curation evidence, not a doc edit.
+
 ```yaml
 cigar:
   cigarId: cg_01j9x2
@@ -43,9 +51,12 @@ cigar:
   verification: verified
 ```
 
-## Cigar — taxonomy-resistant, lazy-created mid-conversation
+## Cigar — sparse levels, lazy-created mid-conversation
 
-No line exists and none is invented; `canonicalName` is the identity.
+The brand is known and the line is not, so the leaf hangs directly off its
+brand and `line` stays NULL — the shape ADR-012 is built for. Nothing is
+invented to fill a level, and `canonicalName` stays `freeform` until curation
+resolves the parts.
 
 ```yaml
 cigar:

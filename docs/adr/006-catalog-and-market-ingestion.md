@@ -56,6 +56,8 @@ conversational lazy-create is mandatory regardless of crawl coverage.
   confident matches auto-link,
   the rest queue for manual confirmation. Match status (`auto`/`confirmed`/
   `unmatched`) is never silently overwritten by later crawls.
+  *Amended 2026-08-31 by ADR-012 — see "matching v2" below.* The
+  name-plus-trigram resolver is retired; status handling is unchanged.
 - **Price comparison (MVP):** per-cigar current offers across vendors +
   simple price history from `offers`. **Review aggregation (R11, later):**
   derived descriptors/statistics only — no verbatim third-party review text
@@ -80,6 +82,19 @@ LLM-created cigars accumulate until curated.
 
 ## Amendments
 
+- **2026-08-31 — listing matching superseded by ADR-012 (matching v2).** The
+  "normalized canonical name + trigram similarity" resolver above is retired:
+  it inverts at scale (distinct blends outscore true sibling vitolas), so
+  every vendor mints a parallel catalog. Matching v2 anchors on a brand alias,
+  resolves line and blend by alias within that brand, then vitola and
+  packaging by token, with trigram demoted to ranking residue inside the
+  resolved scope; `categoryPath` breadcrumbs are persisted as parse evidence
+  instead of discarded, and seed mode never mints a row from an unparsed
+  title — no brand anchor means triage with the suggested parse attached.
+  The rest of this ADR — trust order, vendor registry, crawl shape, offers as
+  a time series, match-status preservation, track separation — is unchanged.
+  See [ADR-012](012-structured-catalog-taxonomy.md); no new vendor is enabled
+  until matching v2 and the packaging fold land.
 - **2026-08-29 (owner) — vendor expansion + Cuban Lou's posture.** More NC
   vendors join the initial set (2 Guys Cigars, Small Batch Cigar built as
   adapters alongside Fox). **Cuban Lou's: photos + price seeds YES, purchase
@@ -329,3 +344,219 @@ LLM-created cigars accumulate until curated.
     change. Widening the rule instead — calling "nothing scored" an error —
     would mean a vendor that simply does not stock a brand could never retire
     the request, which is the hang this amendment exists to remove.
+- **2026-08-30 — the evidenced market, write authority, and per-request lane
+  liveness (issues #170, #157, #155, #185).** The 2026-08-30 per-vendor ledger
+  amendment above put ONE market predicate in the drain and the rollup. That was
+  necessary and not sufficient: the predicate read `cigars.type`, and 884 of 971
+  active catalogue rows have no type. The rest of this entry is what the same
+  ruling looks like once it is applied to the catalogue we actually have.
+  - **Three predicates, named and separated.** They had been one word,
+    "coverage", and collapsing them is what let a CC-focus vendor fill an NC
+    cigar's one catalogue-photo slot:
+    **(1) Eligibility** — who MAY be asked? A liberal negative filter
+    (`coversMarketSql`), in the vendor fleet and the drain's open set.
+    **(2) Queue gate** — may we file an ask at all? A conservative positive
+    claim (`liveEnrichMarkets`, `marketCovered`), at enqueue time.
+    **(3) Write authority** — may THIS vendor write THIS artifact to THIS
+    cigar? At the write sites, and **split by reversibility** (below).
+    Predicates 1 and 3 read the evidenced market; predicate 2 deliberately does
+    not (see the stated inconsistency below).
+  - **The evidenced market.** `cigars.type` is not the cigar's market — it is the
+    market someone RECORDED. So: *the evidenced market is `cigars.type` if set;
+    else the single market shared by every single-market vendor that already
+    stocks the cigar; else unknown.* This is not a new inference, it is this
+    ADR's own negative filter run backwards: the ADR already rules that a CC-only
+    vendor will not carry an NC cigar, so an NC-only vendor stocking X means X is
+    not CC. A `focus='both'` vendor contributes nothing (a both-market vendor
+    stocking a cigar says nothing about its market), and disagreeing sources
+    resolve to unknown rather than to a winner. On prod it resolves 822 of the 884
+    untyped rows — Fox-only to NC — with no new column, no backfill and no
+    hand-maintained coverage table, which this ADR
+    forbids. It **self-heals**: every crawl that links a listing sharpens it, and
+    `cigars.type` overrides it outright, so a curator always has the last word.
+    A wrong auto-link — the very defect #170 is about — does become evidence, and
+    that is bounded in the right direction: the value can only ever EXCLUDE a
+    vendor, never authorize a write its own focus would not already allow. The
+    failure mode is an ask the right vendor is never sent, which surfaces as an
+    open row naming who is awaited, not as a wrong photo.
+  - **`vendors.focus` is a claim about inventory and must be checked against the
+    inventory** (added 2026-08-31, before this lane shipped). The evidenced market
+    is only ever as sound as that column, and the first live reading of it was
+    wrong: Cuban Lou's was recorded `'CC'` on the strength of its name while its
+    catalogue carries Perdomo, Gurkha, CAO, Rocky Patel, Quorum and
+    Dominican/Nicaraguan bundles beside genuine Habanos. Of the 57 untyped cigars
+    it alone stocked, ~39 were thereby evidenced CC and were not Cuban. The failure
+    then **sealed itself**: an evidenced-CC row drops Fox — the only live enrich
+    lane — from its own fleet, so the vendor that could have contradicted the claim
+    could never be asked. Migration 0025 records the shop as `'both'`, which
+    collapses every one of those inferences to unknown with **no algorithm change**
+    (`focus='both'` already contributes no evidence).
+  - **Evidence comes only from crawl-enabled vendors, and that is what un-seals
+    it** (added 2026-08-31). Correcting the one row above removes today's seal but
+    does not stop the next one: `approved-import` stamps `focus='CC'` on every
+    vendor it adds (#210), so the next approved Cuban shop would re-form the seal
+    the day it lands. "No CC-focus vendor exists right now" is a fact about the
+    registry, not a property of the design. The structural statement is instead:
+    *linkage evidence is read only from vendors with `crawl_enabled = true`* — the
+    same set the fleet is drawn from, because a vendor that cannot be asked cannot
+    be evidence either. Two consequences, and both are the point: a mis-focused
+    shop can only ever seal rows while it is enabled, and **disabling it frees
+    every row it sealed**, today, with no migration — which is the lever this ADR
+    already promises and, before this, did not actually deliver. `cigars.type`
+    still overrides everything, and remains authoritative by construction.
+    **The rule this establishes:** a shop that trades in both markets
+    is recorded `'both'`, whatever its name suggests; recording it as one market
+    manufactures evidence, and the cost is paid by a *different* vendor's lane.
+    **The residual, named and not fixed here:** `vendors.focus` conflates *what a
+    vendor sells* with *what it is authoritative about*. Those come apart exactly
+    at `'both'` — the shop genuinely sells NC and CC, yet is a weaker photo
+    authority than a focused vendor precisely because its posture rules nothing
+    out. Write authority is currently derived from the sales claim plus a
+    pre-emption test rather than recorded directly; separating them (an explicit
+    authority column, or per-market vendor postures) is a schema question left open.
+  - **Write authority, split by reversibility.** The two crawler writes are not
+    the same kind of thing. `listing_matches` + `offers` NAME their vendor, are
+    revisable by a curator (`decided_by` already protects a non-crawler verdict)
+    and are re-written on the next crawl. `product_photos` is `UNIQUE(cigar_id)`,
+    inserted `onConflictDoNothing`, and **nothing in the crawler ever deletes
+    one**: one global slot, first write wins, forever. So:
+    *a vendor may LINK to a cigar when its focus does not CONFLICT with the
+    cigar's evidenced market (unknown permits); a SINGLE-MARKET vendor may fill the
+    cigar's single catalogue-photo slot only when the evidenced market is KNOWN and
+    its focus covers it; a vendor with NO single market (`both`, or no recorded
+    focus) may fill it only when no single-market vendor already stocks the cigar.*
+    The last clause replaces an earlier ruling that the guard should be **inert**
+    for a market-agnostic vendor, on the reasoning that it has no market to
+    conflict with. That was right about the market and wrong about the slot:
+    `focus='both'` does not mean "no opinion to check", it means THE NEGATIVE
+    FILTER IS UNAVAILABLE — nothing about the vendor's posture can rule out a bad
+    name-match — which is when the one permanent slot deserves more care, not less.
+    Inertness also made `both` the most privileged focus a vendor could hold, which
+    is backwards. So the guard asks the question that is still answerable: is there
+    a vendor here whose focus *does* cover this cigar's market? If so it is the
+    better authority and must not be PRE-EMPTED (overwriting is already impossible
+    — `UNIQUE(cigar_id)`, and an occupied slot returns early — so winning an empty
+    slot first is the whole risk). If not, the market-agnostic vendor is the only
+    source there is and its own product page beats an empty slot. Deliberately keyed
+    on the stockist fact, not on `market == null`, since unknown covers both "no
+    evidence" (permit) and "two focused vendors disagree" (refuse).
+  - **Self-evidencing (option A), and its residual.** The photo guard reads the
+    market AFTER the listing match is committed, so a single-market vendor that
+    links a cigar nobody else stocks becomes its own sole evidence and may
+    photograph it. That costs the working Fox lane nothing while still refusing
+    the conflict case. **The residual, stated:** the first vendor to discover a
+    cigar can always photograph it, so a CC lane that name-matches a Nicaraguan
+    brand nobody else stocks still fills the slot. Closing it needs INDEPENDENT
+    evidence — `cigars.type`, or a different vendor already stocking it — which
+    trades catalogue completeness for the photo tier's integrity and is an owner
+    call, not one this lane made.
+  - **`findCatalogMatch` is the other half, and the half that already fired.**
+    Both live cross-market rows in prod came from the seed/offers path, not from
+    the drain: `Petit Royales Romeo y Julieta` (`type='CC'`) auto-linked by an
+    NC-focus vendor to its Altadis `Romeo y Julieta 1875` listing, and a Cuban
+    Lou's listing match plus offer on the Fox-created `Romeo y Julieta Mini Red
+    Aroma`. The guard there REJECTS the candidate rather than re-ranking to the
+    best market-compatible one: rejection can only remove a link, while
+    substitution could invent new ones, and the 0.55 similarity floor is a
+    verified false-positive source. **A refusal is not a miss, and never creates**
+    (corrected 2026-08-31). The two used to collapse to one `null` return, so in
+    `seed` mode a refusal fell through to creating a cigar — justified as "a
+    listing whose market contradicts its best match is a different cigar". That
+    holds only while the market evidence is sound, and the evidence was wrong often
+    enough to sink it (see the `vendors.focus` ruling above). When a refusal is
+    false, creating turns a recoverable bad link into a **permanent duplicate**:
+    the link would have been named, revisable and re-written next crawl, whereas a
+    spurious catalogue row is none of those and is invisible at the point it is
+    made. So the result type distinguishes `none` / `match` / `refused`; a refusal
+    leaves the listing `unmatched` with no cigar, in `seed` mode exactly as in
+    `offers`, and it lands in the triage queue a curator already works. The count
+    is reported per run (`links refused (market)`) because that queue growing is
+    something an operator must be able to see — and a lane refusing a lot is more
+    likely to have a wrong `vendors.focus` than a wrong catalogue.
+  - **The 0.55 floor is untouched, deliberately.** `similarity('Romeo y Julieta
+    Mini White Original', 'Romeo y Julieta Mini') = 0.5833` is a real
+    within-market false positive and a separate defect. The market predicate
+    rejects CROSS-market mis-matches only; shipping it does not make mis-matching
+    solved, and folding a threshold change in here would let it ride as a market
+    fix.
+  - **One runner per (vendor, mode) (#157).** The atomic ledger increment means
+    no look is lost, but two overlapping same-vendor runs still select the same
+    rows and fetch them twice — burning both nights of `ATTEMPTS_PER_VENDOR` in
+    one evening and doubling the polite load on the vendor. The fix is a
+    session-level advisory lock per (vendor, mode), held for the whole run; not
+    acquired means log, exit 0, and **write no `crawl_runs` row** (a row for a run
+    that looked at nothing is a lie in the audit, and liveness is read from
+    succeeded enrich runs). `FOR UPDATE SKIP LOCKED` is the wrong tool one level
+    down: the drain holds each request across seconds of deliberately polite HTTP,
+    so a row lock would be held across network I/O for minutes. Per (vendor,
+    MODE) because Fox's 04:00 `offers` lane has a 9,000 s deadline and can still
+    be running at 06:00 — a per-vendor lock would make a correctness fix silently
+    cancel a nightly job. **Known bounded cost:** a pod lost with its node can
+    leave a half-open connection holding the lock until Postgres reaps the
+    backend, and that lane skips until then. It self-corrects with no manual step.
+    **No reaper for `in_progress`:** the drain stopped writing that state and 0023
+    normalized the legacy rows, so a reaper would guard a state nothing writes.
+  - **Stranded runs (#155), in two layers.** A signal handler closes the graceful
+    case — `activeDeadlineSeconds` sends SIGTERM and waits out the grace period —
+    with one idempotent `UPDATE ... WHERE id = $1 AND status = 'running'`, which
+    is what makes it safe to race with normal completion. A startup sweep closes
+    the ungraceful case (SIGKILL, OOM, node loss). The sweep carries **no age
+    ceiling** and needs none: it runs under the lane lock, so by construction
+    nothing else can be running this lane and a `running` row for this (vendor,
+    kind) is stranded rather than concurrent. That is strictly better than a
+    ceiling, which would be a constant that has to track the slowest legitimate
+    run and is wrong on both sides of the guess. Neither layer can corrupt the
+    exhaustion denominator: liveness reads only `succeeded`, so the sweep moves a
+    row between two equally uncounted states.
+  - **Liveness is per REQUEST, not per vendor (#185).** "Has this lane ever run an
+    enrich pass?" is monotone: once true it is true forever, so a lane that runs
+    once and stops counts against every ask filed afterwards and none of them can
+    ever reach `exhausted` — nor, therefore, `retryExhausted`. A lane now counts
+    against an ask when it has already recorded a look there (the clause that
+    carries a lane's own first night, while its run row is still `running`) **or**
+    it started a succeeded enrich run since the ask was created. **`started_at`,
+    not `finished_at`:** the drain's open-set SELECT happens near the start of a
+    run, so a run that began before the ask existed never saw the row however late
+    it finished.
+  - **What #185 does NOT fix, and why no better proxy ships.** An ask filed
+    *before* a lane's last run that the lane never reached still counts that lane,
+    forever. At `ENRICH_DEFAULT_LIMIT = 10` a lane reaches ten asks a night, so on
+    prod's shape that residual is most of the queue: the rule fixes the inflow and
+    almost nothing of the standing backlog. A **recency window** ("count only if
+    the lane ran in the last N days") would close it and is **rejected**: it needs
+    a constant tracking the slowest lane's schedule, has to be revisited on every
+    cadence change, and is still a proxy for the thing #156 will actually record.
+    What ships instead is visibility plus the lever that already exists — the
+    backlog press now reports `awaitingVendors` on `already_queued` rows, naming
+    the counted lanes that owe a look, and `crawl_enabled = false` on a suspended
+    lane drops it from the fleet and frees every ask it was holding, today, with
+    no migration. #156 remains the real fix.
+  - **`liveEnrichMarkets` stays monotone, and the asymmetry is deliberate.** The
+    queue gate is evaluated at ENQUEUE time, when the ask does not exist, so "has
+    a lane run since now?" is never true and a per-request rule there would refuse
+    every ask forever. The postures differ because the costs of being wrong
+    differ: a stale `true` in the gate only PERMITS filing an ask, which stays
+    open and self-heals; a stale `true` in the denominator BLOCKS retirement
+    forever. Monotone is acceptable for a gate that opens a door and unacceptable
+    for a counter that closes one.
+  - **A real inconsistency, recorded rather than left implicit.** `marketCovered`
+    — the enqueue gate — still reads `cigars.type`, while the drain and the
+    exhaustion denominator read the evidenced market. On the evidenced market the
+    gate would accept prod's 821 Fox-evidenced untyped rows the moment it shipped:
+    ~800 new asks and, at ten a night, months of nightly Fox crawling. That is a
+    crawl-volume and vendor-courtesy decision, not a correctness one, and it wants
+    the owner's sign-off in its own change. Until then the enqueue gate and the
+    exhaustion denominator read the market from two different sources, which is
+    defensible only because they are different predicates with opposite postures.
+  - **Rejected alternative: backfill `cigars.type` from vendor focus.** Writing an
+    inferred market into a curator-trust-order, user-visible field from a signal
+    as coarse as a vendor's focus is manufacturing catalogue facts, which this ADR
+    forbids. It would also freeze at the moment it ran, while the derived value
+    sharpens with every crawl and is overridden the moment a curator types the
+    cigar. Migration 0025 adds two read-path indexes and writes nothing.
+  - **Two live rows are NOT repaired here.** `Petit Royales Romeo y Julieta` is
+    still linked to Fox's `/shop/cigars/romeo-y-julieta-1875-petit-bully-2/`, and
+    Cuban Lou's still holds a listing match and an offer on `Romeo y Julieta Mini
+    Red Aroma`. This change makes both unreachable going forward and repairs
+    neither; a curator ruling and a follow-up are required, or the fix will read
+    as ineffective.

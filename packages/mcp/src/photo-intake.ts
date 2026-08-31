@@ -25,13 +25,15 @@ import { isIP } from "node:net";
 // truncated to MAX_MIME_LENGTH here so a model-writable string cannot grow a log
 // line without bound — without it `sniffedType` has nothing to be compared to).
 
-// The internal marker `schemas.ts` wraps an unparsable `image` argument in, so
-// this module can classify and LOG its shape instead of the MCP SDK rejecting
-// the whole call with InvalidParams before any server-side record exists (a
-// class of failure today's logging cannot see at all). Never published in the
-// manifest, never forwarded to a fetch, a log value, or a tool result. The name
-// is deliberately improbable so a genuine host key can never be misread as it.
-export const UNPARSED_IMAGE = "__cj_unparsed_image";
+// WHAT THIS MODULE NO LONGER DOES (2026-08-31, issue #202 experiment 1).
+// `schemas.ts` used to wrap an `image` argument its schema rejected in an internal
+// marker key, so this module could classify and log the shape instead of the SDK
+// refusing the call with InvalidParams before any server-side record existed. The
+// published `image` schema is strict now, and the marker retired with it: the
+// raw-body probe `logPhotoIntakeRequest` (app.ts) already describes a rejected
+// delivery from the unparsed JSON-RPC body, before SDK validation, so nothing is
+// unobserved. Everything below therefore works on the delivery exactly as the host
+// sent it, with no unwrapping step.
 
 // The handler's fetch cap: the most image the server will pull from a signed URL.
 export const MAX_ATTACHED_BYTES = 20 * 1024 * 1024;
@@ -105,16 +107,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// Unwrap the schema's leniency marker. Everything downstream — classification AND
-// shape description — works on the RAW delivery, so the log reports the keys the
-// host actually sent rather than the wrapper we added around them.
-function unwrapImage(value: unknown): unknown {
-  if (isRecord(value) && Object.prototype.hasOwnProperty.call(value, UNPARSED_IMAGE)) {
-    return value[UNPARSED_IMAGE];
-  }
-  return value;
-}
-
 function truncateKey(key: string): string {
   return key.length <= MAX_KEY_LENGTH ? key : key.slice(0, MAX_KEY_LENGTH);
 }
@@ -158,9 +150,9 @@ export function shapeOf(value: unknown): Shape {
   };
 }
 
-// The `image` ARGUMENT as the host sent it (marker unwrapped).
+// The `image` ARGUMENT as the host sent it.
 export function describeArgument(image: unknown): Shape {
-  return shapeOf(unwrapImage(image));
+  return shapeOf(image);
 }
 
 interface MetaSelection {
@@ -415,8 +407,7 @@ export function fetchTargetOf(raw: string): FetchTarget | null {
 
 // Classify ONE file handle. Never throws, never returns null: an unusable shape
 // is a first-class result carrying WHY, which is the whole point of this module.
-function classifyHandle(rawEntry: unknown, channel: Channel): Delivery {
-  const entry = unwrapImage(rawEntry);
+function classifyHandle(entry: unknown, channel: Channel): Delivery {
   if (!isRecord(entry)) return { kind: "unusable", channel, reason: "not_an_object" };
 
   const mimeType = firstString(entry, MIME_KEYS);
@@ -470,8 +461,7 @@ function classifyHandle(rawEntry: unknown, channel: Channel): Delivery {
 export function classify(argImage: unknown, requestMeta: unknown): Delivery {
   const selection = selectMetaEntry(requestMeta);
   const metaDelivery = selection.present ? classifyHandle(selection.entry, "request_meta") : null;
-  const argDelivery =
-    unwrapImage(argImage) === undefined ? null : classifyHandle(argImage, "argument");
+  const argDelivery = argImage === undefined ? null : classifyHandle(argImage, "argument");
 
   if (metaDelivery && metaDelivery.kind !== "unusable") return metaDelivery;
   if (argDelivery && argDelivery.kind !== "unusable") return argDelivery;

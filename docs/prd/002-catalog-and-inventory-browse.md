@@ -41,9 +41,10 @@ is in the humidor, since when — per PRD-001 R13's ledger mapping.
 - R-CAT-2 — Brand page: a hero (brand poster, stick/line counts), then the
   brand's lines as collapsible poster sections — the haynesnetwork season
   pattern: a 2:3 line poster on the section summary, vitola rows lazy-loaded
-  on expand. Where a brand has no line data the level collapses honestly —
-  no fabricated tiers (house rule: facts are never invented to satisfy
-  taxonomy).
+  on expand. The tiers are the real ones — brand → line → blend → vitola
+  (ADR-012) — and an unknown level collapses honestly: a brand with no lines
+  shows its cigars directly rather than under a placeholder tier. Structure
+  renders known facts; it never invents one to fill a level.
 - R-CAT-3 — Vitola-level cigars are "episodes": 16:9 still tiles (the
   haynesnetwork episode-still shape — right for a horizontal stick photo),
   each with its ADR-007 ProductPhoto, dimensions, and price-at-a-glance from

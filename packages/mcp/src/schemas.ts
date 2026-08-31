@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { ENRICHMENT_BACKLOG_MAX } from "@cj/domain";
-import { UNPARSED_IMAGE } from "./photo-intake.js";
 
 // Zod input schemas mirroring docs/mcp/tool-contract.md. Design rules:
 //
@@ -538,10 +537,38 @@ export const recordPurchaseSchema = z
 // a SHORT-LIVED signed URL). The legacy request-level `_meta["openai/fileParams"]`
 // delivery is still accepted server-side; both normalize into one fetch path.
 //
-// PERMISSIVE by design: every sub-field is optional and unknown keys pass through,
-// so a partial/odd file object is NOT rejected at input validation but reaches the
-// handler, which fetches a usable one or falls back to the mode-B upload link —
-// never an error (contract "unknown/malformed → mode B"). It is out of `required`.
+// STRICT, and deliberately so — issue #202, experiment 1 (2026-08-31). Every
+// sub-field is optional and `image` itself stays out of `required`, but the object
+// admits exactly these four properties and nothing else, so the published JSON
+// schema carries `additionalProperties: false`.
+//
+// WHY IT IS STRICT. ChatGPT has never hydrated `image` for this connector
+// (tool-contract.md, "Open lead"). Integrations that reportedly do receive files
+// declare exactly this four-property shape, and host-side hydration may key on the
+// PUBLISHED shape rather than on the `openai/fileParams` declaration alone — so
+// emitting the reference shape verbatim is the cheapest falsifiable experiment
+// available. It either fixes intake or narrows the cause to host-side gating.
+//
+// WHAT IT REPLACED, AND WHY THAT IS SAFE. This object used to be `.passthrough()`
+// behind a `z.preprocess` wrapper that caught anything the schema rejected under an
+// internal marker, so an unparsable delivery reached the handler and got LOGGED
+// instead of dying inside the SDK with no server-side record. That reason no longer
+// holds. The raw-body probe `logPhotoIntakeRequest` (app.ts) writes
+// `photo_intake_request` — paramKeys, argKeys, argImage, metaFileParams — off the
+// UNPARSED JSON-RPC body, before the SDK validates anything. A shape this schema
+// rejects is therefore still fully observed; only the handler-side `photo_intake`
+// line is missing, and the probe already carries what it would have said about the
+// delivery's shape.
+//
+// THE COST, STATED PLAINLY. A host that sends `image: null` as its "no file
+// attached" shape, or a URL under a key other than `download_url`, now gets an
+// InvalidParams error instead of a mode-B upload link. The request-level
+// `_meta["openai/fileParams"]` channel is unvalidated and still accepts both, and
+// the probe records either. If the experiment does not move intake, this reverts.
+//
+// Do NOT reach for `.catch()` to soften it: `.catch(fn)` throws "Dynamic catch
+// values are not supported in JSON Schema" at emission time in zod 4.4.3, which
+// would break `tools/list` for the WHOLE server.
 const fileParamHandle = z
   .object({
     download_url: z
@@ -555,36 +582,7 @@ const fileParamHandle = z
     mime_type: z.string().optional().describe("File MIME type, if the host provided one."),
     file_name: z.string().optional().describe("Original file name, if the host provided one."),
   })
-  .passthrough();
-
-// …but only permissive UP TO A POINT, and the gap was hiding the very failures we
-// need to see. `passthrough()` forgives unknown KEYS, not a wrong TYPE: probed
-// against the installed zod 4.4.3 + SDK 1.30.0, `image: "http://x"`, `image: null`,
-// `image: 5` and `image: { download_url: 12 }` all FAIL validation, and the SDK
-// raises that as McpError(InvalidParams) BEFORE the handler runs — so those calls
-// never reach `mcpEvent` and leave ZERO lines in Loki. `image: null` in particular
-// is a plausible "no file attached" host shape that hard-errors the whole call.
-//
-// So wrap rather than loosen: anything the handle schema rejects is preserved
-// VERBATIM under an internal marker key, and the handler classifies and logs its
-// shape (photo-intake.ts) instead of the call dying as a protocol error. The
-// marker is stripped before the handle is used and never reaches a fetch, a log
-// value, or the result.
-//
-// Do NOT reach for `.catch()` here: `.catch(fn)` throws "Dynamic catch values are
-// not supported in JSON Schema" at emission time in zod 4.4.3, which would break
-// `tools/list` for the WHOLE server, and `.catch(undefined)` discards the raw
-// value — silently converting a malformed delivery into a false "no image was
-// sent", precisely the confusion this change exists to end.
-//
-// The published manifest is UNCHANGED by this wrapper (verified byte-identical
-// through the SDK's own converter, `image` still absent from `required`,
-// `additionalProperties: {}` preserved); mcp.test.ts pins that so a zod/SDK
-// upgrade cannot drift it.
-const fileParamImage = z.preprocess(
-  (value) => (value === undefined || fileParamHandle.safeParse(value).success ? value : { [UNPARSED_IMAGE]: value }),
-  fileParamHandle.optional(),
-);
+  .strict();
 
 export const addSmokePhotoSchema = z
   .object({
@@ -601,12 +599,13 @@ export const addSmokePhotoSchema = z
       .string()
       .optional()
       .describe("A short caption in the user's words, only if they gave one. Sparse is correct — omit rather than invent."),
-    // `.optional()` already lives inside the preprocess wrapper above — applying
-    // it again here would wrap the pipe and change the emitted schema.
-    image: fileParamImage
+    // `.describe()` BEFORE `.optional()`: the description has to sit on the object
+    // itself, since that is the schema the converter emits under `properties.image`.
+    image: fileParamHandle
       .describe(
         "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. Omit it and the tool returns a one-time upload link instead.",
-      ),
+      )
+      .optional(),
   })
   .strict();
 
@@ -1059,7 +1058,7 @@ export const getCurationQueueSchema = z
     kind: z
       .enum(["unverified", "duplicates", "match_triage", "unbranded", "untyped", "missing_photos"])
       .describe(
-        "Which backlog to page: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only), match_triage (vendor listing→cigar auto-matches to confirm/unmatch), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo).",
+        "Which backlog to page: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only), match_triage (vendor listings the crawler has not settled: auto rows to confirm/unmatch, and unmatched rows it produced no link for, each carrying a reason), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo).",
       ),
     cursor: z
       .string()
@@ -1074,7 +1073,7 @@ export type GetCurationQueueArgs = z.infer<typeof getCurationQueueSchema>;
 export const setListingMatchStatusSchema = z
   .object({
     clientRequestId: curationClientRequestId,
-    matchId: z.string().describe("Listing-match id from a get_curation_queue match_triage row."),
+    matchId: z.string().describe("Listing-match id from a get_curation_queue match_triage row with status auto."),
     status: z
       .enum(["confirmed", "unmatched"])
       .describe("confirmed keeps the auto-matched cigar; unmatched clears the link (the listing matched no catalog cigar)."),

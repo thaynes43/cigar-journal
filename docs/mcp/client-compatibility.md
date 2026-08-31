@@ -211,13 +211,21 @@ restricts `fileParams` to its own first-party apps server, under an explicit
 connectors plausibly sit behind the same policy. If so, nothing we ship changes the
 outcome, and no amount of schema polish will.
 
-**One falsifiable lead before accepting that.** Integrations that reportedly do
-receive files declare a **strict four-property file schema** for the param
-(`download_url`, `file_id`, `mime_type`, `file_name`); we publish the object via a
-preprocess/passthrough wrapper, which emits a looser shape. Aligning the published
-schema exactly with the Apps SDK reference shape and re-testing would separate
-"our declaration is subtly off" from "custom connectors are gated out". Worth one
-experiment; not worth a redesign.
+**One falsifiable lead before accepting that — now run.** Integrations that
+reportedly do receive files declare a **strict four-property file schema** for the
+param (`download_url`, `file_id`, `mime_type`, `file_name`); we published the object
+via a preprocess/passthrough wrapper, which emitted a looser shape. **Experiment 1
+(2026-08-31, issue #202)** aligned it: `image` is now that exact shape, all four
+optional strings, `additionalProperties: false`, wrapper and marker gone
+([tool-contract.md](tool-contract.md), "File intake"). This separates "our
+declaration is subtly off" from "custom connectors are gated out" and nothing else —
+it is one experiment, not a redesign, and it reverts if intake does not move.
+
+**The retest.** The owner attaches an image in ChatGPT and calls `add_smoke_photo`
+after a connector refresh and in a new chat (see below). `photo_intake_request`
+answers: a hydrated `image` or `openai/fileParams` entry means the shape was the
+cause; another `metaFileParams: {"type":"absent"}` with no `image` argument means it
+was not, and gating is the remaining explanation.
 
 **No other host has the mechanism at all.** Claude cannot extract attachment bytes
 into tool arguments — architecturally out of reach, per Anthropic's own tracker —
