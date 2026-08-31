@@ -131,6 +131,7 @@ export function CatalogAllGrid({
               <CigarStillTile
                 cigar={cigar}
                 level={level}
+                own={state.own}
                 imageUrl={
                   cigar.hasProductPhoto ? `/api/product-photos/${cigar.cigarId}/thumb` : undefined
                 }

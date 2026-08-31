@@ -10,6 +10,7 @@ import { chipPopoverStyle } from "@/lib/chip-popover";
 import {
   CATALOG_DIMENSION_META,
   CATALOG_PARENT_DIMENSION,
+  CATALOG_GROUP_STRINGS,
   UNFILED_SLUG,
   type CatalogDimension,
   type CatalogHierarchy,
@@ -164,7 +165,7 @@ export function CatalogFacetChip({
   // a readable pill rather than an empty one.
   const selected = options.find((option) => option.slug === value);
   const shown =
-    value === UNFILED_SLUG ? "Unfiled" : (selected?.name ?? value);
+    value === UNFILED_SLUG ? CATALOG_GROUP_STRINGS.unfiled : (selected?.name ?? value);
 
   return (
     <>

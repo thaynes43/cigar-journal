@@ -82,8 +82,8 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   request_cigar_enrichment: ["journal:write"],
   update_cigar: ["journal:write"],
   record_price: ["journal:write"],
-  // Curation surface (DESIGN-003 wave 4a). The read takes curation:read, the eight
-  // writes curation:write — a separate scope pair from journal/catalog, so a
+  // Curation surface (DESIGN-003 wave 4a, extended by ADR-012 Wave 3). The read
+  // takes curation:read, the twelve writes curation:write — a separate scope pair from journal/catalog, so a
   // journal:write token can never reach a curation tool. Scope is necessary but
   // NOT sufficient: every curation handler also requires an admin principal (the
   // domain services assert the curator role, and the adapter re-checks), so a

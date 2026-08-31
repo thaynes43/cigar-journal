@@ -4,7 +4,7 @@ import { TRPCError } from "@trpc/server";
 import type { CigarHierarchy, CigarView, GetCigarResult, Tobacco } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
 import { requireAuth } from "@/lib/require-auth";
-import { formatPrice, formatSeenAt } from "@/lib/format";
+import { formatPrice, formatSeenDate } from "@/lib/format";
 import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
 import { BandTile } from "../../_components/band-tile";
@@ -191,6 +191,16 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
   // observations over ≥2 distinct days, else a first/last-seen text line.
   const now = Date.now();
   const historyDays = new Set(priceHistory.map((p) => p.seenAt.slice(0, 10)));
+  // "One row per vendor with a current offer" (DESIGN-002 §Price): both price
+  // columns are nullable, and a row carrying neither is not an offer — it used
+  // to render as a bare "—" under the Price heading, which reads as a price.
+  const pricedOffers = offers.filter((o) => o.pricePerStick != null || o.price != null);
+  // The section speaks whenever there is anything true to say about price:
+  // current offers, or — when they have all lapsed — the fact that there were
+  // some. Observation history is the "existed before" signal, so the two cases
+  // are distinguishable rather than both collapsing to an absent section.
+  const hadOffers = priceHistory.length > 0;
+  const showPrice = pricedOffers.length > 0 || hadOffers;
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-8">
@@ -266,11 +276,14 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
         </section>
       ) : null}
 
-      {offers.length > 0 ? (
+      {showPrice ? (
         <section className="flex flex-col gap-3">
           <h2 className="label-caps">Price</h2>
+          {pricedOffers.length === 0 ? (
+            <p className="text-sm text-muted">No current offers.</p>
+          ) : (
           <ul className="flex flex-col gap-2">
-            {offers.map((offer) => {
+            {pricedOffers.map((offer) => {
               // A registry vendor crawled for depth but not a purchase destination
               // (ADR-006, e.g. Cuban Lou's) is shown as plain, labeled text — no
               // link-out (below) and an "unapproved source" tag here.
@@ -278,7 +291,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
               const meta = [
                 offer.isRegistryVendor ? null : "community source",
                 noLinkout ? "unapproved source" : null,
-                formatSeenAt(offer.seenAt),
+                `seen ${formatSeenDate(offer.seenAt)}`,
                 offer.inStock === false ? "out of stock" : null,
               ]
                 .filter(Boolean)
@@ -287,14 +300,13 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
               // shown WITH its packaging ("$16.70/stick · box of 20"); a bare
               // per-stick figure is banned. Fall back to the package price when
               // per-stick is not derivable.
+              // `pricedOffers` guarantees one of the two figures exists, so there
+              // is no priceless branch left to render.
               const pack = packagingLabel(offer);
               const amount =
                 offer.pricePerStick != null
                   ? `${formatPrice(offer.pricePerStick, offer.currency)}/stick`
-                  : offer.price != null
-                    ? formatPrice(offer.price, offer.currency)
-                    : "—";
-              const priced = offer.pricePerStick != null || offer.price != null;
+                  : formatPrice(offer.price!, offer.currency);
               // Stale rows (seen > 30 days ago) keep their date but the whole row
               // drops to muted (DESIGN-002 §Price staleness rule).
               const stale = now - new Date(offer.seenAt).getTime() > 30 * 24 * 60 * 60 * 1000;
@@ -308,7 +320,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
                   </div>
                   <span className="flex flex-col items-end gap-0.5">
                     <span
-                      className={`text-sm tabular-nums ${priced && !stale ? "text-ink" : "text-muted"}`}
+                      className={`text-sm tabular-nums ${stale ? "text-muted" : "text-ink"}`}
                     >
                       {amount}
                     </span>
@@ -336,13 +348,16 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
               );
             })}
           </ul>
+          )}
           {priceHistory.length >= 3 && historyDays.size >= 2 ? (
             <PriceSpark points={priceHistory} />
           ) : priceHistory.length >= 2 ? (
             <p className="label-caps text-muted">
-              first seen {formatSeenAt(priceHistory[0]!.seenAt)} · last seen{" "}
-              {formatSeenAt(priceHistory[priceHistory.length - 1]!.seenAt)}
+              first seen {formatSeenDate(priceHistory[0]!.seenAt)} · last seen{" "}
+              {formatSeenDate(priceHistory[priceHistory.length - 1]!.seenAt)}
             </p>
+          ) : priceHistory.length === 1 ? (
+            <p className="label-caps text-muted">seen {formatSeenDate(priceHistory[0]!.seenAt)}</p>
           ) : null}
         </section>
       ) : null}

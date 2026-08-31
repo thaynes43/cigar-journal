@@ -65,18 +65,35 @@ export function formatPrice(price: number, currency: string | null): string {
   return price.toFixed(2);
 }
 
-const RELATIVE = new Intl.RelativeTimeFormat("en-US", { numeric: "auto" });
+// Seen-dates format in UTC, unlike the viewer-facing smoke dates above: a market
+// observation is a server-side crawl fact with no viewer-local moment, and fixing
+// the zone keeps the date identical on server and client (no hydration skew) and
+// stable for every reader. This preserves the timezone-robustness the earlier
+// relative-age rendering got from day-granularity epoch math.
+const SEEN_MONTH_DAY = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  timeZone: "UTC",
+});
+const SEEN_FULL = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  timeZone: "UTC",
+});
 
-// How long ago a market observation was seen, e.g. "yesterday" / "3 weeks ago",
-// falling back to a short date past a year. Day-granularity, so it is timezone-
-// robust; server-rendered against a stable now, so no hydration skew.
-export function formatSeenAt(iso: string, now: Date = new Date()): string {
+// The as-of date of a market observation: "Aug 12" within the current year,
+// "Aug 12, 2025" outside it (DESIGN-002 §Strings, "seen Aug 12 — month + day;
+// year when not current"). A relative age ("3 weeks ago") was the earlier
+// rendering and is deliberately gone: the staleness rule only means something
+// if the date itself stays explicit on a muted row.
+//
+// Callers supply the "seen"/"first seen" lead-in, so this returns the bare date.
+// Day-granularity keeps it timezone-robust, and it is server-rendered against a
+// stable now, so there is no hydration skew.
+export function formatSeenDate(iso: string, now: Date = new Date()): string {
   const then = new Date(iso);
-  const days = Math.round((then.getTime() - now.getTime()) / 86_400_000);
-  const abs = Math.abs(days);
-  if (abs < 1) return "today";
-  if (abs < 7) return RELATIVE.format(days, "day");
-  if (abs < 30) return RELATIVE.format(Math.round(days / 7), "week");
-  if (abs < 365) return RELATIVE.format(Math.round(days / 30), "month");
-  return DAY.format(then);
+  return then.getUTCFullYear() === now.getUTCFullYear()
+    ? SEEN_MONTH_DAY.format(then)
+    : SEEN_FULL.format(then);
 }

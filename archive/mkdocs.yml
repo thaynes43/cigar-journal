@@ -5,7 +5,9 @@ site_author: Tom Haynes
 # Configuration
 theme:
   name: material
+  custom_dir: overrides
   features:
+    - announce.dismiss
     - navigation.instant
     - navigation.path
     - navigation.indexes

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import type { CatalogCigarTile } from "@cj/domain";
+import type { CatalogCigarTile, OwnershipFacet } from "@cj/domain";
 import { ui } from "@/lib/ui";
 import { tileCaption, type CatalogLevel } from "./catalog-registry";
 import { BandTile } from "./band-tile";
@@ -21,6 +21,7 @@ export function CigarStillTile({
   cigar,
   imageUrl,
   level = "root",
+  own = "all",
 }: {
   cigar: CatalogCigarTile;
   imageUrl?: string | null;
@@ -29,6 +30,11 @@ export function CigarStillTile({
   // above it already states. Defaults to the root, where nothing is elided, so
   // every existing call site keeps its current caption.
   level?: CatalogLevel;
+  // The active ownership facet, when the grid is filtered by one. A tile never
+  // shows a badge the facet already implies (DESIGN-002 badge-row discipline):
+  // under Want every tile is wanted, so the want mark is noise there and its
+  // slot is better spent on a real difference between the tiles.
+  own?: OwnershipFacet;
 }) {
   const caption = tileCaption(cigar, level);
   const subtitle = [cigar.vitola.name, cigar.type].filter(Boolean).join(" · ");
@@ -57,7 +63,7 @@ export function CigarStillTile({
         ×{cigar.remaining}
       </span>
     ) : null;
-  const want = cigar.wanted ? <WantBadge key="want" /> : null;
+  const want = cigar.wanted && own !== "want" ? <WantBadge key="want" /> : null;
   const seal =
     cigar.userRating != null ? <RatingSeal key="seal" rating={cigar.userRating} size="sm" /> : null;
   const dimsBadge =

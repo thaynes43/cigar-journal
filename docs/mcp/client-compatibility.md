@@ -5,9 +5,16 @@ document goes stale by design** — client products evolve independently of
 this application. Re-verify before relying on any row.
 
 ```yaml
-lastVerified: 2026-08-26        # Phase 0 spike, OAuth mode, at
-                                # https://cigars.haynesnetwork.com — all
-                                # three target clients tested live
+lastReviewed: 2026-08-31        # go-live sweep, issue #97
+clientMatrixVerified: 2026-08-26 # Phase 0 spike, OAuth mode — all three target
+                                # clients driven live against
+                                # https://cigars.haynesnetwork.com. The per-cell
+                                # dates in the matrix are what actually matters;
+                                # no client has been re-driven end to end since,
+                                # so this date has NOT moved.
+productionEvidence: 2026-08-31  # live authenticated ChatGPT tool calls captured
+                                # in Loki (see the dated sections below), and a
+                                # service-token `tools/list` against production
 ```
 
 > The Cigar Journal supports journal reads and writes. Whether a particular
@@ -16,19 +23,21 @@ lastVerified: 2026-08-26        # Phase 0 spike, OAuth mode, at
 
 ## Matrix
 
-Values: `verified` (proven against the Phase 0 spike, date noted) ·
-`documented` (official docs only) · `unverified` · `unsupported`.
+Values: `verified` (driven live, date noted — originally against the Phase 0
+spike, since then against production and the Loki record) · `documented`
+(official docs only) · `unverified` · `unsupported`.
 
 | Capability | ChatGPT Web¹ | Claude Code | Codex CLI | Generic MCP client |
 |---|---|---|---|---|
-| Remote MCP (Streamable HTTP) | **verified** 08-26 | **verified** 08-26 | **verified** 08-26 | protocol-dependent |
+| Remote MCP (Streamable HTTP) | **verified** 08-26 | **verified** 08-26 | **verified** 08-26 | **verified** 08-31 — a service token drove `initialize` + `tools/list` against production |
 | OAuth 2.1 + PKCE + discovery | **verified** 08-26 (owner authenticated via the connector flow) | **verified** 08-26 (DCR, S256, state, RFC 8707 resource, `offline_access`; accepts pasted redirect URL — headless-drivable) | **verified** 08-26 (native `codex mcp login`; localhost callback — headless-drivable) | protocol-dependent |
 | Read tools | **verified** 08-26 | **verified** 08-26 (authless and authenticated) | **verified** 08-26 | yes if connected |
 | Write tools | **verified** 08-26 | **verified** 08-26; server-derived identity confirmed | **verified** 08-26; server-derived identity confirmed | yes if connected |
 | Write confirmation UX | **none observed** — the write executed with no prompt, despite OpenAI docs saying writes confirm by default. Keep `readOnlyHint` annotations anyway; treat confirmation as host-owned and changeable | **verified**: governed by Claude Code's permission system (interactive prompt / `--allowedTools`), not MCP annotations | **verified**: governed by codex approval/sandbox policy — headless `exec` auto-cancelled the write until `sandbox_mode=danger-full-access` + `approval_policy=never` | client-dependent |
-| Tool availability late in a long conversation | unverified — initial test needed no per-turn selection, but a 90-minute smoke hasn't been simulated; observe during first real sessions | **verified**: tools persist for the session | **verified**: tools persist for the session | client-dependent |
-| Token refresh / long-lived link | unverified — first test was same-session; observe across days of real use | **verified** 08-26: silent refresh after 10-min token expiry, rotation honored (server `refresh_rotated`) | unverified (session outlived no token in test) | client-dependent |
-| Reconnect after expiry | unverified | **verified** 08-26: post-expiry call succeeds, no user interaction | unverified | client-dependent |
+| Tool availability late in a long conversation | unverified — a full-length smoke has still never been measured end to end. Real sessions have run since launch, but nothing in the record establishes tool availability late in one, so this stays open rather than being marked green by association | **verified**: tools persist for the session | **verified**: tools persist for the session | client-dependent |
+| Token refresh / long-lived link | **verified** 08-31 — authenticated tool calls from the same connector are in the Loki record on 08-30 and 08-31, days after the 08-26/27 authorization, with no re-consent in between | **verified** 08-26: silent refresh after 10-min token expiry, rotation honored (server `refresh_rotated`) | unverified (session outlived no token in test) | client-dependent |
+| Reconnect after expiry | **verified** 08-31, implied by the row above — the 1h access tokens had long expired, so those calls rode a refresh; not driven as an isolated test | **verified** 08-26: post-expiry call succeeds, no user interaction | unverified | client-dependent |
+| In-chat file attachment → tool args | **unsupported in practice** — verified 08-31: the host forwards nothing on any channel, despite a correct `openai/fileParams` declaration. The upload link is the flow, not a fallback | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported** — Codex source gates `fileParams` to its first-party apps server | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
 
 ¹ Owner's account, Developer Mode, 2026-08-26 (spike). **Production
 verified 2026-08-27**: ChatGPT Web connected to the real server end to end
@@ -313,11 +322,16 @@ validation client-side rather than reaching the server.
 
 ## Workflows
 
-**Ideal (design target):** the user talks to ChatGPT normally for the whole
-smoke; on "that's it," the model calls `save_smoke`. Phase 0 shows this is
-live-reachable today on the owner's account — reads *and* writes worked from
-normal Chat with no confirmation friction. Remaining watch item: connector
-availability across a very long conversation.
+**Primary (shipped, in daily use):** the user talks to ChatGPT normally for the
+whole smoke; on "that's it," the model calls `save_smoke`. This is how entries
+are written — reads *and* writes from normal Chat, no confirmation friction —
+and the journal's own record shows conversational smokes alongside the imported
+archive. Remaining watch item, unchanged: connector availability across a very
+long conversation (matrix row above).
+
+**Photos take the upload link, on every client.** No host forwards an in-chat
+attachment into tool arguments (matrix row, and the 08-31 section below);
+`add_smoke_photo` returns a one-time upload link and that is the flow.
 
 **Fallback (if a client loses write tools):** the model produces the exact
 `save_smoke` payload as text; the user pastes it into the site's import page

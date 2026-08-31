@@ -54,7 +54,13 @@ export async function CatalogShelves() {
   return (
     <div className="flex flex-col gap-8">
       {shown.map(({ shelf, cigars }) => (
-        <ShelfStrip key={shelf.heading} heading={shelf.heading} href={shelf.href} cigars={cigars} />
+        <ShelfStrip
+          key={shelf.heading}
+          heading={shelf.heading}
+          href={shelf.href}
+          cigars={cigars}
+          own={shelf.args.own ?? "all"}
+        />
       ))}
     </div>
   );
