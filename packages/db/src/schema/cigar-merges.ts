@@ -21,6 +21,7 @@ export interface CigarMergeMovedIds {
   purchases: string[];
   listingMatches: string[];
   offers: string[];
+  reviewObservations: string[];
   enrichmentRequests: string[];
   productPhotos: string[];
   wants: string[];

@@ -8,6 +8,7 @@ import {
   purchases,
   listingMatches,
   offers,
+  reviewObservations,
   productPhotos,
   enrichmentRequests,
   wants,
@@ -248,6 +249,7 @@ export const MERGE_LEDGER_TABLES = [
   { key: "purchases", table: "purchases" },
   { key: "listingMatches", table: "listing_matches" },
   { key: "offers", table: "offers" },
+  { key: "reviewObservations", table: "review_observations" },
   { key: "enrichmentRequests", table: "enrichment_requests" },
   { key: "productPhotos", table: "product_photos" },
   { key: "wants", table: "wants" },
@@ -395,6 +397,29 @@ async function mergeWithinTx(
     .where(eq(offers.cigarId, source.id))
     .returning({ id: offers.id });
 
+  // External review scores (ADR-013) re-point too. A review observation is
+  // externally-sourced evidence ABOUT THE PRODUCT, and a merge asserts the two
+  // rows are the same product — so the evidence belongs to the survivor. Leaving
+  // it on the source would make it vanish from every aggregate: the source is now
+  // a catalog_status='merged' tombstone, and the ADR-013 aggregate views resolve
+  // ancestry only through active cigars (`cigar_ancestry`, migration 0028, filters
+  // catalog_status = 'active'). That is silent loss of evidence a re-crawl would
+  // have to buy back.
+  //
+  // Only cigar-linked observations carry a non-null cigar_id; a BLEND-linked one
+  // (the reviewer scored the blend at large) is untouched by a cigar merge and
+  // must stay exactly as it is — its target did not move.
+  //
+  // No de-dupe step and no restore guard, deliberately: unlike wants/favorites,
+  // `review_observations` has no UNIQUE constraint involving cigar_id — its only
+  // one is (source, url) — so a re-point can never collide and the unmerge needs
+  // no case in `restoreGuard`.
+  const reviewObservationRows = await tx
+    .update(reviewObservations)
+    .set({ cigarId: target.id })
+    .where(eq(reviewObservations.cigarId, source.id))
+    .returning({ id: reviewObservations.id });
+
   // Want marks re-point, closing the #45-noted gap where a merge orphaned the
   // source's wants. The UNIQUE(user_id, cigar_id) pair forbids a user holding two
   // marks, so a user who wanted BOTH sides is de-duped: drop the source's mark
@@ -456,6 +481,7 @@ async function mergeWithinTx(
     purchases: purchaseRows.length,
     listingMatches: listingRows.length,
     offers: offerRows.length,
+    reviewObservations: reviewObservationRows.length,
     productPhotos: movedPhotoIds.length,
     enrichmentRequests: enrichmentRows.length,
     wants: wantRows.length,
@@ -499,6 +525,7 @@ async function mergeWithinTx(
       purchases: purchaseRows.map((r) => r.id),
       listingMatches: listingRows.map((r) => r.id),
       offers: offerRows.map((r) => r.id),
+      reviewObservations: reviewObservationRows.map((r) => r.id),
       enrichmentRequests: enrichmentRows.map((r) => r.id),
       productPhotos: movedPhotoIds,
       wants: wantRows.map((r) => r.id),
@@ -782,6 +809,7 @@ async function unmergeWithinTx(
     purchases: 0,
     listingMatches: 0,
     offers: 0,
+    reviewObservations: 0,
     productPhotos: 0,
     enrichmentRequests: 0,
     wants: 0,

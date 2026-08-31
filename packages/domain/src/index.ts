@@ -46,6 +46,37 @@ export {
   type RecordObservationResult,
 } from "./price-observations.js";
 
+// External reviews and the two-population aggregates (ADR-013, migration 0028).
+// `recordReviewObservation` is the single review writer — idempotent on
+// (source, url), fetching nothing, taking already-extracted facts; the score
+// normalization beside it is a stated convention, kept reversible by storing the
+// native scale and score alongside the 0-100 value. The aggregates read one
+// definition of what sits under a level for BOTH populations, so a critic count
+// and a journal count rendered side by side count over the same population.
+export {
+  recordReviewObservation,
+  REVIEW_EXCERPT_MAX,
+  type ReviewObservationInput,
+  type ReviewIngestAttribution,
+  type RecordReviewObservationResult,
+} from "./review-observations.js";
+export {
+  normalizeReviewScore,
+  nativeScoreText,
+  isReviewScale,
+  REVIEW_SCALES,
+  LETTER_GRADE_ORDER,
+  type ReviewScale,
+} from "./review-scores.js";
+export {
+  getScoreAggregate,
+  getScoreAggregates,
+  type ScoreLevel,
+  type ScoreAggregate,
+  type ScorePair,
+  type JournalPopulation,
+} from "./score-aggregates.js";
+
 // Catalog curation (ADR-006, DESIGN-003 §Curation): merge duplicates (tombstone,
 // not delete), dismiss false-positive pairs, verify entries, set listing-match
 // status, exclude/restore catalog rows, set product-photo rights, and the admin

@@ -175,6 +175,9 @@ const MOVED_LABELS: Record<string, string> = {
   purchases: "Purchases",
   listingMatches: "Listing matches",
   offers: "Offers",
+  // "Review scores", not "Reviews": these rows hold a score, a link and at most a
+  // sentence — never the review — and the console should not promise otherwise.
+  reviewObservations: "Review scores",
   productPhotos: "Photos",
   enrichmentRequests: "Gap-fill requests",
   wants: "Wants",
