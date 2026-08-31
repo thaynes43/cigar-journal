@@ -4,6 +4,7 @@ import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
 import { brandImages, cigars, productPhotos, type BrandImageRow } from "@cj/db";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { runBrandImages, selectWork, type BrandImagesDeps } from "./core/brand-images.js";
+import { MAX_IMAGE_BYTES } from "./core/fetcher.js";
 import { entitiesUrl, imageInfoUrl, parseImageInfo, parseSearch, searchUrl } from "./core/wikidata.js";
 import type { WikidataTaxonomy } from "./core/wikidata-taxonomy.js";
 import { createMockFetcher, fakeProcessPhoto, loadFixture, type MockFetcher, type MockRoute } from "./testing/fixtures.js";
@@ -465,6 +466,24 @@ describe("brand images job (embedded Postgres)", () => {
     expect(result.status).toBe("succeeded");
     expect(result.stats).toMatchObject({ storeAttempts: 1, imagesStored: 0, errors: 0 });
     expect((await row())?.status).toBe("blocked");
+  });
+
+  it("blocks an oversize download as a refusal, not an error — Commons hands back 30MB originals", async () => {
+    await seedBrand();
+    // One byte over is enough: the fetcher refuses the download, and the run
+    // records the refusal in the negative cache like any other blocked file.
+    const oversize = { ...routes(), [imageBytesUrl()]: { binary: Buffer.alloc(MAX_IMAGE_BYTES + 1) } };
+
+    const result = await runBrandImages(deps(createMockFetcher(oversize), createMemoryPhotoStorage()), {
+      brand: BRAND,
+    });
+
+    expect(result.status).toBe("succeeded");
+    expect(result.stats).toMatchObject({ storeAttempts: 1, imagesStored: 0, errors: 0 });
+    const saved = await row();
+    expect(saved?.status).toBe("blocked");
+    expect(saved?.note).toBe("oversize");
+    expect(saved?.objectKey).toBeNull();
   });
 
   it("leaves a brand unchecked rather than caching a false no_match when Wikimedia declines", async () => {

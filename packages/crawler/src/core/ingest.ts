@@ -17,7 +17,7 @@ import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
 import { isCigarListing, normalizeListing, type NormalizedListing } from "./normalize.js";
 import { createCigarFromListing, findCatalogMatch, upsertListingMatch } from "./match.js";
 import { parseRobots } from "./robots.js";
-import { CRAWLER_UA_TOKEN, type Fetcher } from "./fetcher.js";
+import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
 
 // The run driver (ADR-006). Three modes share one polite walk: `seed` (catalog
 // creation + offers + photos), `offers` (offers-only, never creates a cigar), and
@@ -223,7 +223,10 @@ async function capturePhoto(
     .limit(1);
   if (existing[0]) return;
 
-  const image = await deps.fetcher.fetchBinary(listing.imageUrl);
+  // Bounded: a vendor's product image is whatever their CMS holds, and an
+  // oversize one throws — both call sites already isolate a photo failure into
+  // stats.errors rather than losing the offer (ADR-007).
+  const image = await deps.fetcher.fetchBinary(listing.imageUrl, MAX_IMAGE_BYTES);
   if (image.status !== 200) {
     stats.errors += 1;
     return;

@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { brandImages, type BrandImageRow, type Database } from "@cj/db";
 import { brandSlug } from "@cj/domain";
 import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedPhoto } from "@cj/photos";
-import type { Fetcher } from "./fetcher.js";
+import { MAX_IMAGE_BYTES, MaxBytesExceededError, type Fetcher } from "./fetcher.js";
 import {
   entitiesUrl,
   entityDescription,
@@ -39,10 +39,6 @@ const MIN_SLUG_LENGTH = 4;
 // How long a negative outcome (no_match / no_image / blocked / error) is honoured
 // before the job re-checks it. --refresh overrides.
 const RECHECK_AFTER_DAYS = 30;
-
-// Matches the web's MAX_UPLOAD_BYTES: the pipeline downsamples anything larger
-// than we serve, so this only bounds what we will decode.
-const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 export interface BrandImagesDeps {
   db: Database;
@@ -226,8 +222,18 @@ async function storeImage(
   slug: string,
   downloadUrl: string,
 ): Promise<StoredObjects | { blocked: string }> {
-  const image = await deps.fetcher.fetchBinary(downloadUrl);
+  // The cap is the fetcher's job: Commons hands back the ORIGINAL file whenever
+  // it has no thumbnail to offer (wikidata.ts), and originals run 20–40MB.
+  let image;
+  try {
+    image = await deps.fetcher.fetchBinary(downloadUrl, MAX_IMAGE_BYTES);
+  } catch (error) {
+    if (error instanceof MaxBytesExceededError) return { blocked: "oversize" };
+    throw error;
+  }
   if (image.status !== 200) return { blocked: `download:${image.status}` };
+  // Redundant against the real fetcher, kept because Fetcher is an injected
+  // interface: this is the one place the oversize outcome is guaranteed.
   if (image.body.length > MAX_IMAGE_BYTES) return { blocked: "oversize" };
 
   const process = deps.processPhoto ?? defaultProcessPhoto;
