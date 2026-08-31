@@ -1076,10 +1076,20 @@ describe("@cj/mcp adapter", () => {
       ) as {
         smoke: { smokeId: string; version: number; cigar: { cigarId: string } };
         cigarCreated: boolean;
+        enrichmentQueued: boolean;
       };
       expect(saved.cigarCreated).toBe(true);
       const smokeId = saved.smoke.smokeId;
       const createdCigarId = saved.smoke.cigar.cigarId;
+
+      // The safety net (#177). The documented path is add_cigar → save_smoke, but a
+      // client that skips the prelude must still not lose the entry: this save
+      // published it, created the cigar, and — because it CREATED it — queued the
+      // enrichment the prelude would have queued.
+      expect(saved.enrichmentQueued).toBe(true);
+      const queued = await enrichmentRows(createdCigarId);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]!.status).toBe("pending");
 
       // 3. History shows the new smoke (filter by the freshly-created cigar).
       const list = payloadOf(await call(client, "get_my_smokes", { cigarId: createdCigarId })) as {
@@ -1166,6 +1176,49 @@ describe("@cj/mcp adapter", () => {
       expect(replay.replayed).toBe(true);
       expect(replay.cigar.cigarId).toBe(created.cigar.cigarId);
       expect(await enrichmentRows(created.cigar.cigarId)).toHaveLength(1);
+    });
+  });
+
+  it("add_cigar always reports journalEntryCreated:false — on create, on an existing link, and on replay", async () => {
+    // The point-of-use half of the #177 fix. Whatever else add_cigar reports, it
+    // must say it wrote no journal entry: the live loss was a client that read a
+    // successful add_cigar as "logged" and never issued the save_smoke. The flag
+    // is an ADAPTER constant, so the replay assertion is the load-bearing one —
+    // it proves the field rides the stored idempotency envelope too, rather than
+    // vanishing on exactly the retry path a confused client is most likely to take.
+    const existing = "Halcyon Drift Robusto";
+    await h.seedCigar({ canonicalName: existing, brand: "Halcyon" });
+    await withClient(ownerFull, async (client) => {
+      const args = {
+        clientRequestId: randomUUID(),
+        cigar: { canonicalName: "Zenith Meridian Lancero", brand: "Zenith", type: "NC" },
+      };
+      const created = payloadOf(await call(client, "add_cigar", args)) as {
+        created: boolean;
+        guidance: string;
+        journalEntryCreated: boolean;
+      };
+      expect(created.created).toBe(true);
+      expect(created.guidance).toBe("created");
+      expect(created.journalEntryCreated).toBe(false);
+
+      const replay = payloadOf(await call(client, "add_cigar", args)) as {
+        replayed: boolean;
+        journalEntryCreated: boolean;
+      };
+      expect(replay.replayed).toBe(true);
+      expect(replay.journalEntryCreated).toBe(false);
+
+      // An exact-name hit links rather than creates — still nothing journaled.
+      const linked = payloadOf(
+        await call(client, "add_cigar", {
+          clientRequestId: randomUUID(),
+          cigar: { canonicalName: existing, brand: "Halcyon" },
+        }),
+      ) as { created: boolean; guidance: string; journalEntryCreated: boolean };
+      expect(linked.created).toBe(false);
+      expect(linked.guidance).toBe("already_existed");
+      expect(linked.journalEntryCreated).toBe(false);
     });
   });
 

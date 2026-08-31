@@ -906,6 +906,12 @@ export const saveSmokeOutput = z
       .passthrough()
       .optional(),
     cigarCreated: z.boolean(),
+    // True when the save CREATED the cigar from a described ref and queued its
+    // background enrichment (#177) — it implies `cigarCreated`, since a save that
+    // linked to an existing entry filled no gap. Optional because an idempotent
+    // replay of an envelope stored before this field existed returns the original
+    // result verbatim.
+    enrichmentQueued: z.boolean().optional(),
     replayed: z.boolean(),
   })
   .passthrough();
@@ -915,6 +921,11 @@ export const addCigarOutput = z
     cigar: looseObject,
     created: z.boolean(),
     enrichmentQueued: z.boolean(),
+    // Always false — declared, not inferred (#177). passthrough() would carry the
+    // adapter's constant regardless, but the client-visible schema is the point:
+    // this is the field a model reads at the point of use to learn that cataloging
+    // a cigar has not logged anything, so it must appear in the published shape.
+    journalEntryCreated: z.boolean(),
     guidance: z.string(),
     replayed: z.boolean(),
   })

@@ -1,6 +1,15 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { eq } from "drizzle-orm";
-import { smokes, smokeProgression, smokeConsumptions, purchases, cigars, idempotencyKeys, auditLog } from "@cj/db";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { eq, sql } from "drizzle-orm";
+import {
+  smokes,
+  smokeProgression,
+  smokeConsumptions,
+  purchases,
+  cigars,
+  idempotencyKeys,
+  auditLog,
+  enrichmentRequests,
+} from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import type { Principal, SaveSmokeInput } from "./index.js";
@@ -399,5 +408,157 @@ describe("saveSmoke", () => {
       consumption: { fromHumidor: true },
     });
     expect(deduct.holdingAfter).toEqual({ totalAcquired: 3, remaining: 2 });
+  });
+  // ---- gap-fill enrichment (#177) -------------------------------------------
+  // add_cigar → save_smoke is the documented path; a described save is the safety
+  // net for a client that skipped the prelude, and when it CREATES the entry it
+  // queues what add_cigar would have queued. Three gates, each asserted below —
+  // created, described, llm-conversation provenance. The created gate keeps the
+  // queue off the merely-incomplete rows that make up most of the catalog; the
+  // provenance gate keeps the next full archive import from filing one request
+  // per distinct cigar.
+
+  // The enrichment-queue rows for one cigar. Filtered in JS to match the house
+  // style in this suite (no extra drizzle operator imports for a one-off read).
+  async function enrichmentRowsFor(cigarId: string) {
+    const all = await h.deps.db.select().from(enrichmentRequests);
+    return all.filter((r) => r.cigarId === cigarId);
+  }
+
+  it("queues enrichment exactly once for a described conversational save, and never twice", async () => {
+    const described = {
+      canonicalName: "Quasarium Halo Toro",
+      brand: "Quasarium",
+      type: "NC" as const,
+    };
+    const first = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described },
+      overallDescriptors: ["marker"],
+      provenance: { source: "llm-conversation" },
+    });
+    expect(first.cigarCreated).toBe(true);
+    expect(first.enrichmentQueued).toBe(true);
+    const cigarId = first.smoke.cigar.cigarId;
+    expect(await enrichmentRowsFor(cigarId)).toHaveLength(1);
+
+    // A second smoke of the same cigar LINKS to the row just created (exact name),
+    // so it filled no gap and the created gate stops it before the queue is even
+    // consulted. That is what keeps a heavy smoker off a pile of duplicates.
+    const second = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described },
+      overallDescriptors: ["marker"],
+      provenance: { source: "llm-conversation" },
+    });
+    expect(second.smoke.cigar.cigarId).toBe(cigarId);
+    expect(second.cigarCreated).toBe(false);
+    expect(second.enrichmentQueued).toBe(false);
+    expect(await enrichmentRowsFor(cigarId)).toHaveLength(1);
+  });
+
+  it("queues NOTHING for a described legacy-import save (the archive-reimport guard)", async () => {
+    const result = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "Vellichor Sable Corona", brand: "Vellichor" } },
+      originalMarkdown: "Imported from the legacy ledger.",
+      provenance: { source: "legacy-import", client: "importer" },
+    });
+    expect(result.cigarCreated).toBe(true);
+    expect(result.enrichmentQueued).toBe(false);
+    expect(await enrichmentRowsFor(result.smoke.cigar.cigarId)).toHaveLength(0);
+  });
+
+  it("queues nothing for a manual save or for a save against an existing cigarId", async () => {
+    // The web form: described gap-fill is possible there too, but it has its own
+    // repair surfaces and must not push work into the crawler's queue.
+    const manual = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "Petrichor Vector Robusto", brand: "Petrichor" } },
+      overallDescriptors: ["marker"],
+      provenance: { source: "manual" },
+    });
+    expect(manual.cigarCreated).toBe(true);
+    expect(manual.enrichmentQueued).toBe(false);
+    expect(await enrichmentRowsFor(manual.smoke.cigar.cigarId)).toHaveLength(0);
+
+    // The common path — a resolved id — takes no enrichment reads at all.
+    const cigarId = await h.seedCigar({ canonicalName: "Sonderling Prism Toro", brand: "Sonderling" });
+    const byId = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["marker"],
+      provenance: { source: "llm-conversation" },
+    });
+    expect(byId.enrichmentQueued).toBe(false);
+    expect(await enrichmentRowsFor(cigarId)).toHaveLength(0);
+  });
+
+  it("queues nothing for a described save that LINKS to an existing incomplete cigar", async () => {
+    // The created gate, which is the whole of review major 1 on PR #188. Without
+    // it the enrichment fired on resolve as well as create, so every conversational
+    // save of an already-catalogued cigar filed a request — and most catalog rows
+    // are incomplete, so that is roughly one row per described save, aimed at
+    // exactly the unverified/untyped entries the curation press refuses without an
+    // override. It also made enrichmentQueued:true reachable with
+    // cigarCreated:false, which all four surfaces documenting the field say
+    // cannot happen.
+    const canonicalName = "Ambergris Tide Robusto";
+    const cigarId = await h.seedCigar({ canonicalName, brand: "Ambergris", verification: "unverified" });
+
+    const result = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName, brand: "Ambergris" } },
+      overallDescriptors: ["marker"],
+      provenance: { source: "llm-conversation" },
+    });
+
+    expect(result.smoke.cigar.cigarId).toBe(cigarId);
+    expect(result.cigarCreated).toBe(false);
+    expect(result.enrichmentQueued).toBe(false);
+    expect(await enrichmentRowsFor(cigarId)).toHaveLength(0);
+  });
+
+  it("saves the smoke even when the enrichment queue fails, and says enrichmentQueued false", async () => {
+    // Never trade the entry for the enrichment. Driven with a REAL Postgres error
+    // rather than a stubbed throw, because the hazard is server-side: a failed
+    // statement aborts the transaction, so every later statement — the smoke, its
+    // audit row — fails too. A stubbed throw would not reproduce that and a bare
+    // try/catch would not survive it. Rolling back to the savepoint is what does.
+    await h.deps.db.execute(sql`
+      create function cj_test_block_enrichment() returns trigger as $$
+      begin raise exception 'enrichment boom'; end;
+      $$ language plpgsql
+    `);
+    await h.deps.db.execute(sql`
+      create trigger cj_test_block_enrichment before insert on enrichment_requests
+      for each row execute function cj_test_block_enrichment()
+    `);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const result = await saveSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigar: { described: { canonicalName: "Ferrous Cascade Toro", brand: "Ferrous" } },
+        overallDescriptors: ["marker"],
+        provenance: { source: "llm-conversation" },
+      });
+
+      expect(result.cigarCreated).toBe(true);
+      expect(result.enrichmentQueued).toBe(false);
+
+      // The committed row, not just the returned envelope — the point is that the
+      // transaction survived the failure inside it.
+      const saved = await h.deps.db.select().from(smokes).where(eq(smokes.id, result.smoke.smokeId));
+      expect(saved).toHaveLength(1);
+      expect(await enrichmentRowsFor(result.smoke.cigar.cigarId)).toHaveLength(0);
+
+      // And the loss of the enrichment is not silent.
+      expect(warn.mock.calls.flat().join(" ")).toContain("enrichment_queue_failed");
+    } finally {
+      warn.mockRestore();
+      await h.deps.db.execute(sql`drop trigger cj_test_block_enrichment on enrichment_requests`);
+      await h.deps.db.execute(sql`drop function cj_test_block_enrichment()`);
+    }
   });
 });

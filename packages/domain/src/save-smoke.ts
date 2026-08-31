@@ -6,6 +6,7 @@ import { validateSaveInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
 import { normalizeDescriptors, verbatimDescriptors } from "./descriptors.js";
 import { resolveCigar } from "./cigar-resolution.js";
+import { maybeQueueEnrichment } from "./enrichment.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
 import { applyConsumptionOnSave } from "./consumption.js";
@@ -34,6 +35,37 @@ export async function saveSmoke(
       }
     }
     throw error;
+  }
+}
+
+// Queue the gap-fill enrichment WITHOUT putting the journal entry at risk (#177).
+// maybeQueueEnrichment runs six reads and an insert (the cigar, its photos, the
+// request history, the vendor fleet, the attempt ledger); before this guard any
+// error among them aborted the whole save, so the fix against dropping the entry
+// had quietly added a new way to drop it.
+//
+// The attempt runs in a SAVEPOINT rather than a bare try/catch, because a bare
+// try/catch cannot help here: a failed statement puts Postgres into an aborted
+// transaction, where every later statement — the smoke, its audit row — fails
+// too. Rolling back to the savepoint is what clears that state. The save then
+// commits with enrichmentQueued:false and a logged reason.
+//
+// Priority order, if the two ever conflict: an un-enriched cigar is recoverable
+// (it lands in the curate lane's unverified and missing_photos worklists, and
+// request_cigar_enrichment repairs it later); a missing journal entry lands in no
+// worklist and is unrecoverable without the user. Never trade the entry for the
+// enrichment.
+async function queueEnrichmentSafely(tx: Tx, cigarId: string, requestedBy: string): Promise<boolean> {
+  try {
+    return await tx.transaction((savepoint) => maybeQueueEnrichment(savepoint, cigarId, requestedBy));
+  } catch (error) {
+    // Structured and prose-free, matching the [mcp] event log: ids and a reason,
+    // never journal content.
+    console.warn(
+      `${new Date().toISOString()} [domain] enrichment_queue_failed`,
+      JSON.stringify({ cigarId, reason: error instanceof Error ? error.message : String(error) }),
+    );
+    return false;
   }
 }
 
@@ -117,6 +149,32 @@ async function saveWithinTx(
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 
+  // Gap-fill enrichment (#177). add_cigar → save_smoke is the documented path
+  // (owner ruling on #177); a described save is the SAFETY NET for a client that
+  // skipped the prelude. When that net catches — the save creates the catalog
+  // entry itself — it queues what add_cigar would have queued, specs and a
+  // product photo. Three gates, each load-bearing:
+  //   * cigar.created — a save that LINKED to an existing row filled no gap.
+  //     Queueing there would file a request for any of the ~96% of catalog rows
+  //     that fail assessEnrichmentFields.complete, against exactly the unverified
+  //     and untyped rows the #154 curation press refuses without an override —
+  //     and would make enrichmentQueued:true reachable with cigarCreated:false,
+  //     which all four surfaces documenting the field say cannot happen.
+  //   * described refs only — a cigarId save never creates, so the common path
+  //     takes no enrichment reads at all.
+  //   * llm-conversation provenance only — the legacy importer saves per review
+  //     with described cigars ("legacy-import"), and an ungated queue would file
+  //     one request per distinct cigar on the next archive import. The web form
+  //     ("manual") is excluded for the same reason; it has its own repair
+  //     surfaces. record_purchase queues under every provenance — this is
+  //     deliberately narrower than that, not parity with it.
+  // Ordered last on purpose: everything the user actually asked for is already
+  // written above.
+  const enrichmentQueued =
+    cigar.created && "described" in input.cigar && provenanceSource === "llm-conversation"
+      ? await queueEnrichmentSafely(tx, cigar.cigarId, principal.userId)
+      : false;
+
   // When the save carried a consumption block (ADR-008 / DESIGN-002 ask-once
   // flow), report the derived stock picture AFTER the smoke so the caller reads
   // back the new remaining without a follow-up read (mirrors record_purchase's
@@ -134,6 +192,7 @@ async function saveWithinTx(
       cigar: { cigarId: cigar.cigarId, canonicalName: cigar.canonicalName, verification: cigar.verification },
     },
     cigarCreated: cigar.created,
+    enrichmentQueued,
     ...(holdingAfter ? { holdingAfter } : {}),
     replayed: false,
   };

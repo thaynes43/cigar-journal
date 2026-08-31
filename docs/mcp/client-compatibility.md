@@ -245,6 +245,41 @@ server instructions changed, and per the manifest-cache section above an in-flig
 conversation keeps serving the pre-change text. Testing without both is testing the
 old description against the new server, and the result is uninterpretable.
 
+## 2026-08-31 — gap-fill hardened: the two-call path, stated as an invariant
+
+The server `INSTRUCTIONS` "Gap-fill" paragraph and `add_cigar`'s tool description
+were rewritten (issue #177). The instruction already read "fill the gap first …
+the later `save_smoke`", and a client obeyed the first half only: on 2026-08-30
+the owner asked for a journal entry, the catalog lacked the cigar, `add_cigar`
+ran, and **no `save_smoke` ever followed** — a catalog row that reported success
+and dropped the entry. Nothing in the text said the request was unfinished until
+the second call ran.
+
+`add_cigar` → `save_smoke` remains the documented path (owner ruling, 2026-08-31).
+What changed is that the invariant is now stated: gap-fill is a prelude, never the
+answer; the request is not complete until the `save_smoke`/`record_purchase` that
+motivated it has run in the same turn; and a catalog row with no journal entry is
+worse than no row at all, because it looks like success. `add_cigar`'s result
+carries `journalEntryCreated: false` so a client that never reads the preamble
+still meets the invariant at the point of use, and `save_smoke`'s result gains
+`enrichmentQueued`.
+
+**One behaviour change, not purely additive.** A conversational `save_smoke` that
+*creates* a described cigar now also files an `enrichment_requests` row — a new DB
+write on a path that previously made none. It is gated to exactly that case
+(created + `described` + `llm-conversation` provenance), so the legacy importer
+and the web form are untouched, and it can never cost the entry: the queue attempt
+runs in a savepoint, and a failure returns `enrichmentQueued: false` with the
+smoke saved. The schema changes themselves are additive — one new output field on
+`add_cigar`, one optional field on `save_smoke` — and no behaviour is removed.
+
+**This is inert on the surface where it failed until the owner acts.** Per the
+manifest-cache section above, ChatGPT caches tool descriptions globally and input
+schemas per conversation: the rewritten instruction and the new result field reach
+it only after a **connector refresh AND a new chat**. The conversation in which the
+loss happened keeps the old preamble and can repeat the loss verbatim. Nothing
+server-side can force the refresh.
+
 ## Workflows
 
 **Ideal (design target):** the user talks to ChatGPT normally for the whole
