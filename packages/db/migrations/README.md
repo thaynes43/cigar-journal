@@ -87,8 +87,24 @@ init container at startup (ADR-003).
   must outlive the client row it names.
 - `0025_enrichment_market_evidence.sql` — two read-path indexes,
   `listing_matches (cigar_id) WHERE cigar_id IS NOT NULL` and
-  `crawl_runs (vendor_id, kind, status, started_at DESC)`. Schema-neutral: no
-  column, no constraint, no data write. They serve two predicates added by the
+  `crawl_runs (vendor_id, kind, status, started_at DESC)`, plus **one registry
+  correction**: `vendors.focus` for Cuban Lou's, `'CC'` → `'both'`.
+  Schema-neutral (no column, no constraint, no catalogue backfill) but **not
+  write-free**. The shop was recorded `'CC'` on the strength of its name; measured
+  against the live catalogue on 2026-08-31 it stocks Perdomo, Gurkha, CAO, Rocky
+  Patel, Quorum and Dominican/Nicaraguan bundles alongside genuine Habanos, so
+  `'CC'` was a factual error. It is load-bearing because the evidenced market
+  reads it: while the row said `'CC'`, the 57 cigars only that shop stocks each
+  asserted "CC", and each wrong inference then excluded Fox — the only live
+  enrich lane — from that cigar's fleet, so nothing could ever contradict it.
+  `evidencedMarketSql` already excludes `focus='both'` from the evidence set, so
+  the correction collapses all of it with no algorithm change (verified by
+  simulation against prod: 821 NC / 56 CC / 7 unknown becomes 822 / 0 / 62). The
+  `UPDATE` is guarded on the current value, so it is idempotent and cannot undo a
+  later deliberate re-decision. Note this is the opposite kind of write from the
+  one the file forbids below: `cigars.type` would be a catalogue fact inferred
+  from a weak signal, while `vendors.focus` is a registry fact we recorded wrong.
+  The indexes serve two predicates added by the
   2026-08-30 ADR-006 amendment. The **evidenced market** (#170) — `cigars.type`
   if set, else the single market shared by every single-market vendor that
   already stocks the cigar — is a correlated subquery keyed on

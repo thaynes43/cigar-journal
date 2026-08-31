@@ -354,9 +354,9 @@ LLM-created cigars accumulate until curated.
     vendor will not carry an NC cigar, so an NC-only vendor stocking X means X is
     not CC. A `focus='both'` vendor contributes nothing (a both-market vendor
     stocking a cigar says nothing about its market), and disagreeing sources
-    resolve to unknown rather than to a winner. On prod it resolves 878 of the 884
-    untyped rows — 821 Fox-only to NC, 56 Cuban Lou's-only to CC — with no new
-    column, no backfill and no hand-maintained coverage table, which this ADR
+    resolve to unknown rather than to a winner. On prod it resolves 822 of the 884
+    untyped rows — Fox-only to NC — with no new column, no backfill and no
+    hand-maintained coverage table, which this ADR
     forbids. It **self-heals**: every crawl that links a listing sharpens it, and
     `cigars.type` overrides it outright, so a curator always has the last word.
     A wrong auto-link — the very defect #170 is about — does become evidence, and
@@ -364,6 +364,30 @@ LLM-created cigars accumulate until curated.
     vendor, never authorize a write its own focus would not already allow. The
     failure mode is an ask the right vendor is never sent, which surfaces as an
     open row naming who is awaited, not as a wrong photo.
+  - **`vendors.focus` is a claim about inventory and must be checked against the
+    inventory** (added 2026-08-31, before this lane shipped). The evidenced market
+    is only ever as sound as that column, and the first live reading of it was
+    wrong: Cuban Lou's was recorded `'CC'` on the strength of its name while its
+    catalogue carries Perdomo, Gurkha, CAO, Rocky Patel, Quorum and
+    Dominican/Nicaraguan bundles beside genuine Habanos. Of the 57 untyped cigars
+    it alone stocked, ~39 were thereby evidenced CC and were not Cuban. The failure
+    then **sealed itself**: an evidenced-CC row drops Fox — the only live enrich
+    lane — from its own fleet, so the vendor that could have contradicted the claim
+    could never be asked. Migration 0025 records the shop as `'both'`, which
+    collapses every one of those inferences to unknown with **no algorithm change**
+    (`focus='both'` already contributes no evidence), and the seal cannot re-form:
+    with no CC-focus vendor in the registry, linkage evidence can no longer produce
+    CC at all — only a curator setting `cigars.type` can, which is authoritative by
+    construction. **The rule this establishes:** a shop that trades in both markets
+    is recorded `'both'`, whatever its name suggests; recording it as one market
+    manufactures evidence, and the cost is paid by a *different* vendor's lane.
+    **The residual, named and not fixed here:** `vendors.focus` conflates *what a
+    vendor sells* with *what it is authoritative about*. Those come apart exactly
+    at `'both'` — the shop genuinely sells NC and CC, yet is a weaker photo
+    authority than a focused vendor precisely because its posture rules nothing
+    out. Write authority is currently derived from the sales claim plus a
+    pre-emption test rather than recorded directly; separating them (an explicit
+    authority column, or per-market vendor postures) is a schema question left open.
   - **Write authority, split by reversibility.** The two crawler writes are not
     the same kind of thing. `listing_matches` + `offers` NAME their vendor, are
     revisable by a curator (`decided_by` already protects a non-crawler verdict)
@@ -371,12 +395,25 @@ LLM-created cigars accumulate until curated.
     inserted `onConflictDoNothing`, and **nothing in the crawler ever deletes
     one**: one global slot, first write wins, forever. So:
     *a vendor may LINK to a cigar when its focus does not CONFLICT with the
-    cigar's evidenced market (unknown permits); it may fill the cigar's single
-    catalogue-photo slot only when the evidenced market is KNOWN and its focus
-    covers it.* A vendor with no single market (`both`, or no recorded focus) has
-    none to conflict with, so the guard is inert for it rather than asserting an
-    authority the market predicate does not have — the moment such a vendor is
-    added, #170 reopens for that lane, and no guard here can close it.
+    cigar's evidenced market (unknown permits); a SINGLE-MARKET vendor may fill the
+    cigar's single catalogue-photo slot only when the evidenced market is KNOWN and
+    its focus covers it; a vendor with NO single market (`both`, or no recorded
+    focus) may fill it only when no single-market vendor already stocks the cigar.*
+    The last clause replaces an earlier ruling that the guard should be **inert**
+    for a market-agnostic vendor, on the reasoning that it has no market to
+    conflict with. That was right about the market and wrong about the slot:
+    `focus='both'` does not mean "no opinion to check", it means THE NEGATIVE
+    FILTER IS UNAVAILABLE — nothing about the vendor's posture can rule out a bad
+    name-match — which is when the one permanent slot deserves more care, not less.
+    Inertness also made `both` the most privileged focus a vendor could hold, which
+    is backwards. So the guard asks the question that is still answerable: is there
+    a vendor here whose focus *does* cover this cigar's market? If so it is the
+    better authority and must not be PRE-EMPTED (overwriting is already impossible
+    — `UNIQUE(cigar_id)`, and an occupied slot returns early — so winning an empty
+    slot first is the whole risk). If not, the market-agnostic vendor is the only
+    source there is and its own product page beats an empty slot. Deliberately keyed
+    on the stockist fact, not on `market == null`, since unknown covers both "no
+    evidence" (permit) and "two focused vendors disagree" (refuse).
   - **Self-evidencing (option A), and its residual.** The photo guard reads the
     market AFTER the listing match is committed, so a single-market vendor that
     links a cigar nobody else stocks becomes its own sole evidence and may
@@ -395,9 +432,21 @@ LLM-created cigars accumulate until curated.
     Aroma`. The guard there REJECTS the candidate rather than re-ranking to the
     best market-compatible one: rejection can only remove a link, while
     substitution could invent new ones, and the 0.55 similarity floor is a
-    verified false-positive source. In `seed` mode a refusal falls through to
-    creating a cigar, which is the right answer — a listing whose market
-    contradicts its best match is a different cigar.
+    verified false-positive source. **A refusal is not a miss, and never creates**
+    (corrected 2026-08-31). The two used to collapse to one `null` return, so in
+    `seed` mode a refusal fell through to creating a cigar — justified as "a
+    listing whose market contradicts its best match is a different cigar". That
+    holds only while the market evidence is sound, and the evidence was wrong often
+    enough to sink it (see the `vendors.focus` ruling above). When a refusal is
+    false, creating turns a recoverable bad link into a **permanent duplicate**:
+    the link would have been named, revisable and re-written next crawl, whereas a
+    spurious catalogue row is none of those and is invisible at the point it is
+    made. So the result type distinguishes `none` / `match` / `refused`; a refusal
+    leaves the listing `unmatched` with no cigar, in `seed` mode exactly as in
+    `offers`, and it lands in the triage queue a curator already works. The count
+    is reported per run (`links refused (market)`) because that queue growing is
+    something an operator must be able to see — and a lane refusing a lot is more
+    likely to have a wrong `vendors.focus` than a wrong catalogue.
   - **The 0.55 floor is untouched, deliberately.** `similarity('Romeo y Julieta
     Mini White Original', 'Romeo y Julieta Mini') = 0.5833` is a real
     within-market false positive and a separate defect. The market predicate

@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { cigars, listingMatches, type ListingMatchRow } from "@cj/db";
-import { coversMarket, evidencedMarket, type Queryer, type VendorFocus } from "@cj/domain";
+import { coversMarket, evidencedMarket, type CigarType, type Queryer, type VendorFocus } from "@cj/domain";
 
 // Listing → catalog matching (ADR-006). Same trigram machinery the domain search
 // uses: an exact case-insensitive canonical-name hit wins outright, else the best
@@ -39,24 +39,42 @@ export interface FindCatalogMatchOptions {
 // 'Romeo y Julieta Mini') = 0.5833`), so substituting a lower-scoring row would
 // invent mis-links that do not exist today. Rejection cannot.
 //
-// A refusal in `seed` mode falls through to createCigarFromListing, which is the
-// right outcome: a listing whose market contradicts its best match is a different
-// cigar. In `offers` mode it leaves the listing `unmatched` for the triage queue.
+// A REFUSAL IS NOT A MISS, and the result type says so. Both used to collapse to
+// `null`, which the caller could only read as "nothing matched" — so in `seed` mode
+// a cross-market refusal fell through to `createCigarFromListing` and minted a new
+// catalogue row for the very cigar we had just declined to link. That reasoning
+// ("a listing whose market contradicts its best match is a different cigar") is
+// only sound when the market evidence is sound; when it is not, the refusal is
+// false and the fall-through turns one bad link into a permanent duplicate, which
+// is strictly worse and invisible. A refusal now says so by name, and the caller
+// leaves the listing unmatched for a human instead of guessing.
+export type CatalogMatchResult =
+  // Nothing cleared the similarity floor. In `seed` mode this is what licenses
+  // creating a catalogue row: we looked and there is genuinely nothing to link to.
+  | { kind: "none" }
+  // A candidate cleared the floor and the market guard accepted it.
+  | { kind: "match"; hit: CatalogHit }
+  // A candidate cleared the floor and this vendor's focus contradicts the cigar's
+  // evidenced market. We know something is here; we do not know enough to act.
+  | { kind: "refused"; hit: CatalogHit; market: CigarType | null };
+
 export async function findCatalogMatch(
   db: Queryer,
   name: string,
   options?: FindCatalogMatchOptions,
-): Promise<CatalogHit | null> {
+): Promise<CatalogMatchResult> {
   const trimmed = name.trim();
-  if (!trimmed) return null;
+  if (!trimmed) return { kind: "none" };
 
   const hit = await bestCandidate(db, trimmed);
-  if (!hit) return null;
+  if (!hit) return { kind: "none" };
 
   const focus = options?.vendorFocus ?? null;
   // A vendor with no single market cannot conflict with one; skip the read.
-  if (focus == null || focus === "both") return hit;
-  return coversMarket(focus, await evidencedMarket(db, hit.cigarId)) ? hit : null;
+  if (focus == null || focus === "both") return { kind: "match", hit };
+
+  const market = await evidencedMarket(db, hit.cigarId);
+  return coversMarket(focus, market) ? { kind: "match", hit } : { kind: "refused", hit, market };
 }
 
 async function bestCandidate(db: Queryer, trimmed: string): Promise<CatalogHit | null> {

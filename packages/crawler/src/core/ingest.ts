@@ -10,6 +10,7 @@ import {
   evidencedMarket,
   evidencedMarketSql,
   mayWriteCatalogPhoto,
+  photoAuthority,
   vendorNotRetiredSql,
   type CigarType,
   type EnrichmentOutcome,
@@ -55,6 +56,13 @@ export interface IngestStats {
   // that refused nothing stays byte-identical to what it was before this field
   // existed. Not an error — a refusal is the guard working.
   photosSkippedMarket?: number;
+  // Seed/offers listings whose best catalogue candidate was REFUSED on market
+  // grounds (#170), leaving the listing unmatched rather than linked or newly
+  // created. Optional on the same terms as the field above: absent when zero, so a
+  // run that refused nothing serialises exactly as it did before this existed.
+  // Worth watching after the Cuban Lou's correction — a lane refusing a lot is
+  // more likely to have a wrong `vendors.focus` than a wrong catalogue.
+  linksRefusedMarket?: number;
   errors: number;
   // Present only for a vendor with sitemapSampling configured — absent keeps the
   // JSONB byte-identical for every other vendor.
@@ -239,15 +247,21 @@ async function productUrls(deps: IngestDeps, adapter: VendorAdapter, stats: Inge
 // this guard is STRICTER than the one on the link: the slot may only be filled
 // when the cigar's evidenced market is KNOWN and this vendor's focus covers it.
 //
-// The market is read HERE, after the listing match has been committed, and that
-// ordering is the whole design (option A, SELF-EVIDENCING):
+// The authority is read HERE, after the listing match has been committed, and
+// that ordering is the whole design (option A, SELF-EVIDENCING):
 //   * a single-market vendor that links a cigar nobody else stocks becomes its own
 //     sole evidence, so it may photograph it — Fox's working seed/enrich lanes are
 //     not regressed by this guard at all;
 //   * a second vendor of the OTHER market linking the same cigar makes the
 //     evidence conflict, which resolves to unknown, and its photo is refused.
+//
+// A `both`-focus vendor (Cuban Lou's, from migration 0025) is NOT self-evidencing:
+// its own link contributes no market evidence, so what gates it is whether a
+// FOCUSED vendor already stocks the cigar. It photographs what only it carries and
+// never pre-empts Fox on a row Fox stocks. See `mayWriteCatalogPhoto`.
+//
 // The residual, stated: the first vendor to discover a cigar can always photograph
-// it, so a CC lane that name-matches a Nicaraguan brand nobody else stocks still
+// it, so a single-market lane that name-matches a brand nobody else stocks still
 // fills the slot. Closing that needs INDEPENDENT evidence (`cigars.type`, or a
 // different vendor already stocking it), which would mean the discovering vendor
 // can never photograph what it found — an owner call, raised as such, not decided
@@ -275,7 +289,7 @@ async function capturePhoto(
 
   // The market gate precedes the download: a photo we are not allowed to write is
   // a photo we should not have spent a vendor's bandwidth fetching.
-  if (!mayWriteCatalogPhoto(focus, await evidencedMarket(deps.db, cigarId))) {
+  if (!mayWriteCatalogPhoto(focus, await photoAuthority(deps.db, cigarId))) {
     stats.photosSkippedMarket = (stats.photosSkippedMarket ?? 0) + 1;
     return;
   }
@@ -348,16 +362,27 @@ async function ingestListing(
     // fired in production: BOTH live cross-market rows came through here, not
     // through the drain. A CC vendor walking its own sitemap trigram-matched an NC
     // catalogue row and auto-linked it. The guard is a pure negative filter — it
-    // can only ever refuse a link, never redirect one — so in `seed` mode a
-    // refusal falls through to createCigarFromListing, which is the right answer:
-    // a listing whose market contradicts its best match is a DIFFERENT cigar.
-    const hit = await findCatalogMatch(tx, listing.name, { vendorFocus: focus });
+    // can only ever refuse a link, never redirect one.
+    const result = await findCatalogMatch(tx, listing.name, { vendorFocus: focus });
     let linkedCigarId: string | null = null;
     let status: "auto" | "unmatched";
 
-    if (hit) {
-      linkedCigarId = hit.cigarId;
+    if (result.kind === "match") {
+      linkedCigarId = result.hit.cigarId;
       status = "auto";
+    } else if (result.kind === "refused") {
+      // A REFUSAL DOES NOT CREATE, in seed mode either. We found a strong name
+      // candidate and declined it on market grounds — that is an unresolved
+      // question, not evidence of a new cigar. Falling through to
+      // createCigarFromListing (which is what this did) would mint a duplicate of
+      // the row we just refused every time the refusal was wrong, and a wrong
+      // refusal is exactly what a wrong `vendors.focus` produces (#170: Cuban
+      // Lou's was recorded 'CC' while selling Perdomo). A bad link is named,
+      // revisable and re-written next crawl; a duplicate catalogue row is none of
+      // those. So: leave the listing UNMATCHED, with no cigar, for the triage
+      // queue a curator already works — the same landing place `offers` mode uses.
+      status = "unmatched";
+      stats.linksRefusedMarket = (stats.linksRefusedMarket ?? 0) + 1;
     } else if (options.mode === "seed") {
       linkedCigarId = await createCigarFromListing(tx, listing.name);
       stats.cigarsCreated += 1;

@@ -78,6 +78,7 @@ export {
   createCigarFromListing,
   MATCH_THRESHOLD,
   type CatalogHit,
+  type CatalogMatchResult,
   type FindCatalogMatchOptions,
 } from "./core/match.js";
 // The crawl_runs row's lifecycle and the per-(vendor, mode) lane lock (#155,

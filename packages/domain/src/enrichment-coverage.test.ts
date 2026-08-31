@@ -663,7 +663,11 @@ describe("enrichment coverage", () => {
         const inSql = (rows.rows[0] as { ok: boolean }).ok;
         expect([focus, market, inSql]).toEqual([focus, market, coversMarket(focus, market)]);
         // Write authority can never permit what the link filter already refuses.
-        if (!coversMarket(focus, market)) expect(mayWriteCatalogPhoto(focus, market)).toBe(false);
+        // Checked against BOTH stockist readings, so neither can be the reason.
+        if (!coversMarket(focus, market)) {
+          expect(mayWriteCatalogPhoto(focus, { market, focusedStockist: false })).toBe(false);
+          expect(mayWriteCatalogPhoto(focus, { market, focusedStockist: true })).toBe(false);
+        }
       }
     }
 
@@ -671,11 +675,20 @@ describe("enrichment coverage", () => {
     // vendor may LINK a cigar whose market is unknown (revisable, per-vendor, named)
     // but may not fill its one permanent catalogue-photo slot.
     expect(coversMarket("NC", null)).toBe(true);
-    expect(mayWriteCatalogPhoto("NC", null)).toBe(false);
-    // A vendor with no single market has none to conflict with, so the guard is
-    // inert there rather than asserting an authority it does not have.
-    expect(mayWriteCatalogPhoto("both", null)).toBe(true);
-    expect(mayWriteCatalogPhoto(null, null)).toBe(true);
+    expect(mayWriteCatalogPhoto("NC", { market: null, focusedStockist: false })).toBe(false);
+
+    // A vendor with no single market is gated on PRE-EMPTION instead, because its
+    // focus cannot rule anything out: it may take an empty slot nobody focused
+    // competes for, and may not take one from a vendor whose focus covers the row.
+    // The market is deliberately not what decides it — note both readings below
+    // hold at market=null, which covers "no evidence" AND "conflicting evidence".
+    for (const focus of ["both", null] as const) {
+      expect(mayWriteCatalogPhoto(focus, { market: null, focusedStockist: false })).toBe(true);
+      expect(mayWriteCatalogPhoto(focus, { market: null, focusedStockist: true })).toBe(false);
+      expect(mayWriteCatalogPhoto(focus, { market: "NC", focusedStockist: true })).toBe(false);
+      // Typed by a curator, stocked by nobody focused: still the only source there is.
+      expect(mayWriteCatalogPhoto(focus, { market: "CC", focusedStockist: false })).toBe(true);
+    }
   });
 
   // --- per-request liveness (#185) -------------------------------------------

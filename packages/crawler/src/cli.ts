@@ -206,6 +206,12 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
     // only in the JSONB (#170).
     lines.push(`  photos refused (market): ${s.photosSkippedMarket}`);
   }
+  if (s.linksRefusedMarket) {
+    // These listings are now sitting unmatched in the triage queue rather than
+    // silently becoming new catalogue rows, so an operator needs to see the count
+    // to know the queue grew and why (#170).
+    lines.push(`  links refused (market): ${s.linksRefusedMarket}`);
+  }
   const enrich = s.enrich;
   if (enrich) {
     // A nightly drain has to say what it retired and where: `spent` is a verdict

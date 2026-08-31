@@ -1119,19 +1119,42 @@ describe("crawler ingest (embedded Postgres)", () => {
     await stock(nc, ncCigar);
 
     // No focus supplied: unchanged behaviour, the candidate comes back.
-    expect((await findCatalogMatch(pg.db, name))?.cigarId).toBe(ncCigar);
+    expect(await findCatalogMatch(pg.db, name)).toEqual({
+      kind: "match",
+      hit: { cigarId: ncCigar, canonicalName: name },
+    });
     // An NC vendor may link an NC-evidenced row...
-    expect((await findCatalogMatch(pg.db, name, { vendorFocus: "NC" }))?.cigarId).toBe(ncCigar);
-    // ...and a CC vendor may not.
-    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "CC" })).toBeNull();
+    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "NC" })).toMatchObject({
+      kind: "match",
+      hit: { cigarId: ncCigar },
+    });
+    // ...and a CC vendor may not. The refusal NAMES the candidate it refused: that
+    // is what stops the seed path reading it as "nothing matched" and creating a
+    // duplicate of this very row.
+    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "CC" })).toMatchObject({
+      kind: "refused",
+      hit: { cigarId: ncCigar },
+      market: "NC",
+    });
     // A both-market vendor has no single market to conflict with.
-    expect((await findCatalogMatch(pg.db, name, { vendorFocus: "both" }))?.cigarId).toBe(ncCigar);
+    expect(await findCatalogMatch(pg.db, name, { vendorFocus: "both" })).toMatchObject({
+      kind: "match",
+      hit: { cigarId: ncCigar },
+    });
+    // A genuine miss stays distinguishable from a refusal.
+    expect(await findCatalogMatch(pg.db, `No Such Cigar ${randomUUID()}`, { vendorFocus: "CC" })).toEqual({
+      kind: "none",
+    });
   });
 
-  // The same guard through the real seed path: refusing the link falls through to
-  // createCigarFromListing, which is the RIGHT answer — a listing whose market
-  // contradicts its best match is a different cigar, not a bad link.
-  it("a CC seed run creates its own cigar rather than auto-linking an NC-evidenced catalogue row", async () => {
+  // The same guard through the real seed path. This used to assert the OPPOSITE —
+  // that a refusal fell through to createCigarFromListing, on the reasoning that a
+  // listing contradicting its best match is a different cigar. That holds only when
+  // the market evidence is right, and #170's own evidence was wrong often enough to
+  // sink it (Cuban Lou's recorded 'CC' while stocking Perdomo). When a refusal is
+  // false, creating turns a recoverable bad link into a permanent duplicate. So the
+  // refusal now leaves the listing UNMATCHED for triage and creates nothing.
+  it("a CC seed run leaves a refused listing unmatched instead of minting a duplicate", async () => {
     const nc = await makeVendor("Seed Walk NC", "NC");
     const cc = await makeVendor("Seed Walk CC", "CC");
     await arrange([nc, cc]);
@@ -1146,12 +1169,94 @@ describe("crawler ingest (embedded Postgres)", () => {
       mode: "seed",
     });
 
-    expect(run.stats.cigarsCreated).toBe(1);
-    expect((await pg.db.select({ id: cigars.id }).from(cigars)).length).toBe(before + 1);
-    // The NC row is untouched: no CC listing_match points at it.
-    expect((await matchesFor(cc)).every((m) => m.cigarId !== ncCigar)).toBe(true);
-    // And the NC row's photo slot is still free — nothing was written to it.
+    // Nothing created for the refused listing, and the refusal is counted.
+    expect(run.stats.cigarsCreated).toBe(0);
+    expect(run.stats.linksRefusedMarket).toBe(1);
+    expect((await pg.db.select({ id: cigars.id }).from(cigars)).length).toBe(before);
+
+    // The listing is recorded, unmatched and pointing at no cigar — the triage
+    // queue's shape, so a curator can resolve what the crawler would not guess.
+    const ccMatches = await matchesFor(cc);
+    expect(ccMatches).toHaveLength(1);
+    expect(ccMatches[0]).toMatchObject({ cigarId: null, status: "unmatched" });
+
+    // The NC row is untouched: no CC listing_match points at it, and its photo
+    // slot is still free.
+    expect(ccMatches.every((m) => m.cigarId !== ncCigar)).toBe(true);
     expect(await photosFor(ncCigar)).toHaveLength(0);
+  });
+
+  // --- the `both`-focus vendor: evidence, and the seal that used to close ------
+  //
+  // Cuban Lou's is recorded `focus='both'` from migration 0025, because measured
+  // against its live catalogue it sells Perdomo, Gurkha, CAO, Rocky Patel and
+  // Dominican/Nicaraguan bundles alongside genuine Habanos. These three cases pin
+  // what that value has to mean, since the whole correctness of #170 now rests on
+  // it rather than on the algorithm.
+
+  // THE SELF-SEALING SCENARIO, and the reason the vendor row had to change rather
+  // than the predicate. While Cuban Lou's said 'CC', its listing on a Perdomo made
+  // that row evidenced-CC; coversMarketSql then dropped Fox — the ONLY live enrich
+  // lane — from the row's fleet, so the one vendor that could have contradicted the
+  // claim could never be asked, and the wrong inference was permanent. As 'both'
+  // the shop asserts no market, the row stays unknown, and Fox keeps its reach.
+  it("a both-market vendor stocking a cigar is not evidence: an NC lane can still be asked (the Cuban Lou's sells Perdomo case)", async () => {
+    const cubanLous = await makeVendor("Perdomo Case Cuban Lous", "both");
+    const fox = await makeVendor("Perdomo Case Fox", "NC");
+    await arrange([cubanLous, fox]);
+
+    // A Nicaraguan cigar, untyped, that only the both-market shop stocks — the
+    // shape of all 57 such rows in prod.
+    const cigarId = await seedCigar(`Perdomo Artesanal Sumatra ${randomUUID().slice(0, 8)}`, null);
+    const requestId = await seedRequest(cigarId);
+    await stock(cubanLous, cigarId);
+
+    // Had the shop stayed 'CC' this would be 0: the row would read as evidenced-CC
+    // and the NC lane would be filtered out of its own open set.
+    const run = await enrichRun(fox, missRoutes);
+    expect(run.stats.enrich!.requests).toBe(1);
+    expect(await ledgerRows(requestId)).toHaveLength(1);
+  });
+
+  // WRITE AUTHORITY FOR A VENDOR WITH NO MARKET. `mayWriteCatalogPhoto('both', …)`
+  // used to return true unconditionally, which made `both` the most privileged
+  // focus a vendor could hold: it could take the one permanent slot on any cigar,
+  // including one a focused vendor already stocks. It may not pre-empt that vendor.
+  it("a both-market lane does not pre-empt a focused vendor's photo slot", async () => {
+    const fox = await makeVendor("Preempt Fox", "NC");
+    const cubanLous = await makeVendor("Preempt Cuban Lous", "both");
+    await arrange([fox, cubanLous]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    const requestId = await seedRequest(cigarId);
+    await stock(fox, cigarId);
+
+    const run = await enrichRun(cubanLous, hitRoutes, createMemoryPhotoStorage());
+    // 'both' covers every market, so the lane is eligible, looks, and LINKS — the
+    // link is named, revisable and re-written next crawl.
+    expect(run.stats.enrich).toMatchObject({ requests: 1, matched: 1 });
+    expect((await matchesFor(cubanLous)).some((m) => m.cigarId === cigarId)).toBe(true);
+    // ...and the permanent slot is left for the vendor whose focus covers the row.
+    expect(await photosFor(cigarId)).toHaveLength(0);
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(run.stats.photosSkippedMarket).toBe(1);
+    expect((await requestRow(requestId)).status).toBe("fulfilled");
+  });
+
+  // The other half, or the guard would just be "a `both` vendor never photographs
+  // anything" — which would strand the 57 rows only this shop carries with an empty
+  // slot forever. With nothing focused to pre-empt, its own product page wins.
+  it("a both-market lane DOES fill a slot no focused vendor competes for", async () => {
+    const cubanLous = await makeVendor("Sole Source Cuban Lous", "both");
+    await arrange([cubanLous]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    await seedRequest(cigarId);
+
+    const run = await enrichRun(cubanLous, hitRoutes, createMemoryPhotoStorage());
+    expect(run.stats.photosCaptured).toBe(1);
+    expect(run.stats.photosSkippedMarket).toBeUndefined();
+    expect(await photosFor(cigarId)).toHaveLength(1);
   });
 
   // The 291 `decided_by='agent'` rows in prod are the highest-value data in

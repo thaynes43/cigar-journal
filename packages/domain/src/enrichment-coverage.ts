@@ -184,14 +184,79 @@ export function coversMarket(focus: VendorFocus | null, market: CigarType | null
 //     NOTHING in the crawler ever deletes one. One global slot, first write wins,
 //     forever. A wrong one is silent and permanent.
 //
-// So: a SINGLE-MARKET vendor may fill the slot only when the cigar's evidenced
-// market is KNOWN and matches. A `both` vendor (or one with no recorded focus)
-// has no single market to conflict with — the market predicate can say nothing
-// about it either way, so it is not the guard that should stop it, and the guard
-// is inert there rather than pretending to an authority it does not have.
-export function mayWriteCatalogPhoto(focus: VendorFocus | null, market: CigarType | null): boolean {
-  if (focus == null || focus === "both") return true;
-  return market === focus;
+// THE RULE, in two halves, because a vendor with a market and a vendor without
+// one are authoritative about different things:
+//
+//   * A SINGLE-MARKET vendor may fill the slot only when the cigar's evidenced
+//     market is KNOWN and matches. Its focus is a real claim, so we can check it.
+//   * A `both` vendor (or one with no recorded focus) may fill the slot only when
+//     NO single-market vendor already stocks the cigar.
+//
+// The second half used to return an unconditional `true`, on the reasoning that a
+// both-market vendor has no market to conflict with, so the guard should be inert
+// rather than pretend to an authority it lacks. That reasoning was right about the
+// market and wrong about the slot. `focus='both'` does not mean "no opinion to
+// check"; it means THE NEGATIVE FILTER IS UNAVAILABLE — nothing about this
+// vendor's posture can rule out a bad name-match, which is precisely when the one
+// permanent slot deserves more care, not less. Being inert made `both` the most
+// privileged focus a vendor could have, which is backwards.
+//
+// So the second half asks the one question that is still answerable: is there a
+// vendor here whose focus DOES cover this cigar's market? If yes, that vendor is
+// the better authority for the slot and a market-agnostic vendor must not
+// PRE-EMPT it. (Overwriting is already impossible — `product_photos` is
+// UNIQUE(cigar_id) and the caller returns early on an occupied slot — so
+// pre-emption, winning an empty slot first, is the whole of the risk.) If no
+// focused vendor stocks it, the market-agnostic vendor is the only source there
+// is, and its own product page beats an empty slot.
+//
+// Note this is deliberately NOT keyed on `market === null`: unknown covers both
+// "nobody focused stocks it" (permit) and "two focused vendors disagree" (refuse,
+// they are both better authorities than we are). Only the stockist fact separates
+// them, which is why it is carried alongside the market rather than derived from
+// it.
+export function mayWriteCatalogPhoto(focus: VendorFocus | null, facts: PhotoAuthority): boolean {
+  if (focus === "NC" || focus === "CC") return facts.market === focus;
+  return !facts.focusedStockist;
+}
+
+// The two facts the slot guard needs about a cigar, read together.
+export interface PhotoAuthority {
+  // The evidenced market (above): `cigars.type`, else the single market shared by
+  // every single-market vendor stocking it, else null.
+  market: CigarType | null;
+  // Whether ANY single-market vendor stocks this cigar — the question `market`
+  // cannot answer, since it reports null both for "no evidence" and "conflict".
+  focusedStockist: boolean;
+}
+
+// "Does a vendor with a real market already stock this cigar?" Same join as the
+// evidence subquery, without the single-market HAVING: here a disagreement is
+// still two focused stockists, and both outrank a market-agnostic vendor.
+export function focusedStockistSql(cigarId: SQL): SQL {
+  return sql`EXISTS (
+    SELECT 1
+      FROM listing_matches fs_lm
+      JOIN vendors fs_v ON fs_v.id = fs_lm.vendor_id
+     WHERE fs_lm.cigar_id = ${cigarId}
+       AND fs_v.focus IN ('NC', 'CC')
+  )`;
+}
+
+// Both facts in ONE statement, so the guard cannot read them from two different
+// snapshots, and so composing it inside a caller's transaction still sees the
+// link that transaction just wrote (the self-evidencing ordering below).
+export async function photoAuthority(q: Queryer, cigarId: string): Promise<PhotoAuthority> {
+  const id = sql`${cigarId}::uuid`;
+  const result = await q.execute(
+    sql`SELECT ${evidencedMarketSql(id)} AS market, ${focusedStockistSql(id)} AS focused`,
+  );
+  const row = (result.rows as unknown as { market: string | null; focused: boolean }[])[0];
+  const market = row?.market ?? null;
+  return {
+    market: market === "NC" || market === "CC" ? market : null,
+    focusedStockist: row?.focused === true,
+  };
 }
 
 // THE EVIDENCED MARKET (#170).
@@ -211,8 +276,19 @@ export function mayWriteCatalogPhoto(focus: VendorFocus | null, market: CigarTyp
 // SELF-HEALS: every crawl that links a listing sharpens it, and a curator setting
 // `cigars.type` overrides it outright.
 //
-// It resolves 878 of prod's 884 untyped rows (821 Fox-only -> NC, 56 Cuban
-// Lou's-only -> CC, 1 conflicting and 6 unlinked -> unknown).
+// It resolves 822 of prod's 884 untyped rows (Fox-only -> NC; 62 unlinked or
+// stocked only by a both-market vendor stay unknown).
+//
+// THE INFERENCE IS ONLY EVER AS GOOD AS `vendors.focus`, and that is not a
+// theoretical caveat — it is how this was first got wrong. Recorded posture said
+// Cuban Lou's was 'CC', so its 57 sole-stocked listings evidenced CC, and ~39 of
+// those were Perdomo, Gurkha, CAO and Dominican bundles. Worse, each wrong CC then
+// excluded Fox — the only live enrich lane — from that row's fleet, so no later
+// crawl could contradict it: the inference SEALED ITSELF. Migration 0025 corrects
+// the shop to 'both'. The lesson the next vendor inherits: a shop's focus is a
+// claim about its inventory that must be checked against the inventory, and a
+// vendor that trades in both markets MUST be recorded 'both' — recording it as the
+// market its name suggests silently manufactures evidence.
 //
 // Two deliberate exclusions from the evidence set:
 //   * `focus='both'` vendors — a both-market vendor stocking a cigar says nothing

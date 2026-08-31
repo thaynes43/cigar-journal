@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "../testing/embedded-pg.js";
 import { migrate } from "../scripts/migrate.js";
+import { vendors } from "./vendors.js";
 
 // Migrations apply cleanly from empty against a real Postgres 16 (embedded
 // binary). Also asserts idempotency and that the core extensions/objects land.
@@ -203,11 +204,11 @@ describe("migrations", () => {
     await insert("brand_slug, brand_name, status", "'gate-c', 'Gate C', 'no_match'");
   });
 
-  // 0025: two read-path indexes, no schema change and no data write. They are not
-  // an optimization detail — the evidenced market (#170) is a correlated subquery
-  // keyed on `listing_matches.cigar_id`, a column that carried NO index at all,
-  // evaluated twice per row in the crawler's open set and once per row for up to
-  // ENRICHMENT_BACKLOG_MAX = 100 rows a backlog press.
+  // 0025: two read-path indexes and one registry correction, no schema change.
+  // They are not an optimization detail — the evidenced market (#170) is a
+  // correlated subquery keyed on `listing_matches.cigar_id`, a column that carried
+  // NO index at all, evaluated twice per row in the crawler's open set and once per
+  // row for up to ENRICHMENT_BACKLOG_MAX = 100 rows a backlog press.
   it("0025 creates the evidenced-market and lane-liveness indexes", async () => {
     const rows = await pg.db.execute(sql`
       SELECT indexname, indexdef FROM pg_indexes
@@ -225,5 +226,34 @@ describe("migrations", () => {
     expect(byName.get("crawl_runs_vendor_kind_started_idx")).toMatch(
       /\(vendor_id, kind, status, started_at DESC\)/,
     );
+  });
+
+  // The registry correction (#170). Asserted on a row this test inserts rather
+  // than on the migration's own effect, because the test database starts empty:
+  // what is pinned is that the UPDATE is idempotent, correctly targeted, and
+  // guarded — re-running it must not touch a vendor someone has since re-decided.
+  it("0025's vendor correction retargets only a still-CC Cuban Lou's", async () => {
+    const stmt = sql`UPDATE vendors SET focus = 'both' WHERE name = 'Cuban Lou''s' AND focus = 'CC'`;
+
+    const [stale, alreadyFixed, redecided, other] = await Promise.all([
+      pg.db.insert(vendors).values({ name: "Cuban Lou's", focus: "CC" }).returning({ id: vendors.id }),
+      pg.db.insert(vendors).values({ name: "Cuban Lou's", focus: "both" }).returning({ id: vendors.id }),
+      pg.db.insert(vendors).values({ name: "Cuban Lou's", focus: "NC" }).returning({ id: vendors.id }),
+      pg.db.insert(vendors).values({ name: "Fox Cigar", focus: "NC" }).returning({ id: vendors.id }),
+    ]);
+
+    await pg.db.execute(stmt);
+    // Idempotent: the second run is a no-op, not a second correction.
+    await pg.db.execute(stmt);
+
+    const focusOf = async (id: string) =>
+      (await pg.db.select({ focus: vendors.focus }).from(vendors).where(eq(vendors.id, id)))[0]?.focus;
+
+    expect(await focusOf(stale[0]!.id)).toBe("both");
+    expect(await focusOf(alreadyFixed[0]!.id)).toBe("both");
+    // Guarded on focus='CC', so a later deliberate decision is not silently undone.
+    expect(await focusOf(redecided[0]!.id)).toBe("NC");
+    // And no other vendor is in range of the name predicate.
+    expect(await focusOf(other[0]!.id)).toBe("NC");
   });
 });
