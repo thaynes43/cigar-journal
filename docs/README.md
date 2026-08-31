@@ -12,7 +12,9 @@ public journal pages, and the 17-tool MCP server — is the sum of these.
   accepted; supersede rather than edit.
 - [`design/`](design/) — cross-cutting UX/research design docs (the go-live
   experience, DESIGN-002).
-- [`ddd/`](ddd/) — ubiquitous language, bounded contexts, aggregates.
+- [`ddd/`](ddd/) — ubiquitous language, bounded contexts, aggregates, and the
+  [cigar industry vocabulary](ddd/cigar-industry-vocabulary.md) that binds
+  enrichment, curation, and UI copy.
 - [`flows/`](flows/) — cross-boundary workflows with sequence diagrams.
 - [`mcp/`](mcp/) — the MCP tool contract (schemas, errors, examples), the
   LLM client-compatibility matrix, and the

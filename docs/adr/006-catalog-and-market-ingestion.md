@@ -56,6 +56,8 @@ conversational lazy-create is mandatory regardless of crawl coverage.
   confident matches auto-link,
   the rest queue for manual confirmation. Match status (`auto`/`confirmed`/
   `unmatched`) is never silently overwritten by later crawls.
+  *Amended 2026-08-31 by ADR-012 — see "matching v2" below.* The
+  name-plus-trigram resolver is retired; status handling is unchanged.
 - **Price comparison (MVP):** per-cigar current offers across vendors +
   simple price history from `offers`. **Review aggregation (R11, later):**
   derived descriptors/statistics only — no verbatim third-party review text
@@ -80,6 +82,19 @@ LLM-created cigars accumulate until curated.
 
 ## Amendments
 
+- **2026-08-31 — listing matching superseded by ADR-012 (matching v2).** The
+  "normalized canonical name + trigram similarity" resolver above is retired:
+  it inverts at scale (distinct blends outscore true sibling vitolas), so
+  every vendor mints a parallel catalog. Matching v2 anchors on a brand alias,
+  resolves line and blend by alias within that brand, then vitola and
+  packaging by token, with trigram demoted to ranking residue inside the
+  resolved scope; `categoryPath` breadcrumbs are persisted as parse evidence
+  instead of discarded, and seed mode never mints a row from an unparsed
+  title — no brand anchor means triage with the suggested parse attached.
+  The rest of this ADR — trust order, vendor registry, crawl shape, offers as
+  a time series, match-status preservation, track separation — is unchanged.
+  See [ADR-012](012-structured-catalog-taxonomy.md); no new vendor is enabled
+  until matching v2 and the packaging fold land.
 - **2026-08-29 (owner) — vendor expansion + Cuban Lou's posture.** More NC
   vendors join the initial set (2 Guys Cigars, Small Batch Cigar built as
   adapters alongside Fox). **Cuban Lou's: photos + price seeds YES, purchase
