@@ -3,86 +3,25 @@ import { cigars } from "@cj/db";
 import type { Tx } from "./deps.js";
 import type { CigarRef, Verification } from "./types.js";
 import { CigarNotFoundError, CigarAmbiguousError, ValidationError } from "./errors.js";
+import { assertCigarAncestry } from "./cigar-ancestry.js";
+import { loadAncestryContext, resolveDescribedTaxonomy } from "./taxonomy-resolve.js";
+
+// The string heuristics moved to name-heuristics.ts, which carries their
+// retirement note (ADR-012: they die with the Wave 3 backfill). Re-exported here
+// because the curation duplicate queue and the MCP surface import them from this
+// module and the move is not their business.
+export {
+  numbersCompatible,
+  packagingCompatible,
+  variantCompatible,
+  strongLinkCompatible,
+} from "./name-heuristics.js";
+import { strongLinkCompatible } from "./name-heuristics.js";
 
 // Similarity at or above this counts as a strong catalog match — link rather
 // than create. Tuned against pg_trgm on canonical names; the `%` prefilter
 // (default 0.3) narrows candidates, this threshold decides linking.
 const STRONG_MATCH = 0.6;
-
-// Model tokens are name tokens carrying a digit — product numbers ("1926",
-// "1964") or alphanumeric model codes ("T52"). Trigram similarity is blind to
-// these: "1964 Maduro" and "1926 Maduro" score 0.6 purely on shared letters, so
-// a strong score alone once linked number-distinct products in production
-// ("1964 Maduro"→"Padron 1926 Maduro", "Liga Privada T52"→"...No. 9"). A digit
-// token EITHER side carries but the other lacks means different products — both
-// the two-sided case ("1964" vs "1926") and the one-sided case ("Signature 2000"
-// vs "Signature", where the naked name has no digit at all). Such a pair is
-// disqualified from strong-linking (it may still surface as an ordinary
-// candidate). Names with no digit token on either side are unaffected.
-function modelTokens(name: string): Set<string> {
-  const tokens = name.toLowerCase().match(/[a-z0-9]+/g) ?? [];
-  return new Set(tokens.filter((t) => /[0-9]/.test(t)));
-}
-
-// Packaging tokens describe how a product is boxed/tinned/bundled — the FORM it
-// ships in, not the cigar itself. A "…Signature 2000 Tubos Pack" is a packaging
-// variant of the "…Signature 2000" stick, not the product, so the two must not
-// strong-link even though every non-packaging token (and the number) agrees.
-// Matched on the same lowercase-alphanumeric tokenization as modelTokens.
-const PACKAGING_TOKENS = new Set([
-  "tubo",
-  "tubos",
-  "tube",
-  "tubed",
-  "tubopack",
-  "tubospack",
-  "pack",
-  "pk",
-  "tin",
-  "jar",
-  "sampler",
-  "box",
-  "cab",
-  "bundle",
-]);
-
-function packagingTokens(name: string): Set<string> {
-  const tokens = name.toLowerCase().match(/[a-z0-9]+/g) ?? [];
-  return new Set(tokens.filter((t) => PACKAGING_TOKENS.has(t)));
-}
-
-function hasExtra(a: Set<string>, b: Set<string>): boolean {
-  for (const token of a) if (!b.has(token)) return true;
-  return false;
-}
-
-// Exported for the curation queue (ADR-006) via strongLinkCompatible, which
-// applies the same guard to near-duplicate candidate pairs. Incompatible when
-// EITHER side carries a digit-bearing token the other lacks — mutually-distinct
-// numbers ("No. 9" vs "T52") AND one-sided extras ("Signature 2000" vs
-// "Signature") are different products by definition, never merge candidates.
-export function numbersCompatible(query: string, candidate: string): boolean {
-  const q = modelTokens(query);
-  const c = modelTokens(candidate);
-  return !(hasExtra(q, c) || hasExtra(c, q));
-}
-
-// Incompatible when EITHER side carries a packaging token the other lacks — a
-// Tubos Pack / tin / sampler is a packaging variant, not the product, so it is
-// never a strong-link target nor a merge candidate for the naked stick.
-export function packagingCompatible(query: string, candidate: string): boolean {
-  const q = packagingTokens(query);
-  const c = packagingTokens(candidate);
-  return !(hasExtra(q, c) || hasExtra(c, q));
-}
-
-// The full strong-link disqualifier: a candidate strong-links only when it agrees
-// on model numbers AND carries no extra packaging token. Exported for the curation
-// duplicate queue, which is subject to the same "different product" reasoning — a
-// number- or packaging-distinct pair is never a merge candidate either.
-export function strongLinkCompatible(query: string, candidate: string): boolean {
-  return numbersCompatible(query, candidate) && packagingCompatible(query, candidate);
-}
 
 export interface ResolvedCigar {
   cigarId: string;
@@ -199,12 +138,28 @@ export async function resolveCigar(
     }
   }
 
+  // STRUCTURED ON CREATION (ADR-012 Wave 2). Every path that creates a cigar now
+  // resolves its registry ancestry, so a row minted from a conversation is
+  // findable by the same alias probe the crawler anchors on instead of joining
+  // the flat namespace and waiting for a backfill.
+  //
+  // Resolved from the DESCRIBED FIELDS, never from the name: a described cigar
+  // already separates brand from line, and re-deriving them by parsing the string
+  // the user just typed would be strictly less information. Unknown stays NULL —
+  // a brand spelling no registry answers to leaves the row unlinked for Wave 3
+  // curation rather than minting a registry entry from an unaudited write path.
+  const taxonomy = await resolveDescribedTaxonomy(tx, { brand: described.brand, line: described.line });
+  assertCigarAncestry(taxonomy, await loadAncestryContext(tx, taxonomy));
+
   const inserted = await tx
     .insert(cigars)
     .values({
       canonicalName: name,
       brand: described.brand ?? null,
       line: described.line ?? null,
+      brandId: taxonomy.brandId,
+      lineId: taxonomy.lineId,
+      blendId: taxonomy.blendId,
       edition: described.edition ?? null,
       vitolaName: described.vitola?.name ?? null,
       lengthInches:

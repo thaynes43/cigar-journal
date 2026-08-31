@@ -113,6 +113,89 @@ export {
   type CigarAncestryContext,
 } from "./cigar-ancestry.js";
 
+// MATCHING V2 (ADR-012, issue #196 Wave 2). The matching-key vocabulary, the
+// pure parse pipeline, and the registry-backed resolution the crawler and the
+// journal both anchor on. `fold` lives here rather than in @cj/crawler because
+// @cj/domain cannot import from it and the alias probe is domain-side — the
+// crawler re-exports this one so the keys in `brands.aliases` can only ever
+// agree with the function that reads them.
+export {
+  fold,
+  foldTokens,
+  tokenWindows,
+  windowKeys,
+  anchorByAlias,
+  composeCanonicalName,
+  MAX_ALIAS_TOKENS,
+  MIN_ANCHOR_KEY_LENGTH,
+  type TokenWindow,
+  type AnchorOptions,
+  type AliasCandidate,
+  type AliasAnchor,
+  type CanonicalNameParts,
+} from "./taxonomy-keys.js";
+export {
+  parseListingTitle,
+  stripPackaging,
+  parsePackagingFacts,
+  parseDims,
+  extractDims,
+  matchVitola,
+  tokenizeTitle,
+  PACKAGING_TOKENS,
+  PACKAGING_TOKEN_LABELS,
+  type ListingParse,
+  type ParseRegistry,
+  type PackagingFacts,
+  type StrippedTitle,
+  type Dims,
+} from "./catalog-parse.js";
+export {
+  parseListing,
+  loadAncestryContext,
+  scopedLeafCandidates,
+  chooseLeaf,
+  deriveBrandId,
+  findUnlinkedNameCollision,
+  resolveDescribedTaxonomy,
+  loadNamePartsForCigar,
+  SCOPED_MATCH_THRESHOLD,
+  SCOPE_LIMIT,
+  type LeafCandidate,
+  type LeafChoice,
+  type DescribedTaxonomy,
+} from "./taxonomy-resolve.js";
+export { vitolaAgrees, variantRelation, type VariantRelation } from "./name-heuristics.js";
+
+// Registry writes and name recomposition. Domain-level only this wave — the
+// curation surfaces that call them are Wave 3 and their MCP tools are Wave 4.
+export {
+  createLine,
+  addLineAliases,
+  createBlend,
+  addBlendAliases,
+  createBlender,
+  addBlenderAliases,
+  creditBlender,
+  assignCigarParts,
+  recomposeCigarName,
+  loadCigarNameParts,
+  aliasKeysFor,
+  type CreateLineInput,
+  type CreateLineResult,
+  type CreateBlendInput,
+  type CreateBlendResult,
+  type CreateBlenderInput,
+  type CreateBlenderResult,
+  type AddAliasesInput,
+  type AddAliasesResult,
+  type CreditBlenderInput,
+  type AssignCigarPartsInput,
+  type AssignCigarPartsResult,
+  type CigarNameParts,
+  type RegistryAttribution,
+} from "./taxonomy-writes.js";
+
 // The single want mark (PRD-003 R-WANT). setWant sets/clears (idempotent,
 // audited); isWanted is the scalar overlay reused by record_purchase and reads.
 export { setWant, isWanted } from "./wants.js";

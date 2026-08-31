@@ -212,6 +212,20 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
     // to know the queue grew and why (#170).
     lines.push(`  links refused (market): ${s.linksRefusedMarket}`);
   }
+  if (s.linksNoAnchor) {
+    // THE NUMBER TO WATCH after matching v2 (ADR-012). These listings matched no
+    // brand alias, which in seed mode is exactly the population that used to be
+    // minted as new catalog rows — so this count is the size of the parallel
+    // catalog the old matcher would have created tonight. A high number is not a
+    // matcher failure, it is a REGISTRY GAP: the fix is aliases in Wave 3
+    // curation, never a looser matcher.
+    lines.push(`  links unanchored (no brand alias): ${s.linksNoAnchor}`);
+  }
+  if (s.linksAmbiguous) {
+    // The brand anchored and more than one of its leaves fit. A high count points
+    // at collapse buckets that still need splitting.
+    lines.push(`  links ambiguous (multiple leaves): ${s.linksAmbiguous}`);
+  }
   const enrich = s.enrich;
   if (enrich) {
     // A nightly drain has to say what it retired and where: `spent` is a verdict

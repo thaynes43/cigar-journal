@@ -1664,8 +1664,18 @@ export interface WorklistMatch {
   //                    so a cluster of them from one shop is a signal about the
   //                    shop, not about the catalogue.
   //   no_match       — nothing cleared the floor.
+  //   no_anchor      — no brand alias matched the title, so there was nothing to
+  //                    anchor identity on. A registry gap, not a matcher failure:
+  //                    the fix is a brand alias, and minting from this state is
+  //                    how a flat namespace grew a parallel catalogue per vendor
+  //                    (ADR-012).
+  //   ambiguous      — a brand anchored but no single leaf came out. Either
+  //                    several of its leaves fit, or the listing is an assortment
+  //                    (sampler) naming none — the parse says which. NOT always
+  //                    "several candidates"; both shapes are the same instruction
+  //                    to the queue: a human chooses, nothing is minted.
   // Absent means the row is an `auto` proposal, which needs no reason.
-  reason?: "market_refusal" | "no_match";
+  reason?: "market_refusal" | "no_match" | "no_anchor" | "ambiguous";
 }
 
 // One page of the worklist. Exactly one of the payload arrays is populated per

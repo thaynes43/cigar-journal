@@ -1,7 +1,6 @@
 import { and, asc, desc, eq, isNull, sql, type SQL } from "drizzle-orm";
 import {
   auditLog,
-  brands,
   cigars,
   cigarMerges,
   duplicateDismissals,
@@ -24,7 +23,9 @@ import {
 } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
-import { brandSlug } from "./catalog-browse.js";
+import { assertCigarAncestry } from "./cigar-ancestry.js";
+import { deriveBrandId, loadAncestryContext } from "./taxonomy-resolve.js";
+import { recomposeCigarName } from "./taxonomy-writes.js";
 import type {
   MergeCigarsInput,
   MergeCigarsResult,
@@ -1562,24 +1563,6 @@ const CIGAR_FACT_COLUMNS: { key: "brand" | "line" | "type" | "manufacturer"; col
   { key: "manufacturer", column: "manufacturer" },
 ];
 
-// `cigars.brand_id` is DERIVED from the free-text `brand`, never dictated
-// alongside it (ADR-012; migration 0026 mints the link the same way). Any path
-// that rewrites `brand` therefore has to recompute the link in the same
-// statement — otherwise a curator who fixes a misspelled marca leaves `brand_id`
-// pointing at the brand the row used to claim, and the registry quietly
-// disagrees with the column it was built from.
-//
-// A spelling no brand answers to clears the link rather than keeping the stale
-// one: an unlinked cigar is a Wave 3 worklist item, a wrongly linked one is a
-// silent error. Registries are not minted here — that is curation with an audit
-// trail, not a side effect of a fact edit.
-async function deriveBrandId(tx: Tx, brand: string | null): Promise<string | null> {
-  const slug = brandSlug((brand ?? "").trim());
-  if (slug === "") return null;
-  const rows = await tx.select({ id: brands.id }).from(brands).where(eq(brands.slug, slug)).limit(1);
-  return rows[0]?.id ?? null;
-}
-
 export async function setCigarFacts(
   deps: Deps,
   principal: Principal,
@@ -1648,6 +1631,22 @@ async function setCigarFactsWithinTx(
   // text re-derives it again by the same rule.
   if (changedFields.includes("brand")) {
     set.brandId = await deriveBrandId(tx, (set.brand as string | null) ?? null);
+
+    // ANCESTRY IS CHECKED WHEREVER A STRUCTURAL FK MOVES (ADR-012 Wave 2), and
+    // this path moves one as a side effect. Re-spelling the marca on a row that
+    // also carries a line would leave that line belonging to the brand the row
+    // USED to claim — the exact inconsistency `assertCigarAncestry` exists to
+    // name. Refused rather than silently repaired: clearing the line would
+    // destroy a known fact, and picking a line under the new brand would invent
+    // one. The curator's fix is `assignCigarParts`, which moves the levels
+    // together. Unreachable today — 0026 minted no lines, so no row has one —
+    // and wired now so it cannot become reachable unnoticed.
+    const ancestry = {
+      brandId: (set.brandId as string | null) ?? null,
+      lineId: current.lineId,
+      blendId: current.blendId,
+    };
+    assertCigarAncestry(ancestry, await loadAncestryContext(tx, ancestry));
   }
 
   if (changedFields.length > 0) {
@@ -1655,6 +1654,11 @@ async function setCigarFactsWithinTx(
       .update(cigars)
       .set({ ...set, updatedAt: deps.now() })
       .where(eq(cigars.id, current.id));
+
+    // A `composed` name is a projection of the parts; a part just changed, so it
+    // is recomputed in the same transaction. A `freeform` row is untouched —
+    // recomposeCigarName no-ops on one.
+    await recomposeCigarName(tx, current.id, deps.now());
 
     // The cigar id rides both snapshots (like cigarSnapshot's `id`) so the review
     // console can name the target and an Undo knows which row to write the
@@ -1741,6 +1745,20 @@ async function renameWithinTx(
 
   const current = await loadCigar(tx, input.cigarId);
   if (!current) throw new CigarNotFoundError();
+
+  // A COMPOSED NAME IS NOT EDITABLE AS A STRING (ADR-012). `canonical_name` on a
+  // composed row is a projection of brand + line + blend + vitola + edition, so
+  // typing over it would be undone by the next part change and would meanwhile
+  // make the row look maintained while disagreeing with its own parts. The edit
+  // the curator wants is on the parts; say so and name the path.
+  if (current.nameSource === "composed") {
+    throw new ValidationError([
+      {
+        path: "canonicalName",
+        message: "This cigar's name is composed from its brand, line, blend and vitola. Edit those parts instead.",
+      },
+    ]);
+  }
 
   const changed = current.canonicalName !== name;
   if (changed) {
@@ -2080,7 +2098,7 @@ async function matchTriagePage(
     listing_key: string;
     match_created_at_text: string;
     status: "auto" | "unmatched";
-    unmatched_reason: "market_refusal" | "no_match" | null;
+    unmatched_reason: "market_refusal" | "no_match" | "no_anchor" | "ambiguous" | null;
     vendor_name: string;
     listing_url: string | null;
     cigar_id: string | null;
@@ -2960,6 +2978,22 @@ async function applyInverse(
       const cigarId = String(before.id);
       const current = await loadCigar(tx, cigarId);
       if (!current) throw new CigarNotFoundError();
+      // The same refusal renameCigar makes, and for the same reason (ADR-012): the
+      // row may have been flipped to `composed` since this rename was audited, and
+      // an undo is not a licence to write what the forward path rejects — a
+      // freehand string over a projection is undone by the next part change and
+      // meanwhile makes the row look maintained while disagreeing with its parts.
+      // Checked before the staleness gate below, which would otherwise report the
+      // recomposition as a newer rename and send the curator hunting for an edit
+      // nobody made.
+      if (current.nameSource === "composed") {
+        throw new ValidationError([
+          {
+            path: "canonicalName",
+            message: "This cigar's name is composed from its brand, line, blend and vitola. Edit those parts instead.",
+          },
+        ]);
+      }
       // renameCigar rejects an empty name and skips the audit entirely on a no-op,
       // so a rename audit always carries a real prior name — but the undo reads it
       // out of JSONB, so it is checked rather than trusted.
@@ -3025,8 +3059,17 @@ async function applyInverse(
       // old text against the new brand's id.
       if ("brand" in before) {
         set.brandId = await deriveBrandId(tx, (set.brand as string | null) ?? null);
+        const ancestry = {
+          brandId: (set.brandId as string | null) ?? null,
+          lineId: current.lineId,
+          blendId: current.blendId,
+        };
+        assertCigarAncestry(ancestry, await loadAncestryContext(tx, ancestry));
       }
       await tx.update(cigars).set({ ...set, updatedAt: deps.now() }).where(eq(cigars.id, cigarId));
+      // Same reason as the forward path: a composed name is a projection, and a
+      // part just moved.
+      await recomposeCigarName(tx, cigarId, deps.now());
       return writeUndo({ action: "cigar.set_facts", before: undoBefore, after: undoAfter });
     }
     default:

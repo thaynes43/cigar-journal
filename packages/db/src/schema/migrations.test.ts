@@ -5,7 +5,7 @@ import { migrate } from "../scripts/migrate.js";
 import { vendors } from "./vendors.js";
 import { cigars } from "./cigars.js";
 import { productPhotos } from "./product-photos.js";
-import { listingMatches } from "./listing-matches.js";
+import { listingMatches, type SuggestedParse } from "./listing-matches.js";
 
 // Migrations apply cleanly from empty against a real Postgres 16 (embedded
 // binary). Also asserts idempotency and that the core extensions/objects land.
@@ -327,7 +327,11 @@ describe("migrations", () => {
         vendorId: vendor!.id,
         listingKey: `reason-${reason ?? "null"}-${Math.random()}`,
         status: "unmatched",
-        unmatchedReason: reason as "market_refusal" | "no_match" | null,
+        // Cast so an arbitrary string reaches the insert and the DATABASE's CHECK
+        // is what rejects it — the point of the test. Spelled with the full union
+        // 0027 widened the column to, so this is the last place in the tree still
+        // claiming the constraint admits two values.
+        unmatchedReason: reason as "market_refusal" | "no_match" | "no_anchor" | "ambiguous" | null,
       });
 
     await expect(insert("market_refusal")).resolves.toBeDefined();
@@ -507,6 +511,108 @@ describe("migrations", () => {
              (SELECT count(*)::int FROM lines WHERE brand_id = ${brandId}) AS lines
     `);
     expect(left.rows[0]).toMatchObject({ brands: 0, lines: 0 });
+  });
+
+  // 0027: two more reasons a crawler row can be unmatched (ADR-012 Wave 2). The
+  // important one is `no_anchor` — seed mode used to MINT a catalog row from
+  // exactly that state, which is how a flat namespace grew a parallel copy of
+  // itself per vendor. An unparseable title is now a question for a curator.
+  // Asserted through the constraint, because widening a CHECK in Postgres means
+  // dropping and re-adding it, and a re-add that quietly lost a value would look
+  // identical from the migration's side.
+  it("0027 admits no_anchor and ambiguous, keeps the 0025 reasons, and still refuses an unknown one", async () => {
+    const [vendor] = await pg.db
+      .insert(vendors)
+      .values({ name: "Matching V2 Vendor" })
+      .returning({ id: vendors.id });
+    const insert = (reason: string | null) =>
+      pg.db.insert(listingMatches).values({
+        vendorId: vendor!.id,
+        listingKey: `v2-${reason ?? "null"}-${Math.random()}`,
+        status: "unmatched",
+        unmatchedReason: reason as "no_anchor" | "ambiguous" | null,
+      });
+
+    // The two 0025 reasons keep their exact meanings and must survive the re-add.
+    await expect(insert("market_refusal")).resolves.toBeDefined();
+    await expect(insert("no_match")).resolves.toBeDefined();
+    await expect(insert("no_anchor")).resolves.toBeDefined();
+    await expect(insert("ambiguous")).resolves.toBeDefined();
+    // NULL still means "nobody's guess" — an auto link, a curator verdict, or
+    // the excludeCigar cascade — and stays legal.
+    await expect(insert(null)).resolves.toBeDefined();
+    await expect(insert("nonsense")).rejects.toThrow();
+  });
+
+  // `category_path` is nullable with NO DEFAULT, and the distinction is
+  // load-bearing rather than incidental: NULL means the vendor's breadcrumbs
+  // were never captured (every row written before 0027), `{}` means the page
+  // genuinely offered none. A DEFAULT '{}' would have erased that difference
+  // across the whole backlog the moment the migration applied.
+  it("0027 leaves category_path NULL when unset and round-trips a text[]", async () => {
+    const [vendor] = await pg.db
+      .insert(vendors)
+      .values({ name: "Category Path Vendor" })
+      .returning({ id: vendors.id });
+    const add = async (categoryPath: string[] | undefined) =>
+      (
+        await pg.db
+          .insert(listingMatches)
+          .values({ vendorId: vendor!.id, listingKey: `cat-${Math.random()}`, categoryPath })
+          .returning({ categoryPath: listingMatches.categoryPath })
+      )[0]!.categoryPath;
+
+    // Never captured.
+    expect(await add(undefined)).toBeNull();
+    // Captured, and the vendor offered none — a different fact, stored differently.
+    expect(await add([])).toEqual([]);
+    // Captured. Order is the breadcrumb trail and has to survive the round trip.
+    expect(await add(["Cigars", "Nicaraguan", "Padrón"])).toEqual(["Cigars", "Nicaraguan", "Padrón"]);
+  });
+
+  // The parse a curator inherits instead of redoing by eye. One jsonb blob and
+  // not columns because nothing reads it back to make a match — it is evidence,
+  // not identity — so the only contract is that it survives the round trip whole.
+  it("0027 round-trips a suggested_parse object", async () => {
+    const [vendor] = await pg.db
+      .insert(vendors)
+      .values({ name: "Suggested Parse Vendor" })
+      .returning({ id: vendors.id });
+    const parse: SuggestedParse = {
+      brandId: null,
+      brandName: "Padrón",
+      lineId: null,
+      lineName: "1964 Anniversary",
+      blendId: null,
+      blendName: null,
+      vitolaName: "Exclusivo",
+      lengthInches: 5.5,
+      ringGauge: 50,
+      cleanedName: "Padrón 1964 Anniversary Exclusivo Maduro",
+      packaging: "box",
+      sticksPerPackage: 10,
+      residue: "maduro 10 ct",
+      notes: ["anchored brand padron", "two leaves fit under 1964 Anniversary"],
+    };
+
+    const [row] = await pg.db
+      .insert(listingMatches)
+      .values({
+        vendorId: vendor!.id,
+        listingKey: `parse-${Math.random()}`,
+        status: "unmatched",
+        unmatchedReason: "ambiguous",
+        suggestedParse: parse,
+      })
+      .returning({ suggestedParse: listingMatches.suggestedParse });
+    expect(row!.suggestedParse).toEqual(parse);
+
+    // And an unresolved row that carried no parse is the ordinary pre-0027 shape.
+    const [bare] = await pg.db
+      .insert(listingMatches)
+      .values({ vendorId: vendor!.id, listingKey: `parse-none-${Math.random()}` })
+      .returning({ suggestedParse: listingMatches.suggestedParse });
+    expect(bare!.suggestedParse).toBeNull();
   });
 
   // `name_source` is the switch Wave 2 flips to make canonical_name a

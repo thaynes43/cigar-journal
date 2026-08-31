@@ -1,3 +1,4 @@
+import { parsePackagingFacts } from "@cj/domain";
 import type { JsonLdOffer, JsonLdPriceSpecification, JsonLdProduct } from "./jsonld.js";
 import type { VendorAdapter } from "../adapters/types.js";
 
@@ -26,19 +27,16 @@ export interface NormalizedListing {
 // markers in the product name; anything else stays unknown (null/null). A single
 // stick yields sticksPerPackage 1 so per-stick equals the price. Ordered most- to
 // least-specific so "box of 20" wins over a lone "20".
+//
+// The rules moved to @cj/domain (catalog-parse.ts) for matching v2 and this
+// delegates to them. ONE vocabulary, deliberately: matching v2 strips packaging
+// out of a title before reading it as a name, and if the stripper and this
+// recognizer disagreed, a token could come off the name without being recorded
+// on the offer — the fact would vanish rather than move. The behaviour here is
+// byte-identical to what it was; the definition simply lives where both callers
+// can reach it.
 export function parsePackaging(name: string): { packaging: string | null; sticksPerPackage: number | null } {
-  const boxOf = /\bbox\s+of\s+(\d{1,3})\b/i.exec(name);
-  if (boxOf) return { packaging: "box", sticksPerPackage: Number(boxOf[1]) };
-
-  const packOf = /\bpack\s+of\s+(\d{1,2})\b/i.exec(name);
-  if (packOf) return { packaging: `${packOf[1]}-pack`, sticksPerPackage: Number(packOf[1]) };
-
-  const nPack = /\b(\d{1,2})[\s-]?pack\b/i.exec(name);
-  if (nPack) return { packaging: `${nPack[1]}-pack`, sticksPerPackage: Number(nPack[1]) };
-
-  if (/\bsingles?\b/i.test(name)) return { packaging: "single", sticksPerPackage: 1 };
-
-  return { packaging: null, sticksPerPackage: null };
+  return parsePackagingFacts(name);
 }
 
 function firstOf<T>(value: T | T[] | undefined): T | undefined {

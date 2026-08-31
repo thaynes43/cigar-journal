@@ -224,3 +224,30 @@ init container at startup (ADR-003).
   whenever it rewrites the free-text `brand`**, clearing the link when no brand
   answers to the new spelling. `brand_id` is a projection of `brand`, and the two
   must never be allowed to drift apart.
+- `0027_matching_v2.sql` — the write-path half of ADR-012 (issue #196 Wave 2).
+  Adds `listing_matches.suggested_parse` (jsonb) and `listing_matches.category_path`
+  (`text[]`): the structured parse matching v2 computed for a listing it could
+  **not** settle to one leaf, and the vendor's own breadcrumb trail, which
+  `normalizeListing` has always parsed and thrown away after the category gate.
+  Both are **evidence, not identity** — a curator reads them, the matcher never
+  reads them back. `category_path` is nullable with no default on purpose: NULL
+  means never captured (every pre-0027 row), `{}` means the page offered none,
+  and a `DEFAULT '{}'` would erase that difference across the whole backlog.
+  Widens the `unmatched_reason` CHECK with `no_anchor` (the title matched no brand
+  alias at all — the state seed mode used to **mint** from, which is how a flat
+  namespace grew a copy of itself per vendor) and `ambiguous` (the brand anchored
+  and more than one of its leaves fit). `matchTriagePage` admits any non-null
+  reason, so both route into the queue with no read-path change.
+  Then **re-runs the 0026 backfill**, which is the debt 0026 wrote down: the
+  insert paths were unwired in Wave 1, so every cigar minted in between carries a
+  brand string and no `brand_id`. Wider than the two UPDATEs 0026 named — the
+  brands INSERT and its alias-collision pass run again too, because a cigar minted
+  in the gap can carry a brand string **no `brands` row covers** (`add_cigar`
+  takes free text) and for that row the UPDATE alone finds nothing to link to and
+  it stays unlinked forever. Still mints brands ONLY: no lines, no blends, no
+  blenders, no name edits, no attachment of the unbranded rows — all Wave 3
+  curation. Every statement is unchanged from 0026 and each was written to be
+  re-runnable (`ON CONFLICT DO NOTHING`, `IS NULL` guards, a collision pass whose
+  every subquery reads the pre-statement snapshot); the DDL carries
+  `IF NOT EXISTS`/`IF EXISTS` so the suite can replay the file and observe that a
+  second application changes nothing.

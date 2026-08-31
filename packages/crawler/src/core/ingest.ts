@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import { enrichmentRequests, productPhotos, vendors, type Database } from "@cj/db";
+import { enrichmentRequests, productPhotos, vendors, type Database, type SuggestedParse } from "@cj/db";
 import {
   recordPriceObservation,
   recordEnrichmentAttempt,
@@ -9,6 +9,7 @@ import {
   coversMarketSql,
   evidencedMarket,
   evidencedMarketSql,
+  findUnlinkedNameCollision,
   mayWriteCatalogPhoto,
   mayWriteCatalogPhotoSql,
   photoAuthority,
@@ -23,7 +24,13 @@ import { collectSitemapSamples, collectSitemapUrls } from "./sitemap.js";
 import { filterProductUrls, pathOf, robotsGatePath } from "./product-url.js";
 import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
 import { isCigarListing, normalizeListing, type NormalizedListing } from "./normalize.js";
-import { createCigarFromListing, findCatalogMatch, upsertListingMatch } from "./match.js";
+import {
+  createCigarFromListing,
+  existingCrawlerLink,
+  resolveListing,
+  toSuggestedParse,
+  upsertListingMatch,
+} from "./match.js";
 import { parseRobots } from "./robots.js";
 import { openCrawlRun, reclaimStrandedRuns, type SignalHost } from "./run-record.js";
 import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
@@ -64,6 +71,29 @@ export interface IngestStats {
   // Worth watching after the Cuban Lou's correction — a lane refusing a lot is
   // more likely to have a wrong `vendors.focus` than a wrong catalogue.
   linksRefusedMarket?: number;
+  // Matching v2 (ADR-012 Wave 2). Both absent when zero, on the same terms as
+  // the fields above — a run that produced neither serialises exactly as it did
+  // before they existed.
+  //
+  // `linksNoAnchor` IS A REGISTRY DEBT COUNTER, not a link-loss counter, and the
+  // difference is the positive-evidence rule: a listing whose title matches no
+  // brand alias is ANNOTATED, never detached — if it already had a crawler link
+  // it keeps it, with the parse and the verdict attached for curation. So this
+  // number measures how much of the registry is still unwritten, and the fix for
+  // a high count is aliases in Wave 3 curation, never a looser matcher.
+  linksNoAnchor?: number;
+  // Listings where the brand anchored and more than one of its leaves fit. A
+  // high count points at collapse buckets that still need splitting.
+  linksAmbiguous?: number;
+  // Listings whose EXISTING link survived a verdict that could not re-derive it.
+  // The positive-evidence rule made these invisible in the two counters above —
+  // both count verdicts, and a verdict over a linked listing now annotates rather
+  // than detaching — so this is what separates "the registry cannot yet explain
+  // 500 listings nobody had linked" from "the registry cannot yet explain 500
+  // listings we are actively holding links for". The second is the one that says
+  // how much a Wave 3 alias session is worth. Absent when zero, like its
+  // siblings, so a run that annotated nothing serialises unchanged.
+  linksAnnotated?: number;
   errors: number;
   // Present only for a vendor with sitemapSampling configured — absent keeps the
   // JSONB byte-identical for every other vendor.
@@ -414,39 +444,127 @@ async function ingestListing(
     // through the drain. A CC vendor walking its own sitemap trigram-matched an NC
     // catalogue row and auto-linked it. The guard is a pure negative filter — it
     // can only ever refuse a link, never redirect one.
-    const result = await findCatalogMatch(tx, listing.name, { vendorFocus: focus });
+    const result = await resolveListing(tx, listing.name, { vendorFocus: focus });
+    // THE LINK THIS LISTING ALREADY HAS. Read before the arms decide, because
+    // under the positive-evidence rule it is an INPUT to the decision.
+    const priorLink = await existingCrawlerLink(tx, options.vendorId, listingKey);
     let linkedCigarId: string | null = null;
     let status: "auto" | "unmatched";
     // Only ever set alongside status='unmatched'; see listing_matches.unmatched_reason.
-    let unmatchedReason: "market_refusal" | "no_match" | null = null;
+    let unmatchedReason: "market_refusal" | "no_match" | "no_anchor" | "ambiguous" | null = null;
+    // The parse rides an unresolved row into triage (0027). Null on a clean link:
+    // there is nothing for a curator to resolve, and a stale parse on a row that
+    // has since become a link reads as an open question that is not open.
+    let suggestedParse: SuggestedParse | null = null;
+    // POSITIVE EVIDENCE ONLY — the rule this whole block turns on.
+    //
+    // `no_anchor`, `ambiguous` and `none` are all statements about what the
+    // REGISTRY could not do. None of them is evidence that an existing link is
+    // wrong: a title that anchored last night and does not tonight has almost
+    // always met a registry gap, not a different cigar. v2's first draft let each
+    // of them clear `cigar_id`, which meant every alias we had not written yet
+    // silently detached a working link and threw away the offer history hanging
+    // off it — the matcher deciding, on silence, to undo work a crawl had already
+    // done correctly.
+    //
+    // So these arms ANNOTATE. The row keeps its status and its cigar, and gains
+    // the parse plus this verdict, which is exactly the material a curator needs
+    // to close the registry gap. A link is only ever moved by a POSITIVE finding:
+    // a parse that resolves to a DIFFERENT leaf (the `match` arm), or the
+    // cross-market refusal (#192), which is itself positive evidence — it names
+    // the candidate and the conflicting market, and its unlink behaviour is
+    // deliberately unchanged.
+    let silentVerdict: "no_anchor" | "ambiguous" | "no_match" | null = null;
 
     if (result.kind === "match") {
       linkedCigarId = result.hit.cigarId;
       status = "auto";
     } else if (result.kind === "refused") {
-      // A REFUSAL DOES NOT CREATE, in seed mode either. We found a strong name
+      // A REFUSAL DOES NOT CREATE, in seed mode either. We found a strong
       // candidate and declined it on market grounds — that is an unresolved
       // question, not evidence of a new cigar. Falling through to
-      // createCigarFromListing (which is what this did) would mint a duplicate of
-      // the row we just refused every time the refusal was wrong, and a wrong
-      // refusal is exactly what a wrong `vendors.focus` produces (#170: Cuban
-      // Lou's was recorded 'CC' while selling Perdomo). A bad link is named,
-      // revisable and re-written next crawl; a duplicate catalogue row is none of
-      // those. So: leave the listing UNMATCHED, with no cigar, for the triage
-      // queue a curator already works — the same landing place `offers` mode uses.
-      // The reason rides the row (0025): without it the refusal is byte-identical
-      // to an ordinary no-match, and the queue could not show one without showing
-      // every cascade leftover too.
+      // createCigarFromListing (which is what this did before #192) would mint a
+      // duplicate of the row we just refused every time the refusal was wrong,
+      // and a wrong refusal is exactly what a wrong `vendors.focus` produces
+      // (#170: Cuban Lou's was recorded 'CC' while selling Perdomo). A bad link
+      // is named, revisable and re-written next crawl; a duplicate catalog row is
+      // none of those. So: leave the listing UNMATCHED, with no cigar, for the
+      // triage queue a curator already works.
       status = "unmatched";
       unmatchedReason = "market_refusal";
+      suggestedParse = toSuggestedParse(result.parse);
       stats.linksRefusedMarket = (stats.linksRefusedMarket ?? 0) + 1;
-    } else if (options.mode === "seed") {
-      linkedCigarId = await createCigarFromListing(tx, listing.name);
-      stats.cigarsCreated += 1;
-      status = "auto";
-    } else {
+    } else if (result.kind === "no_anchor") {
+      // THE CHANGE ADR-012 WAS WRITTEN FOR. No brand alias matched this title, so
+      // there is nothing to anchor identity on — and seed mode used to mint from
+      // exactly this state, which is how every new vendor grew a parallel catalog
+      // (Cuban Lou's: 56 rows over ground Fox already covered). The listing is
+      // recorded with the parse attached so a curator can see how far the resolver
+      // got and why it stopped — as triage if nothing was linked, as an annotation
+      // on the link if something was.
       status = "unmatched";
-      unmatchedReason = "no_match";
+      silentVerdict = "no_anchor";
+      stats.linksNoAnchor = (stats.linksNoAnchor ?? 0) + 1;
+    } else if (result.kind === "sampler") {
+      // A mixed box is not one catalog cigar (docs/ddd/cigar-industry-vocabulary.md).
+      // It shares `ambiguous` as its stored reason because 0027 widened the CHECK
+      // by exactly two values and a sampler is, from the queue's point of view,
+      // the same instruction — a human decides, nothing is minted. It does NOT
+      // share the counter: `linksAmbiguous` is read as "collapse buckets still
+      // needing a split", and a shop's sampler shelf would drown that signal.
+      // The parse says which it is, in words, on the row.
+      status = "unmatched";
+      silentVerdict = "ambiguous";
+    } else if (result.kind === "ambiguous") {
+      // The brand anchored and more than one of its leaves fits. Minting would be
+      // the collapse-bucket failure in reverse: a new row for a product the
+      // catalog already holds — possibly twice, which is why it is ambiguous.
+      status = "unmatched";
+      silentVerdict = "ambiguous";
+      stats.linksAmbiguous = (stats.linksAmbiguous ?? 0) + 1;
+    } else if (options.mode === "seed" && priorLink == null) {
+      // The one arm that mints, and it mints a STRUCTURED row: the brand
+      // anchored, we looked under it, and this cigar is genuinely not there yet.
+      //
+      // "NOT THERE YET" IS A CLAIM THE SCOPE QUERY CANNOT MAKE ALONE. It only
+      // sees rows attributable to the anchored brand, and 516 of prod's 570
+      // unlinked rows are attributable to none — so a brand that anchors, finds
+      // nothing under itself and mints would create a second row for a cigar the
+      // catalog already holds under a name that does not start with the marca.
+      // One unscoped pass over the unlinked rows turns that mint into a question.
+      // Wave 3 retires this check with the bridge clause it defends.
+      const collision = await findUnlinkedNameCollision(tx, result.parse.cleanedName);
+      if (collision) {
+        status = "unmatched";
+        silentVerdict = "ambiguous";
+        stats.linksAmbiguous = (stats.linksAmbiguous ?? 0) + 1;
+      } else {
+        linkedCigarId = await createCigarFromListing(tx, result.parse);
+        stats.cigarsCreated += 1;
+        status = "auto";
+      }
+    } else {
+      // No leaf under this brand fits. In offers mode that has always been a
+      // triage row; in seed mode over a listing that ALREADY LINKS, the mint above
+      // is skipped, because minting a second row for a listing whose first row we
+      // are still holding is the duplicate this wave exists to prevent.
+      status = "unmatched";
+      silentVerdict = "no_match";
+    }
+
+    // REGISTRY SILENCE NEVER BREAKS A LINK. The arms above recorded a verdict
+    // about what the registry could not do; only here does it become either a
+    // triage row or an annotation, and which one it becomes depends solely on
+    // whether this listing already has a link worth keeping.
+    if (silentVerdict != null) {
+      suggestedParse = toSuggestedParse(result.parse, silentVerdict);
+      if (priorLink != null) {
+        linkedCigarId = priorLink;
+        status = "auto";
+        stats.linksAnnotated = (stats.linksAnnotated ?? 0) + 1;
+      } else {
+        unmatchedReason = silentVerdict;
+      }
     }
 
     const match = await upsertListingMatch(tx, {
@@ -456,9 +574,23 @@ async function ingestListing(
       status,
       now,
       unmatchedReason,
+      suggestedParse,
+      // The vendor's own breadcrumb taxonomy — parsed since the crawler was
+      // written, used for one boolean category gate, and thrown away ever since.
+      // It is the single structured taxonomy signal a vendor gives us (ADR-012),
+      // so it is now kept next to the parse it informs.
+      categoryPath: listing.categoryPath,
       runId: crawlRunId,
     });
-    if (status === "auto") stats.matchesAuto += 1;
+    // THE ROW'S OUTCOME, NOT THIS RUN'S VERDICT — the same distinction the photo
+    // path below learned the hard way. `status` is what the resolver decided;
+    // `match` is what the listing_matches row actually says after the upsert, and
+    // they disagree on every row a curator or an agent owns (591 on prod), which
+    // upsertListingMatch returns untouched. Counting the resolver's verdict
+    // reported an auto match for a listing whose row was never written and whose
+    // `cigar_id` is still null — a nightly overcount of exactly the population the
+    // guard exists to protect.
+    if (match.status === "auto" && match.cigarId != null) stats.matchesAuto += 1;
 
     // One offers write path shared with record_price — the 24h dedupe skips an
     // identical observation (ADR-009). Crawler offers link to their cigar through
@@ -789,8 +921,8 @@ async function tryEnrichCandidates(
     //
     // Evaluated INSIDE the transaction that writes the match, so the check and the
     // write see one snapshot.
-    const linked = await deps.db.transaction(async (tx) => {
-      if (!coversMarket(focus, await evidencedMarket(tx, cigar.id))) return false;
+    const outcome = await deps.db.transaction(async (tx): Promise<"refused" | "declined" | "linked"> => {
+      if (!coversMarket(focus, await evidencedMarket(tx, cigar.id))) return "refused";
       const match = await upsertListingMatch(tx, {
         vendorId: options.vendorId,
         listingKey: pathOf(candidate.url),
@@ -798,11 +930,30 @@ async function tryEnrichCandidates(
         status: "auto",
         now,
         // The drain only ever LINKS, so any reason the row carried from a previous
-        // non-link is stale and is cleared with the write.
+        // non-link is stale and is cleared with the write — and so is any parse,
+        // which described a question this link has just answered.
         unmatchedReason: null,
+        suggestedParse: null,
+        // Evidence about the listing, kept regardless of the verdict (0027).
+        categoryPath: listing.categoryPath,
         runId: crawlRunId,
       });
-      stats.matchesAuto += 1;
+      // THE COMMITTED ROW, NOT THIS RUN'S VERDICT — the same distinction the seed
+      // path and the photo path (#209) both had to learn. `upsertListingMatch`
+      // DECLINES to rewrite a row a curator or an agent decided and returns it
+      // untouched (591 such rows on prod), so counting a match here reported a
+      // link that was never written, on every drain, forever — and against
+      // precisely the population the guard exists to protect. A declined upsert is
+      // a miss: the row says something other than "linked to this cigar", and no
+      // arithmetic on our side changes that.
+      const committed = match.status === "auto" && match.cigarId === cigar.id;
+      if (committed) stats.matchesAuto += 1;
+
+      // The offer is written either way. It is a fact about the LISTING —
+      // this shop, this price, today — and it hangs off `match.id`, which exists
+      // whoever owns the verdict. Discarding an observation because a human
+      // decided the link differently would throw away the price history the
+      // curator's own row depends on.
       const observation = await recordPriceObservation(tx, {
         cigarId: null,
         vendorId: options.vendorId,
@@ -820,7 +971,7 @@ async function tryEnrichCandidates(
         seenAt: now,
       });
       if (observation.inserted) stats.offersWritten += 1;
-      return true;
+      return committed ? "linked" : "declined";
     });
 
     // A refusal ends the LOOK, not just this candidate: the conflict is a property
@@ -828,10 +979,18 @@ async function tryEnrichCandidates(
     // for the same reason. It scores as a `miss` — we read the vendor's catalogue
     // and declined to conclude from it — never as an `error`, which would burn
     // ERROR_BUDGET on a guard doing its job and re-fetch the same pages nightly.
-    if (!linked) {
+    if (outcome === "refused") {
       if (stats.enrich) stats.enrich.skippedMarket = (stats.enrich.skippedMarket ?? 0) + 1;
       return "miss";
     }
+
+    // A DECLINED UPSERT ENDS THE LOOK TOO, and it must end it BEFORE the photo.
+    // The row belongs to a curator or an agent who pointed this listing somewhere
+    // else; capturing a catalogue photo for `cigar.id` on the strength of a link
+    // that was refused is the exact shape of #209, one path over. Not counted as a
+    // market skip — nothing was refused on market grounds — and not an error: we
+    // read the catalogue and a human had already answered the question.
+    if (outcome === "declined") return "miss";
 
     // THE PHOTO IS THE ASK, so its refusal cannot be reported as the ask fulfilled
     // (#209). This used to be a fire-and-forget call whose only visible failure was

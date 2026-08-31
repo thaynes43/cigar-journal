@@ -1,4 +1,4 @@
-import { brandSlug } from "@cj/domain";
+import { fold } from "@cj/domain";
 import type { BrandImageCandidate } from "@cj/db";
 import type { Fetcher } from "./fetcher.js";
 import { WIKIDATA_TAXONOMY, type WikidataTaxonomy } from "./wikidata-taxonomy.js";
@@ -212,9 +212,13 @@ export function parseEntities(body: string): WikidataEntity[] {
 // mark stripping folds "Padrón" onto "padron"; plain brandSlug() would give
 // "padr-n" and miss. The stored `brand_slug` column stays plain brandSlug(),
 // because that is the join key the URL contract resolves through.
-export function fold(value: string): string {
-  return brandSlug(value.normalize("NFKD").replace(/\p{M}+/gu, ""));
-}
+//
+// The implementation moved to @cj/domain (taxonomy-keys.ts) for matching v2,
+// which needs it on the domain side where @cj/crawler cannot be imported. It is
+// re-exported rather than reimplemented because `brands.aliases` is seeded with
+// this exact function's output: two copies that drifted by one character would
+// silently stop every anchor probe from matching.
+export { fold };
 
 function labelOf(entity: WikidataEntity, lang = "en"): string | null {
   return entity.labels?.[lang]?.value ?? null;

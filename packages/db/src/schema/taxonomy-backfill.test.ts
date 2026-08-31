@@ -25,17 +25,23 @@ import { migrate } from "../scripts/migrate.js";
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../migrations/", import.meta.url));
 
-// Everything except 0026 into `pre`, 0026 alone into `only0026` — so the runner
-// builds the whole pre-taxonomy schema, we seed, then apply the one migration
-// under test. 0026 is currently the highest-numbered migration, so nothing
-// ordered after it needs to join `pre`.
+// Everything ordered BEFORE 0026 into `pre`, 0026 alone into `only0026` — so the
+// runner builds the whole pre-taxonomy schema, we seed, then apply the one
+// migration under test.
+//
+// Migrations ordered AFTER 0026 go into NEITHER dir. They used to join `pre`
+// (0026 was the highest number when this was written) and that stopped working
+// the moment 0027 landed: 0027 both reads `brands` — so applying it ahead of
+// 0026 aborts the run outright — and RE-RUNS the very backfill observed below,
+// which would silently confound every assertion here. 0027's own re-run is
+// proved separately, in matching-v2-backfill.test.ts.
 function splitMigrations(): { pre: string; only0026: string } {
   const pre = mkdtempSync(join(tmpdir(), "cj-mig-pre-"));
   const only0026 = mkdtempSync(join(tmpdir(), "cj-mig-0026-"));
   for (const name of readdirSync(MIGRATIONS_DIR)) {
     if (!name.endsWith(".sql")) continue;
-    const dest = name.startsWith("0026") ? only0026 : pre;
-    copyFileSync(join(MIGRATIONS_DIR, name), join(dest, name));
+    if (name.startsWith("0026")) copyFileSync(join(MIGRATIONS_DIR, name), join(only0026, name));
+    else if (name < "0026") copyFileSync(join(MIGRATIONS_DIR, name), join(pre, name));
   }
   return { pre, only0026 };
 }
