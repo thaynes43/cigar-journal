@@ -1,13 +1,21 @@
 # Ubiquitous Language
 
 Terms used in code, docs, and conversation. Singular, capitalized when used as
-a domain term.
+a domain term. Trade vocabulary the catalog must speak but does not model as
+types — marca, vitola de galera, Edición Limitada, wrapper varietals — is in
+[`cigar-industry-vocabulary.md`](cigar-industry-vocabulary.md).
 
 | Term | Meaning |
 |---|---|
 | **User** | An account holder. Owns Smokes and Purchases; has a journal visibility setting (`private`/`public`). |
 | **Identity** | One way a User authenticates: local credentials or a linked OIDC account (Authentik). Many Identities → one User. |
-| **Cigar** | A catalog product that can be smoked repeatedly. Identity is the required **canonical name** ("Atabey Divinos"); brand, line, edition, vitola, dimensions, and blend metadata (manufacturer, wrapper/binder/filler origins) are optional facts, never invented to satisfy taxonomy. Shared across all users. |
+| **Cigar** | The catalog leaf: **one Blend in one Vitola** — the thing you light (ADR-012). Carries the required **canonical name** ("Atabey Divinos"), nullable Brand/Line/Blend references, and vitola name, dimensions, and edition. Every level is nullable; structure holds known facts and never invents them. Shared across all users. |
+| **Brand** | The marque a cigar is sold under (Drew Estate, Padrón, Hoyo de Monterrey; *marca* on the Cuban side). A reference entity with a canonical name, stable slug, and aliases (`Padrón`/`Padron`, `RYJ`). |
+| **Line** | A named family of Blends within one Brand (Liga Privada, 1964 Anniversary Series, Acid). Optional — a Cigar whose line is unknown hangs directly off its Brand. |
+| **Blend** | One recipe within a Line (No. 9, T52), sold across several sizes. Owns wrapper/binder/filler, strength, blend notes, and the marketing photo. Wrapper variants sold as distinct products (Natural vs Maduro) are distinct Blends, because that is how they are sold. |
+| **Blender** | The person or team credited with a Blend — a master blender on the non-Cuban side. Many-to-many with Blends: collaborations exist and a blender's work spans brands. Null for Cuban blends, which are credited institutionally; blender-level views roll up NC-side only. |
+| **Vitola** | The size and shape a Blend is rolled in (Toro, Robusto, Belicoso), with length and ring gauge. A label *within* a Blend, not an entity — it lives on the Cigar leaf, and there is no global vitola registry. |
+| **Name Source** | How a Cigar's canonical name is maintained: `freeform` (the string is authoritative — today's rows) or `composed` (recomposed from Brand + Line + Blend + Vitola + edition, so renaming edits the parts). |
 | **Verification** | Catalog lifecycle: `verified` (curated or crawl-confirmed) vs `unverified` (created mid-conversation from LLM-supplied attributes, pending curation). |
 | **Smoke** | One User's experience smoking one physical cigar at a point in time. The central aggregate. A Smoke always references exactly one Cigar. |
 | **Progression Entry** | A temporal slice of a Smoke: free-form stage label ("opening", "halfway"), optional approximate position (0–1), Descriptors, and verbatim observation text. Progression is optional — sparse Smokes carry only overall Descriptors. |
