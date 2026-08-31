@@ -1,4 +1,5 @@
 import { pgTable, uuid, text, integer, boolean, jsonb, timestamp, index } from "drizzle-orm/pg-core";
+import { brands } from "./brands.js";
 
 // The brand tier of ADR-007 (issue #127): one Wikidata/Wikimedia Commons image
 // per brand slug, used as a wall cover ONLY where no member cigar has a servable
@@ -35,6 +36,11 @@ export const brandImages = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     brandSlug: text("brand_slug").notNull().unique(),
+    // The registry row this image belongs to (ADR-012, migration 0026).
+    // Nullable: an image may resolve for a slug with no catalog cigar behind it
+    // yet. `brandSlug` above stays the working key and every current reader is
+    // unchanged — Wave 5 retires it once this column carries the joins.
+    brandId: uuid("brand_id").references(() => brands.id, { onDelete: "set null" }),
     brandName: text("brand_name").notNull(),
     status: text("status").$type<BrandImageStatus>().notNull().default("no_match"),
     rights: text("rights").$type<BrandImageRights>().notNull().default("pending"),
@@ -62,7 +68,10 @@ export const brandImages = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("brand_images_status_idx").on(table.status, table.checkedAt)],
+  (table) => [
+    index("brand_images_status_idx").on(table.status, table.checkedAt),
+    index("brand_images_brand_id_idx").on(table.brandId),
+  ],
 );
 
 export type BrandImageRow = typeof brandImages.$inferSelect;

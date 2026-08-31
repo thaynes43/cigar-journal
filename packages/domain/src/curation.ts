@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, isNull, sql, type SQL } from "drizzle-orm";
 import {
   auditLog,
+  brands,
   cigars,
   cigarMerges,
   duplicateDismissals,
@@ -23,6 +24,7 @@ import {
 } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
+import { brandSlug } from "./catalog-browse.js";
 import type {
   MergeCigarsInput,
   MergeCigarsResult,
@@ -1560,6 +1562,24 @@ const CIGAR_FACT_COLUMNS: { key: "brand" | "line" | "type" | "manufacturer"; col
   { key: "manufacturer", column: "manufacturer" },
 ];
 
+// `cigars.brand_id` is DERIVED from the free-text `brand`, never dictated
+// alongside it (ADR-012; migration 0026 mints the link the same way). Any path
+// that rewrites `brand` therefore has to recompute the link in the same
+// statement — otherwise a curator who fixes a misspelled marca leaves `brand_id`
+// pointing at the brand the row used to claim, and the registry quietly
+// disagrees with the column it was built from.
+//
+// A spelling no brand answers to clears the link rather than keeping the stale
+// one: an unlinked cigar is a Wave 3 worklist item, a wrongly linked one is a
+// silent error. Registries are not minted here — that is curation with an audit
+// trail, not a side effect of a fact edit.
+async function deriveBrandId(tx: Tx, brand: string | null): Promise<string | null> {
+  const slug = brandSlug((brand ?? "").trim());
+  if (slug === "") return null;
+  const rows = await tx.select({ id: brands.id }).from(brands).where(eq(brands.slug, slug)).limit(1);
+  return rows[0]?.id ?? null;
+}
+
 export async function setCigarFacts(
   deps: Deps,
   principal: Principal,
@@ -1620,6 +1640,14 @@ async function setCigarFactsWithinTx(
     before[key] = currentValue;
     after[key] = nextValue;
     changedFields.push(key);
+  }
+
+  // Rewriting the brand text re-derives the registry link in the same UPDATE.
+  // Not audited and not reported in `changedFields`: `brand_id` is a projection
+  // of `brand`, not a fact the curator asserted, and an undo that restores the
+  // text re-derives it again by the same rule.
+  if (changedFields.includes("brand")) {
+    set.brandId = await deriveBrandId(tx, (set.brand as string | null) ?? null);
   }
 
   if (changedFields.length > 0) {
@@ -2991,6 +3019,12 @@ async function applyInverse(
         (set as Record<string, unknown>)[column as string] = restore;
         undoBefore[key] = (current as unknown as Record<string, unknown>)[column as string] ?? null;
         undoAfter[key] = restore;
+      }
+      // The undo writes `brand` directly, so it owes the same re-derivation the
+      // forward path does — otherwise undoing a brand correction restores the
+      // old text against the new brand's id.
+      if ("brand" in before) {
+        set.brandId = await deriveBrandId(tx, (set.brand as string | null) ?? null);
       }
       await tx.update(cigars).set({ ...set, updatedAt: deps.now() }).where(eq(cigars.id, cigarId));
       return writeUndo({ action: "cigar.set_facts", before: undoBefore, after: undoAfter });
