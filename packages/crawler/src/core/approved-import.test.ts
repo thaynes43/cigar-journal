@@ -58,10 +58,33 @@ describe("diffApproved / applyApproved (embedded Postgres)", () => {
   beforeEach(async () => {
     await pg.db.delete(auditLog);
     await pg.db.delete(vendors);
+    // `approvalNote` is the provenance marker: the rows carrying the attribution
+    // are the ones a previous wiki sync approved, and so the only ones a later
+    // sync may revoke. "Hand Approved Shop" is the counter-case — approved by the
+    // owner, absent from the wiki, no note — and must survive every sync.
     await pg.db.insert(vendors).values([
       { name: "PCC", url: "https://pccdirect.example", focus: "CC", approvalStatus: "unapproved" },
-      { name: "Keep Approved Shop", url: "https://keepapproved.example", focus: "CC", approvalStatus: "approved" },
-      { name: "Old Approved Shop", url: "https://oldshop.example", focus: "CC", approvalStatus: "approved" },
+      {
+        name: "Keep Approved Shop",
+        url: "https://keepapproved.example",
+        focus: "CC",
+        approvalStatus: "approved",
+        approvalNote: APPROVED_LIST_ATTRIBUTION,
+      },
+      {
+        name: "Old Approved Shop",
+        url: "https://oldshop.example",
+        focus: "CC",
+        approvalStatus: "approved",
+        approvalNote: APPROVED_LIST_ATTRIBUTION,
+      },
+      {
+        name: "Hand Approved Shop",
+        url: "https://handapproved.example",
+        focus: "CC",
+        approvalStatus: "approved",
+        approvalNote: null,
+      },
       { name: "Fox Cigar", url: "https://foxcigar.com", focus: "NC", approvalStatus: "owner-added" },
     ]);
   });
@@ -75,6 +98,9 @@ describe("diffApproved / applyApproved (embedded Postgres)", () => {
     expect(diff.unchanged).toBe(1);
     // Fox (NC, owner-added, absent from the wiki) is never touched.
     expect(diff.changes.some((c) => c.store === "Fox Cigar")).toBe(false);
+    // Nor is the owner's own approval, though it is a CC shop absent from the
+    // wiki — exactly the row the old focus-based guard would have revoked.
+    expect(diff.changes.some((c) => c.store === "Hand Approved Shop")).toBe(false);
   });
 
   it("apply is a no-op without --yes semantics (dry diff leaves the DB unchanged)", async () => {
@@ -96,12 +122,20 @@ describe("diffApproved / applyApproved (embedded Postgres)", () => {
     expect(pcc!.approvalStatus).toBe("approved");
     expect(pcc!.approvalNote).toBe(APPROVED_LIST_ATTRIBUTION);
 
-    // NewCC Store created as an approved CC vendor, crawl disabled.
+    // NewCC Store created as an approved shop with NO market focus (#210) and
+    // crawl disabled. Being listed on the wiki is not evidence of what a shop
+    // stocks, so the import asserts nothing; focus stays unknown until a crawl
+    // or a curator says otherwise.
     const [newcc] = await pg.db.select().from(vendors).where(eq(vendors.name, "NewCC Store"));
     expect(newcc!.approvalStatus).toBe("approved");
-    expect(newcc!.focus).toBe("CC");
+    expect(newcc!.focus).toBeNull();
+    expect(newcc!.kind).toBe("vendor");
     expect(newcc!.crawlEnabled).toBe(false);
     expect(newcc!.purchaseLinkout).toBe(true);
+
+    // Promotion likewise leaves an existing row's focus exactly as the registry
+    // had it — approving a shop says nothing about its market.
+    expect(pcc!.focus).toBe("CC");
 
     // Old Approved Shop revoked (dropped from the wiki).
     const [old] = await pg.db.select().from(vendors).where(eq(vendors.name, "Old Approved Shop"));
@@ -161,13 +195,17 @@ describe("diffApproved / applyApproved (embedded Postgres)", () => {
     expect(reviewer!.approvalNote).toBeNull();
     expect(reviewer!.focus).toBeNull();
     expect(reviewer!.purchaseLinkout).toBe(false);
-    // The shop the wiki actually listed exists beside it.
+    // The shop the wiki actually listed exists beside it — and it too is minted
+    // without a market claim.
     expect(shop!.approvalStatus).toBe("approved");
-    expect(shop!.focus).toBe("CC");
+    expect(shop!.focus).toBeNull();
   });
 
   // The revocation half of the same rule. A reviewer cannot be dropped from a
-  // list it was never on, and the sweep must not reach it to try.
+  // list it was never on, and the sweep must not reach it to try. Stamped with
+  // the wiki attribution on purpose, so the `kind` scoping is the only thing
+  // holding it out — otherwise the provenance guard would pass the test for it
+  // and the reviewer rule would go untested.
   it("never revokes a reviewer row absent from the wiki", async () => {
     await pg.db.insert(vendors).values({
       name: "Retired Reviewer",
@@ -176,10 +214,39 @@ describe("diffApproved / applyApproved (embedded Postgres)", () => {
       focus: null,
       purchaseLinkout: false,
       approvalStatus: "approved",
+      approvalNote: APPROVED_LIST_ATTRIBUTION,
     });
 
     const diff = await diffApproved(pg.db, parseApprovedWiki(WIKI));
     expect(diff.changes.some((c) => c.store === "Retired Reviewer")).toBe(false);
+  });
+
+  // The round trip #210 could have broken. A row this import mints now carries
+  // NO focus, and revocation used to be gated on focus being CC/both — so the
+  // importer's own rows would have become unrevocable: added on one sync, then
+  // stranded 'approved' forever once the wiki dropped them. Keying revocation on
+  // provenance instead of on a market guess closes it.
+  it("revokes a row it minted itself once the wiki drops it, despite the NULL focus", async () => {
+    // Sync one: the wiki lists NewCC Store, so the import mints it.
+    await applyApproved(pg.db, await diffApproved(pg.db, parseApprovedWiki(WIKI)));
+    const [minted] = await pg.db.select().from(vendors).where(eq(vendors.name, "NewCC Store"));
+    expect(minted!.focus).toBeNull();
+    expect(minted!.approvalStatus).toBe("approved");
+
+    // Sync two: a later snapshot no longer lists it.
+    const diff = await diffApproved(
+      pg.db,
+      parseApprovedWiki("* [Keep Approved Shop](https://keepapproved.example)"),
+    );
+    const revoke = diff.changes.find((c) => c.store === "NewCC Store");
+    expect(revoke?.kind).toBe("revoke");
+
+    await applyApproved(pg.db, diff);
+    const [after] = await pg.db.select().from(vendors).where(eq(vendors.name, "NewCC Store"));
+    expect(after!.approvalStatus).toBe("unapproved");
+    // Revoking drops the attribution too — the wiki no longer vouches for it, so
+    // a third sync has nothing to revoke a second time.
+    expect(after!.approvalNote).toBeNull();
   });
 
   it("applyApproved on an empty diff writes nothing", async () => {

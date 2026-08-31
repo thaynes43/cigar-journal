@@ -338,9 +338,12 @@ export async function photoAuthority(q: Queryer, cigarId: string): Promise<Photo
 // a convenience. The seal in the paragraph above — an evidenced-CC row dropping the
 // only lane that could contradict it — was closed in the first pass by a fact about
 // today's registry (nobody is recorded 'CC' any more). That is circumstance, not
-// structure: `approved-import` mints every vendor it adds with `focus='CC'` (#210),
-// so the next approved Cuban shop would re-form the seal the day it lands, with no
-// code change and no review. Reading evidence only from CRAWL-ENABLED vendors makes
+// structure: `approved-import` used to mint every vendor it added with `focus='CC'`
+// (that stamp is gone as of #210 — it mints NULL now), so the next approved Cuban
+// shop would have re-formed the seal the day it landed, with no code change and no
+// review. Removing the stamp narrows that path but does not close it — focus is
+// still set by curation and by evidence, and a genuinely CC-focused shop is a row
+// the registry is SUPPOSED to be able to hold. Reading evidence only from CRAWL-ENABLED vendors makes
 // the un-seal hold on its own terms, and it is the same set the fleet is drawn from
 // (`enrichVendorFleet`): a vendor that cannot be asked cannot be evidence either.
 //
