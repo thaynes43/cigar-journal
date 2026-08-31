@@ -5,6 +5,7 @@ import { auditActor } from "./audit-attribution.js";
 import type { SetFavoriteInput, SetFavoriteResult } from "./types.js";
 import { CigarNotFoundError } from "./errors.js";
 import { provenanceToActor } from "./mapping.js";
+import { isUuid } from "./uuid.js";
 
 // The single favorite mark (PRD-003, DESIGN-002) — the second cigar-level mark,
 // mirroring setWant. Favorite = a cigar the user LOVES, distinct from Want (a
@@ -38,6 +39,11 @@ export async function setFavorite(
   principal: Principal,
   input: SetFavoriteInput,
 ): Promise<SetFavoriteResult> {
+  // A malformed id is answered as `cigar_not_found` too — the existence probe
+  // below would raise 22P02 on it instead of returning no rows, and to the caller
+  // the two cases mean the same thing (./uuid.ts).
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
+
   // The cigar must exist — a bogus id is cigar_not_found, never a silent no-op
   // (and the FK would otherwise reject the insert as an opaque fault).
   const exists = await deps.db

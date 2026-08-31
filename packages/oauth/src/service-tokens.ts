@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { auditLog, oauthAccessToken, oauthClient, users, type Database } from "@cj/db";
-import { auditActor } from "@cj/domain";
+import { auditActor, isUuid } from "@cj/domain";
 import { SUPPORTED_SCOPES, mcpResource, resourceMatches } from "./config.js";
 import { hashToken, randomClientId, randomToken } from "./crypto.js";
 import { invalidRequest, invalidScope, invalidTarget } from "./errors.js";
@@ -98,8 +98,6 @@ export function newRunId(): string {
 
 /** A token's lifetime above which it cannot have come from the 1h grant. */
 const LONG_LIVED_HOURS = 24;
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** An operational failure the CLI reports as exit 1 (as opposed to bad flags). */
 export class ServiceTokenError extends Error {
@@ -569,7 +567,7 @@ export async function describeTokenForRevoke(
   db: Database,
   tokenId: string,
 ): Promise<RevocableToken | null> {
-  if (!UUID_RE.test(tokenId)) return null;
+  if (!isUuid(tokenId)) return null;
   const found = await db
     .select({
       tokenId: oauthAccessToken.id,
@@ -666,7 +664,7 @@ export async function revokeServiceToken(
   const log = input.log ?? ((message, ...rest) => console.log(message, ...rest));
   // The id arrives as untrusted CLI text; a malformed uuid is a not-found, not a
   // Postgres cast error.
-  if (!UUID_RE.test(input.tokenId)) return { ok: false, error: "unknown_token" };
+  if (!isUuid(input.tokenId)) return { ok: false, error: "unknown_token" };
 
   return db.transaction(async (tx) => {
     const found = await tx

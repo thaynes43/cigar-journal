@@ -10,6 +10,7 @@ import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation
 import { CigarNotFoundError, SmokeNotFoundError, VersionConflictError } from "./errors.js";
 import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
 import { applyConsumptionChange } from "./consumption.js";
+import { isUuid } from "./uuid.js";
 
 // Correct an existing Smoke via explicit, field-scoped change ops — never a
 // generic patch (ADR-002). Append-only progression; original_markdown is never
@@ -21,6 +22,15 @@ export async function updateSmoke(
   input: UpdateSmokeInput,
 ): Promise<UpdateSmokeResult> {
   validateUpdateInput(input);
+
+  // Both ids are refused before the transaction opens, not inside it: a 22P02
+  // does not merely escape as a 500, it aborts the surrounding transaction, so a
+  // guard placed at either query site would still leave a poisoned tx to unwind.
+  // A malformed smokeId is the same refusal as an unowned or unknown one, and a
+  // malformed resolveTo the same as a cigar that does not exist (./uuid.ts).
+  if (!isUuid(input.smokeId)) throw new SmokeNotFoundError();
+  if (input.changes.cigar && !isUuid(input.changes.cigar.resolveTo)) throw new CigarNotFoundError();
+
   const requestFingerprint = fingerprint(input);
 
   try {

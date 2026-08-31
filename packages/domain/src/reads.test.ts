@@ -1,9 +1,19 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
-import { getSmoke, queryMySmokes, searchCigars, getCigar, browseCigars } from "./reads.js";
+import {
+  getSmoke,
+  queryMySmokes,
+  searchCigars,
+  getCigar,
+  getCigarOffers,
+  getCigarOfferHistory,
+  getCigarPricing,
+  getCigarPriceHistory,
+  browseCigars,
+} from "./reads.js";
 import type { Principal } from "./index.js";
-import { SmokeNotFoundError, ValidationError } from "./errors.js";
+import { CigarNotFoundError, SmokeNotFoundError, ValidationError } from "./errors.js";
 
 describe("read services", () => {
   let h: DomainHarness;
@@ -332,6 +342,63 @@ describe("read services", () => {
     );
     expect(error).toBeInstanceOf(ValidationError);
     expect((error as ValidationError).fields.some((f) => f.path === "smokedAfter")).toBe(true);
+  });
+
+  // #206. Every read below is reachable with an id the caller chose, and each one
+  // used to carry that raw string into a `uuid` column. The assertion is always
+  // the same shape — malformed must be INDISTINGUISHABLE from unknown-but-valid —
+  // because that equality, not the specific value, is the contract being pinned.
+  it("getCigar answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await getCigar(h.deps, userA, { cigarId: "not-a-uuid" }).catch(
+      (e: unknown) => e,
+    );
+    const unknown = await getCigar(h.deps, userA, { cigarId: newRequestId() }).catch(
+      (e: unknown) => e,
+    );
+    expect(malformed).toBeInstanceOf(CigarNotFoundError);
+    expect(unknown).toBeInstanceOf(CigarNotFoundError);
+    expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+      (unknown as CigarNotFoundError).toPayload(),
+    );
+  });
+
+  it("queryMySmokes narrows a malformed cigarId filter to nothing, as an unknown one does", async () => {
+    // A filter is not an identity: naming no cigar returns an empty page rather
+    // than a not-found, so the guard must narrow instead of throw.
+    const malformed = await queryMySmokes(h.deps, userA, { cigarId: "not-a-uuid" });
+    const unknown = await queryMySmokes(h.deps, userA, { cigarId: newRequestId() });
+    expect(malformed.smokes).toEqual([]);
+    expect(malformed).toEqual(unknown);
+  });
+
+  it("the catalog price reads answer a malformed cigarId exactly as an unknown one", async () => {
+    // getCigarOffers and getCigarPricing are guarded through latestSeries; the two
+    // history reads run their own SQL and carry their own guards. All four answer
+    // with emptiness rather than an error, so emptiness is what must match.
+    const bad = "not-a-uuid";
+    const unknown = newRequestId();
+    expect(await getCigarOffers(h.deps, { cigarId: bad })).toEqual(
+      await getCigarOffers(h.deps, { cigarId: unknown }),
+    );
+    expect(await getCigarOfferHistory(h.deps, { cigarId: bad })).toEqual(
+      await getCigarOfferHistory(h.deps, { cigarId: unknown }),
+    );
+    expect(await getCigarPricing(h.deps, bad)).toEqual(await getCigarPricing(h.deps, unknown));
+    expect(await getCigarPriceHistory(h.deps, { cigarId: bad })).toEqual(
+      await getCigarPriceHistory(h.deps, { cigarId: unknown }),
+    );
+    // Pin the values too, so a future change that made BOTH paths throw could not
+    // satisfy the equalities above while breaking the contract.
+    expect(await getCigarOffers(h.deps, { cigarId: bad })).toEqual([]);
+    expect(await getCigarPricing(h.deps, bad)).toBeNull();
+    expect(await getCigarPriceHistory(h.deps, { cigarId: bad })).toEqual([]);
+    expect(await getCigarOfferHistory(h.deps, { cigarId: bad })).toEqual({
+      firstSeenAt: null,
+      lastSeenAt: null,
+      minPricePerStick: null,
+      maxPricePerStick: null,
+      observationCount: 0,
+    });
   });
 
   it("getCigar computes a personal profile over multiple smokes", async () => {

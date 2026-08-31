@@ -71,4 +71,27 @@ describe("deleteSmoke", () => {
     expect(error).toBeInstanceOf(SmokeNotFoundError);
     expect(await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId))).toHaveLength(1);
   });
+
+  it("answers a malformed smokeId exactly as it answers an unknown one", async () => {
+    // #206. A non-uuid used to reach the `uuid` column and raise Postgres 22P02 —
+    // untyped, so it escaped this refusal and became a 500 (and aborted a
+    // transaction opened only to unwind it). The web procedure rejects a non-uuid
+    // a layer earlier, so what is pinned here is the domain refusing to depend on
+    // its adapter: malformed and unknown are one answer.
+    const malformed = await deleteSmoke(h.deps, user, { smokeId: "not-a-uuid" }).catch(
+      (e: unknown) => e,
+    );
+    const unknown = await deleteSmoke(h.deps, user, { smokeId: newRequestId() }).catch(
+      (e: unknown) => e,
+    );
+
+    expect(malformed).toBeInstanceOf(SmokeNotFoundError);
+    expect(unknown).toBeInstanceOf(SmokeNotFoundError);
+    expect((malformed as SmokeNotFoundError).toPayload()).toEqual(
+      (unknown as SmokeNotFoundError).toPayload(),
+    );
+
+    // Neither refusal deleted anything.
+    expect(await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId))).toHaveLength(1);
+  });
 });

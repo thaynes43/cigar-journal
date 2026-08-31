@@ -35,6 +35,7 @@ import {
   hierarchyConditions,
   lookupHierarchyEntity,
 } from "./catalog-hierarchy.js";
+import { isUuid } from "./uuid.js";
 
 // The poster library reads (PRD-002 phase 2 / PRD-003 R-UNI). Browse descends
 // brand → line → cigar; the personal overlay (caller's smoke count + average
@@ -113,6 +114,18 @@ function encodeCursor(c: Cursor): string {
 // one from a different field or direction, is treated as absent (start of the
 // list) rather than an error — a stale share link, a sort switch or a direction
 // flip degrades to the first page.
+//
+// The id is shape-checked because every sort spends it unquoted as `${cur.id}::uuid`
+// (nine sites across the four sorts), so a well-formed envelope carrying junk
+// used to raise 22P02 and 500 instead of degrading — on the widest surface in the
+// app, since browse_catalog and catalog.browse both take the cursor as a bare
+// string (#206, ./uuid.ts).
+//
+// The ORDERING KEY is deliberately not validated here, and that is a known
+// remaining hole rather than an oversight: `key` is cast per sort — ::timestamptz
+// for recently-added, Number() for my-rating and price — so junk there raises a
+// cast error of a different class that this shape check would not catch. Closing
+// it needs the sort enum, not just its identity string; tracked separately.
 function decodeCursor(raw: string | null | undefined, identity: string): Cursor | null {
   if (!raw) return null;
   try {
@@ -122,7 +135,8 @@ function decodeCursor(raw: string | null | undefined, identity: string): Cursor 
       typeof parsed[0] === "string" &&
       typeof parsed[1] === "string" &&
       typeof parsed[2] === "string" &&
-      parsed[0] === identity
+      parsed[0] === identity &&
+      isUuid(parsed[2])
     ) {
       return { sort: identity, key: parsed[1], id: parsed[2] };
     }

@@ -31,6 +31,7 @@ import {
   OAuthError,
 } from "./errors.js";
 import { authEvent, mask } from "./logger.js";
+import { isUuid } from "@cj/domain";
 
 // The app's OAuth 2.1 authorization server (ADR-004/005), ported from the Phase 0
 // spike's proven OAuthServerProvider shape onto Postgres storage. Every function
@@ -333,8 +334,17 @@ export interface ConsentView {
   scopes: { scope: string; description: string }[];
 }
 
-/** Load a pending transaction for the consent screen (client name + scopes). */
+/**
+ * Load a pending transaction for the consent screen (client name + scopes).
+ *
+ * The txn arrives as a raw `?txn=` query parameter. A malformed one is undefined
+ * exactly as an unknown or expired one is — all three render the same "request
+ * expired" screen, and before the guard a non-uuid reached the `uuid` column and
+ * 500'd the consent page instead (#206).
+ */
 export async function getConsentView(db: Db, txnId: string): Promise<ConsentView | undefined> {
+  if (!isUuid(txnId)) return undefined;
+
   const rows = await db
     .select({
       id: oauthAuthorization.id,

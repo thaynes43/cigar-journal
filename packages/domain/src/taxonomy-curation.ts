@@ -8,6 +8,7 @@ import { auditActor } from "./audit-attribution.js";
 import { composeCanonicalName, fold } from "./taxonomy-keys.js";
 import { assertCigarAncestry, type CigarAncestry } from "./cigar-ancestry.js";
 import { deriveBrandId, loadAncestryContext } from "./taxonomy-resolve.js";
+import { isUuid } from "./uuid.js";
 // The audit `before`/`after` shape `applyInverse` reads for a listing-match undo.
 // Imported rather than re-declared so a split's re-point and the console's own
 // status write are literally the same snapshot, and the undo that inverts one
@@ -357,6 +358,12 @@ export async function registerTaxonomy(
   input: RegisterTaxonomyInput,
 ): Promise<RegisterTaxonomyResult> {
   assertCurator(principal);
+  // `loadBrand` is reached inside the envelope, after the replay lookup has
+  // already run work on the transaction — so a malformed marca id is refused
+  // here, in `loadBrand`'s own words, before the transaction opens (./uuid.ts).
+  if (input.brandId != null && !isUuid(input.brandId)) {
+    throw new ValidationError([{ path: "brandId", message: "No such brand." }]);
+  }
   const requestFingerprint = fingerprint(input);
   try {
     return await deps.db.transaction((tx) =>
@@ -399,6 +406,10 @@ export async function updateRegistryAliases(
   input: UpdateRegistryAliasesInput,
 ): Promise<UpdateRegistryAliasesResult> {
   assertCurator(principal);
+  // The enveloped editor reaches the row only after the replay lookup, so the
+  // core's own guard would fire on a transaction that has already read. Same
+  // refusal, taken before the transaction opens (./uuid.ts).
+  if (!isUuid(input.id)) throw new ValidationError([{ path: "id", message: `No such ${input.level}.` }]);
   const requestFingerprint = fingerprint(input);
 
   const run = async (tx: Tx): Promise<UpdateRegistryAliasesResult> => {
@@ -497,7 +508,18 @@ async function namesForAncestry(
 ): Promise<PartNames> {
   const names: PartNames = { brand: brandText, line: lineText, blend: null };
   if (ancestry.brandId != null) {
-    const rows = await tx.select({ name: brands.name }).from(brands).where(eq(brands.id, ancestry.brandId)).limit(1);
+    // The MARCA is the one level that arrives here unresolved: `lineId` and
+    // `blendId` have just been through `assertCigarAncestry` over
+    // `loadAncestryContext`, which carries the shape guard for both, while
+    // nothing looks a brand up before this — so a malformed `brandId` would
+    // raise 22P02 on the caller's transaction right here. Skipping the query
+    // falls back to `brandText`, which is exactly what a brandId no row answers
+    // to already does (./uuid.ts). What happens next — the FK the write raises
+    // on a brandId that does not exist — is then the same for both, and is a
+    // separate bug from this one.
+    const rows = isUuid(ancestry.brandId)
+      ? await tx.select({ name: brands.name }).from(brands).where(eq(brands.id, ancestry.brandId)).limit(1)
+      : [];
     names.brand = rows[0]?.name ?? brandText;
   }
   if (ancestry.lineId != null) {
@@ -666,6 +688,10 @@ export async function assignCigarTaxonomy(
   input: AssignCigarTaxonomyInput,
 ): Promise<AssignCigarTaxonomyResult> {
   assertCurator(principal);
+  // Before the transaction, for the reason the whole sweep is: the leaf is read
+  // after the replay lookup, and a 22P02 aborts the transaction that lookup
+  // already ran on rather than merely failing its own query (./uuid.ts).
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
   const requestFingerprint = fingerprint(input);
   try {
     return await deps.db.transaction((tx) =>
@@ -1194,6 +1220,33 @@ async function splitCigarWithinTx(
   return result;
 }
 
+// Every id a split carries, refused before the transaction opens, each in the
+// words of the miss it stands in for and in the order the transaction would have
+// reached them (./uuid.ts).
+//
+// THE LISTING IDS ARE THE ONE THAT MATTERS. They are read as a single
+// `inArray(...)` probe, so ONE malformed element raises 22P02 for the whole call
+// — a multi-arm split failing wholesale as a 500 instead of naming the id it
+// could not find, which is a refusal this code already writes. The first
+// offender is reported in the order `allIds` is built, which is the order the
+// loop over that probe's result reaches them.
+function assertSplitIdsWellFormed(input: SplitCigarInput): void {
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
+
+  const malformedListingId = input.splits.flatMap((split) => split.listingIds).find((id) => !isUuid(id));
+  if (malformedListingId !== undefined) {
+    throw new ValidationError([
+      { path: "splits", message: `No listing match matches id ${malformedListingId}.` },
+    ]);
+  }
+
+  for (const [index, split] of input.splits.entries()) {
+    if (split.targetCigarId != null && !isUuid(split.targetCigarId)) {
+      throw new ValidationError([{ path: `splits.${index}.targetCigarId`, message: "No such cigar." }]);
+    }
+  }
+}
+
 // Break one catalog row that has been standing for several products into the
 // leaves it should have been, moving each product's listings onto its own.
 //
@@ -1219,6 +1272,7 @@ export async function splitCigar(
   input: SplitCigarInput,
 ): Promise<SplitCigarResult> {
   assertCurator(principal);
+  assertSplitIdsWellFormed(input);
   const requestFingerprint = fingerprint(input);
   try {
     return await deps.db.transaction((tx) => splitCigarWithinTx(tx, deps, principal, input, requestFingerprint));

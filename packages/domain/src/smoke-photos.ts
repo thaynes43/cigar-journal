@@ -6,6 +6,7 @@ import type { Deps, Principal } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
 import type { SmokePhotoKind, SmokePhotoView } from "./types.js";
 import { SmokeNotFoundError, PhotoNotFoundError, PhotoLimitError } from "./errors.js";
+import { isUuid } from "./uuid.js";
 import { toSmokePhotoView, smokePhotoSnapshot } from "./mapping.js";
 
 // Review-bound smoke photos (ADR-007, issue #44 part 1). @cj/domain owns
@@ -60,6 +61,12 @@ export async function addSmokePhoto(
   principal: Principal,
   input: AddSmokePhotoInput,
 ): Promise<SmokePhotoView> {
+  // Ahead of the ownership read, so the guard also precedes the two storage puts:
+  // a failure raised after them is only unwound by the orphan cleanup below, and
+  // there is no reason to spend two bucket writes on an id that names nothing. A
+  // malformed id is answered as the cross-user case is (./uuid.ts).
+  if (!isUuid(input.smokeId)) throw new SmokeNotFoundError();
+
   const rows = await deps.db.select().from(smokes).where(eq(smokes.id, input.smokeId)).limit(1);
   const smoke = rows[0];
   // Cross-user access is reported as not-found so a smoke never leaks (as in
@@ -128,6 +135,11 @@ export async function listSmokePhotos(
   principal: Principal,
   args: { smokeId: string },
 ): Promise<SmokePhotoView[]> {
+  // A listing, not an identity: this read already returns nothing for a smoke that
+  // does not exist or is not the caller's, so a malformed id returns nothing too
+  // rather than becoming the one id shape that errors (./uuid.ts).
+  if (!isUuid(args.smokeId)) return [];
+
   const rows = await deps.db
     .select()
     .from(smokePhotos)
@@ -142,6 +154,11 @@ export async function getSmokePhoto(
   principal: Principal,
   args: { photoId: string },
 ): Promise<SmokePhotoObject> {
+  // The photo id comes off an image URL, so a mangled one is a routine 404 for the
+  // serving route — the same answer an unknown or another user's photo gets
+  // (./uuid.ts).
+  if (!isUuid(args.photoId)) throw new PhotoNotFoundError();
+
   const rows = await deps.db
     .select()
     .from(smokePhotos)
@@ -162,6 +179,11 @@ export async function getPublicSmokePhoto(
   deps: Deps,
   args: { photoId: string },
 ): Promise<SmokePhotoObject> {
+  // Anonymous, so any string can arrive in the image URL. It resolves to nothing,
+  // which is what a private journal's photo already resolves to here — one
+  // not-found covers all three cases and leaks nothing (./uuid.ts).
+  if (!isUuid(args.photoId)) throw new PhotoNotFoundError();
+
   const rows = await deps.db
     .select({
       objectKey: smokePhotos.objectKey,
@@ -186,6 +208,10 @@ export async function removeSmokePhoto(
   principal: Principal,
   input: RemoveSmokePhotoInput,
 ): Promise<{ photoId: string }> {
+  // Before the lookup and therefore before the delete transaction: nothing to
+  // detach, answered as the unknown and cross-user cases are (./uuid.ts).
+  if (!isUuid(input.photoId)) throw new PhotoNotFoundError();
+
   const rows = await deps.db
     .select()
     .from(smokePhotos)

@@ -7,6 +7,7 @@ import { resolveCigar, type ResolvedCigar } from "./cigar-resolution.js";
 import { enrichmentCoverageForCigar, evidencedMarket, type EnrichmentCoverage } from "./enrichment-coverage.js";
 import { CigarNotFoundError } from "./errors.js";
 import { provenanceToActor } from "./mapping.js";
+import { isUuid } from "./uuid.js";
 
 // The conversational gap-fill path (owner, 2026-08-28): resolve-or-create the
 // described cigar through the SAME logic save_smoke uses (resolveCigar — the
@@ -242,6 +243,12 @@ export async function requestCigarEnrichment(
   principal: Principal,
   input: RequestCigarEnrichmentInput,
 ): Promise<RequestCigarEnrichmentResult> {
+  // classifyEnrichmentRequest is the transaction's very first statement, so an
+  // unguarded id would abort the transaction on entry; its own CigarNotFoundError
+  // is the answer being matched here (./uuid.ts). This closes the only external
+  // door to the coverage reads, whose raw-SQL cigar_id comparisons carry no
+  // explicit cast — the backlog path reaches them with ids from its own query.
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
   return deps.db.transaction(async (tx) => {
     const { cigar, assessment, status } = await classifyEnrichmentRequest(tx, input.cigarId);
 

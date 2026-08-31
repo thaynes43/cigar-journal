@@ -131,6 +131,25 @@ describe("favorites", () => {
     expect(error).toBeInstanceOf(CigarNotFoundError);
   });
 
+  // #206. A caller-chosen id used to reach the `cigars.id` uuid column raw; the
+  // contract being pinned is that malformed is INDISTINGUISHABLE from
+  // unknown-but-valid, not the particular value that proves it.
+  it("setFavorite answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await setFavorite(h.deps, user, {
+      cigarId: "not-a-uuid",
+      favorited: true,
+    }).catch((e: unknown) => e);
+    const unknown = await setFavorite(h.deps, user, {
+      cigarId: newRequestId(),
+      favorited: true,
+    }).catch((e: unknown) => e);
+    expect(malformed).toBeInstanceOf(CigarNotFoundError);
+    expect(unknown).toBeInstanceOf(CigarNotFoundError);
+    expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+      (unknown as CigarNotFoundError).toPayload(),
+    );
+  });
+
   it("scopes favorite marks to the caller — one user's mark never leaks into another's reads", async () => {
     const brand = `FavIsolation ${tag}`;
     const cigarId = await h.seedCigar({ canonicalName: `${brand} Belicoso`, brand, line: "L" });

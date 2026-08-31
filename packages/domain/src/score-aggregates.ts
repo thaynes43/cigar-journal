@@ -1,5 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 import type { Queryer } from "./deps.js";
+import { isUuid } from "./uuid.js";
 
 // The two-population aggregates (ADR-013 §3) — the Rotten Tomatoes model over
 // this catalogue. A CRITIC score over external `review_observations`, a JOURNAL
@@ -315,16 +316,24 @@ export async function getScoreAggregates(
   // id into one bound parameter — and every row is written back to every
   // original spelling that produced it. The map therefore has exactly one entry
   // per distinct string the caller passed, no more and no fewer.
+  //
+  // A malformed id is seeded like any other and then simply never asked about.
+  // It keeps its EMPTY — indistinguishable from an id naming nothing, which is
+  // this function's answer for an unknown id anyway — while staying out of the
+  // bound array. That last part is the point: `ARRAY[…]::uuid[]` is cast as a
+  // whole, so ONE unparseable element used to fail the entire batch, turning
+  // every other id's perfectly good aggregate into a 500 (#206, ./uuid.ts).
   const originalsByCanonical = new Map<string, string[]>();
   for (const id of ids) {
     if (result.has(id)) continue;
     result.set(id, EMPTY);
+    if (!isUuid(id)) continue;
     const canonical = id.toLowerCase();
     const originals = originalsByCanonical.get(canonical);
     if (originals) originals.push(id);
     else originalsByCanonical.set(canonical, [id]);
   }
-  if (result.size === 0) return result;
+  if (originalsByCanonical.size === 0) return result;
 
   // The two populations are computed independently and stitched by key, never
   // joined row-to-row: a blend with critic scores and no smokes must still return

@@ -48,6 +48,7 @@ import { normalizeDescriptor } from "./descriptors.js";
 import { toSmokePhotoView } from "./mapping.js";
 import { assessEnrichmentFields } from "./enrichment.js";
 import { validateQueryFilters } from "./validation.js";
+import { isUuid } from "./uuid.js";
 import { decodeSmokeCursor, encodeSmokeCursor, afterSmokeCursor } from "./smoke-cursor.js";
 
 const DEFAULT_SMOKE_LIMIT = 10;
@@ -126,23 +127,19 @@ function toSmokeView(
   };
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 // The canonical, complete representation of one Smoke — owner-only.
 //
 // A malformed id is answered as NOT-FOUND, not as a validation error, because to
 // the caller it is indistinguishable from an id that names nothing: both mean
 // "there is no such smoke", and the read already refuses to confirm existence to
-// a non-owner. Without the guard the raw string reaches a `uuid` column and
-// Postgres raises 22P02 — untyped, so it escapes the SmokeNotFoundError path and
-// becomes a 500 in every adapter (the MCP `get_smoke` tool passes its id straight
-// through; web rejects it a layer earlier with `.uuid()` on the procedure input).
+// a non-owner. See `./uuid.ts` for why the guard belongs here and not in the
+// adapters.
 export async function getSmoke(
   deps: Deps,
   principal: Principal,
   args: { smokeId: string },
 ): Promise<SmokeView> {
-  if (!UUID_RE.test(args.smokeId)) throw new SmokeNotFoundError();
+  if (!isUuid(args.smokeId)) throw new SmokeNotFoundError();
 
   const rows = await deps.db
     .select({
@@ -184,7 +181,12 @@ export async function getSmoke(
 
 function smokeConditions(principal: Principal, filters: QueryMySmokesFilters): SQL[] {
   const conditions: SQL[] = [eq(smokes.userId, principal.userId)];
-  if (filters.cigarId) conditions.push(eq(smokes.cigarId, filters.cigarId));
+  // A malformed cigarId filter narrows to nothing rather than raising 22P02 —
+  // the same empty page a filter naming an unknown cigar already returns
+  // (./uuid.ts). A filter is not an identity, so there is no not-found to throw.
+  if (filters.cigarId) {
+    conditions.push(isUuid(filters.cigarId) ? eq(smokes.cigarId, filters.cigarId) : sql`false`);
+  }
   if (filters.brand) conditions.push(ilike(cigars.brand, filters.brand));
 
   if (filters.descriptor) {
@@ -672,6 +674,8 @@ export async function getCigar(
   principal: Principal,
   args: { cigarId: string },
 ): Promise<GetCigarResult> {
+  if (!isUuid(args.cigarId)) throw new CigarNotFoundError();
+
   const rows = await deps.db.select().from(cigars).where(eq(cigars.id, args.cigarId)).limit(1);
   const cigar = rows[0];
   if (!cigar) throw new CigarNotFoundError();
@@ -814,6 +818,12 @@ interface SeriesRow {
 // link directly via cigar_id with no listing match. DISTINCT ON collapses each
 // append-only series to its latest row — no N+1 across sources/packagings.
 async function latestSeries(deps: Deps, cigarId: string): Promise<SeriesRow[]> {
+  // No series for a malformed id, exactly as for a cigar nobody has priced
+  // (./uuid.ts). Guarding here rather than in each caller is what carries the
+  // contract into getCigarOffers (maps to `[]`) and getCigarPricing (its
+  // `rows.length === 0` path returns null before it runs its own totals query).
+  if (!isUuid(cigarId)) return [];
+
   const result = await deps.db.execute(sql`
     WITH obs AS (
       SELECT v.name AS source, TRUE AS is_registry, v.purchase_linkout,
@@ -880,10 +890,23 @@ export async function getCigarOffers(
 // listing match; ad-hoc/chat rows direct via cigar_id), aggregated in one pass.
 // per-stick bounds cover only observations where a per-stick figure is stored;
 // null when the cigar has no such observation. Catalog-scoped — no principal.
+const EMPTY_OFFER_HISTORY: OfferHistory = {
+  firstSeenAt: null,
+  lastSeenAt: null,
+  minPricePerStick: null,
+  maxPricePerStick: null,
+  observationCount: 0,
+};
+
 export async function getCigarOfferHistory(
   deps: Deps,
   args: { cigarId: string },
 ): Promise<OfferHistory> {
+  // The empty history a cigar with no observations already reports (./uuid.ts).
+  // This read runs its own SQL rather than going through latestSeries, so it
+  // carries its own guard.
+  if (!isUuid(args.cigarId)) return EMPTY_OFFER_HISTORY;
+
   const result = await deps.db.execute(sql`
     WITH obs AS (
       SELECT o.seen_at, o.price_per_stick_cents
@@ -1013,6 +1036,10 @@ export async function getCigarPriceHistory(
   deps: Deps,
   args: { cigarId: string },
 ): Promise<CigarPricePoint[]> {
+  // No points for a malformed id, as for a cigar with no per-stick observation
+  // (./uuid.ts). Own SQL, so own guard — same reason as getCigarOfferHistory.
+  if (!isUuid(args.cigarId)) return [];
+
   const result = await deps.db.execute(sql`
     WITH obs AS (
       SELECT o.seen_at, o.price_per_stick_cents

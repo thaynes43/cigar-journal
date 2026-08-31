@@ -6,6 +6,7 @@ import type { RecordPriceInput, RecordPriceResult } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { provenanceToActor } from "./mapping.js";
+import { isUuid } from "./uuid.js";
 import { CigarNotFoundError, ValidationError } from "./errors.js";
 import { recordPriceObservation } from "./price-observations.js";
 
@@ -56,6 +57,10 @@ export async function recordPrice(
   input: RecordPriceInput,
 ): Promise<RecordPriceResult> {
   validateRecordPrice(input);
+  // Before the transaction: the cigar check lives inside it, so a 22P02 there
+  // would abort a transaction the idempotency read has already used, and
+  // isUniqueViolation would not recognise it to recover (./uuid.ts).
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
   const requestFingerprint = fingerprint(input);
   try {
     return await deps.db.transaction((tx) => recordWithinTx(deps, tx, principal, input, requestFingerprint));

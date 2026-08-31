@@ -5,10 +5,12 @@ import { saveSmoke } from "./save-smoke.js";
 import {
   numbersCompatible,
   packagingCompatible,
+  resolveCigar,
   strongLinkCompatible,
   variantCompatible,
 } from "./cigar-resolution.js";
 import { variantRelation } from "./name-heuristics.js";
+import { CigarNotFoundError } from "./errors.js";
 import type { Principal } from "./index.js";
 
 // Pure guard coverage (no DB): the disqualifiers behind the strong-link filter.
@@ -170,5 +172,42 @@ describe("resolveCigar number-token guard", () => {
     });
     expect(result.smoke.cigar.cigarId).toBe(existingId);
     expect(result.cigarCreated).toBe(false);
+  });
+
+  // #206, sharing this file's single embedded Postgres. resolveCigar is the front
+  // door for save_smoke, record_purchase and add_cigar, so the equality pinned
+  // here — malformed is INDISTINGUISHABLE from unknown-but-valid — is the answer
+  // all three inherit.
+  it("resolveCigar answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await h.deps.db
+      .transaction((tx) => resolveCigar(tx, { cigarId: "not-a-uuid" }))
+      .catch((e: unknown) => e);
+    const unknown = await h.deps.db
+      .transaction((tx) => resolveCigar(tx, { cigarId: newRequestId() }))
+      .catch((e: unknown) => e);
+    expect(malformed).toBeInstanceOf(CigarNotFoundError);
+    expect(unknown).toBeInstanceOf(CigarNotFoundError);
+    expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+      (unknown as CigarNotFoundError).toPayload(),
+    );
+  });
+
+  // The guard keys on the ref's SHAPE, not on any string it carries: a described
+  // ref names a cigar rather than identifying one, reaches no uuid column, and
+  // must still link or create exactly as before — including when the name itself
+  // is a string no uuid column would accept.
+  it("resolveCigar leaves the described path untouched by the id guard", async () => {
+    const existingId = await h.seedCigar({ canonicalName: "Guarded Path Reserva Robusto" });
+    const linked = await h.deps.db.transaction((tx) =>
+      resolveCigar(tx, { described: { canonicalName: "Guarded Path Reserva Robusto" } }),
+    );
+    expect(linked.cigarId).toBe(existingId);
+    expect(linked.created).toBe(false);
+
+    const created = await h.deps.db.transaction((tx) =>
+      resolveCigar(tx, { described: { canonicalName: "not-a-uuid" } }),
+    );
+    expect(created.created).toBe(true);
+    expect(created.canonicalName).toBe("not-a-uuid");
   });
 });

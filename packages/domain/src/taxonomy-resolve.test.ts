@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
 import { blends, brands, cigars, lines } from "@cj/db";
-import { createHarness, type DomainHarness } from "./testing/harness.js";
+import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { brandSlug } from "./catalog-browse.js";
 import { fold } from "./taxonomy-keys.js";
 import {
@@ -11,8 +11,13 @@ import {
   findUnlinkedNameCollision,
   resolveDescribedTaxonomy,
   loadAncestryContext,
+  loadNamePartsForCigar,
 } from "./taxonomy-resolve.js";
-import { assertCigarAncestry } from "./cigar-ancestry.js";
+import {
+  assertCigarAncestry,
+  type CigarAncestry,
+  type CigarAncestryContext,
+} from "./cigar-ancestry.js";
 import { ValidationError } from "./errors.js";
 
 // Matching v2 against real registries and a real Postgres (ADR-012 Wave 2). The
@@ -483,6 +488,55 @@ describe("taxonomy resolution", () => {
       const crossed = { brandId: padronId, lineId: ligaPrivadaId, blendId: null };
       const context = await loadAncestryContext(h.deps.db, crossed);
       expect(() => assertCigarAncestry(crossed, context)).toThrow(ValidationError);
+    });
+
+    // #206. This loader is where the sweep pays for itself: every wired write path
+    // resolves its ancestry through it, so one guard answers a malformed lineId or
+    // blendId for assignCigarTaxonomy, splitCigar and assignCigarParts at once —
+    // and each of them keeps producing its own refusal without knowing.
+    it("loadAncestryContext answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformedAncestry: CigarAncestry = {
+        brandId: padronId,
+        lineId: "not-a-uuid",
+        blendId: "also-not-a-uuid",
+      };
+      const unknownAncestry: CigarAncestry = {
+        brandId: padronId,
+        lineId: newRequestId(),
+        blendId: newRequestId(),
+      };
+      const malformed = await loadAncestryContext(h.deps.db, malformedAncestry);
+      const unknown = await loadAncestryContext(h.deps.db, unknownAncestry);
+
+      expect(malformed).toEqual(unknown);
+      expect(malformed).toEqual({ line: null, blend: null });
+
+      // Which the assertion turns into the same ValidationError, not a 500.
+      const refusalFor = (ancestry: CigarAncestry, context: CigarAncestryContext) => {
+        try {
+          assertCigarAncestry(ancestry, context);
+          return null;
+        } catch (error) {
+          return (error as ValidationError).toPayload();
+        }
+      };
+      expect(refusalFor(malformedAncestry, malformed)).not.toBeNull();
+      expect(refusalFor(malformedAncestry, malformed)).toEqual(refusalFor(unknownAncestry, unknown));
+    });
+
+    it("loadNamePartsForCigar answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await loadNamePartsForCigar(h.deps.db, {
+        brandId: padronId,
+        lineId: "not-a-uuid",
+        blendId: "also-not-a-uuid",
+      });
+      const unknown = await loadNamePartsForCigar(h.deps.db, {
+        brandId: padronId,
+        lineId: newRequestId(),
+        blendId: newRequestId(),
+      });
+      expect(malformed).toEqual(unknown);
+      expect(malformed).toEqual({ line: null, blend: null });
     });
   });
 

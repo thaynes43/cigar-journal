@@ -1,6 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { purchases, cigars, vendors } from "@cj/db";
 import type { Deps, Principal, Queryer } from "./deps.js";
+import { isUuid } from "./uuid.js";
 import type {
   InventoryLot,
   InventoryHolding,
@@ -204,6 +205,22 @@ export async function getHoldingForCigar(
   principal: Principal,
   cigarId: string,
 ): Promise<CigarHolding> {
+  // A holding is a quantity, not an identity: a cigar the caller has never bought
+  // already answers with the empty holding rather than an error, and "no such
+  // cigar" is not distinguished from "none held" here. So a malformed id gets that
+  // same empty answer — the forms then simply omit the humidor control (./uuid.ts).
+  if (!isUuid(cigarId)) {
+    return {
+      cigarId,
+      hasHolding: false,
+      totalAcquired: 0,
+      remaining: 0,
+      overConsumed: 0,
+      agingSince: null,
+      lots: [],
+    };
+  }
+
   const lotRows = await deps.db
     .select({
       purchaseId: purchases.id,

@@ -13,7 +13,10 @@ import {
   addBlendAliases,
   createBlender,
   creditBlender,
+  editRegistryAliases,
   assignCigarParts,
+  loadCigarNameParts,
+  recomposeCigarName,
   aliasKeysFor,
   mintRegistrySlug,
   registrySlugCandidates,
@@ -23,7 +26,7 @@ import {
 import { renameCigar, setCigarFacts } from "./curation.js";
 import { resolveCigar } from "./cigar-resolution.js";
 import { updateCigar } from "./update-cigar.js";
-import { ValidationError, UnauthorizedError } from "./errors.js";
+import { CigarNotFoundError, ValidationError, UnauthorizedError } from "./errors.js";
 import type { Principal } from "./deps.js";
 
 // Registry writes, ancestry wiring and name recomposition (ADR-012 Wave 2).
@@ -859,6 +862,170 @@ describe("taxonomy writes", () => {
       const row = (await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId)))[0]!;
       expect(row.canonicalName).toBe("The Owner's Own Gap Fill");
       expect(row.brandId).toBe(padronId);
+    });
+  });
+
+  // #206. Every id below is caller-supplied and lands in a `uuid` column, so a
+  // non-uuid string used to raise an untyped 22P02 — a 500 — instead of the
+  // refusal each of these functions already had for an id it cannot find. The
+  // assertion is always the same shape, because the equality is the contract:
+  // malformed must be INDISTINGUISHABLE from unknown-but-valid.
+  describe("a malformed id is answered exactly as an unknown one", () => {
+    const bad = "not-a-uuid";
+
+    it("editRegistryAliases answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await editRegistryAliases(h.deps, curator, {
+        level: "brand",
+        id: bad,
+        add: ["Sweep Spelling"],
+      }).catch((e: unknown) => e);
+      const unknown = await editRegistryAliases(h.deps, curator, {
+        level: "brand",
+        id: newRequestId(),
+        add: ["Sweep Spelling"],
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([{ path: "id", message: "No such brand." }]);
+    });
+
+    // The alias delegates all go through that one editor, so guarding the core
+    // guarded every one of them — including the level in the message.
+    it("addLineAliases inherits the editor's answer", async () => {
+      const malformed = await addLineAliases(h.deps, curator, { id: bad, aliases: ["Sweep Spelling"] }).catch(
+        (e: unknown) => e,
+      );
+      const unknown = await addLineAliases(h.deps, curator, {
+        id: newRequestId(),
+        aliases: ["Sweep Spelling"],
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([{ path: "id", message: "No such line." }]);
+    });
+
+    it("createLine answers a malformed brandId exactly as it answers an unknown one", async () => {
+      const malformed = await createLine(h.deps, curator, { brandId: bad, name: "Sweep Orphan" }).catch(
+        (e: unknown) => e,
+      );
+      const unknown = await createLine(h.deps, curator, { brandId: newRequestId(), name: "Sweep Orphan" }).catch(
+        (e: unknown) => e,
+      );
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([{ path: "brandId", message: "No such brand." }]);
+    });
+
+    it("createBlend answers a malformed lineId exactly as it answers an unknown one", async () => {
+      const malformed = await createBlend(h.deps, curator, { lineId: bad, name: "Sweep Orphan Blend" }).catch(
+        (e: unknown) => e,
+      );
+      const unknown = await createBlend(h.deps, curator, {
+        lineId: newRequestId(),
+        name: "Sweep Orphan Blend",
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([{ path: "lineId", message: "No such line." }]);
+    });
+
+    // Both ends of the credit, and their ORDER: a credit naming an unresolvable
+    // blend is told about the blend whether or not the blender is resolvable
+    // either, so the guards must not answer out of turn.
+    it("creditBlender answers a malformed blendId or blenderId exactly as it answers an unknown one", async () => {
+      const line = await createLine(h.deps, curator, { brandId: padronId, name: "Sweep Credit Series" });
+      const blend = await createBlend(h.deps, curator, { lineId: line.lineId, name: "Sweep Credit Blend" });
+      const blender = await createBlender(h.deps, curator, { name: "Sweep Credit Blender" });
+
+      const malformedBlend = await creditBlender(h.deps, curator, {
+        blendId: bad,
+        blenderId: blender.blenderId,
+      }).catch((e: unknown) => e);
+      const unknownBlend = await creditBlender(h.deps, curator, {
+        blendId: newRequestId(),
+        blenderId: blender.blenderId,
+      }).catch((e: unknown) => e);
+      expect(malformedBlend).toBeInstanceOf(ValidationError);
+      expect((malformedBlend as ValidationError).toPayload()).toEqual(
+        (unknownBlend as ValidationError).toPayload(),
+      );
+      expect((malformedBlend as ValidationError).fields).toEqual([
+        { path: "blendId", message: "No such blend." },
+      ]);
+
+      const malformedBlender = await creditBlender(h.deps, curator, {
+        blendId: blend.blendId,
+        blenderId: bad,
+      }).catch((e: unknown) => e);
+      const unknownBlender = await creditBlender(h.deps, curator, {
+        blendId: blend.blendId,
+        blenderId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformedBlender).toBeInstanceOf(ValidationError);
+      expect((malformedBlender as ValidationError).toPayload()).toEqual(
+        (unknownBlender as ValidationError).toPayload(),
+      );
+      expect((malformedBlender as ValidationError).fields).toEqual([
+        { path: "blenderId", message: "No such blender." },
+      ]);
+    });
+
+    it("loadCigarNameParts answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await loadCigarNameParts(h.deps.db, bad);
+      const unknown = await loadCigarNameParts(h.deps.db, newRequestId());
+      expect(malformed).toEqual(unknown);
+      expect(malformed).toBeNull();
+    });
+
+    // Recomposition runs on a CALLER'S transaction, which is the reason the guard
+    // replaces the query instead of wrapping it: a 22P02 aborts the transaction,
+    // taking down work that has nothing to do with the bad id.
+    it("recomposeCigarName answers a malformed id as an unknown one, leaving the transaction usable", async () => {
+      const outcome = await h.deps.db.transaction(async (tx) => {
+        const malformed = await recomposeCigarName(tx, bad, h.deps.now());
+        const unknown = await recomposeCigarName(tx, newRequestId(), h.deps.now());
+        const stillQueryable = await tx.select({ id: brands.id }).from(brands).limit(1);
+        return { malformed, unknown, stillQueryable: stillQueryable.length };
+      });
+      expect(outcome.malformed).toEqual(outcome.unknown);
+      expect(outcome.malformed).toEqual({ changed: false, canonicalName: null });
+      expect(outcome.stillQueryable).toBe(1);
+    });
+
+    it("assignCigarParts answers a malformed cigarId exactly as it answers an unknown one", async () => {
+      const malformed = await assignCigarParts(h.deps, curator, { cigarId: bad, vitolaName: "Robusto" }).catch(
+        (e: unknown) => e,
+      );
+      const unknown = await assignCigarParts(h.deps, curator, {
+        cigarId: newRequestId(),
+        vitolaName: "Robusto",
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    // The ancestry levels are guarded once, in `loadAncestryContext`. This is that
+    // guard arriving at a caller: a malformed lineId is the line that could not be
+    // resolved, which is what an unknown one has always been.
+    it("assignCigarParts answers a malformed lineId as the unresolvable line it is", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Sweep Ancestry Row" });
+      const malformed = await assignCigarParts(h.deps, curator, {
+        cigarId,
+        brandId: padronId,
+        lineId: bad,
+      }).catch((e: unknown) => e);
+      const unknown = await assignCigarParts(h.deps, curator, {
+        cigarId,
+        brandId: padronId,
+        lineId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "lineId", message: "The referenced line could not be resolved." },
+      ]);
     });
   });
 });

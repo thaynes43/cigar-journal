@@ -3,6 +3,7 @@ import { smokeConsumptions, purchases } from "@cj/db";
 import type { Tx, Queryer } from "./deps.js";
 import type { ConsumptionInput, ConsumptionChange, SmokeConsumptionView } from "./types.js";
 import { ValidationError } from "./errors.js";
+import { isUuid } from "./uuid.js";
 
 // Explicit consumption (ADR-008): a smoke deducts one stick from the humidor
 // only via a row in smoke_consumptions. save_smoke and update_smoke both write
@@ -33,6 +34,17 @@ async function assertLotOwned(
   purchaseId: string,
   path: string,
 ): Promise<void> {
+  // A malformed purchaseId is refused exactly as a lot that does not exist, is
+  // not the caller's, or belongs to another cigar — all four are "no such lot of
+  // this cigar" and already share one message. Guarding here covers both write
+  // paths (save and update) at their single point of contact with `purchases`,
+  // and refuses before the query so no 22P02 aborts the caller's transaction
+  // (./uuid.ts). This is the one guard in the sweep that answers validation_error
+  // rather than a not-found: the lot is a field of the request, not the identity
+  // being addressed, so it is the existing answer for an unknown lot that is
+  // being matched — the rule is "malformed reads as unknown", not "as not-found".
+  if (!isUuid(purchaseId)) throw noSuchLot(path);
+
   const rows = await tx
     .select({ id: purchases.id })
     .from(purchases)
@@ -44,11 +56,13 @@ async function assertLotOwned(
       ),
     )
     .limit(1);
-  if (!rows[0]) {
-    throw new ValidationError([
-      { path, message: "No humidor lot of this cigar matches the given purchaseId." },
-    ]);
-  }
+  if (!rows[0]) throw noSuchLot(path);
+}
+
+function noSuchLot(path: string): ValidationError {
+  return new ValidationError([
+    { path, message: "No humidor lot of this cigar matches the given purchaseId." },
+  ]);
 }
 
 // Capture consumption at save time. `fromHumidor: true` writes the link (with a

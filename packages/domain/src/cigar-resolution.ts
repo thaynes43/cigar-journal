@@ -5,6 +5,7 @@ import type { CigarRef, Verification } from "./types.js";
 import { CigarNotFoundError, CigarAmbiguousError, ValidationError } from "./errors.js";
 import { assertCigarAncestry } from "./cigar-ancestry.js";
 import { loadAncestryContext, resolveDescribedTaxonomy } from "./taxonomy-resolve.js";
+import { isUuid } from "./uuid.js";
 
 // The string heuristics moved to name-heuristics.ts, which carries their
 // retirement note (ADR-012: they die with the Wave 3 backfill). Re-exported here
@@ -61,6 +62,15 @@ export async function resolveCigar(
   ref: CigarRef,
   options?: ResolveCigarOptions,
 ): Promise<ResolvedCigar> {
+  // A malformed id is `cigar_not_found`, the same answer a well-formed id naming
+  // no row gets below — this is the shared front door for save_smoke,
+  // record_purchase and add_cigar, so it is where all three inherit that answer.
+  // It runs first because this function is handed the CALLER's transaction: a
+  // 22P02 at the comparison would abort that transaction rather than surface as
+  // this function's own typed refusal (./uuid.ts). A described ref carries no id
+  // and is left to the resolution path below.
+  if ("cigarId" in ref && !isUuid(ref.cigarId)) throw new CigarNotFoundError();
+
   if ("cigarId" in ref) {
     const rows = await tx
       .select({

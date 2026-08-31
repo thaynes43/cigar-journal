@@ -6,6 +6,7 @@ import { auditActor } from "./audit-attribution.js";
 import { HIERARCHY_UNFILED } from "./types.js";
 import { brandSlug } from "./catalog-browse.js";
 import { composeCanonicalName, fold, mintRegistrySlug } from "./taxonomy-keys.js";
+import { isUuid } from "./uuid.js";
 
 // The mint-time slug rule lives with the rest of the key vocabulary in
 // taxonomy-keys.ts — `deriveBrandId` needs it too, and taxonomy-resolve.ts
@@ -347,6 +348,12 @@ export async function editRegistryAliasesWithinTx(
   principal: Principal,
   input: EditAliasesInput,
 ): Promise<EditAliasesResult> {
+  // The row lookup below casts the id, so a malformed one answers the same "no
+  // such row" refusal the miss answers — same path, same message (./uuid.ts).
+  // Guarding the core covers `editRegistryAliases` and the three alias delegates
+  // that go through it.
+  if (!isUuid(input.id)) throw new ValidationError([{ path: "id", message: `No such ${input.level}.` }]);
+
   const scopeColumn = aliasScopeColumn(input.level);
   const scopeSelect = scopeColumn === null ? sql`NULL` : sql`${sql.identifier(scopeColumn)}::text`;
   const found = await tx.execute(sql`
@@ -414,6 +421,11 @@ export async function editRegistryAliases(
   input: EditAliasesInput,
 ): Promise<EditAliasesResult> {
   assertCurator(principal);
+  // Repeated ahead of the transaction rather than left to the core's own guard:
+  // the shape check needs no database, and every entry point in this sweep
+  // refuses before opening one so that no caller's guard sits behind work a
+  // 22P02 would have aborted (./uuid.ts). Same path, same message, one literal.
+  if (!isUuid(input.id)) throw new ValidationError([{ path: "id", message: `No such ${input.level}.` }]);
   return deps.db.transaction((tx) => editRegistryAliasesWithinTx(tx, deps, principal, input));
 }
 
@@ -441,6 +453,10 @@ export async function createLineWithinTx(
   principal: Principal,
   input: CreateLineInput,
 ): Promise<CreateLineResult> {
+  // A malformed parent id is a parent that cannot be resolved — the refusal the
+  // brand lookup below already makes (./uuid.ts).
+  if (!isUuid(input.brandId)) throw new ValidationError([{ path: "brandId", message: "No such brand." }]);
+
   const name = requireName(input.name, "name");
   const slug = requireSlug(name, "name");
   const aliases = aliasKeysFor(name, input.aliases ?? []);
@@ -491,6 +507,7 @@ export async function createLine(
   input: CreateLineInput,
 ): Promise<CreateLineResult> {
   assertCurator(principal);
+  if (!isUuid(input.brandId)) throw new ValidationError([{ path: "brandId", message: "No such brand." }]);
   return deps.db.transaction((tx) => createLineWithinTx(tx, deps, principal, input));
 }
 
@@ -552,6 +569,10 @@ export async function createBlendWithinTx(
   principal: Principal,
   input: CreateBlendInput,
 ): Promise<CreateBlendResult> {
+  // As on the line above: an unresolvable parent, answered by the refusal the
+  // line lookup below already makes (./uuid.ts).
+  if (!isUuid(input.lineId)) throw new ValidationError([{ path: "lineId", message: "No such line." }]);
+
   const name = requireName(input.name, "name");
   const slug = requireSlug(name, "name");
   const aliases = aliasKeysFor(name, input.aliases ?? []);
@@ -613,6 +634,7 @@ export async function createBlend(
   input: CreateBlendInput,
 ): Promise<CreateBlendResult> {
   assertCurator(principal);
+  if (!isUuid(input.lineId)) throw new ValidationError([{ path: "lineId", message: "No such line." }]);
   return deps.db.transaction((tx) => createBlendWithinTx(tx, deps, principal, input));
 }
 
@@ -721,13 +743,18 @@ export async function creditBlenderWithinTx(
   principal: Principal,
   input: CreditBlenderInput,
 ): Promise<{ created: boolean }> {
-  const blend = await tx.select({ id: blends.id }).from(blends).where(eq(blends.id, input.blendId)).limit(1);
+  // BOTH ENDS OF THE CREDIT, each refused where its own lookup would have missed
+  // rather than in a pair of checks at the top. A malformed id is answered by the
+  // refusal that follows it (./uuid.ts), and refusing in place is what keeps the
+  // ORDER honest too: a call naming an unknown blend and a malformed blender must
+  // still be told about the blend, exactly as a call that invents both is.
+  const blend = isUuid(input.blendId)
+    ? await tx.select({ id: blends.id }).from(blends).where(eq(blends.id, input.blendId)).limit(1)
+    : [];
   if (!blend[0]) throw new ValidationError([{ path: "blendId", message: "No such blend." }]);
-  const blender = await tx
-    .select({ id: blenders.id })
-    .from(blenders)
-    .where(eq(blenders.id, input.blenderId))
-    .limit(1);
+  const blender = isUuid(input.blenderId)
+    ? await tx.select({ id: blenders.id }).from(blenders).where(eq(blenders.id, input.blenderId)).limit(1)
+    : [];
   if (!blender[0]) throw new ValidationError([{ path: "blenderId", message: "No such blender." }]);
 
   const inserted = await tx
@@ -755,6 +782,11 @@ export async function creditBlender(
   input: CreditBlenderInput,
 ): Promise<{ created: boolean }> {
   assertCurator(principal);
+  // Only the blend here. It is the first thing the core resolves, so refusing it
+  // before the transaction opens cannot reorder anything; a malformed blenderId
+  // is left to the core, which refuses it in its turn — after the blend, which is
+  // where an unknown blender is refused too (./uuid.ts).
+  if (!isUuid(input.blendId)) throw new ValidationError([{ path: "blendId", message: "No such blend." }]);
   return deps.db.transaction((tx) => creditBlenderWithinTx(tx, deps, principal, input));
 }
 
@@ -775,6 +807,10 @@ export interface CigarNameParts {
 // the registry is the single spelling the whole catalog agrees on, so a composed
 // name cannot drift the way 36 independently-typed brand strings did.
 export async function loadCigarNameParts(db: Queryer, cigarId: string): Promise<CigarNameParts | null> {
+  // "No such row" is already spelled `null` here, so that is what a malformed id
+  // gets — and every caller reads it as the miss it is (./uuid.ts).
+  if (!isUuid(cigarId)) return null;
+
   const result = await db.execute(sql`
     SELECT c.brand, c.line, c.vitola_name, c.edition,
            b.name AS brand_name, l.name AS line_name, bl.name AS blend_name
@@ -819,6 +855,11 @@ export async function recomposeCigarName(
   cigarId: string,
   now: Date,
 ): Promise<{ changed: boolean; canonicalName: string | null }> {
+  // Nothing to recompose for a row that cannot exist — the same answer this gives
+  // for a row that does not (./uuid.ts). It runs on a caller's transaction, so
+  // the check has to replace the query rather than wrap it.
+  if (!isUuid(cigarId)) return { changed: false, canonicalName: null };
+
   const rows = await tx
     .select({ canonicalName: cigars.canonicalName, nameSource: cigars.nameSource })
     .from(cigars)
@@ -896,6 +937,12 @@ export async function assignCigarPartsWithinTx(
   principal: Principal,
   input: AssignCigarPartsInput,
 ): Promise<AssignCigarPartsResult> {
+  // The leaf being assigned, refused as absent before the read that would raise
+  // 22P02 on the caller's transaction (./uuid.ts). `lineId` and `blendId` need no
+  // check of their own: they are resolved through `loadAncestryContext`, which
+  // carries the guard for every path that asserts an ancestry.
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
+
   const rows = await tx
     .select({
       id: cigars.id,
@@ -1003,5 +1050,6 @@ export async function assignCigarParts(
   input: AssignCigarPartsInput,
 ): Promise<AssignCigarPartsResult> {
   assertCurator(principal);
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
   return deps.db.transaction((tx) => assignCigarPartsWithinTx(tx, deps, principal, input));
 }

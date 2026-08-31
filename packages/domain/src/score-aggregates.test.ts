@@ -701,6 +701,67 @@ describe("score aggregates", () => {
       expect(map.size).toBe(2);
       expect(map.get(ids.bl1)!.critic).toEqual({ score: 90, count: 3 });
     });
+
+    // #206, and the batch is where a malformed id did the most damage. The ids
+    // are bound as `ARRAY[$1, $2, …]::uuid[]`, which Postgres casts as a WHOLE:
+    // ONE unparseable element raised 22P02 for the entire statement, so a single
+    // bad id in a page's worth turned every other id's perfectly good aggregate
+    // into a 500. The guard drops a malformed id from the bound array while
+    // still seeding its entry, so it keeps the EMPTY pair this module already
+    // answers an id naming nothing with.
+    it("keeps a malformed id from poisoning the rest of the batch", async () => {
+      const unknown = "00000000-0000-0000-0000-000000000000";
+      const malformed = "not-a-uuid";
+      // Malformed FIRST: under the old form that is the element bound as $1, the
+      // one the cast reaches soonest.
+      const map = await getScoreAggregates(h.deps.db, "blend", [
+        malformed,
+        ids.bl1,
+        unknown,
+        ids.bl3,
+      ]);
+
+      // One entry per distinct string asked about, and no throw getting here.
+      expect(map.size).toBe(4);
+
+      // The regression that matters: the real ids still carry their true
+      // aggregates, both populations, unchanged by the bad neighbour.
+      expect(map.get(ids.bl1)!.critic).toEqual({ score: 90, count: 3 });
+      expect(map.get(ids.bl1)!.journal).toEqual({
+        score: 80,
+        count: 1,
+        journalCount: 1,
+        ratingCount: 2,
+      });
+      expect(map.get(ids.bl3)!.critic).toEqual({ score: 70, count: 1 });
+      expect(map.get(ids.bl1)).toEqual(await getScoreAggregate(h.deps.db, "blend", ids.bl1));
+
+      // And the malformed id is answered — as nothing, exactly like an id that
+      // names nothing. A caller cannot tell the two apart, which is the point:
+      // both mean "the observations say nothing about this".
+      expect(map.get(malformed)).toEqual({ critic: null, journal: null });
+      expect(map.get(malformed)).toEqual(map.get(unknown));
+    });
+
+    it("answers a batch of nothing but malformed ids without touching the database", async () => {
+      // Nothing survives the filter, so there is no array to bind and no query to
+      // run — the seeded entries stand on their own.
+      const map = await getScoreAggregates(h.deps.db, "cigar", ["not-a-uuid", "42"]);
+      expect(map.size).toBe(2);
+      expect(map.get("not-a-uuid")).toEqual({ critic: null, journal: null });
+      expect(map.get("42")).toEqual({ critic: null, journal: null });
+    });
+
+    it("agrees with the single read for a malformed id too", async () => {
+      // getScoreAggregate is the batch of one, and it reads its answer back by
+      // the string it was given — so the seeded entry has to be there under that
+      // exact spelling, not merely absent-and-defaulted.
+      const malformed = await getScoreAggregate(h.deps.db, "cigar", "not-a-uuid");
+      expect(malformed).toEqual({ critic: null, journal: null });
+      expect(malformed).toEqual(
+        await getScoreAggregate(h.deps.db, "cigar", "00000000-0000-0000-0000-000000000000"),
+      );
+    });
   });
 
   it("resolves a leaf with no blend up to the brand it does belong to", async () => {
