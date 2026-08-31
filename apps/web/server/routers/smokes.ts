@@ -26,15 +26,19 @@ export const smokesRouter = router({
     .input(queryMySmokesSchema)
     .query(({ ctx, input }) => queryMySmokes(ctx.deps, ctx.principal, input)),
 
+  // `.uuid()` matters beyond hygiene: the id reaches a uuid column, so a
+  // non-UUID string would raise Postgres 22P02 — an untyped error that escapes
+  // the NOT_FOUND path and surfaces as a 500 on a public URL. Rejecting it here
+  // keeps a malformed id a 404 (see the detail page's catch).
   get: authedProcedure
-    .input(z.object({ smokeId: z.string() }))
+    .input(z.object({ smokeId: z.string().uuid() }))
     .query(({ ctx, input }) => getSmoke(ctx.deps, ctx.principal, input)),
 
   // Anonymous public-journal reads (PRD-001 R7, ADR-004; issue #96). Public
   // procedures — the visibility filter in the domain read is the authorization,
   // so a private or nonexistent smoke both surface as NOT_FOUND (no leak).
   getPublic: publicProcedure
-    .input(z.object({ smokeId: z.string() }))
+    .input(z.object({ smokeId: z.string().uuid() }))
     .query(({ ctx, input }) => getPublicSmoke(ctx.deps, input)),
 
   listPublic: publicProcedure

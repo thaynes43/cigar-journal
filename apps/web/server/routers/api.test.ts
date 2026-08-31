@@ -3,6 +3,7 @@ import { TRPCError } from "@trpc/server";
 import { DomainError } from "@cj/domain";
 import { createHarness, newRequestId, type DomainHarness } from "@cj/domain/testing";
 import type { Principal } from "@cj/domain";
+import { isUnresolvableSmoke } from "@/lib/smoke-lookup";
 import { appRouter } from "./_app";
 import type { Context } from "../trpc";
 
@@ -142,6 +143,33 @@ describe("tRPC API", () => {
     const still = await a.smokes.get({ smokeId });
     expect(still.assessment.liked).toBeNull();
     expect(still.version).toBe(1);
+  });
+
+  it("rejects a malformed smoke id at the procedure boundary, on both the private and public read", async () => {
+    // /smokes/<segment> passes the segment through unexamined. Without `.uuid()`
+    // on the input it reached a uuid column and raised Postgres 22P02 — untyped,
+    // so it escaped as a 500 on a public URL rather than a 404.
+    const owned = await trpcError(caller(h.deps, userA).smokes.get({ smokeId: "not-a-uuid" }));
+    const anon = await trpcError(caller(h.deps, null).smokes.getPublic({ smokeId: "not-a-uuid" }));
+    expect(owned.code).toBe("BAD_REQUEST");
+    expect(anon.code).toBe("BAD_REQUEST");
+
+    // The two halves of the fix meet here: the errors the real router raises are
+    // the ones the smoke pages must turn into notFound().
+    expect(isUnresolvableSmoke(owned)).toBe(true);
+    expect(isUnresolvableSmoke(anon)).toBe(true);
+
+    // A well-formed id that names nothing is unchanged — still NOT_FOUND, and
+    // still a 404, so the malformed and the merely absent stay alike.
+    const unknown = newRequestId();
+    const ownedUnknown = await trpcError(caller(h.deps, userA).smokes.get({ smokeId: unknown }));
+    const anonUnknown = await trpcError(
+      caller(h.deps, null).smokes.getPublic({ smokeId: unknown }),
+    );
+    expect(ownedUnknown.code).toBe("NOT_FOUND");
+    expect(anonUnknown.code).toBe("NOT_FOUND");
+    expect(isUnresolvableSmoke(ownedUnknown)).toBe(true);
+    expect(isUnresolvableSmoke(anonUnknown)).toBe(true);
   });
 
   it("browses the catalog alphabetically, catalog-only", async () => {

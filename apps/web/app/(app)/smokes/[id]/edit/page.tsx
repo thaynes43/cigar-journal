@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
-import { TRPCError } from "@trpc/server";
 import { getServerCaller } from "@/lib/trpc/server";
 import { requireAuth } from "@/lib/require-auth";
+import { isUnresolvableSmoke } from "@/lib/smoke-lookup";
 import { EditSmokeForm } from "../../../_components/edit-smoke-form";
 
 export default async function EditSmokePage({ params }: { params: Promise<{ id: string }> }) {
@@ -13,7 +13,7 @@ export default async function EditSmokePage({ params }: { params: Promise<{ id: 
     const smoke = await caller.smokes.get({ smokeId: id });
     return <EditSmokeForm smoke={smoke} />;
   } catch (error) {
-    if (error instanceof TRPCError && error.code === "NOT_FOUND") notFound();
+    if (isUnresolvableSmoke(error)) notFound();
     throw error;
   }
 }
