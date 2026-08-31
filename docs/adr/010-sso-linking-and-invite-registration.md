@@ -1,7 +1,8 @@
 # ADR-010: Explicit-only SSO linking; invites are the registration gate
 
 - **Status:** accepted
-- **Date:** 2026-08-29
+- **Date:** 2026-08-29 (amended 2026-08-31 — a factual correction to the photo-link
+  TTL cited under "Consequences"; no decision changed)
 
 ## Context
 
@@ -105,8 +106,17 @@ minutes (`RESERVATION_WINDOW_SECONDS`). The invite stays spent either way.
 
 The invite token travels in the URL path (`/invite/<token>`), so it reaches
 ingress access logs and `Referer` headers — the same accepted trade-off as the
-shipped `/u/<token>` photo links, bounded by a 7-day TTL, single use, hash-only
-storage, and the email binding. Do not lengthen the TTL without revisiting.
+shipped `/u/<token>` photo links. The invite is bounded by a 7-day TTL, single use,
+hash-only storage, and the email binding. Do not lengthen the TTL without
+revisiting.
+
+*Amended 2026-08-31.* This paragraph read as though the 7-day TTL covered the photo
+links too. It never did: they shipped at 900 seconds and are now 24 hours
+(`packages/domain/src/photo-upload-tokens.ts`). The two tokens share the URL-path
+trade-off and the hash-only storage, not a TTL — and they should not, since an
+invite is addressed to a person by email while a photo link is single-use and bound
+to one smoke. Correction of record only; nothing decided here changes.
+
 Redemption runs through a server action rather than `/api/auth/*`, so Better
 Auth's DB-backed limiter does not cover it; guessing a 256-bit token is
 infeasible and the bound email caps the damage of a leaked link to one address,

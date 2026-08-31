@@ -185,16 +185,13 @@ and never state a per-stick figure without its packaging; name the vendor when i
 is a known shop, otherwise give a source name (and URL). An identical price re-seen
 within a day is skipped; a changed price is always kept.
 
-Photos attach through add_smoke_photo, never save_smoke. You cannot attach an
-image yourself — it reaches the tool only if the host forwards a file with the
-call — so call add_smoke_photo with just the smoke id: a forwarded image is filed
-under the smoke (mode attached), otherwise you get a one-time link (mode
-upload_url) to hand the user for a phone upload. Never paste an image, a chat file
-link, or a file id into any field. On mode upload_url, give the user the link —
-that is the path that works; delivery.status says why no photo was filed
-(no_image_received means nothing arrived with the call), so tell them the truth
-and hand over the link rather than withholding it. A photo never blocks saving the
-smoke.
+Photos attach through add_smoke_photo, never save_smoke. Call it with just the
+smoke id: you get back a one-time upload link — relay it to the user, it works
+once and lasts 24 hours, and shareWithUser is the sentence to say. If the host
+forwarded an attached image with the call the photo is stored directly instead and
+no link is needed; delivery.status reports which happened. Never fill the image
+argument yourself, and never paste an image, a chat file link, or a file id into
+any field. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.

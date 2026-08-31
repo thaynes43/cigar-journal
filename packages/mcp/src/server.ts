@@ -919,27 +919,26 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     "add_smoke_photo",
     {
       title: "Add smoke photo",
-      // The model CANNOT attach the image itself — only the host can forward one
-      // with the call — so the description no longer instructs it to. The previous
-      // wording ("ATTACH THE IMAGE TO THIS TOOL CALL") described host behavior as a
-      // model action: in the owner's 2026-08-30 transcript the model did exactly the
-      // right thing (called with { smokeId, kind } and invented no `image`), so that
-      // text could only teach it that a correct call had failed. What the model CAN
-      // act on is the result: `mode`, and on mode B the `delivery.status`.
+      // THE LINK IS THE FLOW, and this text now says so first. Earlier drafts led
+      // with attachment and described the link as what you get when attachment
+      // fails — a framing that outlived its evidence. `photo_intake_request`
+      // settled it on 2026-08-31: a live ChatGPT call carried no `openai/fileParams`
+      // on any channel (`metaFileParams: {"type":"absent"}`, no `image` argument, no
+      // undeclared keys), and `mode: attached` has never once been observed in
+      // production. ChatGPT does hydrate fileParams for some servers, so the
+      // mechanism is real — it has just never been aimed here (client-
+      // compatibility.md, 2026-08-31: host-side gating is the leading explanation).
+      // And no other client has the mechanism at all, so the link is the only path
+      // that works everywhere. Leading with a mode that has never fired taught the
+      // model to treat the working path as a consolation prize.
       //
-      // AND THE LINK LEADS. A draft of this text told the model, on
-      // `no_image_received`, to ask the user to re-send the photo with their next
-      // message. That asserts an UNVERIFIED hypothesis — that a host forwards only a
-      // file attached to the invoking turn (client-compatibility.md) — as fact, and
-      // if it is wrong it loops the user through a re-send before offering the link
-      // that actually works. Nothing model-facing states it. The hypothesis stays a
-      // hypothesis in the docs until `photo_intake_request` settles it.
+      // Attachment stays declared and stays implemented — it costs nothing to keep
+      // and it is how this works the day a host forwards a file — but it is now
+      // described as the opportunistic branch it is. `delivery.status` keeps its own
+      // vocabulary (below): it earns its place by telling the model the truth about
+      // what arrived, which is exactly what the probe was built to learn.
       description:
-        "Attach a photo to one of the user's smokes, or get a one-time upload link to hand them. You cannot attach the image yourself — it reaches the tool only if the host forwards a file with this call.\n" +
-        "Call with just the smoke id. If an image was forwarded, the server strips location metadata and files it under the smoke (`mode: attached`); otherwise you get a one-time upload link (`mode: upload_url`) to hand the user — it opens on their phone, goes straight to their camera roll, and attaches to this smoke.\n" +
-        "Never paste an image, a chat file link (e.g. a chatgpt.com/... URL), or a file id into any field; those are unreachable from the server and will fail.\n" +
-        "When `mode` is `upload_url`, hand the user the link — that is the path that works. `delivery.status` says why no photo was filed (`no_image_received` = nothing arrived with the call; the others = something arrived the server could not use); use it to tell them the truth, not to withhold the link.\n" +
-        "A photo NEVER blocks save_smoke — it is a separate action with its own result. `kind` classifies the shot (cigar, band, construction, burn, other; default other); add a `caption` only if the user gave one.",
+        "Add a photo to a smoke. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. If the client forwarded an attached image with the call, the photo is stored directly instead and no link is needed (delivery reports which happened). Never fill the image argument yourself — no URLs, ids, or invented fields.",
       inputSchema: addSmokePhotoSchema,
       outputSchema: addSmokePhotoOutput,
       // Declare `image` as a file input so ChatGPT forwards the attached photo.
@@ -1092,9 +1091,9 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           return jsonResult({ mode: "attached", photo });
         }
 
-        // Mode B — no usable image: mint a short-lived, single-use upload link
-        // bound to (user, smoke, kind?, caption?) for the user to open on their
-        // phone, and tell the model plainly why it got a link.
+        // Mode B — the ordinary path: mint a single-use link bound to
+        // (user, smoke, kind?, caption?) for the user to open on their phone, and
+        // tell the model plainly why it got one.
         record(outcome, "upload_url", channel, extras);
         const minted = await mintPhotoUploadToken(deps, principal, {
           smokeId: args.smokeId,
@@ -1102,10 +1101,15 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           caption: args.caption ?? null,
           correlationId,
         });
+        const url = uploadUrl(minted.token);
         return jsonResult({
           mode: "upload_url",
-          uploadUrl: uploadUrl(minted.token),
+          uploadUrl: url,
           expiresAt: minted.expiresAt,
+          // The sentence to say, not a fact to interpret. A bare `uploadUrl`
+          // field left the model to decide whether a link was worth mentioning;
+          // this is the whole point of the call, so the result says so in words.
+          shareWithUser: `Send the user this link to add their photo: ${url} — it works once and is valid for 24 hours.`,
           delivery: deliveryFor(outcome),
         });
       }),

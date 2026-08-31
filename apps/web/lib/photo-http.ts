@@ -46,6 +46,24 @@ const DOMAIN_TO_STATUS: Record<ErrorCode, number> = {
   unavailable: 503,
 };
 
+// The upload route's own rejections — the ones no domain error covers, because
+// they happen to the FILE before any domain call. They ride the same
+// `{ error: { code } }` envelope as a domain error so the /u/ page has one place
+// to look: the code is what selects the message the user reads, and a status
+// alone was never enough to say which of "too big" and "wrong kind of file" it
+// was. Keep this vocabulary stable — the client maps it to copy.
+export type UploadErrorCode =
+  | "validation_error" // no file in the form body
+  | "too_large" // over MAX_UPLOAD_BYTES
+  | "unsupported_type" // not a type the pipeline accepts
+  | "unreadable" // right type, bytes will not decode
+  | "upload_token_invalid" // unknown, used, or expired link
+  | "unavailable"; // photos unconfigured cluster-wide
+
+export function uploadErrorResponse(code: UploadErrorCode, status: number): Response {
+  return Response.json({ error: { code } }, { status });
+}
+
 // Turn a caught error into a Response. Domain errors map to their status with
 // the structured payload; anything else is re-thrown so Next surfaces a 500
 // without leaking internals. `headers` carries per-route cache directives that

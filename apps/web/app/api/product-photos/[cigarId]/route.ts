@@ -3,6 +3,7 @@ import { attachProductPhoto, getProductPhoto } from "@cj/domain";
 import { processPhoto, UnsupportedImageTypeError } from "@cj/photos";
 import { createContext } from "@/server/context";
 import { photoStorage, MAX_UPLOAD_BYTES } from "@/lib/photos";
+import { MAX_UPLOAD_LABEL } from "@/lib/upload-limits";
 import { domainErrorResponse } from "@/lib/photo-http";
 
 // One cigar's product photo (ADR-007). GET serves it — product photos are
@@ -56,7 +57,7 @@ export async function POST(
   const file = form.get("file");
   if (!(file instanceof File)) return Response.json({ error: "file is required." }, { status: 400 });
   if (file.size > MAX_UPLOAD_BYTES) {
-    return Response.json({ error: "Image exceeds the 15MB limit." }, { status: 413 });
+    return Response.json({ error: `Image exceeds the ${MAX_UPLOAD_LABEL} limit.` }, { status: 413 });
   }
   const requestIdRaw = form.get("clientRequestId");
   const clientRequestId = typeof requestIdRaw === "string" && requestIdRaw.length > 0 ? requestIdRaw : randomUUID();

@@ -126,16 +126,13 @@ and never state a per-stick figure without its packaging; name the vendor when i
 is a known shop, otherwise give a source name (and URL). An identical price re-seen
 within a day is skipped; a changed price is always kept.
 
-Photos attach through add_smoke_photo, never save_smoke. You cannot attach an
-image yourself — it reaches the tool only if the host forwards a file with the
-call — so call add_smoke_photo with just the smoke id: a forwarded image is filed
-under the smoke (mode attached), otherwise you get a one-time link (mode
-upload_url) to hand the user for a phone upload. Never paste an image, a chat file
-link, or a file id into any field. On mode upload_url, give the user the link —
-that is the path that works; delivery.status says why no photo was filed
-(no_image_received means nothing arrived with the call), so tell them the truth
-and hand over the link rather than withholding it. A photo never blocks saving the
-smoke.
+Photos attach through add_smoke_photo, never save_smoke. Call it with just the
+smoke id: you get back a one-time upload link — relay it to the user, it works
+once and lasts 24 hours, and shareWithUser is the sentence to say. If the host
+forwarded an attached image with the call the photo is stored directly instead and
+no link is needed; delivery.status reports which happened. Never fill the image
+argument yourself, and never paste an image, a chat file link, or a file id into
+any field. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -762,13 +759,15 @@ original markdown is immutable. The `consumption` op sets, clears
 the smoke's `cigar` clears a now-foreign lot automatically. The movement is
 audited in the same transaction as the smoke change.
 
-## add_smoke_photo — write, dual-mode
+## add_smoke_photo — write, link-first
 
 Attach a review-bound photo to one of the user's smokes (ADR-007, issue #44).
-The image is **never** a tool argument the model writes — it arrives attached to
-the tool call by the HOST, or not at all — and the tool auto-detects which. A photo
-failure is fully isolated from `save_smoke`: separate tool, separate result, its
-own storage transaction.
+The tool returns a **one-time upload link** for the user to open on their phone;
+if the host happened to forward a file with the call, the photo is stored
+directly instead. The image is **never** a tool argument the model writes — it
+arrives attached by the HOST, or not at all — and the tool auto-detects which. A
+photo failure is fully isolated from `save_smoke`: separate tool, separate
+result, its own storage transaction.
 
 ```yaml
 arguments:
@@ -776,7 +775,17 @@ arguments:
   kind: band                     # cigar | band | construction | burn | other (default other)
   caption: "The second band"     # optional; only if the user gave one
 
-# Mode A — image attached to the tool call (host carries it as file data):
+# Mode B — the ordinary result: a one-time upload link to hand the user
+result:
+  mode: upload_url
+  uploadUrl: https://cigars.haynesnetwork.com/u/<token>
+  expiresAt: "2026-08-29T20:15:00Z"       # 24h after minting
+  shareWithUser: "Send the user this link to add their photo: https://… — it works once and is valid for 24 hours."
+  delivery:                      # why there is no photo, in terms the model can act on
+    status: no_image_received    # | image_reference_unusable | image_fetch_failed | image_unreadable
+    detail: "No image arrived with this call."
+
+# Mode A — opportunistic: a host forwarded a file with the call
 result:
   mode: attached
   photo:
@@ -787,31 +796,42 @@ result:
     width: 2048
     height: 1365
     createdAt: "2026-08-28T20:15:00Z"
-
-# Mode B — no usable image: a one-time, short-lived upload link to hand the user
-result:
-  mode: upload_url
-  uploadUrl: https://cigars.haynesnetwork.com/u/<token>
-  expiresAt: "2026-08-28T20:30:00Z"
-  delivery:                      # why there is no photo, in terms the model can act on
-    status: no_image_received    # | image_reference_unusable | image_fetch_failed | image_unreadable
-    detail: "No image arrived with this call."
 ```
 
-**Two modes, one tool.**
+**One primary mode, one opportunistic one.**
 
-- **Attached image (mode A).** ChatGPT Web attaches the user's image to the tool
-  call; the server fetches it (15s timeout, 20MB cap), runs the shared pipeline
-  (EXIF applied + all metadata/GPS stripped, normalized JPEG + thumb), and files
-  it under the smoke. Only the HOST can forward a file; the description says so
-  rather than instructing the model to do something it cannot do, and tells it never
-  to paste a chat file URL (e.g. `chatgpt.com/...`) as text — those links are
-  unreachable outside ChatGPT and will 403.
-- **No usable image (mode B).** The tool mints a short-lived, single-use link bound
-  to (user, smoke, kind?, caption?) and returns it. The model hands the URL to the
-  user to open on their phone — the reliable path on mobile, where in-chat photo
-  attachment is broken upstream. The link opens a one-tile upload page; the token
-  is the authorization, consumed atomically on first successful use.
+- **Upload link (mode B) — the flow.** The tool mints a single-use link bound to
+  (user, smoke, kind?, caption?), valid 24 hours, and returns it with
+  `shareWithUser`: the sentence the model relays. The user opens it on their
+  phone; it goes straight to the camera roll. The link opens a one-tile upload
+  page; the token is the authorization, consumed atomically on first successful
+  use — after the file has been validated, so a rejected photo leaves the link
+  usable (see `apps/web/app/api/photo-uploads/[token]/route.ts`).
+- **Attached image (mode A) — opportunistic, never observed on this connector.**
+  Declared via `_meta["openai/fileParams"]`, so a host that forwards a file gets a
+  direct store: the server fetches it (15s timeout, 20MB cap), runs the shared
+  pipeline (EXIF applied + all metadata/GPS stripped, normalized JPEG + thumb),
+  and files it under the smoke. **As of 2026-08-31 it has never fired here.** A
+  live ChatGPT call captured in Loki carried no `openai/fileParams` on any channel
+  (`metaFileParams: {"type":"absent"}`, no `image` argument, no undeclared keys),
+  and `mode: attached` has never been seen in production. ChatGPT *does* hydrate
+  `openai/fileParams` for some servers — third-party operators report receiving
+  `{ file_id, download_url }` objects — so the mechanism is real; it has simply
+  never been pointed at this connector, most likely a host-side gating policy
+  rather than anything wrong with our declaration. No other client has the
+  mechanism at all. See [client-compatibility.md](client-compatibility.md). The
+  path stays declared and implemented because it costs nothing and is how this
+  works the day a host does forward a file; it is not what the model or the docs
+  should lead with. Only the HOST can forward a file, and the description tells
+  the model never to paste a chat file URL (e.g. `chatgpt.com/...`) as text —
+  those links are unreachable outside ChatGPT and will 403.
+
+  **Open lead.** ChatGPT integrations that reportedly do receive files declare a
+  strict four-property file schema for the param; we publish the object through a
+  preprocess/passthrough wrapper, which emits a looser shape. Aligning the
+  published schema exactly with the Apps SDK reference shape and re-testing is the
+  next falsifiable experiment — cheap, and it either fixes it or narrows the cause
+  to gating.
 
 **Mode B is guaranteed, so intake failure is a FALLBACK, not an error** (changed
 2026-08-30). A reference that carries no fetchable URL, a URL that fails to fetch
@@ -821,7 +841,8 @@ model-visible error for a failure the user could do nothing about, while the lin
 the thing that actually works — was withheld. The signal is not lost: it moves into
 the `photo_intake` log record (below), which is queryable and alertable, unlike an
 error the user never sees. Consequence to watch: a systemic fetch regression is now
-quieter in the tool result, so a sustained non-`attached` rate deserves an alert.
+quieter in the tool result, so a sustained non-`attached` rate deserves an alert —
+though with attachment unobserved, the current non-`attached` rate is 100%.
 
 `delivery` (mode B only) tells the model **why**, without leaking anything:
 
@@ -886,11 +907,18 @@ published manifest — and the HTTP probe below records those calls anyway.
 **Two deliveries, one fetch path.** Mode A accepts the file handle from either:
 
 1. the declared **`image` argument** — `{ download_url, file_id, mime_type?,
-   file_name? }` the client fills in for the file param (the standard Apps SDK
-   path ChatGPT uses once the declaration is present); or
+   file_name? }` a client would fill in for the file param (the Apps SDK path); or
 2. request-level **`_meta["openai/fileParams"]`** — the same entry shape (array or
-   single object) carried in request metadata (the earlier, production-proven
-   delivery), still accepted.
+   single object) carried in request metadata.
+
+**Neither has ever been observed carrying a file *here*.** Both are accepted on
+the strength of the published specs and of other operators' reports, not of a call
+we have seen: the 2026-08-31 Loki capture found no `fileParams` on either channel.
+An earlier draft of this section called the `_meta` delivery "production-proven" —
+proven for ChatGPT's own apps, perhaps, but never for this server, and the probe
+that could have shown it returned the opposite. Keep both readers: the cost is a
+branch, other servers demonstrably do receive these handles, and the day one
+arrives here we want it to just work. Do not plan on either firing.
 
 In both, `download_url` is a **short-lived signed URL** the server must fetch
 promptly. Request `_meta` still takes precedence, with one fix: a *present but

@@ -994,8 +994,13 @@ export const recordPriceOutput = z
   })
   .passthrough();
 
-// Dual-mode: mode A returns { mode, photo }, mode B returns { mode, uploadUrl,
-// expiresAt } — both branches optional so either validates.
+// Dual-mode: mode B — the ordinary one — returns { mode, uploadUrl, expiresAt,
+// shareWithUser, delivery }; mode A, reached only when a host forwards a file,
+// returns { mode, photo }. Both branches optional so either validates.
+//
+// `shareWithUser` is the mode-B result's point: the ready-made sentence handing
+// the user their link. The link is useless unless the model relays it, and a
+// bare URL field is a fact the model may or may not act on.
 //
 // `delivery` rides mode B only and tells the model the TRUTH about why no image
 // was filed — `no_image_received` (nothing was forwarded) vs
@@ -1010,6 +1015,7 @@ export const addSmokePhotoOutput = z
     photo: looseObject.optional(),
     uploadUrl: z.string().optional(),
     expiresAt: z.string().optional(),
+    shareWithUser: z.string().optional(),
     delivery: looseObject.optional(),
   })
   .passthrough();

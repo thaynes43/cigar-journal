@@ -7,6 +7,7 @@ import {
   mintPhotoUploadToken,
   mintProductPhotoUploadToken,
   consumePhotoUploadToken,
+  assertPhotoUploadTokenUsable,
 } from "./photo-upload-tokens.js";
 import { CigarNotFoundError, SmokeNotFoundError, UnauthorizedError, UploadTokenInvalidError } from "./errors.js";
 import type { Principal } from "./index.js";
@@ -119,6 +120,59 @@ describe("photo upload tokens", () => {
     await expect(
       consumePhotoUploadToken(h.deps, { token: "not-a-real-token" }),
     ).rejects.toBeInstanceOf(UploadTokenInvalidError);
+  });
+
+  it("defaults to a 24-hour TTL", async () => {
+    // The link is delivered in a chat turn and opened on a phone, often not in
+    // the same sitting; the 15 minutes this used to be expired on the user far
+    // more often than it stopped anyone. Single use + 256 bits carry the weight.
+    const minted = await mintPhotoUploadToken(h.deps, user, { smokeId });
+    expect(Date.parse(minted.expiresAt) - h.deps.now().getTime()).toBe(24 * 60 * 60 * 1000);
+
+    // Still live at 23h59m, gone at 24h01m.
+    h.setNow(new Date("2026-08-28T11:59:00.000Z"));
+    await expect(assertPhotoUploadTokenUsable(h.deps, { token: minted.token })).resolves.toBeUndefined();
+    h.setNow(new Date("2026-08-28T12:01:00.000Z"));
+    await expect(consumePhotoUploadToken(h.deps, { token: minted.token })).rejects.toBeInstanceOf(
+      UploadTokenInvalidError,
+    );
+  });
+
+  describe("assertPhotoUploadTokenUsable", () => {
+    it("passes a live token WITHOUT consuming it, so the consume that follows still works", async () => {
+      // The property the upload route depends on: it checks the link is alive
+      // before decoding an image, and that check must not spend the link.
+      const minted = await mintPhotoUploadToken(h.deps, user, { smokeId });
+      await assertPhotoUploadTokenUsable(h.deps, { token: minted.token });
+      await assertPhotoUploadTokenUsable(h.deps, { token: minted.token });
+
+      const rows = await h.deps.db
+        .select()
+        .from(photoUploadTokens)
+        .where(eq(photoUploadTokens.smokeId, smokeId));
+      expect(rows[0]!.usedAt).toBeNull();
+
+      const consumed = await consumePhotoUploadToken(h.deps, { token: minted.token });
+      expect(consumed.targetKind).toBe("smoke");
+    });
+
+    it("refuses an unknown, a used, and an expired token with the same opaque error", async () => {
+      await expect(
+        assertPhotoUploadTokenUsable(h.deps, { token: "not-a-real-token" }),
+      ).rejects.toBeInstanceOf(UploadTokenInvalidError);
+
+      const used = await mintPhotoUploadToken(h.deps, user, { smokeId });
+      await consumePhotoUploadToken(h.deps, { token: used.token });
+      await expect(
+        assertPhotoUploadTokenUsable(h.deps, { token: used.token }),
+      ).rejects.toBeInstanceOf(UploadTokenInvalidError);
+
+      const expired = await mintPhotoUploadToken(h.deps, user, { smokeId, ttlSeconds: 60 });
+      h.setNow(new Date("2026-08-27T12:02:00.000Z"));
+      await expect(
+        assertPhotoUploadTokenUsable(h.deps, { token: expired.token }),
+      ).rejects.toBeInstanceOf(UploadTokenInvalidError);
+    });
   });
 
   it("does not mint for a non-owned smoke, and writes nothing", async () => {

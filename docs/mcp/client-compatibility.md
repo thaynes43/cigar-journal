@@ -133,8 +133,11 @@ intended for conversational clients at all.
 **Verified on the wire (live `tools/list`, authenticated, production endpoint).**
 `add_smoke_photo` publishes `_meta = {"openai/fileParams": ["image"]}` and an
 object-typed top-level `image` property, out of `required`. The manifest/declaration
-hypothesis for the owner's failure is **disproven** — the declaration is correct and
-ChatGPT is reading it.
+hypothesis for the owner's failure is **disproven as a spelling problem** — what we
+publish is correct and well-formed. It does **not** follow that the host acts on it;
+that reading was assumed here and the 2026-08-31 capture below contradicts it. All
+that is established is: we declare it properly, and the declaration reaches the
+client.
 
 **Verified in Loki.** The owner's failing call is recorded:
 `[mcp] tool_called {"tool":"add_smoke_photo","latencyMs":9}` — and that was the
@@ -145,10 +148,12 @@ say whether an image argument arrived, whether request `_meta` arrived, or why m
 B was chosen — and a `file_id`-only handle would have looked identical to no image
 at all.
 
-**Still unresolved: does ChatGPT forward an in-chat image to the tool call?** The
-user had uploaded photos *earlier in the same conversation*, not in the invoking
-turn. The leading hypothesis is that only a file attached to the *current* turn is
-forwarded — but that is a hypothesis drawn from one transcript, not a verified fact.
+**Then unresolved: does ChatGPT forward an in-chat image to the tool call?**
+(Answered on 2026-08-31 — no. See the next section; the reasoning is kept because
+it is why the probe was built.) The user had uploaded photos *earlier in the same
+conversation*, not in the invoking turn. The leading hypothesis was that only a file
+attached to the *current* turn is forwarded — a hypothesis drawn from one
+transcript, not a verified fact.
 
 **It is a hypothesis here and nowhere else.** No model-facing string asserts it: not
 the tool description, not the server `INSTRUCTIONS`, not the contract. An earlier
@@ -159,22 +164,73 @@ link that actually works. So **the link leads** in every branch, and
 `delivery.status` is used to say something true about why, not to withhold it.
 
 The `photo_intake_request` record (tool-contract.md, "Intake diagnostics") is what
-will settle the hypothesis: it is written before input validation, on the raw
-JSON-RPC body, and it describes `params` itself as well as `arguments` and
-`params._meta` — so it reports the keys the host actually sent, including keys the
-server does not read. If the owner's next live test attaches a photo in the invoking
-turn and the record still shows nothing delivered, the hypothesis is wrong; if a key
-we never read turns up, that is the answer.
+settled it: written before input validation, on the raw JSON-RPC body, describing
+`params` itself as well as `arguments` and `params._meta` — so it reports the keys
+the host actually sent, including keys the server does not read. The next section is
+what it found.
 
 **What shipped meanwhile.** Named intake outcomes in the log; a schema that no
 longer rejects an odd `image` before it can be recorded; acceptance of alternate URL
 keys and magic-byte type sniffing; an SSRF guard that decides on the parsed address
 rather than the spelling of the host; fetch/decode failure falling back to the mode-B
-link instead of erroring; and
-a `delivery.status` on the mode-B result so the model can tell the user something
-true. **This may not make in-chat attachment work at all.** If ChatGPT forwards
-nothing, the outcome is a precise diagnosis and honest model guidance — mode B stays
-the working path, and the logs become the evidence for an upstream report.
+link instead of erroring; and a `delivery.status` on the mode-B result so the model
+can tell the user something true. It was written down at the time that this might
+not make in-chat attachment work at all — it did not, and the payoff was the one
+predicted: a precise diagnosis, honest model guidance, and logs that are now the
+evidence for an upstream report.
+
+## 2026-08-31 — settled: ChatGPT forwards nothing
+
+`photo_intake_request` did its job. A live authenticated `tools/call` from ChatGPT
+at 03:00:40Z, captured in Loki, carried **no file params on any channel**:
+
+```
+metaFileParams: {"type":"absent"}     # no _meta["openai/fileParams"]
+argImage:        absent                # the declared `image` argument unfilled
+                                       # and no undeclared keys on params or arguments
+```
+
+The record is written before input validation on the raw JSON-RPC body and
+enumerates the keys the host actually sent — including keys the server does not
+read — so "absent" here means absent, not unparsed. `mode: attached` has never been
+observed in production, on any client.
+
+**What that settles.** The turn-recency hypothesis above is moot: the question was
+never *which* image ChatGPT forwards to this connector, it is that it forwards
+none. The upload link is not the fallback — it is the flow, which is why the tool
+description, the server instructions and the contract now lead with it.
+
+**It is not that the mechanism does not exist.** ChatGPT *can* hydrate
+`openai/fileParams`: third-party operators report their servers receiving
+`{ file_id, download_url }` objects through it. So the feature is real and our
+declaration is well-formed — it has simply never been aimed at this connector.
+
+**The leading explanation is host-side gating, not our schema.** Codex's source
+restricts `fileParams` to its own first-party apps server, under an explicit
+"Disallow custom MCPs from uploading files via fileParams". Developer-mode ChatGPT
+connectors plausibly sit behind the same policy. If so, nothing we ship changes the
+outcome, and no amount of schema polish will.
+
+**One falsifiable lead before accepting that.** Integrations that reportedly do
+receive files declare a **strict four-property file schema** for the param
+(`download_url`, `file_id`, `mime_type`, `file_name`); we publish the object via a
+preprocess/passthrough wrapper, which emits a looser shape. Aligning the published
+schema exactly with the Apps SDK reference shape and re-testing would separate
+"our declaration is subtly off" from "custom connectors are gated out". Worth one
+experiment; not worth a redesign.
+
+**No other host has the mechanism at all.** Claude cannot extract attachment bytes
+into tool arguments — architecturally out of reach, per Anthropic's own tracker —
+and Cursor and VS Code are the same. The MCP spec itself has no file-input
+primitive; the SEP drafts (2356 / 1306) our handle names track are unratified. So
+even if ChatGPT started forwarding tomorrow, the upload link would remain the only
+path that works everywhere. That is the durable reason it leads, independent of
+how the OpenAI question resolves.
+
+**What it does not settle.** Whether the gating is deliberate, temporary, or a
+bug. The Loki signature `photo_intake_request` is the evidence base for an upstream
+report to OpenAI; keep the probe and its logging in place. Mode A stays implemented
+— it costs a branch and it is how this works the day forwarding lands.
 
 **Re-testing requires a connector refresh AND a new chat.** The tool description and
 server instructions changed, and per the manifest-cache section above an in-flight
