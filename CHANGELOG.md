@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.29.0](https://github.com/thaynes43/cigar-journal/compare/v0.28.1...v0.29.0) (2026-08-31)
+
+
+### Features
+
+* **db:** taxonomy registries — brands, lines, blends, blenders (migration 0026, ADR-012) ([#208](https://github.com/thaynes43/cigar-journal/issues/208)) ([94d39df](https://github.com/thaynes43/cigar-journal/commit/94d39df1009cc4efcce2bbf99ab87dca67b46913))
+
+
+### Bug Fixes
+
+* **enrichment:** evidenced market, write authority, lane lock, per-request liveness ([#170](https://github.com/thaynes43/cigar-journal/issues/170), [#157](https://github.com/thaynes43/cigar-journal/issues/157), [#155](https://github.com/thaynes43/cigar-journal/issues/155), [#185](https://github.com/thaynes43/cigar-journal/issues/185)) ([#192](https://github.com/thaynes43/cigar-journal/issues/192)) ([88196bc](https://github.com/thaynes43/cigar-journal/commit/88196bc8fb44000b664b5e31d3a79cedf8c2ddf7))
+* **mcp,web:** malformed-id 404s on delete/get_smoke; strict published photo schema ([#202](https://github.com/thaynes43/cigar-journal/issues/202) exp 1) ([#204](https://github.com/thaynes43/cigar-journal/issues/204)) ([9177a1c](https://github.com/thaynes43/cigar-journal/commit/9177a1cc27ee151fe0825010e9ebe263b3e23b94))
+* **mcp:** gap-fill invariant per [#177](https://github.com/thaynes43/cigar-journal/issues/177) ruling — two-call primary, entry never traded for enrichment ([#188](https://github.com/thaynes43/cigar-journal/issues/188)) ([54176cb](https://github.com/thaynes43/cigar-journal/commit/54176cb8232d13b6324cd4f8c448c58367f7ac74))
+
 ## [0.28.1](https://github.com/thaynes43/cigar-journal/compare/v0.28.0...v0.28.1) (2026-08-31)
 
 
