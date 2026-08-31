@@ -8,7 +8,6 @@ import {
   resolveContentType,
   shapeOf,
   sniffImageType,
-  UNPARSED_IMAGE,
 } from "./photo-intake.js";
 
 // Pure unit tests for the intake classifier: no HTTP, no storage, no database.
@@ -64,17 +63,15 @@ describe("shapeOf", () => {
 });
 
 describe("describeArgument / describeRequestMeta", () => {
-  it("unwraps the schema leniency marker so the record shows what the HOST sent", () => {
-    // schemas.ts preserves an unparsable delivery under the marker; the log must
-    // report the raw shape, never the wrapper we added around it.
-    expect(describeArgument({ [UNPARSED_IMAGE]: "http://x" }).type).toBe("string");
-    expect(describeArgument({ [UNPARSED_IMAGE]: null }).type).toBe("null");
-    expect(describeArgument({ [UNPARSED_IMAGE]: { download_url: 12 } }).keys).toEqual([
-      "download_url",
-    ]);
-    expect(JSON.stringify(describeArgument({ [UNPARSED_IMAGE]: "http://x" }))).not.toContain(
-      UNPARSED_IMAGE,
-    );
+  it("describes the delivery exactly as the host sent it", () => {
+    // No unwrapping step: schemas.ts publishes a strict `image` (issue #202
+    // experiment 1) and no longer wraps an unparsable delivery in a marker, so the
+    // shape reported IS the shape that arrived.
+    expect(describeArgument("http://x").type).toBe("string");
+    expect(describeArgument(null).type).toBe("null");
+    expect(describeArgument({ download_url: 12 }).keys).toEqual(["download_url"]);
+    // A wrongly-typed value means the key arrived but carries nothing usable.
+    expect(describeArgument({ download_url: 12 }).filled).toEqual([]);
   });
 
   it("reports the request-_meta entry count alongside its shape", () => {
@@ -107,11 +104,20 @@ describe("classify — the four answers the acceptance bar needs", () => {
     ]);
   });
 
-  it("a non-object image → not_an_object", () => {
+  it("a non-object handle → not_an_object, on either channel", () => {
     for (const value of ["http://x", 5, null, ["a"], true]) {
-      expect(classify({ [UNPARSED_IMAGE]: value }, undefined)).toEqual({
+      // The published `image` schema now refuses these before the handler, so on
+      // the argument channel this is defence in depth — classify is not the schema.
+      expect(classify(value, undefined)).toEqual({
         kind: "unusable",
         channel: "argument",
+        reason: "not_an_object",
+      });
+      // The request-`_meta` channel is NOT schema-validated, so this is the live
+      // path a host can still take here.
+      expect(classify(undefined, meta([value]))).toEqual({
+        kind: "unusable",
+        channel: "request_meta",
         reason: "not_an_object",
       });
     }

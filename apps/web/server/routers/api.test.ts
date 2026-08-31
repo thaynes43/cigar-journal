@@ -172,6 +172,19 @@ describe("tRPC API", () => {
     expect(isUnresolvableSmoke(anonUnknown)).toBe(true);
   });
 
+  it("rejects a malformed smoke id on delete, and leaves a well-formed unknown id not-found", async () => {
+    // The same defect class as the reads above, on the one procedure the public-id
+    // fix left behind. Authenticated-only, so it was never a public 500 — but it
+    // was still an untyped 22P02 rather than an answer, and the caller cannot tell
+    // a malformed id from an absent one either way.
+    const a = caller(h.deps, userA);
+    const malformed = await trpcError(a.smokes.delete({ smokeId: "not-a-uuid" }));
+    expect(malformed.code).toBe("BAD_REQUEST");
+
+    const unknown = await trpcError(a.smokes.delete({ smokeId: newRequestId() }));
+    expect(unknown.code).toBe("NOT_FOUND");
+  });
+
   it("browses the catalog alphabetically, catalog-only", async () => {
     await h.seedCigar({ canonicalName: "Zylophone Browse Api" });
     await h.seedCigar({ canonicalName: "Aardvark Browse Api" });

@@ -832,6 +832,13 @@ result:
   published schema exactly with the Apps SDK reference shape and re-testing is the
   next falsifiable experiment — cheap, and it either fixes it or narrows the cause
   to gating.
+  **Experiment 1 shipped 2026-08-31** (issue #202): `image` is now a plain optional
+  strict object — the four properties, all optional strings, `additionalProperties:
+  false` — with the preprocess/passthrough wrapper and its internal marker removed.
+  The retest is the owner attaching an image in ChatGPT and calling
+  `add_smoke_photo`; `photo_intake_request` answers, since it records the delivery
+  off the unparsed body before validation. If the shape was never the cause, this
+  reverts and the cause narrows to host-side gating.
 
 **Mode B is guaranteed, so intake failure is a FALLBACK, not an error** (changed
 2026-08-30). A reference that carries no fetchable URL, a URL that fails to fetch
@@ -884,25 +891,38 @@ image). `add_smoke_photo` therefore declares an **optional** top-level `image`
 property and lists it in the **tool-level** `_meta["openai/fileParams"]: ["image"]`
 published in `tools/list`. The MCP SDK (1.30.x) carries this via a `_meta`
 pass-through on `registerTool` — no response hooking needed. The `image` property
-is deliberately **permissive** (every sub-field optional, unknown keys pass
-through, kept out of `required`).
+is **optional** and every sub-field within it is optional, so a partial file object
+never blocks the call; it is kept out of `required`.
 
-**Correction (2026-08-30): that permissiveness had a hole, and it was hiding the
-failures we most needed to see.** `passthrough()` forgives unknown *keys*, not a
-wrong *type*. Probed against the installed zod 4.4.3 + SDK 1.30.0, `image: "http://x"`,
-`image: null`, `image: 5` and `image: { download_url: 12 }` all **failed input
-validation inside the SDK, before the handler ran** — returning a bare error string
-to the model and leaving **zero** lines in the log, because the event logger is only
-reached from inside the tool wrapper. `image: null`, a plausible "no file attached"
-host shape, hard-errored the whole call. So the schema now **wraps rather than
-loosens**: any `image` the handle schema rejects is preserved verbatim under an
-internal marker key, and the handler classifies and logs its shape. The published
-`inputSchema` is byte-identical either way (pinned by a manifest-stability test —
-`.catch()` cannot be used for this at all: it throws "Dynamic catch values are not
-supported in JSON Schema" at emission time and would break `tools/list` for the
-whole server). The outer schema stays `.strict()`: an undeclared top-level key is
-still refused, because relaxing it would flip `additionalProperties` in the
-published manifest — and the HTTP probe below records those calls anyway.
+**The published shape is STRICT (2026-08-31, issue #202 experiment 1).** `image` is
+a plain optional object admitting exactly `download_url`, `file_id`, `mime_type`
+and `file_name`, all optional strings, emitting `additionalProperties: false`:
+
+```json
+{ "type": "object",
+  "properties": { "download_url": {"type":"string"}, "file_id": {"type":"string"},
+                  "mime_type": {"type":"string"}, "file_name": {"type":"string"} },
+  "additionalProperties": false }
+```
+
+This replaced a `z.preprocess` + `.passthrough()` wrapper that preserved anything
+the handle schema rejected under an internal marker so the handler could log its
+shape. The reason for the wrapper was observability — a shape the SDK refuses never
+reaches the event logger — and that reason no longer holds: the HTTP probe below
+(`photo_intake_request`) describes the delivery off the **unparsed** JSON-RPC body,
+before validation, so a refused shape is still fully recorded. What the wrapper
+bought is now paid for a layer earlier, and the published shape is free to match the
+Apps SDK reference exactly, which is the experiment.
+
+**The trade, stated plainly.** On the `image` argument, a host sending `null` (a
+plausible "no file attached" shape) or a URL under an undeclared key now gets
+`InvalidParams` instead of a mode-B upload link. The request-level
+`_meta["openai/fileParams"]` channel is not schema-validated and still accepts
+both. A manifest-stability test pins the emitted object whole, so a zod/SDK upgrade
+cannot drift it. (`.catch()` cannot be used to soften this at all: it throws
+"Dynamic catch values are not supported in JSON Schema" at emission time and would
+break `tools/list` for the whole server.) If the experiment does not move intake,
+this reverts.
 
 **Two deliveries, one fetch path.** Mode A accepts the file handle from either:
 
