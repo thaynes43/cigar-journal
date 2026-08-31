@@ -1,252 +1,184 @@
-# Session handoff — 2026-08-30 evening (v0.28.0)
+# Session handoff — 2026-08-31 pre-dawn (v0.28.0 + overnight fixes)
 
 For a cold-start agent. The durable backlog is GitHub issues (label `backlog`);
-this file is the bridge: where prod stands, what is in flight, and what is
-actually blocked on whom. Overwrite it at the next major handoff.
+this file is the bridge: where prod stands, what shipped overnight, and the
+ordered queue for the 2026-08-31 daytime (ultracode) session. Overwrite it at
+the next major handoff. Every factual claim below was verified against live
+state on 2026-08-31 ~02:00–03:00 UTC; the previous handoff carried eleven
+verified errors, so trust this revision over memory of the old one.
 
 ## Where prod stands
 
-- **v0.28.0 live and verified** — both pods, all four crawl CronJobs, migrations
-  through **0024** applied, `/api/health` ok. Next free migration is **0025**.
-- **SSO is live.** Authentik OIDC + invites (#46) shipped in #168; the owner
-  created the Authentik application and the 1Password fields, and
-  `cigar-journal-oidc` reports SecretSynced. `/signin` renders "Continue with
-  Authentik". Local email+password sign-in is unaffected and stays the fallback.
-- **THE SITE IS LIVE AND THE OWNER'S REVIEWS ARE PUBLIC** (flipped 2026-08-30).
-  `users.journal_visibility = 'public'`; `/journal` and `/smokes/<id>` serve
-  anonymously and review photos serve at `/api/photos/<id>`. Treat every change
-  to those surfaces as user-facing from now on.
-- **Catalogue: 970 active, 6 excluded** (all genuinely Fox gift cards), 914
-  photos, ~1,549-row triage queue, **291 `listing_matches` with
-  `decided_by='agent'`** that must stay protected.
-- **The curation lane runs on a static service token now.** No more re-consent.
-  Token id `c62463be-004f-467f-9372-b60c28bc1597`, client `dev-env-curate`,
-  scopes `curation:read`+`curation:write`, **expires 2026-11-28** (90d — the
-  elevated ceiling). State file `~/.local/state/cigar-curation/token.json` on the
-  dev-env-ops PVC, `{access_token, expires_at, token_id}`, **read-only to the
-  lane** (haynes-ops#2692). A 401 means re-mint, never re-consent.
-- Vendors: **Fox Cigar** (NC, enrich daily 06:00 ET, offers Sun 08:00 ET) and
-  **Cuban Lou's** (CC, offers Wed 08:00 ET; **enrich CronJob SUSPENDED** — that
-  suspension is a workaround for #170, do not lift it until #170 lands).
-  2 Guys and Small Batch remain `crawlEnabled: false`.
+- **v0.28.0 live on both pods**, `/api/health` ok. Migrations through **0024**
+  applied. Migration numbers are pre-assigned: **0025 = held PR #192**,
+  **0026–0027 = taxonomy (#196)**, **0028+ = reviews (#199)**. A new lane takes
+  the next number after those and says so in its prompt.
+- **The site is live and the owner's reviews are public.** `/journal` and
+  `/smokes/<id>` serve anonymously. Overnight, malformed ids on those routes
+  went 500 → 404 and public photo bytes became revocable
+  (`public, max-age=300, must-revalidate` + `Vary: Cookie`) — treat every
+  change here as user-facing.
+- **Catalogue: 971 active, 6 excluded** (Fox gift cards), 914 photos, **591**
+  `listing_matches` with `decided_by='agent'` that must stay protected (the
+  old handoff's 291 was one day's audit count, not the row total).
+- **Crawl CronJobs are consolidated into the HelmRelease** (haynes-ops
+  #2693+#2694, merged 02:17/02:21 UTC): one `&mainImage` pin now moves all six
+  containers. Schedules are **UTC**, not ET: Fox enrich daily 06:00, Fox
+  offers Sun 08:00, Cuban Lou's offers Wed 08:00, Cuban Lou's enrich Tue/Thu/
+  Sat 06:00 — and that last one is **SUSPENDED as the #170 workaround; do not
+  lift until the #192 rework ships** (unsuspending is that work's final step).
+  The k8tz webhook stamped `America/New_York` on the recreated CronJobs
+  (it unconditionally overwrites `spec.timeZone` on CREATE — invisible to
+  flux-local, which cannot simulate admission webhooks); fixed and verified
+  the same night via `k8tz.io/inject: "false"` annotations (haynes-ops
+  **#2698**, HR v41, all four live on `Etc/UTC`).
+- **The curation lane runs on a static service token.** Token id
+  `c62463be-004f-467f-9372-b60c28bc1597`, client `dev-env-curate`, scopes
+  `curation:read`+`curation:write`, expires 2026-11-28. State file
+  `~/.local/state/cigar-curation/token.json` on the dev-env-ops PVC, read-only
+  to the lane. A 401 means re-mint, never re-consent.
+- Vendors: Fox Cigar (`focus='NC'`) and Cuban Lou's (`focus='CC'`) crawl;
+  2 Guys, BR, CI, Mr. Cigar, OC, RSVP are registered but disabled; there is
+  **no Small Batch row** in the prod registry (its adapter exists in code).
+  **Vendor enablement is gated: nothing new is enabled until taxonomy
+  matching v2 lands (ADR-012 / #196 Wave 5).** Re-probes are fine.
+- SSO (Authentik OIDC + invites) live; local email+password stays the
+  fallback. Nothing is blocked on the owner except one design ruling (below).
 
-## Shipped today (v0.27.0 → v0.28.0)
+## Shipped overnight (2026-08-31, 02:00–03:00 UTC)
 
-#160 crawler sitemap sampling + root-slug gate + multi-sample probe · #162
-unmerge bookkeeping + rename undo · #163 Wikidata brand covers · #165/#178
-operator-minted service tokens (ADR-011) + `audit_log.client_id` · #166 the
-packaging-SKU exclusion batch (documented, **not applied**) · #167 bulk-enqueue
-enrichment · #168 SSO + invites · #171 measured tobacco ramp/seal/chips · #179
-2 Guys product gate · #180 the embedded-Postgres teardown race · #181 per-vendor
-enrichment budgets · #184 add_smoke_photo delivery diagnostics.
-Closed: #45, #46, #48, #49, #126, #129, #154, #158, #174.
+An audited review-and-repair pass over the previous day's work:
 
-## IN FLIGHT — six open PRs, all reviewed, ALL HELD
+- **cj #190 merged** — excludeCigar refuses held inventory (#169) + audit
+  client attribution (#183). Its "blocker" hold was disproven by inspection:
+  `applyInverse` only ever restores prior status; the sole `excluded` write
+  site sits behind the guard in-transaction (reasoning on the PR).
+- **cj #194 merged** — the reviewed-clean #173 half of #188 (agent-run console
+  pagination), split out cleanly; #188 now carries only the #177 rework.
+- **cj #197 merged** — `fetchBinary` bounds downloads in two layers; both
+  crawler image paths capped (vendor product photos had **no** bound at all).
+- **cj #200 merged** — public 404s + revocable photo caching (above).
+- **haynes-ops #2693 + #2694 merged** in strict order with cluster
+  verification between (Helm v40); the k8tz timezone stamp was the one field
+  that failed verification, remediated in **haynes-ops #2698** (Helm v41,
+  verified live), after which **cj #189** (one-image-pin docs) merged.
+- **cj #195 merged** — stale-text cleanup (the `--ttl-days` usage string now
+  keys the 90-day ceiling on granted scopes; the public-reads impression
+  comment says what the code does). Most of its migration-number fixes turned
+  out to be already fixed by #190 — the overnight audit ran pre-#190.
+- **ADR-012** (structured taxonomy) and **ADR-013** (external reviews and
+  blend aggregates) written; backlog issues **#196** and **#199** carry the
+  build plans.
 
-The burndown workflow COMPLETED (an earlier draft of this file said it was killed
-by the pod bounce — it was not; ignore that). It produced four PRs, every one
-adversarially reviewed and every one returned **hold**. CI is green on all of
-them; green CI is not the reason they are held.
+## Do these, in this order (the ultracode session)
 
-| PR | covers | verdict |
-|---|---|---|
-| cj **#192** | #170, #157, #155, #185 | hold — **blocker** |
-| cj **#190** | #169, #183 | hold — **blocker** |
-| cj **#188** | #177, #173 | hold — split it, see below |
-| cj **#189** | #159 docs | follows the ops pair |
-| ops **#2693** + **#2694** | #159 (1 of 2, 2 of 2) | hold — ordering hazard |
+### 0. Close out the overnight tail
+Take the release-please PR through (REGULAR merge, not squash) and deploy:
+post-consolidation there is ONE image pin (`&mainImage` in helmrelease.yaml).
+Two one-line follow-ups from #200's review: `smokes.delete` still takes bare
+`z.string()`, and MCP `get_smoke` passes a malformed id straight to the
+domain — both authenticated-only 500s, fix in passing.
 
-Read each PR's review before touching it. The two blockers:
+### 1. Taxonomy — ADR-012, issue #196, Waves 0–2
+The main event, and the gate for everything crawler-shaped. Wave 0 docs
+alignment (supersede the DDD "resists hierarchy" wording; industry-vocabulary
+reference; **DESIGN-004 stays on the driving session** — owner-facing design).
+Wave 1 schema + brand registry (migration 0026). Wave 2 write paths +
+matching v2 (0027). Read the ADR before decomposing; the prod evidence that
+justifies every decision is summarized in it.
 
-- **#192 — the founding inference is empirically false.** It infers a cigar's
-  market from the vendors already stocking it, but **Cuban Lou's (`focus='CC'`)
-  sells a majority NON-Cuban catalogue**, so CC-vendor evidence does not mean the
-  cigar is CC. The review also found the guard is not "only ever refuses a write"
-  (on the seed path a refusal falls through to an unconditional
-  `createCigarFromListing` INSERT), and that a cross-market mis-link permanently
-  disables the guard on the row it damaged — which Cuban Lou's UNSUSPENDED offers
-  CronJob will then re-assert. Do not merge this to unblock #170; it would ship a
-  new mis-link path in the fix for mis-linking.
-- **#190 — a second door past the guard.** `applyInverse`'s `cigar.exclude` case
-  writes `catalog_status='excluded'` directly with no held-inventory check, and
-  it is console-reachable. The guard #169 asks for is not complete until that
-  path is closed too.
+### 2. #192 rework (fixes #170) — then unsuspend Cuban Lou's enrich
+Cheapest correct path per the overnight audit: set `vendors.focus='both'` for
+Cuban Lou's (it sells Habanos AND Dominican/Nicaraguan bundles — ~39 of its
+56 CC inferences are wrong), which collapses the false evidence to `unknown`
+with zero algorithm change; then close the residuals the review found: the
+seed-path fall-through to `createCigarFromListing` after a cross-market
+refusal, and `mayWriteCatalogPhoto('both', …)` returning true (photo
+authority needs its own gate — `vendors.focus` currently conflates "what it
+sells" with "what it is authoritative about"). Rebase over main (#190 landed
+five shared files). Migration 0025 is this PR's. Unsuspending
+`cigar-journal-crawl-enrich-cuban-lous` is the LAST step, not a separate task.
 
-**#188 should be split: land #173 now, hold #177.** The reviewer could not break
-the #173 half (agent-run pagination). The #177 half has three majors, including a
-described `save_smoke` queueing an enrichment request for a cigar that already
-exists, and `enrichmentQueued` now being false on a reachable path against all
-four places that document it.
+### 3. #177 rework (in #188) — one owner ruling needed
+Wrap/move `resolveAndEnrich` so an enrichment failure can never roll back the
+journal entry (it currently runs inside the save transaction with no
+try/catch — "never trade the entry for the enrichment" is the PR's own stated
+priority). **The documented-path inversion is the owner's call** (issue #177
+scope item 3): push that one question via AskUserQuestion when he's around;
+do not decide it in a lane.
 
-**#2693/#2694 ordering hazard:** #2694 is a green non-draft whose branch still
-carries the raw manifests it must not coexist with, and nothing mechanically
-enforces the order. A failed Helm upgrade after #2693 prunes them rolls back to a
-release with NO crawl CronJobs. Also confirm `timeZone` and `suspend` survive the
-chart's silent defaults — `suspend` matters most, because
-`cigar-journal-crawl-enrich-cuban-lous` must stay suspended (#170).
+### 4. Taxonomy Waves 3–4, then reviews (ADR-013 / #199)
+Wave 3 backfill curation (565 unbranded rows, collapse-bucket splits — the
+Padron rows serving 8–12 products each; audited, conservative, reversible).
+Wave 4 read surfaces + facets per DESIGN-004. Then #199: review_observations,
+critic/journal aggregates, halfwheel + Habanos reference sources (each needs
+a GitOps egress allowlist entry before it can fetch).
 
-Start by working the reviews on these six, not by opening new work.
+### 5. 2 Guys re-probe (probe only)
+The corrected gate from #179 is deployed but never re-probed. Run the
+in-cluster probe Job (recipe + acceptance checklist in PR #179's review; the
+gate line must read `prefix /store/ minus /^\/store\/go(?:\/|$)/i`, verdict
+`ok`). **Enabling stays gated on #196 Wave 5** — do not enable on a green
+probe alone.
 
-## Do these, in this order
+### 6. Codex-validate the photo path (#184) after the deploy
+Validation plan in PR #184's body. Codex proves server-side handling and
+diagnostics; it cannot prove ChatGPT's UI binds an in-chat image — only the
+owner can. Say so; don't imply coverage.
 
-Every one of these is unblocked. Nothing here waits on the owner.
+### 7. #97 remainder
+Sweep shipped surfaces against `docs/design/002-go-live-experience.md`;
+empty-state audit; MCP client matrix dated in
+`docs/mcp/client-compatibility.md`; archive cutover per the (closed) #96 plan
+— MkDocs readers point at the new site, every archived review renders, the
+archive stays publishable until the owner retires it. Then README/docs
+describe the launched product.
 
-### 1. Recover the killed burndown (first, before new work)
-See "IN FLIGHT" above. Adopt surviving branches/PRs, `git worktree remove` the
-stranded ones, re-dispatch the rest.
+## Blocked on the owner — one ruling, zero merges
 
-### 2. #170 — vendor-focus predicate on enrich matching
-Highest priority defect on the board. A CC drain can answer an NC request and
-attach a Habanos photo to a non-Cuban cigar; `product_photos` is
-UNIQUE(cigar_id), so the wrong photo takes the only slot and is not merely a
-display bug.
-**`cigar-journal-crawl-enrich-cuban-lous` is SUSPENDED as the workaround for
-this. Do not unsuspend it until #170 ships.** Unsuspending it is the last step
-of #170, not a separate task, and it is what finally gives Cuban Lou's a
-recurring enrich lane.
+The #177 documented-path inversion (queue item 3). Everything else is agent
+work. (The old handoff's "merge the dev-env PRs" section is void — haynes-ops
+#2673/#2684/#2683 all merged 2026-08-31 ~01:12 UTC. Side effect: the dev pod's
+MCP 401 fix is live — verify `claude mcp list` shows cigar-journal healthy on
+the next session start.)
 
-### 3. #169 — excludeCigar must refuse a cigar with purchase lots
-Already cost the owner 23 sticks (three samplers hidden from his humidor). Refuse
-for ANY user's lots, not just the caller's. Guidance already exists in the agent
-manual (haynes-ops#2680) but guidance is not enforcement.
+## Rules that bite
 
-### 4. #177 — gap-fill drops the journal entry
-Our own MCP instruction. Verified from Loki: the owner's whole session was
-`browse_catalog`, `search_cigars`, `add_cigar` — no `save_smoke`, no errors.
-
-### 5. Re-probe 2 Guys, then enable it (separate PRs)
-v0.28.0 carries the corrected gate from #179 but the vendor has NOT been
-re-probed. This is what gets a catalogue photo for brands Fox does not stock —
-the owner's "Red Anchor Captain" case.
-
-Run an in-cluster probe Job in ns `frontend` from the CURRENT image (build the
-Job by taking a crawl CronJob's `jobTemplate` and replacing the command with
-`--probe --vendor two-guys-cigars`; the dev pod cannot reach vendor domains, only
-an in-cluster Job can):
-
-```
-kubectl -n frontend get cronjob cigar-journal-crawl-offers-fox-cigar -o json \
-  | <swap container command to: node --import tsx src/cli.ts --probe --vendor two-guys-cigars> \
-  | kubectl apply -f -
-kubectl -n frontend logs job/<name> -c crawl
-```
-
-**The full acceptance checklist is in the review on PR #179 — read it before
-judging the output.** Two points from it that catch a void run: the verdict must
-be `ok`, and the gate line must read `prefix /store/ minus /^\/store\/go(?:\/|$)/i`
-— if it still prints a bare `prefix /store/`, the Job ran a cached image and the
-result means nothing. The last probe (2026-08-30, pre-fix) showed robots
-allowing, `varied=no` across 4 samples (the sitemap variance is GONE), and 3/3
-sampled URLs failing because `/store/` was matching `/store/go/registry/` pages.
-
-Enabling is a SEPARATE PR from the probe, and green CI is not vendor
-verification.
-
-### 6. Codex-validate the photo path (owner requires this before he retests)
-#184 shipped diagnostics against a live server, so this runs AFTER a deploy, not
-against a branch. The validation plan is in PR #184's body. Be honest about the
-ceiling: codex can prove server-side handling, the diagnostics firing, no secrets
-in logs, and that the fallback never errors. It CANNOT prove whether ChatGPT's UI
-binds an in-chat image — only the owner can exercise that.
-
-### 7. Then the rest
-#157, #155, #185, #183, #173, #156, #159, the #127 remainder, and the 44-row
-packaging-SKU exclusion batch documented in `.agents/reference/catalog-exclusions.md`
-(planned and gated, never applied — re-run its gate before applying, and the
-selector must not touch anything the owner holds a lot for).
-
-### Rules that bit us today
-- Pre-assign a migration number per lane and put it in the lane's prompt. Next
-  free is **0025**. #178 and #181 both took 0023.
-- A red CI `test` job is now a REAL failure (#180 fixed the flake). Do not
+- **Pre-assign migration numbers** (see the ledger at the top). #178/#181
+  collided once already.
+- **A red CI `test` job is usually real** (#180 fixed the main flake) — but
+  one survivor is documented on #174: `auth.test.ts` drives the ambient
+  `@cj/db` singleton pool with no error listener, so pg `57P01` can still
+  fail a green run. Check the failure shape before retriggering; never
   retrigger past one.
-- On any image bump there is now ONE pin: the `&mainImage` anchor in
-  `helmrelease.yaml`. The four crawl CronJobs became app-template controllers on
-  that same HelmRelease and resolve the anchor, so Renovate's one-line edit moves
-  all six containers (#159; haynes-ops#2693 + haynes-ops#2694).
+- **One image pin** post-consolidation: the `&mainImage` anchor in
+  helmrelease.yaml moves all six containers; haynes-ops
+  `scripts/crawl-cronjob-invariants.sh` asserts they stay in step (not yet
+  wired into CI).
+- **k8tz overwrites `spec.timeZone` on every CronJob CREATE** (not
+  fill-when-absent — proven from source and managedFields), flux-local cannot
+  see admission webhooks, and the HelmRelease has drift detection off. The
+  four crawl CronJobs carry `k8tz.io/inject: "false"` since haynes-ops #2698;
+  any NEW CronJob that must not run NY time needs the same annotation, and
+  after anything that CREATEs one, verify `spec.timeZone` live.
+- **`gh` env token goes stale mid-session** — on a 401, prefix commands with
+  `GH_TOKEN=$(cat /creds/gh_token)`.
+- **Fetch the canonical clone before dispatching lanes** — its local `main`
+  sits ~170 commits behind; always branch worktrees from `origin/main`
+  explicitly.
+- UI lanes produce before/after screenshots from the local preview rig; codex
+  drives MCP testing as the ChatGPT proxy.
 
-## Blocked on the owner — ONE thing
+## Operational truths still standing
 
-**Merge the dev-env PRs.** That is the entire list.
-- haynes-ops **#2673** — `CIGAR_JOURNAL_TOKEN` into the pod env; fixes the dev pod's
-  MCP 401 (the header currently registers as an empty `Bearer `).
-- haynes-ops **#2684** — dev-env session docs.
-- haynes-ops **#2683** — Renovate, dev-env image toolchain. Not ours, but it
-  rebuilds the image, so take it in the same window.
-
-All three bounce the dev-env pod, which is the only reason they are drafts.
-
-Everything else that used to sit on him is DONE or reassigned to the agent:
-
-- **Micallef photo — DONE.** He uploaded it. It is a `smoke_photos` row on
-  `Micallef Orange Robusto` (a REVIEW photo). That cigar has no catalogue photo,
-  which is correct and unrelated — the two are different tables and different
-  things. Do not "fix" it by attaching the review photo to the catalogue.
-- **Journal flip — DONE 2026-08-30.** `users.journal_visibility = 'public'`.
-  Verified anonymously: `/journal` and `/smokes/<id>` went 404 → 200, a real
-  browser renders the full review list with ratings, notes, descriptors and a
-  working "Load more", and review photos serve at `/api/photos/<id>` and
-  `/thumb` (200, image/jpeg). **His reviews are public now.** The only console
-  error is the Cloudflare Insights beacon failing to resolve from this pod's
-  egress allowlist — not a site defect.
-- **MCP go-live verification (#97)** — drive it with **codex** as the ChatGPT
-  proxy (the repo's testing standard) rather than asking him. Same for the #184
-  photo-path validation. Codex cannot prove ChatGPT's UI binds an in-chat image;
-  say so plainly instead of implying coverage.
-- **#164 and #169's deeper half** — decide them yourself, conservatively,
-  and write the reasoning into the issue so he can veto rather than author.
-
-### #97 — what is actually left (all yours)
-
-The flip was never the whole cutover. Remaining, from the issue:
-1. Sweep the shipped surfaces against `docs/design/002-go-live-experience.md` —
-   composition order, absent-when-empty sections, badge-row caps, facet/URL
-   behaviour, mobile toolbar panning, `/inventory` redirects. File deltas, fix
-   the small ones.
-2. Empty-state audit: every surface degrades per the design doc (no offers / no
-   holdings / no photo / zero-match facet) with the approved strings only.
-3. MCP go-live verification: the DESIGN-002 conversation set green on the
-   production connector, matrix dated in `docs/mcp/client-compatibility.md`.
-4. Archive cutover: execute #96's plan — point MkDocs readers at the new site,
-   verify every archived review renders (a PRD-001 success criterion), and keep
-   the archive publishable until he retires it (AGENTS.md).
-5. Docs: README + docs/README describe the launched product; remove stale
-   "designed, unbuilt" claims.
-
-Already satisfied and struck: the journal load-more past the 25 cap (#120 —
-`public-journal-list.tsx` has it, confirmed live), per-user timezone (#120), and
-the MCP Gatus probe (haynes-ops#2628).
-
-## Operational truths learned the hard way today
-
-- **`ops-digest.sh` was blanking every entry.** `jq -r '.[$k]'` already unwraps
-  the JSON-string; piping that into `jq 'fromjson?'` hands fromjson an
-  already-parsed object → error → `// {}`. Every digest ever sent read `[?]` /
-  "no note". Fixed haynes-ops#2690. Watch for the same shape elsewhere.
-- **The CI `test` flake is fixed** (#174/#180): `pool.end()` then `pg.stop()`
-  raised an unhandled pool `error` (pg 57P01), failing runs where every test
-  passed. A red `test` job now means a real problem — do not retrigger past one.
-- **Renovate used to split the image pins** — it bumps `helmrelease.yaml` only,
-  which left the four raw CronJob pins stale (2026-08-30, fixed haynes-ops#2689).
-  #159 removed the split rather than documenting it: the CronJobs are controllers
-  on the HelmRelease now, sharing `&mainImage`, so one edit moves everything.
-  `haynes-ops/scripts/crawl-cronjob-invariants.sh` asserts the six stay in step.
-- **Concurrent lanes collide on migration numbers** — #178 and #181 both took
-  0023. Pre-assign a number per lane and say so in the prompt.
-- **Loki has everything**; the pod's Actions-log egress is blocked but
-  `mcp__grafana-mcp__query_loki_logs` against `{namespace="frontend"}` answers
-  most "what actually happened" questions in one query.
-- **Adversarial review is earning its cost.** It caught an SSRF guard that
-  allowed `127.evil.com` and `169.254.169.254`, a security doc claiming
-  attributability the code did not have, and a change that would have hung 890
-  of 977 catalogue rows. Do not skip the verify stage.
-
-## How this repo is worked
-
-Coordinator mode: the session agent designs, reviews and ships; worktree lanes
-build. Fetch the canonical clone BEFORE dispatching. Landing: rebase onto fresh
-`origin/main`, full suite, PR, squash-merge (the branch commit message drives
-release-please; the release PR itself takes a REGULAR merge).
-Ship chain and per-hop remedies: `.agents/reference/ship-chain.md`.
-`gh` needs `GH_TOKEN=$(cat /creds/gh_token)` — the env var is stale and 401s.
-UI lanes must produce before/after screenshots from the local preview rig.
+- **Loki answers "what actually happened"** in one query:
+  `{namespace="frontend"}` via grafana-mcp. The pod cannot reach Actions logs.
+- **Adversarial review keeps earning its cost** — tonight it caught a false
+  blocker (#190's hold) as well as real ones, and the overnight audit found
+  eleven wrong claims in the previous handoff. Verify before acting on any
+  inherited claim; the collapse-bucket and mis-link evidence in ADR-012 came
+  from exactly that discipline.
+- The 44-row packaging-SKU exclusion batch in
+  `.agents/reference/catalog-exclusions.md` is planned, gated, and
+  **superseded in approach by ADR-012** (merge into base rows beats
+  excluding). Do not apply it as written; fold it into #196 Wave 3.
