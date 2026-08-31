@@ -1,7 +1,7 @@
 import { sql, eq } from "drizzle-orm";
-import { blends, lines } from "@cj/db";
+import { blends, brands, lines } from "@cj/db";
 import type { Queryer } from "./deps.js";
-import { windowKeys, fold, anchorByAlias, type AliasCandidate } from "./taxonomy-keys.js";
+import { windowKeys, fold, anchorByAlias, MIN_ANCHOR_KEY_LENGTH, type AliasCandidate } from "./taxonomy-keys.js";
 import {
   parseListingTitle,
   stripPackaging,
@@ -10,8 +10,9 @@ import {
   type ListingParse,
   type ParseRegistry,
 } from "./catalog-parse.js";
-import { numbersCompatible, packagingCompatible, variantCompatible, vitolaAgrees } from "./name-heuristics.js";
+import { numbersCompatible, packagingCompatible, variantRelation, vitolaAgrees } from "./name-heuristics.js";
 import type { CigarAncestry, CigarAncestryContext } from "./cigar-ancestry.js";
+import { brandSlug } from "./catalog-browse.js";
 
 // The database half of matching v2: registry probes in, a `ListingParse` out,
 // and the scoped candidate set the match decision runs over. Everything that
@@ -70,11 +71,15 @@ async function probeBlends(db: Queryer, lineIds: string[], keys: string[]): Prom
 export async function parseListing(db: Queryer, title: string): Promise<ListingParse> {
   const { cleaned } = stripPackaging(title);
   const { remainder } = extractDims(cleaned);
-  const { keys } = tokenizeTitle(remainder);
+  const { keys, segmentStarts } = tokenizeTitle(remainder);
   const probeKeys = windowKeys(keys);
 
   const brandRows = await probeBrands(db, probeKeys);
-  const brand = anchorByAlias(keys, brandRows);
+  // THE SAME CONSTRAINTS THE AUTHORITY APPLIES. This anchor exists only to learn
+  // which brand's lines to prefetch, but it must agree with the one inside
+  // `parseListingTitle` or it would fetch the lines of a brand the parse then
+  // refuses — and the parse would find no candidates for the brand it did pick.
+  const brand = anchorByAlias(keys, brandRows, { segmentStarts, minKeyLength: MIN_ANCHOR_KEY_LENGTH });
 
   const lineRows = brand ? await probeLines(db, brand.entity.id, probeKeys) : [];
   const blendRows = lineRows.length > 0 ? await probeBlends(db, lineRows.map((row) => row.id), probeKeys) : [];
@@ -240,6 +245,59 @@ export async function scopedLeafCandidates(
   }));
 }
 
+// THE LAST CHECK BEFORE A MINT, AND IT IS A WAVE 3 CASUALTY BY DESIGN.
+//
+// The scope query above can only see rows it can attribute to the anchored
+// brand: rows carrying its `brand_id`, plus the bridge clause's unlinked rows
+// whose own name folds to one of the brand's keys. That bridge admits 54 of
+// prod's 570 unlinked rows. The other 516 are invisible to the scope of EVERY
+// brand — their names do not begin with the marca (`Fuente Fuente OpusX
+// Perfecxion No. 2` does not start with `Arturo Fuente`) — and a listing that
+// anchors, finds nothing under the brand, and mints would create a second row
+// for a cigar the catalog already holds. That is the failure ADR-012 exists to
+// end, arriving through the door built to prevent it.
+//
+// So: one unscoped similarity pass over the unlinked rows, and a hit is a
+// QUESTION rather than a mint. Unscoped on purpose — the whole point is that
+// these rows cannot be attributed to a brand, so scoping would re-introduce the
+// blindness. Deliberately narrow: `brand_id IS NULL` only, so it reads a
+// shrinking set and never re-ranks the catalog at large.
+//
+// IT DIES WITH WAVE 3. When the backfill attaches every active row to a brand,
+// `brand_id IS NULL` matches nothing, this query costs one index probe that
+// returns no rows, and it should be deleted along with the bridge clause above.
+export async function findUnlinkedNameCollision(
+  db: Queryer,
+  cleanedName: string,
+  threshold = SCOPED_MATCH_THRESHOLD,
+): Promise<LeafCandidate | null> {
+  if (cleanedName.trim() === "") return null;
+
+  const result = await db.execute(sql`
+    SELECT c.id, c.canonical_name, c.brand_id, c.line_id, c.blend_id, c.vitola_name,
+           similarity(c.canonical_name, ${cleanedName}) AS sim
+    FROM cigars c
+    WHERE c.catalog_status = 'active'
+      AND c.brand_id IS NULL
+      AND c.canonical_name % ${cleanedName}
+      AND similarity(c.canonical_name, ${cleanedName}) >= ${threshold}
+    ORDER BY sim DESC
+    LIMIT 1
+  `);
+
+  const row = (result.rows as unknown as LeafCandidateRow[])[0];
+  if (!row) return null;
+  return {
+    cigarId: row.id,
+    canonicalName: row.canonical_name,
+    brandId: row.brand_id,
+    lineId: row.line_id,
+    blendId: row.blend_id,
+    vitolaName: row.vitola_name,
+    sim: Number(row.sim),
+  };
+}
+
 // --------------------------------------------------------------------------
 // The choice — pure, over the scoped set.
 // --------------------------------------------------------------------------
@@ -330,32 +388,74 @@ export function chooseLeaf(parse: ListingParse, candidates: LeafCandidate[]): Le
   // run (see name-heuristics.ts). Reached when the catalog has no structure to
   // compare against, which today is almost every row and after the Wave 3
   // backfill will be none.
-  const viable = candidates.filter(
-    (c) =>
+  //
+  // BOTH SIDES ARE STRIPPED BEFORE ANY HEURISTIC READS THEM. `parse.cleanedName`
+  // has been through `stripPackaging` and a candidate's `canonical_name` had not,
+  // so the comparison was asymmetric and THE EXACT ROW DISQUALIFIED ITSELF: the
+  // listing `Punch Bolos Tin` cleans to `Punch Bolos` and then failed
+  // `packagingCompatible` against the catalog row `Punch Bolos Tin` on a token
+  // only one side was allowed to keep. 70 of the 94 anchored losses measured on
+  // prod were this one bug, and every one of them was a mint of a row that
+  // already existed — v1's flat namespace, rebuilt by v2's own scope query.
+  const cleanedCandidates = candidates.map((c) => ({ candidate: c, name: stripPackaging(c.canonicalName).cleaned }));
+
+  const viable = cleanedCandidates.filter(
+    ({ candidate: c, name }) =>
       c.sim >= SCOPED_MATCH_THRESHOLD &&
-      numbersCompatible(parse.cleanedName, c.canonicalName) &&
-      packagingCompatible(parse.cleanedName, c.canonicalName) &&
-      variantCompatible(parse.cleanedName, c.canonicalName) &&
+      numbersCompatible(parse.cleanedName, name) &&
+      packagingCompatible(parse.cleanedName, name) &&
+      variantRelation(parse.cleanedName, name) !== "different" &&
       vitolaAgrees(parse.vitolaName, c.vitolaName),
   );
 
   if (viable.length === 0) {
     return { kind: "none", note: "No leaf under this brand survived the freeform comparison." };
   }
+
+  // A stated wrapper that AGREES beats a row that states none, on the same
+  // reasoning the structural arm applies to vitola: an unstated wrapper is an
+  // absence, not a match, and preferring it re-creates the collapse buckets one
+  // blend at a time.
+  const agreed = viable.filter(({ name }) => variantRelation(parse.cleanedName, name) === "same");
+  const pool = agreed.length > 0 ? agreed : viable;
+
   // Ranked here rather than trusted from the query: the scope query orders by
   // STRUCTURAL agreement first so the right rows are inside the window, which is
   // the correct order for choosing and the wrong one for a similarity tie-break.
-  viable.sort((a, b) => b.sim - a.sim);
-  const best = viable[0]!;
+  pool.sort((a, b) => b.candidate.sim - a.candidate.sim);
+  const best = pool[0]!;
   // A near-tie is a real ambiguity, not a ranking problem. Two rows of one brand
   // scoring within a hair of each other is the collapse-bucket signature, and
   // picking the higher one is how 42% of auto-matches came to disagree with the
   // vendor's own slug.
-  const tied = viable.filter((c) => Math.abs(c.sim - best.sim) < 0.02);
+  const tied = pool.filter((c) => Math.abs(c.candidate.sim - best.candidate.sim) < 0.02);
   if (tied.length > 1) {
-    return { kind: "many", candidates: tied, note: "Two or more leaves of this brand score indistinguishably." };
+    return {
+      kind: "many",
+      candidates: tied.map((t) => t.candidate),
+      note: "Two or more leaves of this brand score indistinguishably.",
+    };
   }
-  return { kind: "one", candidate: best, note: `Freeform name match within the brand (sim ${best.sim.toFixed(2)}).` };
+
+  // The listing names a wrapper and the only surviving row names none. That is
+  // not a link and it is not a miss — it is the collapse bucket itself: one row
+  // standing for both wrappers, which a listing has just told us apart. Triage
+  // with the parse attached, where splitting it is the curator's call. Safe to
+  // refuse now in a way it was not before, because a refusal here ANNOTATES an
+  // existing link rather than breaking one (the positive-evidence rule).
+  if (variantRelation(parse.cleanedName, best.name) === "unstated") {
+    return {
+      kind: "many",
+      candidates: [best.candidate],
+      note: "This listing names a wrapper variant and the only matching leaf names none — the leaf likely covers both.",
+    };
+  }
+
+  return {
+    kind: "one",
+    candidate: best.candidate,
+    note: `Freeform name match within the brand (sim ${best.candidate.sim.toFixed(2)}).`,
+  };
 }
 
 // --------------------------------------------------------------------------
@@ -407,6 +507,30 @@ export async function resolveDescribedTaxonomy(
   result.blendId = blendRows[0]!.id;
 
   return result;
+}
+
+// `cigars.brand_id` is a PROJECTION of the free-text `brand`, derived by ONE
+// rule wherever that column is written: migration 0026's backfill minted the
+// links this way, the curator fact edit re-derives them this way, and the
+// conversational gap-fill does too (ADR-012). A path that wrote `brand` without
+// recomputing the link would leave the row pointing at the brand it used to
+// claim, and the registry would quietly disagree with the column it was built
+// from.
+//
+// IT LIVES HERE BECAUSE IT MUST HAVE EXACTLY ONE DEFINITION. Two copies of a
+// derivation rule that must agree is the same hazard `fold()` was moved into
+// @cj/domain to end — the copies do not fail loudly when they drift, they just
+// start linking different rows to different brands.
+//
+// A spelling no brand answers to yields null rather than a stale link: an
+// unlinked cigar is a Wave 3 worklist item, a wrongly linked one is a silent
+// error. Registries are never minted here — that is curation with an audit
+// trail, not a side effect of a write.
+export async function deriveBrandId(db: Queryer, brand: string | null): Promise<string | null> {
+  const slug = brandSlug((brand ?? "").trim());
+  if (slug === "") return null;
+  const rows = await db.select({ id: brands.id }).from(brands).where(eq(brands.slug, slug)).limit(1);
+  return rows[0]?.id ?? null;
 }
 
 // A registry row's own display name, for name recomposition. Loaded together

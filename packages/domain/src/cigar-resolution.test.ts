@@ -6,7 +6,9 @@ import {
   numbersCompatible,
   packagingCompatible,
   strongLinkCompatible,
+  variantCompatible,
 } from "./cigar-resolution.js";
+import { variantRelation } from "./name-heuristics.js";
 import type { Principal } from "./index.js";
 
 // Pure guard coverage (no DB): the disqualifiers behind the strong-link filter.
@@ -52,6 +54,27 @@ describe("strong-link guard predicates", () => {
       strongLinkCompatible("Davidoff Signature 2000", "Davidoff Signature 2000 Tubos Pack"),
     ).toBe(false);
     expect(strongLinkCompatible("Padron 1926 Serie No. 1", "Padron 1926 Serie No. 1")).toBe(true);
+  });
+
+  // TWO GUARDS, NOT THREE. Matching v2 added a wrapper-variant guard and it
+  // belongs to the MATCHER, over vendor listings, where a refusal costs a triage
+  // row. `strongLinkCompatible` is the JOURNAL's guard, over words a user typed,
+  // where a refusal costs a duplicate catalog entry — so the wrapper rule stays
+  // out of it and the #192/#208 definition stands.
+  it("strongLinkCompatible: the wrapper-variant guard is not one of them", () => {
+    expect(strongLinkCompatible("Padron 1964 Anniversary Maduro", "Padron 1964 Anniversary")).toBe(true);
+    expect(variantCompatible("Padron 1964 Anniversary Maduro", "Padron 1964 Anniversary")).toBe(true);
+    // The matcher's own three-valued view of the same pair, which is what makes
+    // the question answerable there without changing the answer here.
+    expect(variantRelation("Padron 1964 Anniversary Maduro", "Padron 1964 Anniversary")).toBe("unstated");
+    expect(variantRelation("Padron 1964 Anniversary Maduro", "Padron 1964 Anniversary Natural")).toBe("different");
+  });
+
+  // One wrapper, three vendor spellings, one claim.
+  it("variantRelation: normalizes a two-word wrapper onto its single-token key", () => {
+    expect(variantRelation("Marca Toro Sun Grown", "Marca Toro sungrown")).toBe("same");
+    expect(variantRelation("Marca Toro sun-grown", "Marca Toro Sun Grown")).toBe("same");
+    expect(variantRelation("Marca Toro Sun Grown", "Marca Toro Maduro")).toBe("different");
   });
 });
 
@@ -129,5 +152,23 @@ describe("resolveCigar number-token guard", () => {
     // A distinct product name (the one-sided test above already created a
     // "…Signature 2000" row in this shared DB — reusing it would exact-link).
     await expectNoStrongLink("Montecristo Epic 2010 Tubos Pack", "Montecristo Epic 2010");
+  });
+
+  // THE SCOPE PIN FOR THE WRAPPER GUARD. Wave 2 briefly folded `variantCompatible`
+  // into `strongLinkCompatible`, which silently re-decided this call: a user
+  // saying "Padrón 1964 Anniversary Maduro" over a catalog row named without the
+  // wrapper would have stopped linking and MINTED A SECOND ROW for the cigar they
+  // have already smoked. That is the duplicate this whole wave exists to prevent,
+  // arriving through the journal instead of the crawler. The guard is a matcher
+  // rule; this path keeps the #192/#208 behaviour it had on main.
+  it("still strong-links a described wrapper variant onto a row that names none", async () => {
+    const existingId = await h.seedCigar({ canonicalName: "Herrera Esteli Norteno Robusto" });
+    const result = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "Herrera Esteli Norteno Robusto Maduro" } },
+      overallDescriptors: ["cocoa"],
+    });
+    expect(result.smoke.cigar.cigarId).toBe(existingId);
+    expect(result.cigarCreated).toBe(false);
   });
 });

@@ -1,4 +1,11 @@
-import { fold, tokenWindows, anchorByAlias, type AliasCandidate, type AliasAnchor } from "./taxonomy-keys.js";
+import {
+  fold,
+  tokenWindows,
+  anchorByAlias,
+  MIN_ANCHOR_KEY_LENGTH,
+  type AliasCandidate,
+  type AliasAnchor,
+} from "./taxonomy-keys.js";
 
 // The pure half of matching v2 (ADR-012 Wave 2): a vendor listing title in, a
 // structured parse out. No database, no I/O — every registry lookup is expressed
@@ -25,26 +32,43 @@ import { fold, tokenWindows, anchorByAlias, type AliasCandidate, type AliasAncho
 // Packaging — the offer's facts, removed from the name before it is a name.
 // --------------------------------------------------------------------------
 
-// Standalone tokens that describe a container rather than a cigar. Migrated here
-// from cigar-resolution.ts, which used them for the same purpose from the other
-// direction (refusing to strong-link a Tubos Pack to the naked stick) and now
-// imports them back from this one vocabulary.
-export const PACKAGING_TOKENS = new Set([
-  "tubo",
-  "tubos",
-  "tube",
-  "tubed",
-  "tubopack",
-  "tubospack",
-  "pack",
-  "pk",
-  "tin",
-  "jar",
-  "sampler",
-  "box",
-  "cab",
-  "bundle",
+// ONE CLOSED VOCABULARY, READ BY BOTH PASSES — and it is closed because when it
+// was two lists they disagreed. `stripPackaging` removed a standalone `Tin` from
+// a title and `parsePackagingFacts` recorded nothing, so the fact did not MOVE
+// from the name to the offer, it VANISHED. Everything this module is willing to
+// strip must come back out of `parsePackagingFacts` as a packaging label or a
+// stick count, and `catalog-parse.test.ts` asserts exactly that over the whole
+// vocabulary rather than over a hand-picked list of examples.
+//
+// Standalone container words, folded key → the label an offer records. A bare
+// container word states no COUNT: a `Tin` is a tin of some size, and inventing 5
+// or 10 would be worse than the null (ADR-012 — absent is never inferred).
+export const PACKAGING_TOKEN_LABELS = new Map<string, string>([
+  ["tubo", "tubo"],
+  ["tubos", "tubo"],
+  ["tube", "tubo"],
+  ["tubed", "tubo"],
+  ["tubopack", "tubos-pack"],
+  ["tubospack", "tubos-pack"],
+  ["pack", "pack"],
+  ["pk", "pack"],
+  ["tin", "tin"],
+  ["jar", "jar"],
+  ["sampler", "sampler"],
+  ["box", "box"],
+  ["cab", "cabinet"],
+  ["bundle", "bundle"],
+  // The trade's own word for a bundle, and the one addition this vocabulary
+  // needed: it was strippable in neither pass, so `Oliva Serie V Mazo` kept a
+  // container word inside its identity.
+  ["mazo", "mazo"],
 ]);
+
+// The same set, as the token membership test. Migrated here from
+// cigar-resolution.ts, which used it for the same purpose from the other
+// direction (refusing to strong-link a Tubos Pack to the naked stick) and now
+// imports it back from this one vocabulary.
+export const PACKAGING_TOKENS = new Set(PACKAGING_TOKEN_LABELS.keys());
 
 // `box-pressed` and `trunk-pressed` are SHAPE, not packaging — the vocabulary
 // reference is explicit that they describe the leaf's vitola and that a title
@@ -57,14 +81,40 @@ export const PACKAGING_TOKENS = new Set([
 // gains a consistent spelling of a shape term into the bargain.
 const PRESSED = /\b(box|trunk)[\s-]?press(ed)?\b/gi;
 
+// Hyphenate `Box Pressed` into the single token `Box-Pressed`. Run before ANY
+// packaging rule reads the title — including the standalone-token scan below,
+// which would otherwise read the `box` in a shape term as a container and record
+// a box that nobody is selling.
+function normalizePressed(name: string): string {
+  return name.replace(PRESSED, (match) => match.replace(/\s+/g, "-"));
+}
+
+interface PackagingRule {
+  pattern: RegExp;
+  packaging: (n: string) => string | null;
+  sticks: (n: string) => number | null;
+}
+
 // The count/packaging phrases, most specific first, exactly as ADR-009's
 // conservative parse has always ordered them: `box of 20` must win over the bare
 // `20`. Each carries how the offer should record it.
-const PACKAGING_PHRASES: { pattern: RegExp; packaging: (n: string) => string; sticks: (n: string) => number }[] = [
+const PACKAGING_PHRASES: PackagingRule[] = [
   { pattern: /\bbox\s+of\s+(\d{1,3})\b/i, packaging: () => "box", sticks: (n) => Number(n) },
+  { pattern: /\bbundle\s+of\s+(\d{1,3})\b/i, packaging: () => "bundle", sticks: (n) => Number(n) },
+  { pattern: /\bmazo\s+of\s+(\d{1,3})\b/i, packaging: () => "mazo", sticks: (n) => Number(n) },
   { pattern: /\bpack\s+of\s+(\d{1,2})\b/i, packaging: (n) => `${n}-pack`, sticks: (n) => Number(n) },
   { pattern: /\b(\d{1,2})[\s-]?pack\b/i, packaging: (n) => `${n}-pack`, sticks: (n) => Number(n) },
   { pattern: /\b(singles?)\b/i, packaging: () => "single", sticks: () => 1 },
+];
+
+// A stick count with no container word: `10 ct`, `(25)`. The stripper has always
+// removed these, so the vocabulary rule obliges the parser to record them — as a
+// COUNT with an unknown container, which is exactly what the title said. A bare
+// number is never one of these: `1964`, `T52` and `No. 9` are identity, and a
+// count is a count because it carries a unit or brackets.
+const COUNT_PHRASES: RegExp[] = [
+  /\b(\d{1,3})\s*(?:ct|cnt|count|pcs?|pieces?|cigars?)\b/i,
+  /\(\s*(\d{1,3})\s*\)/,
 ];
 
 export interface PackagingFacts {
@@ -72,15 +122,30 @@ export interface PackagingFacts {
   sticksPerPackage: number | null;
 }
 
-// The offer's packaging, unchanged from ADR-009's rules. The crawler's
-// `parsePackaging` delegates here so there is one vocabulary rather than two
-// that drift: the stripper below and the offer writer must agree about what
-// counts as packaging, or a token would come off the name without being recorded
-// anywhere.
+// The offer's packaging. ADR-009's phrase rules are unchanged; what is new is
+// that the two silent cases now speak — a standalone container word and a bare
+// stick count. The crawler's `parsePackaging` delegates here, so the stripper
+// below and the offer writer read one vocabulary and a token cannot come off a
+// name without being recorded somewhere.
+//
+// A title naming two containers (`Box of 24` and `Tin`) records the MORE
+// SPECIFIC one and the other is still stripped. That residual is deliberate: the
+// facts are one packaging and one count, and inventing a list to hold an
+// over-determined title would put a data-modelling decision inside a parser.
 export function parsePackagingFacts(name: string): PackagingFacts {
-  for (const phrase of PACKAGING_PHRASES) {
-    const hit = phrase.pattern.exec(name);
-    if (hit) return { packaging: phrase.packaging(hit[1]!), sticksPerPackage: phrase.sticks(hit[1]!) };
+  const working = normalizePressed(name);
+
+  for (const rule of PACKAGING_PHRASES) {
+    const hit = rule.pattern.exec(working);
+    if (hit) return { packaging: rule.packaging(hit[1]!), sticksPerPackage: rule.sticks(hit[1]!) };
+  }
+  for (const pattern of COUNT_PHRASES) {
+    const hit = pattern.exec(working);
+    if (hit) return { packaging: null, sticksPerPackage: Number(hit[1]!) };
+  }
+  for (const word of working.split(/\s+/)) {
+    const label = PACKAGING_TOKEN_LABELS.get(fold(word));
+    if (label != null) return { packaging: label, sticksPerPackage: null };
   }
   return { packaging: null, sticksPerPackage: null };
 }
@@ -102,7 +167,7 @@ export function stripPackaging(name: string): StrippedTitle {
   const facts = parsePackagingFacts(name);
   const sampler = /\bsamplers?\b/i.test(name);
 
-  let working = name.replace(PRESSED, (match) => match.replace(/\s+/g, "-"));
+  let working = normalizePressed(name);
 
   for (const phrase of PACKAGING_PHRASES) {
     working = working.replace(new RegExp(phrase.pattern.source, "gi"), " ");
@@ -349,7 +414,20 @@ export interface TitleTokens {
   words: string[];
   // Folded matching keys — what alias comparison actually runs against.
   keys: string[];
+  // Token indexes that begin the title or one of its punctuation-separated
+  // segments. `fold()` erases punctuation, so a title's structure would be gone
+  // by the time the anchor runs; this is the one piece of it worth keeping,
+  // because a brand leads its title or leads a segment of it, and that is what
+  // separates `Cigars - Padrón 1964` (a merchandising prefix) from `La Aroma de
+  // Cuba Churchill` (a longer marca whose middle word is another brand's name).
+  segmentStarts: Set<number>;
 }
+
+// The punctuation a vendor uses to separate a merchandising prefix, a size
+// suffix or a variant from the product itself. Splitting on it changes no token
+// — `fold()` already turns each of these into a `-` that the multi-part split
+// below breaks on — so this only records WHERE the boundaries were.
+const SEGMENT_SEPARATOR = /[-–—|/,;:()[\]]+/;
 
 // Split a cleaned title into index-aligned display/matching token pairs. Words
 // that fold to nothing (`&`, `—`) are dropped from BOTH arrays: they can never
@@ -358,24 +436,28 @@ export interface TitleTokens {
 export function tokenizeTitle(cleaned: string): TitleTokens {
   const words: string[] = [];
   const keys: string[] = [];
-  for (const word of cleaned.split(/\s+/)) {
-    if (word === "") continue;
-    const key = fold(word);
-    if (key === "") continue;
-    // One display word can fold to a multi-token key (`No.9` → `no-9`), which
-    // would desynchronize the arrays. Split those so one word is one token.
-    const parts = key.split("-");
-    if (parts.length === 1) {
-      words.push(word);
-      keys.push(key);
-      continue;
-    }
-    for (const part of parts) {
-      words.push(part);
-      keys.push(part);
+  const segmentStarts = new Set<number>();
+
+  for (const segment of cleaned.split(SEGMENT_SEPARATOR)) {
+    let first = true;
+    for (const word of segment.split(/\s+/)) {
+      if (word === "") continue;
+      const key = fold(word);
+      if (key === "") continue;
+      // One display word can fold to a multi-token key (`No.9` → `no-9`), which
+      // would desynchronize the arrays. Split those so one word is one token.
+      const parts = key.split("-");
+      for (const part of parts) {
+        if (first) {
+          segmentStarts.add(words.length);
+          first = false;
+        }
+        words.push(parts.length === 1 ? word : part);
+        keys.push(part);
+      }
     }
   }
-  return { words, keys };
+  return { words, keys, segmentStarts };
 }
 
 // --------------------------------------------------------------------------
@@ -429,7 +511,7 @@ export function parseListingTitle(title: string, registry: ParseRegistry): Listi
   // no alias will ever claim, and leaving them in would put a measurement in the
   // residue a curator reads as unexplained identity.
   const { dims, remainder } = extractDims(stripped.cleaned);
-  const { words, keys } = tokenizeTitle(remainder);
+  const { words, keys, segmentStarts } = tokenizeTitle(remainder);
   const consumed = new Set<number>();
   const notes: string[] = [];
 
@@ -458,7 +540,7 @@ export function parseListingTitle(title: string, registry: ParseRegistry): Listi
     notes.push("Sampler listing — a retailer assortment matches no single leaf.");
   }
 
-  const brand = anchorByAlias(keys, registry.brands);
+  const brand = anchorByAlias(keys, registry.brands, { segmentStarts, minKeyLength: MIN_ANCHOR_KEY_LENGTH });
   if (!brand) {
     notes.push("No brand alias matched — nothing anchors this title.");
     parse.residue = words.join(" ");

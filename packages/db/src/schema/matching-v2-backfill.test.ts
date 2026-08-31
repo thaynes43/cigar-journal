@@ -18,17 +18,23 @@ import { migrate } from "../scripts/migrate.js";
 // reproduces that window exactly — seed a catalog, apply 0026, seed the rows
 // that "arrived after 0026", then apply 0027 alone and watch it sweep.
 //
-// Three claims, and the third is the one that makes the other two safe:
+// Four claims, and the last two are the whole difference between 0026's mint
+// into an EMPTY registry and this one's mint into a POPULATED one:
 //
 //   1. The two UPDATEs 0026 promised do catch up the rows that arrived since.
 //   2. The MINT is re-run too, which 0026 did not promise. A cigar created in
 //      the gap can carry a brand string no `brands` row covers — `add_cigar`
 //      takes free text — and for that row the UPDATE alone has nothing to link
 //      to and it would stay unlinked forever.
-//   3. Re-running changes nothing the second time. Not a nicety: a fresh mint
-//      can CREATE an alias collision that did not exist at 0026 (a plain
-//      `Padron` spelling arriving after `Padrón` was already minted), so the
-//      collision pass has to converge on the re-run rather than merely replay.
+//   3. The re-run mints NO RIVAL to a brand that already answers to the key.
+//      A plain `Padron` arriving after `Padrón` was minted as slug `padr-n`
+//      with alias `padron` conflicts with no slug at all, so a naive re-mint
+//      creates an empty `Padron`, the collision pass hands it the key `padron`
+//      on identity grounds, and the real marca is left with no folded key —
+//      every `Padrón ...` title then anchors confidently on the empty row. The
+//      mint drops that source row instead, and the folded link UPDATE puts the
+//      cigar behind it on Padrón.
+//   4. Re-running changes nothing the second time — the whole file, DDL and all.
 
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../migrations/", import.meta.url));
 
@@ -161,11 +167,11 @@ describe("0027 re-run of the 0026 brand backfill", () => {
     //     the folded matching key `bolivar` in `aliases` beside the slug, or
     //     matching v2's anchor probe never finds it.
     await seedCigar("W2 Late Bolivar Belicosos", "Bolívar");
-    // (d) THE COLLISION, and it does not exist until 0027 creates it. 0026 minted
-    //     `padr-n` holding BOTH `padr-n` and the folded `padron`, uncontested at
-    //     the time. This plain spelling now mints a brand whose SLUG is `padron`,
-    //     so two brands claim that one matching key and the collision pass has to
-    //     resolve it on the re-run — it is not replaying settled work.
+    // (d) THE RIVAL THE MINT MUST NOT CREATE. 0026 minted `padr-n` holding BOTH
+    //     `padr-n` and the folded `padron`, uncontested at the time. This plain
+    //     spelling slugs to `padron`, which NO brand owns, so `ON CONFLICT
+    //     (slug)` cannot see it: minted, it would take `padron` off Padrón in the
+    //     collision pass and leave the marca with no key matching probes for.
     await seedCigar("W2 Late Padron Serie 1926", "Padron");
     // (e) Unknown stays unknown. A re-run mints brands; it never invents identity.
     await seedCigar("W2 Late Unbranded", null);
@@ -253,26 +259,67 @@ describe("0027 re-run of the 0026 brand backfill", () => {
     expect(row.rows[0]).toMatchObject({ slug: "nub", brand: "Davidoff" });
   });
 
-  // The collision the re-run CREATED. An alias resolving to two brands is worse
-  // than no alias — the anchor probe would pick a marca confidently and at
-  // random — so identity wins: the brand owning `padron` as its slug keeps it,
-  // and the accented brand that merely folds onto it gives it up.
-  it("resolves the alias collision its own mint introduced", async () => {
+  // THE RIVAL THAT IS NOT MINTED. A key answered by two brands is worse than no
+  // key — the anchor probe picks a marca confidently and at random — and the
+  // collision pass resolves that by IDENTITY, so a rival minted from a folded
+  // spelling does not merely duplicate the marca, it dispossesses it. The mint
+  // drops the source row instead, and `padron` still resolves to exactly one
+  // brand: the one it always meant.
+  it("mints no rival for a brand that already answers to the folded key", async () => {
     const claimants = await pg.db.execute(sql`
-      SELECT slug FROM brands WHERE aliases @> ARRAY['padron'] ORDER BY slug
+      SELECT slug FROM brands WHERE slug = 'padron' OR aliases @> ARRAY['padron'] ORDER BY slug
     `);
-    expect(claimants.rows).toEqual([{ slug: "padron" }]);
+    expect(claimants.rows).toEqual([{ slug: "padr-n" }]);
 
-    const brands = await brandRows();
-    // 0026 left `padron` on this brand; nothing contested it until now.
-    expect(brands).toContainEqual({ name: "Padrón", slug: "padr-n", aliases: ["padr-n"] });
-    expect(brands).toContainEqual({ name: "Padron", slug: "padron", aliases: ["padron"] });
+    // Untouched, not restored: nothing ever contested the alias, so the
+    // collision pass had nothing to resolve and Padrón keeps its anchor.
+    expect(await brandRows()).toContainEqual({
+      name: "Padrón",
+      slug: "padr-n",
+      aliases: ["padr-n", "padron"],
+    });
+  });
 
-    // Two spellings stay two brands: merging them is Wave 3 curation, on
-    // evidence and with an audit trail. Each cigar is linked by its own slug.
+  // ...and the cigar behind the dropped row is not stranded, which is the half
+  // that makes the drop safe. The exact-slug UPDATE cannot reach it — `Padron`
+  // slugs to `padron` and no brand owns that slug — so the folded UPDATE links
+  // it to the brand whose alias already answers to that key.
+  it("links the dropped spelling's cigars to the brand that answers to their key", async () => {
+    const padron = await pg.db.execute(sql`SELECT id FROM brands WHERE slug = 'padr-n'`);
+    const padronId = (padron.rows[0] as { id: string }).id;
+
+    const row = await pg.db.execute(sql`
+      SELECT c.brand, c.brand_id
+      FROM cigars c
+      WHERE c.canonical_name = 'W2 Late Padron Serie 1926'
+    `);
+    // The free text is still the unaccented spelling — the backfill reads that
+    // column, it never rewrites it — and the link points at the accented marca.
+    expect(row.rows[0]).toMatchObject({ brand: "Padron", brand_id: padronId });
+
     const links = await linkBySlug();
+    expect(links.get("W2 Late Padron Serie 1926")).toBe("padr-n");
+    // The rows 0026 already linked by the exact slug are undisturbed.
     expect(links.get("W2 Padron 1964")).toBe("padr-n");
-    expect(links.get("W2 Late Padron Serie 1926")).toBe("padron");
+    expect(links.get("W2 Padron 1926")).toBe("padr-n");
+  });
+
+  // The precondition that makes the folded UPDATE's `HAVING count(*) = 1` guard
+  // a backstop rather than the mechanism: after the collision pass, no key is
+  // answered by two brands, so the guard has nothing to refuse. It is kept
+  // because this statement is where an ambiguity would be COMMITTED — an
+  // unlinked row is a question for a curator, a row linked by coin flip is an
+  // answer nobody can tell is wrong.
+  it("leaves every matching key answered by exactly one brand", async () => {
+    const contested = await pg.db.execute(sql`
+      SELECT k.key, count(*)::int AS claimants
+      FROM (SELECT DISTINCT unnest(aliases) AS key FROM brands
+            UNION SELECT DISTINCT slug FROM brands) k
+      JOIN brands b ON b.slug = k.key OR k.key = ANY (b.aliases)
+      GROUP BY k.key
+      HAVING count(*) > 1
+    `);
+    expect(contested.rows).toEqual([]);
   });
 
   it("invents no identity for a brand string that is not addressable", async () => {
@@ -311,11 +358,11 @@ describe("0027 re-run of the 0026 brand backfill", () => {
   });
 
   // THE CENTRAL CLAIM. Every statement 0027 re-runs was written to be replayed —
-  // ON CONFLICT DO NOTHING on the mint, `IS NULL` guards on both link UPDATEs,
-  // and a collision pass whose every subquery reads the pre-statement snapshot —
-  // and the DDL above it carries IF NOT EXISTS / IF EXISTS so the file as a whole
-  // can be applied twice. This asserts the whole file is a fixed point: apply it
-  // again and NOTHING moves.
+  // ON CONFLICT DO NOTHING plus the folded-key drop on the mint, `IS NULL` guards
+  // on all three link UPDATEs, and a collision pass whose every subquery reads
+  // the pre-statement snapshot — and the DDL above it carries IF NOT EXISTS /
+  // IF EXISTS so the file as a whole can be applied twice. This asserts the whole
+  // file is a fixed point: apply it again and NOTHING moves.
   it("is idempotent — a second application of the whole file changes nothing", async () => {
     // The runner alone will not replay it: the file is recorded as applied.
     expect((await migrate(pg.url, { migrationsDir: dirs.only0027 })).applied).toEqual([]);
@@ -344,11 +391,16 @@ describe("0027 re-run of the 0026 brand backfill", () => {
     const count = await pg.db.execute(sql`SELECT count(*)::int AS n FROM brands`);
     expect((count.rows[0] as { n: number }).n).toBe(before.brands.length);
 
-    // And in particular the collision pass has converged rather than eroding: a
-    // second run must not now strip `padron` from the brand that owns it.
+    // And in particular the Padrón case is stable under replay, which is the one
+    // the deep comparison above would report as a diff without saying why: no
+    // rival is minted on the second pass either, the folded alias is still
+    // there, and the cigar linked through it has not moved.
     const claimants = await pg.db.execute(sql`
-      SELECT slug FROM brands WHERE aliases @> ARRAY['padron'] ORDER BY slug
+      SELECT slug, aliases FROM brands
+      WHERE slug = 'padron' OR aliases @> ARRAY['padron']
+      ORDER BY slug
     `);
-    expect(claimants.rows).toEqual([{ slug: "padron" }]);
+    expect(claimants.rows).toEqual([{ slug: "padr-n", aliases: ["padr-n", "padron"] }]);
+    expect((await linkBySlug()).get("W2 Late Padron Serie 1926")).toBe("padr-n");
   });
 });

@@ -2,6 +2,9 @@ import { eq } from "drizzle-orm";
 import { auditLog, cigars, type CigarRow, type NewCigarRow } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
+import { assertCigarAncestry } from "./cigar-ancestry.js";
+import { deriveBrandId, loadAncestryContext } from "./taxonomy-resolve.js";
+import { recomposeCigarName } from "./taxonomy-writes.js";
 import type { UpdateCigarInput, UpdateCigarResult } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
@@ -109,11 +112,34 @@ async function updateWithinTx(
     changedFields.push(plan.label);
   }
 
+  // Filling the marca moves a structural FK, so this path carries the same two
+  // obligations the curator's fact edit does (ADR-012 Wave 2). The link is
+  // re-derived inside the same UPDATE — neither audited nor reported in
+  // `changedFields`, since it is a projection of `brand` rather than a fact the
+  // conversation asserted. Then the ancestry that would result is checked: a fill
+  // that re-points the brand under a row already carrying a line would leave that
+  // line belonging to the brand the row used to claim. Refused rather than
+  // silently repaired — clearing the line destroys a known fact and picking one
+  // under the new brand invents one — and the repair is a curator's
+  // `assignCigarParts`, which moves the levels together.
+  if (changedFields.includes("brand")) {
+    set.brandId = await deriveBrandId(tx, (set.brand as string | null) ?? null);
+    const ancestry = { brandId: set.brandId ?? null, lineId: cigar.lineId, blendId: cigar.blendId };
+    assertCigarAncestry(ancestry, await loadAncestryContext(tx, ancestry));
+  }
+
   if (changedFields.length > 0) {
+    const now = new Date();
     await tx
       .update(cigars)
-      .set({ ...set, updatedAt: new Date() })
+      .set({ ...set, updatedAt: now })
       .where(eq(cigars.id, input.cigarId));
+
+    // A `composed` canonical_name is a projection of brand, line, blend, vitola
+    // and edition — every one of them fillable here — so it is recomputed from
+    // the parts in the same transaction instead of being left describing the row
+    // as it was. A no-op on a `freeform` row, whose string is the owner's.
+    await recomposeCigarName(tx, input.cigarId, now);
 
     await tx.insert(auditLog).values({
       userId: principal.userId,

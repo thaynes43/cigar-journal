@@ -37,6 +37,7 @@ import {
   agentRunRows,
   undoCurationAction,
 } from "./curation.js";
+import { assignCigarParts } from "./taxonomy-writes.js";
 import { enrichmentCoverageForCigar, recordEnrichmentAttempt } from "./enrichment-coverage.js";
 import { getProductPhoto } from "./product-photos.js";
 import { getMyInventory } from "./inventory.js";
@@ -2629,6 +2630,41 @@ describe("curation", () => {
       });
       const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
       expect(row!.canonicalName).toBe("Q2 First Fix");
+    });
+
+    it("refuses to undo a rename onto a row whose name has become composed", async () => {
+      // The forward rename refuses a composed row, and the inverse is not a way
+      // around it: the string this audit carries was authoritative while the row
+      // was freeform, and writing it back over a projection of the parts would
+      // survive only until the next part change (ADR-012).
+      const [brand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Undo Composed", slug: "undo-composed" })
+        .returning();
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Undo Composed Before" });
+      await renameCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        canonicalName: "Undo Composed After",
+        attribution: { actor: "agent", runId, confidence: 1 },
+      });
+      await assignCigarParts(h.deps, admin, { cigarId, brandId: brand!.id, nameSource: "composed" });
+
+      const auditId = await agentAudit(runId, "cigar.rename");
+      const error = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId,
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields).toEqual([
+        {
+          path: "canonicalName",
+          message: "This cigar's name is composed from its brand, line, blend and vitola. Edit those parts instead.",
+        },
+      ]);
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.canonicalName).toBe("Undo Composed");
     });
 
     it("undo of a merge with a live ledger performs the full unmerge", async () => {

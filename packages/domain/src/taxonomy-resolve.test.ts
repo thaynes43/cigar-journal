@@ -8,6 +8,7 @@ import {
   parseListing,
   scopedLeafCandidates,
   chooseLeaf,
+  findUnlinkedNameCollision,
   resolveDescribedTaxonomy,
   loadAncestryContext,
 } from "./taxonomy-resolve.js";
@@ -141,14 +142,20 @@ describe("taxonomy resolution", () => {
 
     // A one- or two-character key drags every unrelated marca starting with that
     // syllable into scope. Three characters is the floor.
+    //
+    // The anchor now refuses a key that short outright (MIN_ANCHOR_KEY_LENGTH), so
+    // this brand is anchored by its LONG key and carries the short one alongside —
+    // which is the state that keeps the SQL floor load-bearing rather than
+    // redundant. The bridge unnests every alias the brand answers to, so a short
+    // one still reaches the prefix scan however the brand was anchored.
     it("does not let a two-letter alias drag in unrelated rows by prefix", async () => {
       await h.deps.db
         .insert(brands)
-        .values({ name: "La", slug: "la", aliases: ["la"] })
+        .values({ name: "La Aurora", slug: "la-aurora", aliases: ["la-aurora", "la"] })
         .returning({ id: brands.id });
       const unrelated = await h.seedCigar({ canonicalName: "La Flor Dominicana Ligero L-40", brandId: null });
-      const parse = await parseListing(h.deps.db, "La Something Robusto");
-      expect(parse.brandName).toBe("La");
+      const parse = await parseListing(h.deps.db, "La Aurora Something Robusto");
+      expect(parse.brandName).toBe("La Aurora");
       const candidates = await scopedLeafCandidates(h.deps.db, parse);
       expect(candidates.map((c) => c.cigarId)).not.toContain(unrelated);
     });
@@ -308,6 +315,109 @@ describe("taxonomy resolution", () => {
       const parse = await parseListing(h.deps.db, "Empty Marca Something New Robusto");
       const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
       expect(choice.kind).toBe("none");
+    });
+  });
+
+  // THE COMPARISON HAD TO BE SYMMETRIC. `parse.cleanedName` goes through
+  // `stripPackaging`; a candidate's `canonical_name` did not — so a catalog row
+  // carrying a container word in its name (which is most of what v1 minted)
+  // disqualified itself against the very listing it came from. 70 of the 94
+  // anchored losses measured on prod were this, and each one was a mint of a row
+  // that already existed.
+  describe("packaging symmetry in the freeform arm", () => {
+    it("matches a catalog row whose own name still carries its packaging", async () => {
+      const brandId = await seedBrand("Punch");
+      const leaf = await h.seedCigar({ canonicalName: "Punch Bolos Tin", brandId });
+      const parse = await parseListing(h.deps.db, "Punch Bolos Tin");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("one");
+      expect(choice.kind === "one" && choice.candidate.cigarId).toBe(leaf);
+    });
+
+    it("matches across every container word the vocabulary knows", async () => {
+      const brandId = await seedBrand("Symmetry Marca");
+      for (const [index, token] of ["Pack", "Tin", "Tubos"].entries()) {
+        const leaf = await h.seedCigar({ canonicalName: `Symmetry Marca Vitola${index} ${token}`, brandId });
+        const parse = await parseListing(h.deps.db, `Symmetry Marca Vitola${index} ${token}`);
+        const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+        expect(choice.kind, `${token} listing`).toBe("one");
+        expect(choice.kind === "one" && choice.candidate.cigarId).toBe(leaf);
+      }
+    });
+
+    // The case from the review, and the shape that hurt most: the listing states
+    // no packaging and the CATALOG row does. Before the fix the listing cleaned
+    // to a name the row could never be compatible with, so seed mode minted a
+    // second Davidoff Puro Dominicano Perfecto beside the first.
+    it("matches a bare listing to a row minted with packaging in its name", async () => {
+      const brandId = await seedBrand("Davidoff");
+      const leaf = await h.seedCigar({ canonicalName: "Davidoff Puro Dominicano Perfecto Tubos", brandId });
+      const parse = await parseListing(h.deps.db, "Davidoff Puro Dominicano Perfecto");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("one");
+      expect(choice.kind === "one" && choice.candidate.cigarId).toBe(leaf);
+    });
+  });
+
+  // A listing naming a wrapper against a row naming none is the collapse bucket
+  // itself — one row standing for both wrappers, which this listing has just told
+  // apart. Not a link and not a miss: a question, and one that is only safe to
+  // ask now because triage ANNOTATES an existing link rather than breaking it.
+  describe("the wrapper-variant question", () => {
+    it("refuses to link a stated wrapper to a leaf that states none", async () => {
+      const brandId = await seedBrand("Variant Marca");
+      const leaf = await h.seedCigar({ canonicalName: "Variant Marca Reserva Robusto", brandId });
+      const parse = await parseListing(h.deps.db, "Variant Marca Reserva Robusto Maduro");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("many");
+      expect(choice.kind === "many" && choice.candidates.map((c) => c.cigarId)).toEqual([leaf]);
+    });
+
+    it("prefers the sibling whose wrapper actually agrees", async () => {
+      const brandId = await seedBrand("Wrapper Pref Marca");
+      const bare = await h.seedCigar({ canonicalName: "Wrapper Pref Marca Toro", brandId });
+      const maduro = await h.seedCigar({ canonicalName: "Wrapper Pref Marca Toro Maduro", brandId });
+      const parse = await parseListing(h.deps.db, "Wrapper Pref Marca Toro Maduro");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("one");
+      expect(choice.kind === "one" && choice.candidate.cigarId).toBe(maduro);
+      expect(bare).not.toBe(maduro);
+    });
+
+    // Three spellings of one wrapper, and a token scan saw only the third. The
+    // guard was blind exactly where two shops disagreed about a hyphen.
+    it("reads one wrapper written three ways as one claim", async () => {
+      const brandId = await seedBrand("Sungrown Marca");
+      const leaf = await h.seedCigar({ canonicalName: "Sungrown Marca Toro Sun Grown", brandId });
+      for (const spelling of ["Sun Grown", "sun-grown", "sungrown"]) {
+        const parse = await parseListing(h.deps.db, `Sungrown Marca Toro ${spelling}`);
+        const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+        expect(choice.kind, spelling).toBe("one");
+        expect(choice.kind === "one" && choice.candidate.cigarId).toBe(leaf);
+      }
+    });
+  });
+
+  // The scope query can only see rows it can attribute to the anchored brand,
+  // and 516 of prod's 570 unlinked rows are attributable to none — their names do
+  // not begin with the marca. A mint on that blindness is the duplicate ADR-012
+  // exists to prevent, arriving through the door built to prevent it.
+  describe("findUnlinkedNameCollision", () => {
+    it("finds an unlinked row the brand scope could never see", async () => {
+      await seedBrand("Arturo Fuente");
+      const orphan = await h.seedCigar({ canonicalName: "Fuente Fuente OpusX Perfecxion No. 2", brandId: null });
+      const hit = await findUnlinkedNameCollision(h.deps.db, "Fuente Fuente OpusX Perfecxion No. 2");
+      expect(hit?.cigarId).toBe(orphan);
+    });
+
+    it("ignores rows that already carry a brand link", async () => {
+      const brandId = await seedBrand("Linked Marca");
+      await h.seedCigar({ canonicalName: "Linked Marca Distinctive Robusto", brandId });
+      expect(await findUnlinkedNameCollision(h.deps.db, "Linked Marca Distinctive Robusto")).toBeNull();
+    });
+
+    it("stays silent when nothing is close enough to be the same product", async () => {
+      expect(await findUnlinkedNameCollision(h.deps.db, "Nothing Whatsoever Like This Zzz")).toBeNull();
     });
   });
 

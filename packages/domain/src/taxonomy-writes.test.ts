@@ -16,6 +16,7 @@ import {
 } from "./taxonomy-writes.js";
 import { renameCigar, setCigarFacts } from "./curation.js";
 import { resolveCigar } from "./cigar-resolution.js";
+import { updateCigar } from "./update-cigar.js";
 import { ValidationError, UnauthorizedError } from "./errors.js";
 import type { Principal } from "./deps.js";
 
@@ -460,6 +461,78 @@ describe("taxonomy writes", () => {
       expect(row.brandId).toBeNull();
       expect(row.brand).toBe("Totally Unknown Marca");
       expect((await h.deps.db.select({ id: brands.id }).from(brands)).length).toBe(before);
+    });
+  });
+
+  describe("the gap-fill write path", () => {
+    // `update_cigar` fills nulls from a conversation, and `brand` is one of them —
+    // so it owes the registry link the same way every other write of that column
+    // does, or a repaired cigar joins the flat namespace the registries replaced.
+    it("derives the registry link when a fill supplies the brand", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Gap Fill Robusto", verification: "unverified" });
+
+      const result = await updateCigar(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "Padrón" },
+      });
+      expect(result.changedFields).toContain("brand");
+
+      const row = (await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId)))[0]!;
+      expect(row).toMatchObject({ brand: "Padrón", brandId: padronId });
+    });
+
+    // The same refusal the curator's fact edit makes: re-pointing the brand under
+    // a row that already carries a line would leave that line belonging to the
+    // brand the row used to claim.
+    it("refuses a brand fill that would orphan the row's line", async () => {
+      const line = await createLine(h.deps, curator, { brandId: padronId, name: "Familia Reserva" });
+      const cigarId = await h.seedCigar({
+        canonicalName: "Padron Familia Reserva Toro",
+        verification: "unverified",
+        brandId: padronId,
+        lineId: line.lineId,
+      });
+
+      await expect(
+        updateCigar(h.deps, user, {
+          clientRequestId: newRequestId(),
+          cigarId,
+          fields: { brand: "Drew Estate" },
+        }),
+      ).rejects.toBeInstanceOf(ValidationError);
+
+      const row = (await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId)))[0]!;
+      expect(row).toMatchObject({ brand: null, brandId: padronId, lineId: line.lineId });
+    });
+
+    // Every part a composed name is built from is fillable here, so the name is
+    // recomputed rather than left describing the row as it was.
+    it("recomposes a composed row's name after a fill touches its parts", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "some vendor phrasing", verification: "unverified" });
+      await assignCigarParts(h.deps, curator, { cigarId, brandId: padronId, nameSource: "composed" });
+
+      await updateCigar(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { vitola: { name: "Robusto" } },
+      });
+
+      const row = (await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId)))[0]!;
+      expect(row.canonicalName).toBe("Padrón Robusto");
+    });
+
+    it("leaves a freeform row's name alone", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "The Owner's Own Gap Fill", verification: "unverified" });
+      await updateCigar(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "Padrón", vitola: { name: "Robusto" } },
+      });
+
+      const row = (await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId)))[0]!;
+      expect(row.canonicalName).toBe("The Owner's Own Gap Fill");
+      expect(row.brandId).toBe(padronId);
     });
   });
 });

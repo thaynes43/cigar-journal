@@ -231,6 +231,10 @@ describe("matching v2 (embedded Postgres)", () => {
 
     expect(run.stats.cigarsCreated).toBe(0);
     expect(run.stats.linksNoAnchor).toBe(1);
+    // NOTHING WAS HELD, so nothing was annotated. This is the half of the split
+    // `linksNoAnchor` cannot express on its own — registry debt over a listing
+    // nobody had linked, which is a smaller problem than the next case's.
+    expect(run.stats.linksAnnotated).toBeUndefined();
     expect((await pg.db.select({ id: cigars.id }).from(cigars)).length).toBe(before);
 
     const match = (await matchesFor(vendorId))[0]!;
@@ -240,6 +244,11 @@ describe("matching v2 (embedded Postgres)", () => {
     // redoing it by eye — the residue is the part of the title nobody could
     // explain, which is the most useful field on it.
     expect(match.suggestedParse).toMatchObject({
+      // The verdict rides the parse on EVERY unresolved row, not only on the
+      // still-linked ones the next two cases are about, so a curator reads where
+      // the resolver stopped from one field without first having to work out
+      // whether this particular row is a triage row or an annotated link.
+      reason: "no_anchor",
       brandId: null,
       cleanedName: "Vuelta Abajo Reserva Especial Robusto",
       residue: "Vuelta Abajo Reserva Especial Robusto",
@@ -249,6 +258,113 @@ describe("matching v2 (embedded Postgres)", () => {
     // And the vendor's own breadcrumb taxonomy — parsed since the crawler was
     // written and thrown away ever since — is finally kept as evidence.
     expect(match.categoryPath).toEqual(["Home", "Shop", "Cigars"]);
+  });
+
+  // ------------------------------------------------------------------------
+  // POSITIVE EVIDENCE ONLY — the same verdict as the case above, over a listing
+  // that ALREADY LINKS.
+  //
+  // `no_anchor` is a statement about what the registry could not do, never about
+  // the cigar: a title that anchored last night and does not tonight has almost
+  // always met a registry gap. v2's first draft let it clear `cigar_id` anyway,
+  // so every alias nobody had written yet silently detached a working link and
+  // orphaned the offer history hanging off it — the matcher undoing, on silence,
+  // work an earlier crawl had done correctly.
+  // ------------------------------------------------------------------------
+  it("keeps a crawler-owned link the crawl cannot re-derive, and prices the listing anyway", async () => {
+    const vendorId = await makeVendor(`Silence Keeps ${randomUUID()}`);
+    const listingKey = "/shop/vuelta-abajo-reserva-especial-robusto/";
+
+    // The leaf an earlier crawl linked this listing to, back when its marca was
+    // in the registry. The link is the work; the gap is ours.
+    const kept = (
+      await pg.db
+        .insert(cigars)
+        .values({ canonicalName: `Kept Leaf ${randomUUID()}`, verification: "unverified" })
+        .returning({ id: cigars.id })
+    )[0]!;
+    await pg.db
+      .insert(listingMatches)
+      .values({ vendorId, listingKey, cigarId: kept.id, status: "auto", createdAt: now(), updatedAt: now() });
+
+    const run = await runIngest(
+      deps(
+        createMockFetcher(routes([UNKNOWN_URL], { [UNKNOWN_URL]: loadFixture("product-unknown-marca.html") })),
+        createMemoryPhotoStorage(),
+      ),
+      { adapter: foxCigar, vendorId, mode: "seed" },
+    );
+
+    // The resolver reached the same verdict as the triage case above — this is
+    // the identical listing — so what differs below is the ROW, not the parse.
+    expect(run.stats.linksNoAnchor).toBe(1);
+    expect(run.stats.cigarsCreated).toBe(0);
+    // AND THE SAME VERDICT LANDS IN A SECOND COUNTER HERE. `linksNoAnchor` alone
+    // could not tell an operator which of these listings the crawler is actively
+    // holding a link for; this one says so, and it is the number that prices a
+    // Wave 3 alias session.
+    expect(run.stats.linksAnnotated).toBe(1);
+
+    const match = (await matchesFor(vendorId))[0]!;
+    expect(match).toMatchObject({ status: "auto", cigarId: kept.id });
+    // NOT A LIE ABOUT THE ROW. `unmatched_reason` describes an unmatched row and
+    // this one is matched; a reason here would surface in the triage queue and
+    // read as a question a curator has to answer about a link that works.
+    expect(match.unmatchedReason).toBeNull();
+    // The verdict rides the evidence blob instead, which is where the curator who
+    // can close the registry gap already looks.
+    expect(match.suggestedParse!.reason).toBe("no_anchor");
+    expect(match.suggestedParse!.brandId).toBeNull();
+
+    // PRICING IS INTACT, and it is half the point: annotating rather than
+    // unlinking keeps the observation attached to the row it belongs to instead
+    // of stranding it behind a link the crawl just broke.
+    expect(run.stats.offersWritten).toBe(1);
+    const row = (
+      await pg.db
+        .select({ id: listingMatches.id })
+        .from(listingMatches)
+        .where(and(eq(listingMatches.vendorId, vendorId), eq(listingMatches.listingKey, listingKey)))
+    )[0]!;
+    expect(await pg.db.select().from(offers).where(eq(offers.listingMatchId, row.id))).toHaveLength(1);
+  });
+
+  // The other half of the rule, and the reason it is "positive evidence only"
+  // rather than "never move a link": a parse that RESOLVES still re-decides the
+  // row, which is how the 42% slug disagreement heals without a migration.
+  it("moves a crawler-owned link when the parse resolves to a different leaf", async () => {
+    const vendorId = await makeVendor(`Evidence Moves ${randomUUID()}`);
+    const stale = (
+      await pg.db
+        .insert(cigars)
+        .values({ canonicalName: `Stale Leaf ${randomUUID()}`, verification: "unverified" })
+        .returning({ id: cigars.id })
+    )[0]!;
+    await pg.db.insert(listingMatches).values({
+      vendorId,
+      listingKey: "/shop/padron-1964-anniversary-maduro-torpedo/",
+      cigarId: stale.id,
+      status: "auto",
+      createdAt: now(),
+      updatedAt: now(),
+    });
+
+    await runIngest(
+      deps(createMockFetcher(routes([PADRON_URL], { [PADRON_URL]: loadFixture("product-padron.html") })), null),
+      { adapter: foxCigar, vendorId, mode: "seed" },
+    );
+
+    const padron = (
+      await pg.db
+        .select({ id: cigars.id })
+        .from(cigars)
+        .where(and(eq(cigars.canonicalName, PADRON_NAME), eq(cigars.brandId, padronBrandId)))
+    )[0]!;
+    const match = (await matchesFor(vendorId))[0]!;
+    expect(match).toMatchObject({ status: "auto", cigarId: padron.id, unmatchedReason: null });
+    // Nothing is left open on a row that resolved, so nothing is annotated —
+    // including the parse the previous crawl may have left here.
+    expect(match.suggestedParse).toBeNull();
   });
 
   it("keeps the breadcrumb trail on a clean link too", async () => {
@@ -309,6 +425,49 @@ describe("matching v2 (embedded Postgres)", () => {
 
     const respected = (await matchesFor(agentVendor))[0]!;
     expect(respected).toMatchObject({ cigarId: null, status: "unmatched", decidedBy: "agent" });
+  });
+
+  // THE SAME GUARD ON THE ANNOTATION PATH, which is new and therefore unproven
+  // by the case above. `existingCrawlerLink` deliberately cannot see a human's
+  // row, so a no-anchor crawl computes a full triage verdict for one — reason and
+  // parse and all — and only `upsertListingMatch` stops it landing. A parse
+  // smeared onto an agent's row would be the crawler annotating a question a
+  // human already closed.
+  it("annotates nothing on an agent-owned row when the title anchors no brand", async () => {
+    const vendorId = await makeVendor(`Agent No Anchor ${randomUUID()}`);
+    const held = (
+      await pg.db
+        .insert(cigars)
+        .values({ canonicalName: `Agent Held Leaf ${randomUUID()}`, verification: "verified" })
+        .returning({ id: cigars.id })
+    )[0]!;
+    await pg.db.insert(listingMatches).values({
+      vendorId,
+      listingKey: "/shop/vuelta-abajo-reserva-especial-robusto/",
+      cigarId: held.id,
+      status: "confirmed",
+      decidedBy: "agent",
+      createdAt: now(),
+      updatedAt: now(),
+    });
+
+    const run = await runIngest(
+      deps(createMockFetcher(routes([UNKNOWN_URL], { [UNKNOWN_URL]: loadFixture("product-unknown-marca.html") })), null),
+      { adapter: foxCigar, vendorId, mode: "seed" },
+    );
+
+    const match = (await matchesFor(vendorId))[0]!;
+    expect(match).toMatchObject({ status: "confirmed", cigarId: held.id, decidedBy: "agent" });
+    expect(match.unmatchedReason).toBeNull();
+    expect(match.suggestedParse).toBeNull();
+    // Nor is a human's row counted as a link the CRAWLER is holding: the counter
+    // reads `existingCrawlerLink`, which cannot see this row, and a debt figure
+    // that included rows the crawler may not rewrite would overstate what a Wave 3
+    // alias session could actually recover.
+    expect(run.stats.linksAnnotated).toBeUndefined();
+    // The offer is a fact about the LISTING — this shop, this price, today — and
+    // is written whoever owns the verdict.
+    expect(run.stats.offersWritten).toBe(1);
   });
 
   // ------------------------------------------------------------------------
@@ -396,5 +555,87 @@ describe("matching v2 (embedded Postgres)", () => {
     // resolved leaf must belong to the anchored marca.
     expect(linked.brandId).toBe(padronBrandId);
     void blendRow;
+  });
+
+  // ------------------------------------------------------------------------
+  // THE LAST CHECK BEFORE A MINT. "This cigar is not in the catalog yet" is a
+  // claim the scope query cannot make on its own: it only sees rows it can
+  // attribute to the anchored marca, and 516 of prod's 570 unlinked rows are
+  // attributable to none, because their names do not begin with the brand. A
+  // brand that anchors, looks under itself, finds nothing and mints therefore
+  // creates a second row for a cigar the catalog already holds — the exact
+  // failure ADR-012 exists to end, arriving through the door built to stop it.
+  // ------------------------------------------------------------------------
+
+  // A Fox-shaped product page, built here because no recorded fixture has the
+  // shape this case needs: a title that anchors a marca whose orphan row the
+  // scope query is structurally blind to.
+  const foxProductPage = (name: string, url: string): string =>
+    `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<script type="application/ld+json">\n${JSON.stringify(
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "BreadcrumbList",
+            itemListElement: [
+              { "@type": "ListItem", position: 1, name: "Home", item: "https://foxcigar.com/" },
+              { "@type": "ListItem", position: 2, name: "Shop", item: "https://foxcigar.com/shop/" },
+              { "@type": "ListItem", position: 3, name: "Cigars", item: "https://foxcigar.com/shop/cigars/" },
+              { "@type": "ListItem", position: 4, name },
+            ],
+          },
+          {
+            "@type": "Product",
+            name,
+            url,
+            sku: "AF-OPUSX-PERF2",
+            offers: [
+              {
+                "@type": "Offer",
+                priceSpecification: [{ "@type": "PriceSpecification", price: "32.00", priceCurrency: "USD" }],
+                availability: "https://schema.org/InStock",
+                url,
+              },
+            ],
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n</script>\n</head>\n<body><h1>${name}</h1></body>\n</html>\n`;
+
+  it("asks instead of minting when an unlinked row already carries the parsed name", async () => {
+    const vendorId = await makeVendor(`Orphan Collision Fox ${randomUUID()}`);
+    const fuenteBrandId = await seedBrand("Arturo Fuente");
+
+    // THE ROW NEITHER HALF OF THE SCOPE QUERY CAN SEE: `brand_id` is null, so the
+    // brand filter misses it, and its name does not begin with the marca, so the
+    // bridge clause's prefix misses it too. 516 prod rows look exactly like this.
+    await pg.db
+      .insert(cigars)
+      .values({ canonicalName: "Fuente Fuente OpusX Perfecxion No. 2", verification: "unverified" });
+
+    const url = "https://foxcigar.com/shop/arturo-fuente-fuente-fuente-opusx-perfecxion-no-2/";
+    const title = "Arturo Fuente Fuente Fuente OpusX Perfecxion No. 2";
+    const before = (await pg.db.select({ id: cigars.id }).from(cigars)).length;
+
+    const run = await runIngest(deps(createMockFetcher(routes([url], { [url]: foxProductPage(title, url) })), null), {
+      adapter: foxCigar,
+      vendorId,
+      mode: "seed",
+    });
+
+    // The brand DID anchor and the scope DID come back empty — the arm that mints
+    // — and the unscoped pass turned the mint into a question.
+    expect(run.stats.linksNoAnchor).toBeUndefined();
+    expect(run.stats.cigarsCreated).toBe(0);
+    expect(run.stats.linksAmbiguous).toBe(1);
+    expect((await pg.db.select({ id: cigars.id }).from(cigars)).length).toBe(before);
+
+    const match = (await matchesFor(vendorId))[0]!;
+    expect(match).toMatchObject({ status: "unmatched", cigarId: null, unmatchedReason: "ambiguous" });
+    // The parse names the marca it did anchor, so the curator resolving this row
+    // has the one fact that makes the orphan attachable.
+    expect(match.suggestedParse).toMatchObject({ reason: "ambiguous", brandId: fuenteBrandId, cleanedName: title });
   });
 });

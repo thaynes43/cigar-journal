@@ -69,8 +69,25 @@ const VARIANT_TOKENS = new Set([
   "rosado",
 ]);
 
+// A wrapper name is written three ways by three vendors — `Sun Grown`,
+// `sun-grown`, `sungrown` — and a token scan sees the third only. Reading
+// ADJACENT PAIRS as well as single tokens unifies them onto one key, because the
+// separator is the whole difference and `tokensOf` has already dropped it.
+// Without this the guard was blind exactly where it was needed: two rows of one
+// brand differing only in wrapper, spelled differently by two shops, read as
+// making no variant claim at all.
 function variantTokens(name: string): Set<string> {
-  return new Set(tokensOf(name).filter((token) => VARIANT_TOKENS.has(token)));
+  const tokens = tokensOf(name);
+  const found = new Set<string>();
+  for (let i = 0; i < tokens.length; i++) {
+    const single = tokens[i]!;
+    if (VARIANT_TOKENS.has(single)) found.add(single);
+    if (i + 1 < tokens.length) {
+      const joined = single + tokens[i + 1]!;
+      if (VARIANT_TOKENS.has(joined)) found.add(joined);
+    }
+  }
+  return found;
 }
 
 function hasExtra(a: Set<string>, b: Set<string>): boolean {
@@ -95,26 +112,52 @@ export function packagingCompatible(query: string, candidate: string): boolean {
   return mutuallyContained(packagingTokens(query), packagingTokens(candidate));
 }
 
+// THREE ANSWERS, NOT TWO, because the middle one is a real and different fact.
+//
+//   same      — both names state a wrapper and they agree.
+//   different — both state one and they disagree. Never the same leaf, however
+//               close the trigram score: ADR-012 is explicit that "wrapper
+//               variants marketed as separate products (Padron Maduro/Natural)
+//               are distinct blends, because that is how they are sold".
+//   unstated  — one side states a wrapper and the other says nothing. NOT a
+//               disagreement and NOT an agreement: it is the collapse-bucket
+//               signature. `Padron 1964 Anniversary Natural` is one prod row
+//               holding twelve listings spanning BOTH wrappers, so a listing
+//               naming a wrapper against a row naming none is a question about
+//               which half of that row it belongs to — a question for a curator.
+export type VariantRelation = "same" | "different" | "unstated";
+
+export function variantRelation(query: string, candidate: string): VariantRelation {
+  const q = variantTokens(query);
+  const c = variantTokens(candidate);
+  if (q.size === 0 && c.size === 0) return "same";
+  if (q.size === 0 || c.size === 0) return "unstated";
+  return mutuallyContained(q, c) ? "same" : "different";
+}
+
 // Incompatible when the two names name different wrapper variants. A name that
 // states no variant at all is compatible with anything: silence is not a claim,
 // and refusing to link `Padrón 1964 Anniversary` to its Maduro row would invent a
 // distinction the vendor did not make.
 export function variantCompatible(query: string, candidate: string): boolean {
-  const q = variantTokens(query);
-  const c = variantTokens(candidate);
-  if (q.size === 0 || c.size === 0) return true;
-  return mutuallyContained(q, c);
+  return variantRelation(query, candidate) !== "different";
 }
 
 // The full disqualifier for a freeform comparison. Also used by the curation
-// duplicate queue, which is subject to the same reasoning — a number-, packaging-
-// or variant-distinct pair is never a merge candidate either.
+// duplicate queue, which is subject to the same reasoning — a number- or
+// packaging-distinct pair is never a merge candidate either.
+//
+// `variantCompatible` IS DELIBERATELY NOT HERE. Wave 2 folded it in and that
+// silently re-decided two things this wave never intended to touch: the MCP
+// link-vs-create verdict `resolveCigar` gives every described cigar (a user
+// saying "Padrón 1964 Maduro" would stop strong-linking the row they have smoked
+// eleven times and mint a second one), and which pairs reach the curation
+// duplicate queue. The wrapper guard is a MATCHER rule and it belongs where the
+// matcher applies it — `chooseLeaf`'s freeform filter, over listings, where a
+// refusal costs a triage row rather than a duplicate catalog entry. This keeps
+// the #192/#208 definition intact.
 export function strongLinkCompatible(query: string, candidate: string): boolean {
-  return (
-    numbersCompatible(query, candidate) &&
-    packagingCompatible(query, candidate) &&
-    variantCompatible(query, candidate)
-  );
+  return numbersCompatible(query, candidate) && packagingCompatible(query, candidate);
 }
 
 // Two vitola labels agree when they fold to the same key. A NULL on either side

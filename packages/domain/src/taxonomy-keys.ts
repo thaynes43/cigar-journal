@@ -95,10 +95,47 @@ export interface AliasAnchor<T extends AliasCandidate> {
   length: number;
 }
 
+// The shortest alias key allowed to anchor a brand. Two characters is an article
+// (`la`, `de`, `el`), not a marca, and one of those matching mid-title anchors a
+// whole listing on a syllable. Three keeps the real short marcas (CAO, LFD)
+// working and is the same floor the scope query's bridge clause uses, for the
+// same reason — the two must agree or a brand admitted by one is refused by the
+// other.
+export const MIN_ANCHOR_KEY_LENGTH = 3;
+
+export interface AnchorOptions {
+  // Restrict the scan to a token range. That is how "line within the brand's
+  // remaining tokens" and "blend within the line's" are expressed without a
+  // second normalization pass.
+  from?: number;
+  to?: number;
+  // THE BRAND-ANCHOR CONSTRAINTS, and only the brand anchor passes them.
+  //
+  // A single-token alias is the weakest claim any candidate can make on a title,
+  // and matched mid-title it is usually a word the marca does not own. All three
+  // of these are real vendor titles and all three anchored the wrong brand:
+  //
+  //   `La Aroma de Cuba Churchill`  → the brand `Cuba`
+  //   `Flor de Oliva Robusto`       → the brand `Oliva`
+  //   `Xikar 9mm Pull Out Punch`    → the brand `Punch`
+  //
+  // In each one the token is a fragment of a longer name, or of an accessory.
+  // What separates them from the infix anchor that IS right — `Cigars - Padrón
+  // 1964`, where a shop's merchandising prefix leads the title — is punctuation:
+  // the brand leads a SEGMENT there, and a segment boundary is precisely the
+  // signal `fold()` throws away. So a one-token alias must start the title or
+  // start one of its segments; a multi-token alias is a strong enough claim to
+  // match anywhere, unchanged.
+  //
+  // Lines and blends are exempt and need no flag: they are already scoped to a
+  // parent AND to the token range the level above did not consume, so a short
+  // key inside that window is a name, not a claim on the whole title.
+  segmentStarts?: ReadonlySet<number>;
+  minKeyLength?: number;
+}
+
 // Longest-window alias match over a candidate set, honouring the window order
-// above. `within` restricts the scan to a token range — that is how "line within
-// the brand's remaining tokens" and "blend within the line's" are expressed
-// without a second normalization pass.
+// above.
 //
 // Returns null rather than a best guess. Every level below the anchor is allowed
 // to be absent, and absent is never inferred (ADR-012): a title that names no
@@ -106,11 +143,11 @@ export interface AliasAnchor<T extends AliasCandidate> {
 export function anchorByAlias<T extends AliasCandidate>(
   tokens: string[],
   candidates: readonly T[],
-  within?: { from?: number; to?: number },
+  options?: AnchorOptions,
 ): AliasAnchor<T> | null {
   if (candidates.length === 0) return null;
-  const from = within?.from ?? 0;
-  const to = within?.to ?? tokens.length;
+  const from = options?.from ?? 0;
+  const to = options?.to ?? tokens.length;
   if (to - from <= 0) return null;
 
   // One key → one entity. A key claimed by two candidates is dropped rather than
@@ -130,9 +167,14 @@ export function anchorByAlias<T extends AliasCandidate>(
 
   for (const window of tokenWindows(tokens.slice(from, to))) {
     const entity = byKey.get(window.key);
-    if (entity) {
-      return { entity, key: window.key, start: from + window.start, length: window.length };
-    }
+    if (!entity) continue;
+    const start = from + window.start;
+    // A refused window does not end the scan: a shorter or later window may
+    // still carry a legitimate anchor, and refusing THIS claim is not a
+    // statement about the others.
+    if (options?.minKeyLength != null && window.key.length < options.minKeyLength) continue;
+    if (options?.segmentStarts && window.length === 1 && !options.segmentStarts.has(start)) continue;
+    return { entity, key: window.key, start, length: window.length };
   }
   return null;
 }

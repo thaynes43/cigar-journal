@@ -111,9 +111,12 @@ export async function resolveListing(
 }
 
 // The parse as it is persisted for triage (migration 0027). A curator inheriting
-// an unmatched row inherits the reasoning rather than redoing it by eye.
-export function toSuggestedParse(parse: ListingParse): SuggestedParse {
+// an unmatched row inherits the reasoning rather than redoing it by eye — and,
+// under the positive-evidence rule, so does a curator looking at a row that is
+// still LINKED and whose parse no longer reaches that link.
+export function toSuggestedParse(parse: ListingParse, reason?: SuggestedParse["reason"]): SuggestedParse {
   return {
+    ...(reason === undefined ? {} : { reason }),
     brandId: parse.brandId,
     brandName: parse.brandName,
     lineId: parse.lineId,
@@ -129,6 +132,29 @@ export function toSuggestedParse(parse: ListingParse): SuggestedParse {
     residue: parse.residue,
     notes: parse.notes,
   };
+}
+
+// The cigar a CRAWLER-OWNED row already links to, or null. Read before the
+// decision arms choose, because the positive-evidence rule makes the existing
+// link part of the decision rather than something the write discovers afterwards.
+//
+// Restricted to rows the crawler owns and has not confirmed, for the reason
+// `upsertListingMatch` gives at length: a curator's or an agent's verdict is
+// returned untouched by the write anyway, so annotating one would be a promise
+// the write path does not keep.
+export async function existingCrawlerLink(
+  db: Queryer,
+  vendorId: string,
+  listingKey: string,
+): Promise<string | null> {
+  const rows = await db
+    .select({ cigarId: listingMatches.cigarId, decidedBy: listingMatches.decidedBy, status: listingMatches.status })
+    .from(listingMatches)
+    .where(and(eq(listingMatches.vendorId, vendorId), eq(listingMatches.listingKey, listingKey)))
+    .limit(1);
+  const row = rows[0];
+  if (!row || row.decidedBy !== "crawler" || row.status === "confirmed") return null;
+  return row.cigarId;
 }
 
 export interface UpsertMatchInput {

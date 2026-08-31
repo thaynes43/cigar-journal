@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   stripPackaging,
   parsePackagingFacts,
+  PACKAGING_TOKEN_LABELS,
   extractDims,
   parseDims,
   matchVitola,
@@ -82,6 +83,78 @@ describe("stripPackaging", () => {
   });
 });
 
+// THE VOCABULARY INVARIANT, and it is the reason the two passes share one list.
+// A stripper that removes a word the parser never records does not MOVE the fact
+// from the name to the offer, it DESTROYS it — `Punch Bolos Tin` used to lose its
+// `Tin` from the name and record no packaging anywhere. Asserting it over the
+// whole vocabulary rather than over examples is what makes the list closed: a
+// token added to `PACKAGING_TOKEN_LABELS` without a label fails here, not in
+// production six months later.
+describe("the packaging vocabulary is closed", () => {
+  it("records every standalone container word it is willing to strip", () => {
+    for (const token of PACKAGING_TOKEN_LABELS.keys()) {
+      const title = `Oliva Serie V Robusto ${token}`;
+      const stripped = stripPackaging(title);
+      expect(stripped.cleaned, `'${token}' was stripped`).toBe("Oliva Serie V Robusto");
+      expect(stripped.packaging, `'${token}' was recorded`).toBe(PACKAGING_TOKEN_LABELS.get(token));
+    }
+  });
+
+  it("records a count the stripper removes even when no container is named", () => {
+    expect(parsePackagingFacts("Padron 1964 Anniversary 10 ct")).toEqual({ packaging: null, sticksPerPackage: 10 });
+    expect(parsePackagingFacts("Padron 1964 Anniversary (5)")).toEqual({ packaging: null, sticksPerPackage: 5 });
+  });
+
+  it("reads the trade's own bundle words", () => {
+    expect(parsePackagingFacts("Oliva Serie V Bundle of 20")).toEqual({ packaging: "bundle", sticksPerPackage: 20 });
+    expect(parsePackagingFacts("Oliva Serie V Mazo")).toEqual({ packaging: "mazo", sticksPerPackage: null });
+    expect(stripPackaging("Oliva Serie V Mazo").cleaned).toBe("Oliva Serie V");
+  });
+
+  // A shape term is not a container, and the `box` inside `Box-Pressed` must not
+  // become a box on the offer any more than it may come off the name.
+  it("does not read a shape term as a container", () => {
+    expect(parsePackagingFacts("Liga Privada No. 9 Box Pressed Toro")).toEqual({
+      packaging: null,
+      sticksPerPackage: null,
+    });
+  });
+
+  // The general form of the invariant: nothing is removed silently. If the
+  // cleaned name is shorter than the title, the difference is on the offer.
+  it("never removes anything without recording a fact", () => {
+    const titles = [
+      "Padrón 1964 Anniversary Maduro Torpedo Box of 20",
+      "Davidoff Signature 2000 Tubos",
+      "Punch Bolos Tin",
+      "Oliva Serie V Bundle",
+      "Fox 5 Cigar Sampler",
+      "Padron 1964 Anniversary 10 ct",
+      "Padron 1964 Anniversary (5)",
+      "Oliva Serie V 5-Pack",
+      "Arturo Fuente Hemingway Single",
+      "Oliva Serie V Melanio - Box of 10",
+      "My Father Le Bijou 1922 Toro Cab",
+    ];
+    for (const title of titles) {
+      const stripped = stripPackaging(title);
+      if (stripped.cleaned === title) continue;
+      expect(
+        stripped.packaging != null || stripped.sticksPerPackage != null,
+        `'${title}' lost text without recording a fact`,
+      ).toBe(true);
+    }
+  });
+
+  it("leaves a title carrying no packaging entirely alone", () => {
+    expect(stripPackaging("Oliva Serie V Melanio Torpedo")).toMatchObject({
+      cleaned: "Oliva Serie V Melanio Torpedo",
+      packaging: null,
+      sticksPerPackage: null,
+    });
+  });
+});
+
 describe("extractDims", () => {
   // Both orders are real vendor spellings and no separator says which is which.
   // Magnitude decides, and it can: 3–10 inches and 20–80 sixty-fourths do not
@@ -120,7 +193,17 @@ describe("tokenizeTitle", () => {
     expect(tokenizeTitle("Padrón 1964 Anniversary")).toEqual({
       words: ["Padrón", "1964", "Anniversary"],
       keys: ["padron", "1964", "anniversary"],
+      segmentStarts: new Set([0]),
     });
+  });
+
+  // `fold()` erases the punctuation a vendor separates its merchandising prefix
+  // with, so the boundary is recorded before it is erased. It is what lets a
+  // one-token brand alias anchor `Cigars - Padrón 1964` and refuse `La Aroma de
+  // Cuba Churchill`, which have the same shape once the punctuation is gone.
+  it("records where each punctuation-separated segment begins", () => {
+    expect(tokenizeTitle("Cigars - Padrón 1964").segmentStarts).toEqual(new Set([0, 1]));
+    expect(tokenizeTitle("La Aroma de Cuba Churchill").segmentStarts).toEqual(new Set([0]));
   });
 
   // A word folding to a multi-token key would desynchronize the arrays that
@@ -246,6 +329,27 @@ describe("parseListingTitle", () => {
     const parse = parseListingTitle("Cigars - Padrón 1964 Anniversary Series Maduro", registry);
     expect(parse.brandId).toBe("brand-padron");
     expect(parse.notes.join(" ")).toContain("matched mid-title");
+  });
+
+  // A ONE-WORD MARCA IS THE EASIEST THING IN THE WORLD TO SAY BY ACCIDENT, and
+  // every title below says one without naming it: two are fragments of a longer
+  // marca, the third is an accessory. Anchoring any of them would scope the whole
+  // match to the wrong brand and, in seed mode, mint under it.
+  it("refuses a one-word marca buried inside a longer name", () => {
+    const shortBrands: ParseRegistry = {
+      brands: [
+        { id: "brand-cuba", name: "Cuba", aliases: ["cuba"] },
+        { id: "brand-punch", name: "Punch", aliases: ["punch"] },
+        { id: "brand-oliva", name: "Oliva", aliases: ["oliva"] },
+      ],
+      linesOfBrand: () => [],
+      blendsOfLine: () => [],
+    };
+    expect(parseListingTitle("La Aroma de Cuba Churchill", shortBrands).brandId).toBeNull();
+    expect(parseListingTitle("Xikar 9mm Pull Out Punch", shortBrands).brandId).toBeNull();
+    expect(parseListingTitle("Flor de Oliva Robusto", shortBrands).brandId).toBeNull();
+    // And the same alias still anchors the titles it genuinely leads.
+    expect(parseListingTitle("Oliva Serie V Melanio", shortBrands).brandId).toBe("brand-oliva");
   });
 
   // A line belongs to its brand structurally: the candidate set handed in is

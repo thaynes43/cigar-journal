@@ -127,7 +127,9 @@ export {
   anchorByAlias,
   composeCanonicalName,
   MAX_ALIAS_TOKENS,
+  MIN_ANCHOR_KEY_LENGTH,
   type TokenWindow,
+  type AnchorOptions,
   type AliasCandidate,
   type AliasAnchor,
   type CanonicalNameParts,
@@ -141,6 +143,7 @@ export {
   matchVitola,
   tokenizeTitle,
   PACKAGING_TOKENS,
+  PACKAGING_TOKEN_LABELS,
   type ListingParse,
   type ParseRegistry,
   type PackagingFacts,
@@ -152,6 +155,8 @@ export {
   loadAncestryContext,
   scopedLeafCandidates,
   chooseLeaf,
+  deriveBrandId,
+  findUnlinkedNameCollision,
   resolveDescribedTaxonomy,
   loadNamePartsForCigar,
   SCOPED_MATCH_THRESHOLD,
@@ -160,7 +165,7 @@ export {
   type LeafChoice,
   type DescribedTaxonomy,
 } from "./taxonomy-resolve.js";
-export { vitolaAgrees } from "./name-heuristics.js";
+export { vitolaAgrees, variantRelation, type VariantRelation } from "./name-heuristics.js";
 
 // Registry writes and name recomposition. Domain-level only this wave — the
 // curation surfaces that call them are Wave 3 and their MCP tools are Wave 4.

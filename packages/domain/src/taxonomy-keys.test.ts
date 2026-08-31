@@ -6,6 +6,7 @@ import {
   windowKeys,
   anchorByAlias,
   composeCanonicalName,
+  MIN_ANCHOR_KEY_LENGTH,
 } from "./taxonomy-keys.js";
 
 // The matching-key vocabulary (ADR-012, migration 0026/0027). Pure — no database.
@@ -81,6 +82,70 @@ describe("anchorByAlias", () => {
   it("anchors mid-title when nothing earlier matches", () => {
     const hit = anchorByAlias(["cigars", "padron", "1964"], [padron]);
     expect(hit).toMatchObject({ entity: padron, start: 1, length: 1 });
+  });
+
+  // THE BRAND-ANCHOR CONSTRAINTS. Opt-in, and only the brand anchor opts in: a
+  // line or blend is already scoped to a parent and to a token range, where a
+  // short key is a name rather than a claim on the whole title.
+  describe("under the brand-anchor constraints", () => {
+    const cuba = { id: "brand-cuba", name: "Cuba", aliases: ["cuba"] };
+    const punch = { id: "brand-punch", name: "Punch", aliases: ["punch"] };
+    const oliva = { id: "brand-oliva", name: "Oliva", aliases: ["oliva"] };
+    const la = { id: "brand-la", name: "La", aliases: ["la"] };
+    const constrained = { segmentStarts: new Set([0]), minKeyLength: MIN_ANCHOR_KEY_LENGTH };
+
+    // Each of these is a real vendor title whose one-token infix match anchored a
+    // marca the title never named: a fragment of a longer name, or an accessory
+    // that happens to share a word with a brand.
+    it("refuses a one-token alias buried mid-title", () => {
+      expect(anchorByAlias(["la", "aroma", "de", "cuba", "churchill"], [cuba], constrained)).toBeNull();
+      expect(anchorByAlias(["flor", "de", "oliva", "robusto"], [oliva], constrained)).toBeNull();
+      expect(anchorByAlias(["xikar", "9mm", "pull", "out", "punch"], [punch], constrained)).toBeNull();
+    });
+
+    it("accepts a one-token alias that leads the title", () => {
+      expect(anchorByAlias(["oliva", "serie", "v", "melanio"], [oliva], constrained)).toMatchObject({
+        entity: oliva,
+        start: 0,
+      });
+    });
+
+    // A merchandising prefix is the case the rule must not break, and punctuation
+    // is what tells it apart from the three above: the brand leads a SEGMENT.
+    // `tokenizeTitle` records where those begin, because `fold()` erases them.
+    it("accepts a one-token alias that leads a segment", () => {
+      expect(
+        anchorByAlias(["cigars", "padron", "1964"], [padron], {
+          segmentStarts: new Set([0, 1]),
+          minKeyLength: MIN_ANCHOR_KEY_LENGTH,
+        }),
+      ).toMatchObject({ entity: padron, start: 1, length: 1 });
+    });
+
+    // A multi-token alias is a strong enough claim to stand anywhere: it takes
+    // more than one word to name a marca by accident.
+    it("still lets a multi-token alias match infix", () => {
+      expect(anchorByAlias(["cigars", "drew", "estate", "t52"], [drewEstate], constrained)).toMatchObject({
+        entity: drewEstate,
+        start: 1,
+        length: 2,
+      });
+    });
+
+    // Two characters is an article, not a marca. The same floor the scope query's
+    // bridge clause uses, and the two must agree or a brand admitted by one is
+    // refused by the other.
+    it("never anchors a key below the length floor, even at the start", () => {
+      expect(anchorByAlias(["la", "something", "robusto"], [la], constrained)).toBeNull();
+    });
+
+    // A refused window is not a verdict on the others: the scan continues and a
+    // legitimate anchor further along still wins.
+    it("keeps scanning past a refused window", () => {
+      expect(anchorByAlias(["flor", "de", "oliva", "drew", "estate"], [oliva, drewEstate], constrained)).toMatchObject(
+        { entity: drewEstate, start: 3, length: 2 },
+      );
+    });
   });
 
   it("returns null rather than a best guess when nothing matches", () => {

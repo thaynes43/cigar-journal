@@ -92,11 +92,16 @@ ALTER TABLE listing_matches
 -- edits, no attachment of the unbranded rows. All of that remains Wave 3
 -- curation, which needs evidence and an audit trail a migration cannot produce.
 --
--- Each statement is unchanged from 0026 apart from this comment, and each was
--- written to be re-runnable — ON CONFLICT DO NOTHING, `IS NULL` guards, and a
--- collision pass whose every subquery reads the pre-statement snapshot. Their
--- idempotency is not taken on faith: `taxonomy-backfill.test.ts` replays this
--- file and asserts the second application changes nothing.
+-- TWO STATEMENTS DIVERGE FROM 0026'S TEXT, and both diverge for one reason: 0026
+-- minted into an EMPTY registry and this runs against a populated one. The mint
+-- drops a source row whose FOLDED key an existing brand already answers to —
+-- left in, it mints a rival that steals that key — and a further UPDATE links
+-- the cigars behind the dropped rows. Both are spelled out where they stand.
+-- Everything else is 0026 verbatim, and all of it was written to be re-runnable:
+-- ON CONFLICT DO NOTHING, `IS NULL` guards, and a collision pass whose every
+-- subquery reads the pre-statement snapshot. Their idempotency is not taken on
+-- faith — `matching-v2-backfill.test.ts` replays this file and asserts the
+-- second application changes nothing.
 -- ---------------------------------------------------------------------------
 
 INSERT INTO brands (name, slug, aliases)
@@ -114,8 +119,32 @@ slugged AS (
     btrim(regexp_replace(lower(regexp_replace(normalize(s.name, NFKD), U&'[\0300-\036F]', '', 'g')), '[^abcdefghijklmnopqrstuvwxyz0123456789]+', '-', 'g'), '-') AS folded_slug
   FROM source s
 ),
+-- Addressable, AND NOT ALREADY ANSWERED FOR. The second half is the mint's one
+-- divergence from 0026, and it is the difference between minting into an empty
+-- registry and minting into a populated one. `ON CONFLICT (slug) DO NOTHING`
+-- only catches a source row whose SLUG a brand already owns; a row whose FOLDED
+-- key a brand already answers to conflicts with nothing. `Padron` arriving beside
+-- a `Padrón` stored as slug `padr-n` with alias `padron` computes the slug
+-- `padron`, which no brand owns, so it mints a rival — and the collision pass
+-- below then reads that rival as the identity owner of `padron` and strips the
+-- alias from Padrón. The marca loses its anchor and every `Padrón ...` title
+-- lands on an empty brand: not a duplicate, an inversion. Dropping the row here
+-- is the fix, and the cigars behind it are not stranded — the folded UPDATE far
+-- below links them to the brand that already answers to their key.
+--
+-- The subquery reads the pre-statement snapshot, so brands minted by THIS
+-- statement are invisible to it: two spellings arriving together against a
+-- registry holding neither still mint two brands and still go to the collision
+-- pass, exactly as they did under 0026.
 addressable AS (
-  SELECT * FROM slugged WHERE slug <> '' AND octet_length(slug) <= 2000
+  SELECT s.*
+  FROM slugged s
+  WHERE s.slug <> ''
+    AND octet_length(s.slug) <= 2000
+    AND NOT EXISTS (
+      SELECT 1 FROM brands b
+      WHERE b.slug = s.folded_slug OR s.folded_slug = ANY (b.aliases)
+    )
 ),
 canonical AS (
   SELECT DISTINCT ON (slug) slug, name AS canonical_name
@@ -174,23 +203,72 @@ WHERE EXISTS (
 -- untouched: a structural link is not an edit to the cigar's content, and
 -- bumping it would churn recency ordering across the whole catalog.
 --
--- THAT GUARANTEE IS ABOUT LINKS, NOT ABOUT BRAND RETIREMENT — measured, not
--- assumed. Firing this backfill again AFTER Wave 3 curation has begun would
--- re-mint a brand a curator had merged away and deleted, because the mint above
--- reads the free-text `cigars.brand` column, which the merge does not clear. The
--- resurrected row is empty (the link guard correctly leaves the cigar on the
--- brand the curator chose) and a further run changes nothing, so this is a
--- cosmetic resurrection rather than an idempotency break — but it is the reason
--- this re-run is scoped to closing the Wave 1→2 gap and is not a statement that
--- the backfill may be replayed at any time forever. A backfill that must survive
--- curation needs a tombstone the mint respects, which is a Wave 3 design
--- decision and deliberately not made here.
+-- THAT GUARANTEE IS ABOUT LINKS, NOT ABOUT BRAND RETIREMENT. Firing this
+-- backfill again AFTER Wave 3 curation has begun re-mints a brand a curator had
+-- merged away and deleted, because the mint above reads the free-text
+-- `cigars.brand` column, which the merge does not clear.
+--
+-- An earlier version of this comment called that resurrection cosmetic. It is
+-- not. The resurrected brand does not stay empty: every cigar still carrying the
+-- retired spelling with `brand_id` NULL — anything `add_cigar` or a crawl minted
+-- after the merge, and anything the merge itself never reached — is LINKED to it
+-- by this statement. The merge is undone for those rows, and a curator's
+-- judgement is replaced by the mechanical rule they overrode.
+--
+-- The adjacent failure, a re-mint stripping a surviving brand's folded alias and
+-- killing its anchor, IS closed — by the drop in `addressable` above. The
+-- resurrection is not, and cannot be closed here: a mint that survives curation
+-- needs a tombstone it respects, and that is a Wave 3 design decision. So the
+-- rule is flat. This file closes the Wave 1→2 gap; it MUST NOT be replayed once
+-- Wave 3 curation has begun.
 UPDATE cigars c
 SET brand_id = b.id
 FROM brands b
 WHERE c.brand_id IS NULL
   AND nullif(btrim(c.brand), '') IS NOT NULL
   AND b.slug = btrim(regexp_replace(lower(btrim(c.brand)), '[^abcdefghijklmnopqrstuvwxyz0123456789]+', '-', 'g'), '-');
+
+-- The other half of the drop in `addressable`. A source row the mint skipped
+-- still has cigars behind it, and the exact-slug UPDATE above cannot reach them:
+-- `Padron` slugs to `padron` and no brand owns that slug, because Padrón's is
+-- `padr-n`. Without this statement the drop would trade a stolen anchor for a
+-- permanently unlinked catalog row, which is no trade at all. So a cigar whose
+-- brand text FOLDS to a key an existing brand already answers to — as its slug
+-- or in its aliases — is linked to that brand.
+--
+-- ORDERED AFTER THE EXACT MATCH, and the order is the rule: a slug is a brand's
+-- identity and always wins, a folded key is a matching key and only speaks for
+-- the rows identity left NULL. `brand_id IS NULL` therefore does double duty here
+-- — it preserves a curator's correction exactly as above, and it is what makes
+-- the exact match take precedence.
+--
+-- `HAVING count(*) = 1` is the second rule: a folded key TWO brands answer to
+-- links to NEITHER. The collision pass above should have made that unreachable,
+-- but the failure it would produce is the confidently-wrong anchor ADR-012 exists
+-- to end, and this statement is where it would be written to the database rather
+-- than merely reported. An unlinked row is a question for a curator; a row linked
+-- by coin flip is an answer nobody can tell is wrong.
+WITH unlinked AS (
+  SELECT
+    c.id,
+    btrim(regexp_replace(lower(regexp_replace(normalize(btrim(c.brand), NFKD), U&'[\0300-\036F]', '', 'g')), '[^abcdefghijklmnopqrstuvwxyz0123456789]+', '-', 'g'), '-') AS folded_slug
+  FROM cigars c
+  WHERE c.brand_id IS NULL
+    AND nullif(btrim(c.brand), '') IS NOT NULL
+),
+resolved AS (
+  SELECT k.folded_slug, (array_agg(b.id))[1] AS brand_id
+  FROM (SELECT DISTINCT folded_slug FROM unlinked WHERE folded_slug <> '') k
+  JOIN brands b ON b.slug = k.folded_slug OR k.folded_slug = ANY (b.aliases)
+  GROUP BY k.folded_slug
+  HAVING count(*) = 1
+)
+UPDATE cigars c
+SET brand_id = r.brand_id
+FROM unlinked u
+JOIN resolved r ON r.folded_slug = u.folded_slug
+WHERE c.id = u.id
+  AND c.brand_id IS NULL;
 
 -- Still a near no-op in production, and still worth running: 0026 predicted the
 -- brand-image job would start writing rows between the two migrations, and the

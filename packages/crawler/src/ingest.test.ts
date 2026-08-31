@@ -1767,6 +1767,78 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(await photosFor(cigarId)).toHaveLength(0);
   });
 
+  // THE SAME GUARD, ONE PATH OVER — and the drain is the path where it pays
+  // twice. `matchesAuto` used to increment on the resolver's intent rather than
+  // on the committed row, so every drain over one of prod's 591 human-owned rows
+  // reported a link that was never written; and the loop then walked on to the
+  // photo, aiming the one permanent artifact at the cigar the human had rejected.
+  // The committed row is the authority for both, so a declined upsert scores a
+  // miss and ends the look before the capture.
+  it("a drain over a human-owned row scores no match and captures no photo, but still prices the listing", async () => {
+    const lane = await makeVendor("Declined Drain NC", "NC");
+    await arrange([lane]);
+
+    const wanted = await seedCigar(OLIVA_NAME, "NC");
+    const requestId = await seedRequest(wanted);
+    // Where a human actually pointed this listing. The cigar is real and typed, so
+    // the photo guard would PERMIT a capture aimed at `wanted` — without that the
+    // photo assertion below would pass on the guard's account rather than on the
+    // committed row's, which is how this defect stayed invisible next door.
+    const elsewhere = await seedCigar(`Curator Choice ${randomUUID().slice(0, 8)}`, "NC");
+    const decided = await upsertListingMatch(pg.db, {
+      vendorId: lane,
+      listingKey: "/shop/oliva-serie-v-melanio-torpedo/",
+      cigarId: elsewhere,
+      status: "auto",
+      now: now(),
+    });
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "confirmed", decidedBy: "agent" })
+      .where(eq(listingMatches.id, decided.id));
+
+    const run = await enrichRun(lane, hitRoutes, createMemoryPhotoStorage());
+
+    // A COMPLETED LOOK THAT CONCLUDED NOTHING. The row says something other than
+    // "linked to this cigar", and no arithmetic on our side changes that.
+    expect(run.stats.matchesAuto).toBe(0);
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
+    expect((await requestRow(requestId)).status).toBe("pending");
+    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "miss" }]);
+
+    const after = (await pg.db.select().from(listingMatches).where(eq(listingMatches.id, decided.id)))[0]!;
+    expect(after).toMatchObject({ cigarId: elsewhere, status: "confirmed", decidedBy: "agent" });
+
+    // The slot the ask exists to fill stays empty rather than being filled with
+    // the wrong cigar's picture, which is unrecoverable: one slot, first write
+    // wins, and nothing in the crawler ever deletes one.
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(await photosFor(wanted)).toHaveLength(0);
+
+    // The offer is still written. It is a fact about the LISTING and hangs off
+    // `match.id`, which exists whoever owns the verdict — discarding it would cost
+    // the human's own row the price history it depends on.
+    expect(run.stats.offersWritten).toBe(1);
+    expect(await pg.db.select().from(offers).where(eq(offers.listingMatchId, decided.id))).toHaveLength(1);
+
+    // THE CONTROL, and without it every zero above is unfalsifiable: a drain that
+    // never reached the write at all — a candidate that failed to rank, a market
+    // guard refusing the slot on its own account — produces exactly the same
+    // numbers. So hand the SAME listing back to the crawler and change nothing
+    // else. Everything fires, which means the zeros above were the committed row's
+    // doing and nothing else's.
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "auto", decidedBy: "crawler" })
+      .where(eq(listingMatches.id, decided.id));
+
+    const control = await enrichRun(lane, hitRoutes, createMemoryPhotoStorage());
+    expect(control.stats.matchesAuto).toBe(1);
+    expect(control.stats.photosCaptured).toBe(1);
+    expect(await photosFor(wanted)).toHaveLength(1);
+    expect((await requestRow(requestId)).status).toBe("fulfilled");
+  });
+
   // §2c, THE COUPLING. The drain's open set has to be the exact complement of the
   // rollup's denominator over the SAME market value. If the drain filtered on the
   // evidenced market while the rollup filtered on `cigars.type`, the CC lane here

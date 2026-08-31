@@ -327,7 +327,11 @@ describe("migrations", () => {
         vendorId: vendor!.id,
         listingKey: `reason-${reason ?? "null"}-${Math.random()}`,
         status: "unmatched",
-        unmatchedReason: reason as "market_refusal" | "no_match" | null,
+        // Cast so an arbitrary string reaches the insert and the DATABASE's CHECK
+        // is what rejects it — the point of the test. Spelled with the full union
+        // 0027 widened the column to, so this is the last place in the tree still
+        // claiming the constraint admits two values.
+        unmatchedReason: reason as "market_refusal" | "no_match" | "no_anchor" | "ambiguous" | null,
       });
 
     await expect(insert("market_refusal")).resolves.toBeDefined();

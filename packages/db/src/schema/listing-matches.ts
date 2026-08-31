@@ -33,6 +33,19 @@ export interface SuggestedParse {
   // Why the resolver landed where it did, in the order it decided. Free text for
   // a human; never parsed.
   notes: string[];
+  // WHERE THE RESOLVER STOPPED, on a row that is still linked.
+  //
+  // Under the positive-evidence rule a crawl that cannot re-derive an existing
+  // crawler-owned link does NOT break it: registry silence is not a reason to
+  // unlink, so the row keeps `status='auto'` and its `cigar_id` and carries this
+  // instead. The verdict cannot go in `unmatched_reason`, which would be a lie
+  // about a row that is matched — and would surface a reason on an `auto` row to
+  // every reader of the triage queue. So it rides the evidence blob, which is
+  // where a curator already looks.
+  //
+  // Absent on a row whose parse resolved cleanly, and on every row written before
+  // this field existed.
+  reason?: "no_anchor" | "ambiguous" | "no_match";
 }
 
 // Mapping from a vendor SKU/listing to a catalog Cigar (Market context). The
