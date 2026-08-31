@@ -4,7 +4,6 @@ import type { Deps, Principal, Queryer, Tx } from "./deps.js";
 import { CigarNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 import { auditActor } from "./audit-attribution.js";
 import { HIERARCHY_UNFILED } from "./types.js";
-import { brandSlug } from "./catalog-browse.js";
 import { composeCanonicalName, fold, mintRegistrySlug } from "./taxonomy-keys.js";
 
 // The mint-time slug rule lives with the rest of the key vocabulary in
@@ -62,11 +61,33 @@ function auditAttribution(principal: Principal, given: RegistryAttribution | und
 // simply never be probed for, which is a silent failure rather than a loud one,
 // so the keys are derived rather than accepted from the caller.
 //
-// The row's own slug rides along for the same reason 0026 includes it on brands:
-// the probe alone then resolves every spelling the row answers to, with no second
-// lookup against `slug`. For an ASCII name the two collapse to one key.
+// FOLD IS THE ONLY DERIVATION, and that is the fix migration 0029 backs up. This
+// function used to emit `brandSlug(name)` alongside `fold(name)` so the row's own
+// slug would ride along in the probe — true and useful while every slug was a
+// `brandSlug()` transcription, and stale the moment #220 made `mintRegistrySlug`
+// fold. A row minted today has `slug === fold(name)`, so the folded key already
+// IS the slug: emitting the transcription as well no longer adds a slug, it adds
+// a junk key. Wave 3 proved it in production — `Cavalier Genève`, `Don Pepín
+// García` and `Jaime García` each minted a clean folded slug and then accrued
+// `cavalier-gen-ve`, `don-pep-n-garc-a`, `jaime-garc-a` beside it, keys no vendor
+// title can produce because no vendor writes an accent as a hyphen.
+//
+// Two consequences, both wanted. A new mint emits exactly ONE name-derived key.
+// And on the rows that already carry the legacy form, `editRegistryAliases` stops
+// counting it as identity — a transcription is no longer something the name
+// derives, so a curator may finally remove one instead of being told to rename
+// the marca.
+//
+// Removable is not the same as removed, and 0029 draws the line where the URLs
+// are: it strips the transcription only from rows that never wore it as a slug.
+// `Padrón`'s `padr-n` DID, so 0029 renames the slug and KEEPS that key, which is
+// what `brandSlugMatch` (catalog-hierarchy.ts) resolves the old links through.
+//
+// This does not touch `brandSlug()`, and does not touch the aliases already
+// stored: `registrySlugCandidates` still spans both flavors for lookups, and the
+// legacy keys seeded by 0026 stay exactly where they are.
 export function aliasKeysFor(name: string, extra: readonly string[] = []): string[] {
-  const keys = [brandSlug(name.trim()), fold(name), ...extra.map((value) => fold(value))];
+  const keys = [fold(name), ...extra.map((value) => fold(value))];
   return [...new Set(keys)].filter((key) => key !== "").sort();
 }
 

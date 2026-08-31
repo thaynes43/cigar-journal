@@ -1211,6 +1211,120 @@ describe("catalog hierarchy", () => {
     });
   });
 
+  // --- a RENAMED brand slug (migration 0029) --------------------------------
+
+  // Migration 0029 renames `Padrón` off the transcription `padr-n` onto the
+  // folded `padron`. Neither arm of the fallback above can carry that: `padr-n`
+  // is lossy, so no normalization recovers `padron` from it, and slugFold of the
+  // NAME still produces `padr-n`. Both `/cigars/brands/padr-n` (a 307 into the
+  // param) and every pre-wave `?brand=Padrón` link would go quietly empty.
+  //
+  // What carries it is the retained matching key, which is why 0029 keeps
+  // `padr-n` in `aliases` instead of stripping it with the other transcriptions.
+  describe("an old link on a renamed slug still resolves", () => {
+    let renamed: Registry; // slug `padron-<tag>`, still answering to `padr-n-<tag>`
+    let sibling: Registry; // owns `padron-sib-<tag>` outright — the widening guard
+    let renamedMember: string;
+    let siblingMember: string;
+    const q = `Renamed ${tag}`;
+
+    // The post-0029 shape of the row, seeded directly: a folded slug, with the
+    // transcription demoted to an ordinary alias beside it.
+    async function seedRenamed(name: string, slug: string, aliases: string[]): Promise<Registry> {
+      const rows = await h.deps.db
+        .insert(brands)
+        .values({ name, slug, aliases })
+        .returning({ id: brands.id });
+      return { id: rows[0]!.id, slug, name };
+    }
+
+    beforeAll(async () => {
+      renamed = await seedRenamed(`Padrón ${tag}`, `padron-${tag}`, [
+        `padr-n-${tag}`,
+        `padron-${tag}`,
+      ]);
+      // A DIFFERENT marca that owns its slug outright and also carries the folded
+      // key of an accented spelling in its aliases — the shape that makes an
+      // unguarded alias probe widen a correct link into two marcas.
+      sibling = await seedRenamed(`Padron Sib ${tag}`, `padron-sib-${tag}`, [
+        `padron-sib-${tag}`,
+        `padr-n-sib-${tag}`,
+      ]);
+      renamedMember = await h.seedCigar({ canonicalName: `${q} Renamed`, brandId: renamed.id });
+      siblingMember = await h.seedCigar({ canonicalName: `${q} Sibling`, brandId: sibling.id });
+    });
+
+    it("resolves the retired slug the legacy brand route redirects with", async () => {
+      // `/cigars/brands/padr-n-<tag>` 307s to exactly this param.
+      expect(
+        idsOf(await browseCatalog(h.deps, userA, { q, hierarchy: { brand: `padr-n-${tag}` } })),
+      ).toEqual([renamedMember]);
+      // ...and the drill header names the marca rather than echoing the slug.
+      expect((await resolveCatalogHierarchy(h.deps, { brand: `padr-n-${tag}` })).brand).toEqual({
+        slug: renamed.slug,
+        name: renamed.name,
+      });
+    });
+
+    it("still resolves the pre-wave NAME link, which folds to the retired slug", async () => {
+      expect(
+        idsOf(await browseCatalog(h.deps, userA, { q, hierarchy: { brand: renamed.name } })),
+      ).toEqual([renamedMember]);
+      expect((await resolveCatalogHierarchy(h.deps, { brand: renamed.name })).brand).toEqual({
+        slug: renamed.slug,
+        name: renamed.name,
+      });
+    });
+
+    it("resolves the new canonical slug, unchanged", async () => {
+      expect(
+        idsOf(await browseCatalog(h.deps, userA, { q, hierarchy: { brand: renamed.slug } })),
+      ).toEqual([renamedMember]);
+    });
+
+    // THE GUARD. The alias arm fires only when NO brand owns the value as a slug,
+    // so a link that already resolves can never pick up a second marca — the same
+    // widening the negative pin above refuses, now that `aliases` is in play.
+    it("never widens a link that a slug already answers", async () => {
+      expect(
+        idsOf(await browseCatalog(h.deps, userA, { q, hierarchy: { brand: sibling.slug } })),
+      ).toEqual([siblingMember]);
+      expect(
+        idsOf(await browseCatalog(h.deps, userA, { q, hierarchy: { brand: sibling.name } })),
+      ).toEqual([siblingMember]);
+      expect((await resolveCatalogHierarchy(h.deps, { brand: sibling.slug })).brand).toEqual({
+        slug: sibling.slug,
+        name: sibling.name,
+      });
+    });
+
+    // The alias arm widens the spellings a param may take, never the scope it
+    // means: a key no brand carries is still an empty result, not the catalog.
+    it("leaves an unknown key empty", async () => {
+      expect(
+        idsOf(await browseCatalog(h.deps, userA, { q, hierarchy: { brand: `padr-x-${tag}` } })),
+      ).toEqual([]);
+      expect(await resolveCatalogHierarchy(h.deps, { brand: `padr-x-${tag}` })).toEqual({});
+    });
+
+    // The retired slug scopes a descendant lookup too — `?brand=padr-n&line=…`
+    // must keep naming the line, or an old deep link loses its header.
+    it("scopes a line lookup by the retired brand slug", async () => {
+      const line = await seedLine(renamed.id, `Anniversary ${tag}`);
+      await h.seedCigar({
+        canonicalName: `${q} Line Leaf`,
+        brandId: renamed.id,
+        lineId: line.id,
+      });
+      const resolved = await resolveCatalogHierarchy(h.deps, {
+        brand: `padr-n-${tag}`,
+        line: line.slug,
+      });
+      expect(resolved.brand).toEqual({ slug: renamed.slug, name: renamed.name });
+      expect(resolved.line).toEqual({ slug: line.slug, name: line.name });
+    });
+  });
+
   // --- drill-header resolution (D-04) ---------------------------------------
 
   describe("resolveCatalogHierarchy", () => {

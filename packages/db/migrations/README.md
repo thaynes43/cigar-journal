@@ -324,3 +324,30 @@ init container at startup (ADR-003).
   a millisecond at every level. Views rather than maintained tables, benchmarked at ten
   times production volume — see the migration header and
   `pnpm --filter @cj/domain bench:scores`.
+- `0029_accent_key_cleanup.sql` — the last of the Wave 3 accent residue (issue
+  #196 close-out). PR #220 taught the mint path to fold accents in two of the
+  three places a mint writes a key: slugs folded and the alias-ADD path folded,
+  but the NAME-DERIVED key kept emitting `brandSlug(name)` beside `fold(name)`.
+  So the three marcas minted after #220 (`Cavalier Genève`, `Don Pepín García`,
+  `Jaime García`) wear a clean folded slug with a junk transcription key beside
+  it, and `Padrón` — minted by 0026, before any of it folded — still wears the
+  transcription as its ADDRESS. `aliasKeysFor` is fixed in the same PR; this is
+  the data repair. **Two parts, and the order is load-bearing**: part 1 strips
+  the transcription from every registry row that does not wear it as a slug (all
+  four levels — one `aliasKeysFor` serves all four mints — general rather than
+  three UPDATEs by id, so a marca the curation lane mints in the same shape
+  before this deploys is caught too), and part 2 renames `Padrón` from `padr-n`
+  onto `padron`. Reversed, part 1 would strip the very key part 2 needs kept.
+  **The transcription is junk in one case and a live URL in the other**, which is
+  the whole distinction: `padr-n` was Padrón's address, so it STAYS in `aliases`
+  after the rename, and `brandSlugMatch` (`catalog-hierarchy.ts`) resolves
+  `?brand=padr-n` — where `/cigars/brands/padr-n` 307s — plus the pre-wave
+  `?brand=Padrón` name link through it, guarded so the alias arm fires only when
+  no brand owns the value as a slug and therefore can never widen a link that
+  already resolves. An explicit retained-slug list keeps a second execution from
+  tearing that key back off, which is what makes the file idempotent rather than
+  merely re-runnable; the rename is additionally guarded on the target slug being
+  free, so an occupied `padron` makes it a no-op instead of a `brands_slug_key`
+  violation that rolls the deploy back. `brand_images.brand_slug` is untouched
+  and needs to be: it keys on brandSlug() of the free-text `cigars.brand` column
+  and joins the registry by `brand_id`. Data only — no schema change.
