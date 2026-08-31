@@ -65,7 +65,9 @@ const describedCigar = z
       .describe(
         "The cigar's full name as the user knows it, e.g. 'Padron 1964 Anniversary Maduro'. Required.",
       ),
-    brand: z.string().nullish().describe("Brand/marque, e.g. Padron. Omit if unknown."),
+    // Bounded: brand feeds brands.slug (migration 0026), whose btree index
+    // rejects keys over ~2704 bytes.
+    brand: z.string().max(200).nullish().describe("Brand/marque, e.g. Padron. Omit if unknown."),
     line: z
       .string()
       .nullish()
@@ -680,7 +682,7 @@ export type RequestCigarEnrichmentArgs = z.infer<typeof requestCigarEnrichmentSc
 // verified entry is never overwritten. canonicalName is identity and not fillable.
 const updateCigarFields = z
   .object({
-    brand: z.string().nullish().describe("Brand/marque, e.g. Padron. Only if known and currently blank."),
+    brand: z.string().max(200).nullish().describe("Brand/marque, e.g. Padron. Only if known and currently blank."),
     line: z.string().nullish().describe("Product line, e.g. '1964 Anniversary'."),
     edition: z.string().nullish().describe("Limited/special edition designation."),
     vitola: vitola.nullish().describe("Size/shape; name and dimensions fill independently."),
@@ -1067,7 +1069,7 @@ export const getCurationQueueSchema = z
     kind: z
       .enum(["unverified", "duplicates", "match_triage", "unbranded", "untyped", "missing_photos"])
       .describe(
-        "Which backlog to page: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only), match_triage (vendor listing→cigar auto-matches to confirm/unmatch), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo).",
+        "Which backlog to page: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only), match_triage (vendor listings the crawler has not settled: auto rows to confirm/unmatch, and unmatched rows it produced no link for, each carrying a reason), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo).",
       ),
     cursor: z
       .string()
@@ -1082,7 +1084,7 @@ export type GetCurationQueueArgs = z.infer<typeof getCurationQueueSchema>;
 export const setListingMatchStatusSchema = z
   .object({
     clientRequestId: curationClientRequestId,
-    matchId: z.string().describe("Listing-match id from a get_curation_queue match_triage row."),
+    matchId: z.string().describe("Listing-match id from a get_curation_queue match_triage row with status auto."),
     status: z
       .enum(["confirmed", "unmatched"])
       .describe("confirmed keeps the auto-matched cigar; unmatched clears the link (the listing matched no catalog cigar)."),
@@ -1099,7 +1101,7 @@ export const setCigarFactsSchema = z
     cigarId: z.string().describe("Catalog id of the cigar to correct, from a get_curation_queue row."),
     fields: z
       .object({
-        brand: z.string().nullish().describe("Brand/marque, e.g. Padron. null clears a wrong value; omit to leave untouched."),
+        brand: z.string().max(200).nullish().describe("Brand/marque, e.g. Padron. null clears a wrong value; omit to leave untouched."),
         line: z.string().nullish().describe("Product line, e.g. '1964 Anniversary'. null clears; omit to leave untouched."),
         type: cigarType.nullish().describe("NC (non-Cuban) or CC (Cuban). null clears; omit to leave untouched. Never guess — leave null if uncertain."),
         manufacturer: z.string().nullish().describe("Manufacturer, if distinct from brand. null clears; omit to leave untouched."),

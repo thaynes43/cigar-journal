@@ -101,6 +101,18 @@ export {
 export { getMyInventory, deriveHoldingSummary, getHoldingForCigar } from "./inventory.js";
 export { browseBrands, getBrand, browseCatalog, brandSlug, CATALOG_SORTS } from "./catalog-browse.js";
 
+// Ancestry consistency for the catalog taxonomy (ADR-012, migration 0026). The
+// database holds the three nullable FKs but not their agreement; this is where
+// that invariant lives, and every write path that sets brand/line/blend on a
+// cigar calls it. Exported because all four identity write paths (MCP, crawler
+// seed, importer, curation) must share the one rule rather than re-derive it.
+export {
+  assertCigarAncestry,
+  checkCigarAncestry,
+  type CigarAncestry,
+  type CigarAncestryContext,
+} from "./cigar-ancestry.js";
+
 // The single want mark (PRD-003 R-WANT). setWant sets/clears (idempotent,
 // audited); isWanted is the scalar overlay reused by record_purchase and reads.
 export { setWant, isWanted } from "./wants.js";
@@ -167,6 +179,13 @@ export {
   ATTEMPTS_PER_VENDOR,
   ERROR_BUDGET,
   coversMarketSql,
+  coversMarket,
+  mayWriteCatalogPhoto,
+  mayWriteCatalogPhotoSql,
+  evidencedMarketSql,
+  evidencedMarket,
+  focusedStockistSql,
+  photoAuthority,
   vendorNotRetiredSql,
   enrichVendorFleet,
   liveEnrichMarkets,
@@ -176,7 +195,10 @@ export {
   type EnrichmentOutcome,
   type EnrichmentCoverage,
   type FleetVendor,
+  type PhotoAuthority,
+  type RequestRef,
   type VendorBrief,
+  type VendorFocus,
   type VendorAttemptSummary,
 } from "./enrichment-coverage.js";
 // Product photos (ADR-007). Catalog-scoped (not owner-scoped); the serving route

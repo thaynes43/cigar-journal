@@ -5,6 +5,7 @@ import { photoStorageFromEnv } from "@cj/photos";
 import { getAdapter, adapterSlugs } from "./adapters/index.js";
 import { createFetcher } from "./core/fetcher.js";
 import { runIngest, type CrawlMode, type IngestResult } from "./core/ingest.js";
+import { withVendorLaneLock } from "./core/run-record.js";
 import { runProbe, formatProbe, probeFetchBudget } from "./core/probe.js";
 import { runBrandImages, probeBrandTaxonomy, type BrandImagesResult } from "./core/brand-images.js";
 import {
@@ -199,6 +200,18 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
         `union=${sampling.unionLocs} product=${sampling.productLocs} varied=${sampling.varied ? "yes" : "no"}`,
     );
   }
+  if (s.photosSkippedMarket) {
+    // The catalogue-photo slot is UNIQUE per cigar and never re-written, so a
+    // refusal is a permanent decision and belongs in the run summary rather than
+    // only in the JSONB (#170).
+    lines.push(`  photos refused (market): ${s.photosSkippedMarket}`);
+  }
+  if (s.linksRefusedMarket) {
+    // These listings are now sitting unmatched in the triage queue rather than
+    // silently becoming new catalogue rows, so an operator needs to see the count
+    // to know the queue grew and why (#170).
+    lines.push(`  links refused (market): ${s.linksRefusedMarket}`);
+  }
   const enrich = s.enrich;
   if (enrich) {
     // A nightly drain has to say what it retired and where: `spent` is a verdict
@@ -210,6 +223,16 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
       `  enrich: requests=${enrich.requests} looked=${enrich.looked} matched=${enrich.matched} ` +
         `errors=${enrich.errored} spent=${enrich.spent} blocked=${enrich.blocked}`,
     );
+    // The two refusal counters are absent-when-zero in the stats (so the JSONB of a
+    // run that refused nothing is unchanged), and they are printed on the same
+    // terms: a line that says `skipped-market=0` every night is a line an operator
+    // stops reading, which is how a non-zero one goes unnoticed.
+    if (enrich.skippedMarket) lines.push(`  enrich links refused (market): ${enrich.skippedMarket}`);
+    if (enrich.photoRefused) {
+      // Not a retirement and not a fulfilment: these asks are still open, and they
+      // will stay open until a vendor that may write the slot reaches them (#209).
+      lines.push(`  enrich photo refused, request left open: ${enrich.photoRefused}`);
+    }
   }
   if (result.error) lines.push(`  error: ${result.error}`);
   if (result.report.length > 0) {
@@ -361,15 +384,37 @@ async function main(): Promise<number> {
 
   const storage = photoStorageFromEnv();
   const { db, pool } = createDatabase(databaseUrl);
+  const mode = args.mode;
   try {
     const vendorId = await resolveVendor(db, adapter);
     const fetcher = createFetcher({ minIntervalMs: adapter.minIntervalMs, maxPages: adapter.maxPages });
-    const result = await runIngest(
-      { db, fetcher, storage, now: () => new Date() },
-      { adapter, vendorId, mode: args.mode, limit: args.limit, dryRun: args.dryRun },
+
+    // ONE RUNNER PER (VENDOR, MODE) FOR THE WHOLE RUN (#157). Everything the run
+    // does that must not be doubled — selecting the open set, spending a vendor's
+    // nightly attempt budget, fetching the vendor politely, and the stranded-run
+    // sweep inside runIngest — happens under this lock. A dry run takes it too:
+    // it writes nothing but it does FETCH, and the politeness budget is the
+    // vendor's, not ours.
+    const lane = await withVendorLaneLock(pool, vendorId, mode, () =>
+      runIngest(
+        { db, fetcher, storage, now: () => new Date() },
+        { adapter, vendorId, mode, limit: args.limit, dryRun: args.dryRun },
+      ),
     );
-    console.log(formatSummary(adapter, args.mode, result, storage !== null));
-    return result.status === "succeeded" ? 0 : 1;
+
+    if (!lane.acquired) {
+      // Exit 0 and write NO crawl_runs row. A row for a run that looked at nothing
+      // is a lie in the audit, and `enrichVendorFleet` reads succeeded `enrich`
+      // runs as liveness — recording one here would invent a lane that never ran.
+      console.log(
+        `crawl ${adapter.slug} (${mode})  status=skipped\n` +
+          `  lane already running: another process holds the ${mode} lock for this vendor.`,
+      );
+      return 0;
+    }
+
+    console.log(formatSummary(adapter, mode, lane.value, storage !== null));
+    return lane.value.status === "succeeded" ? 0 : 1;
   } finally {
     await pool.end();
   }

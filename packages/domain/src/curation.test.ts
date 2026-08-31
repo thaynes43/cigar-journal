@@ -15,6 +15,7 @@ import {
   wants,
   auditLog,
   favorites,
+  brands,
 } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import {
@@ -1965,6 +1966,89 @@ describe("curation", () => {
       expect(error).toBeInstanceOf(CigarNotFoundError);
     });
 
+    // `brand_id` is a projection of the free-text `brand` (ADR-012, migration
+    // 0026), so rewriting the text has to move the link with it. Left alone, a
+    // curator correcting a misspelled marca would leave the row pointing at the
+    // brand it used to claim — the registry silently disagreeing with the column
+    // it was derived from, and no error anywhere to say so.
+    it("re-derives brand_id whenever the brand text is rewritten", async () => {
+      const [oldBrand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Facts Old Brand", slug: "facts-old-brand" })
+        .returning();
+      const [newBrand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Facts New Brand", slug: "facts-new-brand" })
+        .returning();
+
+      const cigarId = await h.seedCigar({
+        canonicalName: "Registry Link Subject",
+        brand: "Facts Old Brand",
+        brandId: oldBrand!.id,
+      });
+
+      await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "Facts New Brand" },
+      });
+      const [moved] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(moved!.brandId).toBe(newBrand!.id);
+
+      // Resolution goes through the same slug rule the backfill minted under, so
+      // case and punctuation do not break the link.
+      await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "  FACTS OLD BRAND  " },
+      });
+      const [refolded] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(refolded!.brandId).toBe(oldBrand!.id);
+
+      // A spelling no registry row answers to CLEARS the link. An unlinked cigar
+      // is a Wave 3 worklist item; one still claiming its previous brand is a
+      // silent error.
+      await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "Facts Unregistered Brand" },
+      });
+      const [unlinked] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(unlinked!.brandId).toBeNull();
+
+      // And clearing the text clears the link.
+      await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: null },
+      });
+      const [cleared] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(cleared!.brand).toBeNull();
+      expect(cleared!.brandId).toBeNull();
+    });
+
+    // Fields other than brand must not disturb the link — the derivation is
+    // scoped to the column it derives from.
+    it("leaves brand_id alone when the brand text is not among the changed fields", async () => {
+      const [brand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Facts Stable Brand", slug: "facts-stable-brand" })
+        .returning();
+      const cigarId = await h.seedCigar({
+        canonicalName: "Untouched Link Subject",
+        brand: "Facts Stable Brand",
+        brandId: brand!.id,
+      });
+
+      await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { line: "Some Line", type: "NC" },
+      });
+      const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(row!.brandId).toBe(brand!.id);
+    });
+
     it("replays an identical retry", async () => {
       const cigarId = await h.seedCigar({ canonicalName: "Facts Replay", brand: "A" });
       const input = { clientRequestId: newRequestId(), cigarId, fields: { brand: "B" } };
@@ -2145,6 +2229,47 @@ describe("curation", () => {
       const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.action, "cigar.exclude"));
       const audit = audits.find((a) => (a.after as { id?: string }).id === cigarId)!;
       expect((audit.after as { cascadeUnmatched?: string[] }).cascadeUnmatched).toEqual([matchId]);
+    });
+
+    it("shows a crawler's own unmatched listings and hides everyone else's", async () => {
+      // The three rows that share one database state — `status='unmatched'`,
+      // `cigar_id` null — and mean entirely different things (#170 verify round 2).
+      // Only the crawler's own non-links belong in triage.
+      const key = () => `tri-${newRequestId()}`;
+      const [refused] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: key(), cigarId: null, status: "unmatched", unmatchedReason: "market_refusal" })
+        .returning({ id: listingMatches.id });
+      const [noMatch] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: key(), cigarId: null, status: "unmatched", unmatchedReason: "no_match" })
+        .returning({ id: listingMatches.id });
+      // A settled verdict — 591 of these on prod. Re-asking a question a human
+      // already answered is worse than never having asked it.
+      const [decided] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: key(), cigarId: null, status: "unmatched", decidedBy: "agent" })
+        .returning({ id: listingMatches.id });
+      // No reason: not the crawler's guess at all. This is the shape the
+      // excludeCigar cascade leaves behind (#126), which must stay gone.
+      const [cascaded] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: key(), cigarId: null, status: "unmatched" })
+        .returning({ id: listingMatches.id });
+
+      const seen = new Map<string, WorklistMatch>();
+      let cursor: string | null = null;
+      for (let i = 0; i < 500; i++) {
+        const page = await curationWorklist(h.deps, admin, { kind: "match_triage", limit: 200, cursor });
+        for (const m of page.matches!) seen.set(m.matchId, m);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+
+      expect(seen.get(refused!.id)).toMatchObject({ status: "unmatched", reason: "market_refusal" });
+      expect(seen.get(noMatch!.id)).toMatchObject({ status: "unmatched", reason: "no_match" });
+      expect(seen.has(decided!.id)).toBe(false);
+      expect(seen.has(cascaded!.id)).toBe(false);
     });
 
     it("keeps the excluded cigar's auto match out of match_triage", async () => {
@@ -2389,20 +2514,41 @@ describe("curation", () => {
       expect(photo!.rights).toBe("pending");
     });
 
-    it("undo of set_facts writes the before-values back", async () => {
+    it("undo of set_facts writes the before-values back, registry link included", async () => {
+      const [originalBrand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Undo Original", slug: "undo-original" })
+        .returning();
+      const [changedBrand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Undo Changed", slug: "undo-changed" })
+        .returning();
+
       const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
-      const cigarId = await h.seedCigar({ canonicalName: "Undo Facts", brand: "Original", type: null });
+      const cigarId = await h.seedCigar({
+        canonicalName: "Undo Facts",
+        brand: "Undo Original",
+        brandId: originalBrand!.id,
+        type: null,
+      });
       await setCigarFacts(h.deps, admin, {
         clientRequestId: newRequestId(),
         cigarId,
-        fields: { brand: "Changed", type: "CC" },
+        fields: { brand: "Undo Changed", type: "CC" },
         attribution: { actor: "agent", runId, confidence: 1 },
       });
+      const [changed] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
+      expect(changed!.brandId).toBe(changedBrand!.id);
+
       const auditId = await agentAudit(runId, "cigar.set_facts");
       await undoCurationAction(h.deps, admin, { clientRequestId: newRequestId(), auditId });
       const [row] = await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId));
-      expect(row!.brand).toBe("Original");
+      expect(row!.brand).toBe("Undo Original");
       expect(row!.type).toBeNull();
+      // The undo writes `brand` directly, so it owes the same re-derivation the
+      // forward path does — otherwise it restores the old text against the new
+      // brand's id and leaves the row worse than before it was touched.
+      expect(row!.brandId).toBe(originalBrand!.id);
     });
 
     it("undo of an agent rename writes the prior canonical name back", async () => {

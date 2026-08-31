@@ -1262,7 +1262,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Get curation queue",
       description:
-        "Page the catalog curation backlog by kind: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only, no tool here), match_triage (vendor listing→cigar auto-matches, each with the listing and the matched cigar's facts so a confirm/unmatch is judgeable in one read), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo). Drain a kind with the returned nextCursor. Admin only.",
+        "Page the catalog curation backlog by kind: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only, no tool here), match_triage (vendor listings the crawler has not settled — `status` auto is a proposed link, carrying the matched cigar's facts so a confirm/unmatch is judgeable in one read; `status` unmatched is a listing it produced no link for, with `reason` market_refusal when it found a candidate and declined it because the vendor's market contradicts the cigar's, or no_match when nothing matched. Report unmatched rows; there is no tool to resolve one yet), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo). Drain a kind with the returned nextCursor. Admin only.",
       inputSchema: getCurationQueueSchema,
       outputSchema: getCurationQueueOutput,
       annotations: { readOnlyHint: true, title: "Get curation queue" },
@@ -1284,7 +1284,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Set listing match status",
       description:
-        "Rule on a vendor listing→cigar auto-match from get_curation_queue match_triage: confirmed keeps the matched cigar, unmatched clears the link (the listing matched no catalog cigar). Admin only. Pass runId/confidence for the run audit.",
+        "Rule on a vendor listing→cigar auto-match from get_curation_queue match_triage: confirmed keeps the matched cigar, unmatched clears the link (the listing matched no catalog cigar). Applies to a `status` auto row only — an unmatched row points at no cigar, so there is nothing to confirm and it is already unmatched; report it instead. Admin only. Pass runId/confidence for the run audit.",
       inputSchema: setListingMatchStatusSchema,
       outputSchema: setListingMatchStatusOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Set listing match status" },
@@ -1449,7 +1449,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Queue enrichment backlog",
       description:
-        "Operator-initiated bulk enqueue: turn the caller's photoless holdings — the cigars they hold with no servable product photo — into enrichment requests for the crawler, instead of looping request_cigar_enrichment. Do not call this on your own initiative; report the worklist and leave the press to the operator. It queues a row ONLY when the cigar's canonical name is verified and some crawl-enabled vendor covering its market has completed an enrich run; every other row is reported with the reason and nothing is written for it (unverified_name, no_vendor_coverage, already_queued, recently_enriched, not_needed, exhausted, vendor_unreachable). A queued request that cannot be matched is not free — the crawler retires it after two completed looks per vendor. Selects highest remaining stock first, capped by limit. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
+        "Operator-initiated bulk enqueue: turn the caller's photoless holdings — the cigars they hold with no servable product photo — into enrichment requests for the crawler, instead of looping request_cigar_enrichment. Do not call this on your own initiative; report the worklist and leave the press to the operator. It queues a row ONLY when the cigar's canonical name is verified and some crawl-enabled vendor covering its market has completed an enrich run; every other row is reported with the reason and nothing is written for it (unverified_name, no_vendor_coverage, already_queued, recently_enriched, not_needed, exhausted, vendor_unreachable). A retired row names the vendors that looked in `triedVendors`; an `already_queued` row names the lanes that still owe it a look in `awaitingVendors`, and its absence there means no lane counts against the row at all. A queued request that cannot be matched is not free — the crawler retires it after two completed looks per vendor. Selects highest remaining stock first, capped by limit. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
       inputSchema: queueEnrichmentBacklogSchema,
       outputSchema: queueEnrichmentBacklogOutput,
       annotations: {

@@ -53,6 +53,18 @@ export async function startRawTestPostgres(): Promise<TestPostgres> {
       user: "postgres",
       password: "postgres",
       persistent: false,
+      // Production is UTF8; initdb under this pod's C locale would otherwise
+      // default the cluster to SQL_ASCII, which is not merely a different
+      // default but a different SQL dialect: `normalize()` and `U&'\XXXX'`
+      // escapes above 007F are rejected outright on a non-UTF8 server, and
+      // lower()/length() degrade to per-byte operations on multibyte text. That
+      // divergence made migration 0026's accent folding — which runs fine in
+      // production — fail in the suite that is supposed to prove it applies.
+      // The locale is pinned rather than inherited: an unset LANG here yields C,
+      // but CI runners export C.UTF-8, and the two disagree on ordering and on
+      // lower(). Pinning gives every machine production's encoding with C
+      // collation and ctype — the semantics 0026's slug derivation assumes.
+      initdbFlags: ["--encoding=UTF8", "--locale=C"],
       onLog: () => {},
       onError: () => {},
     });

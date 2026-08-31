@@ -1,13 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import { crawlRuns, enrichmentRequests, productPhotos, vendors, type Database } from "@cj/db";
+import { enrichmentRequests, productPhotos, vendors, type Database } from "@cj/db";
 import {
   recordPriceObservation,
   recordEnrichmentAttempt,
   enrichmentCoverageForRequest,
+  coversMarket,
   coversMarketSql,
+  evidencedMarket,
+  evidencedMarketSql,
+  mayWriteCatalogPhoto,
+  mayWriteCatalogPhotoSql,
+  photoAuthority,
   vendorNotRetiredSql,
+  type CigarType,
   type EnrichmentOutcome,
+  type VendorFocus,
 } from "@cj/domain";
 import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedPhoto } from "@cj/photos";
 import type { VendorAdapter } from "../adapters/types.js";
@@ -17,6 +25,7 @@ import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
 import { isCigarListing, normalizeListing, type NormalizedListing } from "./normalize.js";
 import { createCigarFromListing, findCatalogMatch, upsertListingMatch } from "./match.js";
 import { parseRobots } from "./robots.js";
+import { openCrawlRun, reclaimStrandedRuns, type SignalHost } from "./run-record.js";
 import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
 
 // The run driver (ADR-006). Three modes share one polite walk: `seed` (catalog
@@ -42,6 +51,19 @@ export interface IngestStats {
   cigarsCreated: number;
   offersWritten: number;
   photosCaptured: number;
+  // Catalogue-photo writes REFUSED by the write-authority guard (#170): this
+  // vendor's focus is a single market and the cigar's evidenced market is either
+  // unknown or the other one. Present only when non-zero, so the JSONB of a run
+  // that refused nothing stays byte-identical to what it was before this field
+  // existed. Not an error — a refusal is the guard working.
+  photosSkippedMarket?: number;
+  // Seed/offers listings whose best catalogue candidate was REFUSED on market
+  // grounds (#170), leaving the listing unmatched rather than linked or newly
+  // created. Optional on the same terms as the field above: absent when zero, so a
+  // run that refused nothing serialises exactly as it did before this existed.
+  // Worth watching after the Cuban Lou's correction — a lane refusing a lot is
+  // more likely to have a wrong `vendors.focus` than a wrong catalogue.
+  linksRefusedMarket?: number;
   errors: number;
   // Present only for a vendor with sitemapSampling configured — absent keeps the
   // JSONB byte-identical for every other vendor.
@@ -82,6 +104,22 @@ export interface IngestStats {
     // summary that folded the two together would say "we looked and found
     // nothing" about a vendor nobody could reach.
     blocked: number;
+    // Looks that found a listing above the similarity floor and REFUSED to link it
+    // (#170): between the open-set SELECT and the write, the cigar's evidenced
+    // market resolved to the market this vendor does not trade in. Counted as a
+    // completed look (a `miss`) and not as an error, because we did read the
+    // vendor's catalogue — what we declined is the conclusion, not the look.
+    //
+    // Optional on the same terms as its siblings above: absent when zero, so an
+    // enrich run that refused nothing serialises byte-identically to what it did
+    // before this field existed. An always-present `0` would have rewritten the
+    // JSONB of every enrich run in the ledger for a number that says nothing.
+    skippedMarket?: number;
+    // Looks that MATCHED the listing but were refused the catalogue-photo slot by
+    // the write-authority guard (#209). Separate from `matched`, because the
+    // request is NOT fulfilled by one: the photo was the point of the ask, so the
+    // ask stays open for a vendor that may write it. Absent when zero.
+    photoRefused?: number;
   };
 }
 
@@ -93,6 +131,9 @@ export interface IngestDeps {
   // Injectable so ingest tests need neither sharp nor real image bytes; the CLI
   // wires the real @cj/photos pipeline.
   processPhoto?: (input: Buffer, contentType: string) => Promise<ProcessedPhoto>;
+  // Injectable so a test can drive the #155 SIGTERM handler without signalling —
+  // or exiting — the vitest worker. Production leaves it unset and gets `process`.
+  signalHost?: SignalHost;
 }
 
 export interface IngestOptions {
@@ -207,21 +248,80 @@ async function productUrls(deps: IngestDeps, adapter: VendorAdapter, stats: Inge
 
 // --- per-listing ingest ------------------------------------------------------
 
+// WRITE AUTHORITY FOR THE ONE CATALOGUE-PHOTO SLOT (#170).
+//
+// `product_photos` is UNIQUE(cigar_id), inserted with onConflictDoNothing, and
+// nothing in the crawler ever deletes a row. One global slot per cigar, first
+// write wins, forever — so unlike a listing match (per-vendor, named, revisable,
+// re-written next crawl) a wrong photo here is silent and permanent. That
+// asymmetry, not the similarity score, is what makes #170 severe, and it is why
+// this guard is STRICTER than the one on the link: the slot may only be filled
+// when the cigar's evidenced market is KNOWN and this vendor's focus covers it.
+//
+// The authority is read HERE, after the listing match has been committed, and
+// that ordering is the whole design (option A, SELF-EVIDENCING):
+//   * a single-market vendor that links a cigar nobody else stocks becomes its own
+//     sole evidence, so it may photograph it — Fox's working seed/enrich lanes are
+//     not regressed by this guard at all;
+//   * a second vendor of the OTHER market linking the same cigar makes the
+//     evidence conflict, which resolves to unknown, and its photo is refused.
+//
+// A `both`-focus vendor (Cuban Lou's, from migration 0025) is NOT self-evidencing:
+// its own link contributes no market evidence, so what gates it is whether a
+// FOCUSED vendor already stocks the cigar. It photographs what only it carries and
+// never pre-empts Fox on a row Fox stocks. See `mayWriteCatalogPhoto`.
+//
+// The residual, stated: the first vendor to discover a cigar can always photograph
+// it, so a single-market lane that name-matches a brand nobody else stocks still
+// fills the slot. Closing that needs INDEPENDENT evidence (`cigars.type`, or a
+// different vendor already stocking it), which would mean the discovering vendor
+// can never photograph what it found — an owner call, raised as such, not decided
+// here.
+//
+// WHY THIS REPORTS ITS OUTCOME (#209). It used to return `void`, so a REFUSAL was
+// indistinguishable from a write at the call site — and on the enrich path that
+// difference is the whole request: the drain read "no throw" as `match`, marked the
+// ask `fulfilled`, and left the slot empty forever. The three results the caller
+// actually has to tell apart:
+//   wrote   — the slot now holds a photo (this run's insert, or a concurrent one
+//             that won the ON CONFLICT: either way the ask's photo exists);
+//   refused — the write-authority guard said no. Nothing was fetched, nothing was
+//             written, and nothing about this vendor will change that on the next
+//             run; the ask is still open and still needs a different vendor;
+//   skipped — there was nothing to do (no storage, no image on the listing, or the
+//             slot was already filled). Not a refusal: the ask is satisfied or was
+//             never about a photo.
+type PhotoCapture = "wrote" | "refused" | "skipped";
+
 async function capturePhoto(
   deps: IngestDeps,
   vendorId: string,
+  focus: VendorFocus | null,
   cigarId: string,
   listing: NormalizedListing,
   stats: IngestStats,
-): Promise<void> {
-  if (!deps.storage || !listing.imageUrl) return;
+): Promise<PhotoCapture> {
+  if (!deps.storage || !listing.imageUrl) return "skipped";
 
+  // The slot check comes FIRST so `photosSkippedMarket` counts only refusals that
+  // would otherwise have written: a cigar that already has its photo is a no-op
+  // whatever the market says, and counting it would inflate the number an operator
+  // reads as "wrong-market photos this run prevented".
   const existing = await deps.db
     .select({ id: productPhotos.id })
     .from(productPhotos)
     .where(eq(productPhotos.cigarId, cigarId))
     .limit(1);
-  if (existing[0]) return;
+  if (existing[0]) return "skipped";
+
+  // PRE-FLIGHT, not the guard. This read is here for one reason only — a photo we
+  // already know we may not write is a photo we should not spend the vendor's
+  // bandwidth fetching. The AUTHORITATIVE evaluation is the INSERT's own WHERE
+  // clause below, in the write's snapshot; see mayWriteCatalogPhotoSql.
+  if (!mayWriteCatalogPhoto(focus, await photoAuthority(deps.db, cigarId))) {
+    stats.photosSkippedMarket = (stats.photosSkippedMarket ?? 0) + 1;
+    return "refused";
+  }
 
   // Bounded: a vendor's product image is whatever their CMS holds, and an
   // oversize one throws — both call sites already isolate a photo failure into
@@ -229,7 +329,7 @@ async function capturePhoto(
   const image = await deps.fetcher.fetchBinary(listing.imageUrl, MAX_IMAGE_BYTES);
   if (image.status !== 200) {
     stats.errors += 1;
-    return;
+    return "skipped";
   }
 
   const process = deps.processPhoto ?? defaultProcessPhoto;
@@ -242,28 +342,49 @@ async function capturePhoto(
   await deps.storage.put(thumbKey, processed.thumb, processed.contentType);
 
   try {
-    const inserted = await deps.db
-      .insert(productPhotos)
-      .values({
-        cigarId,
-        vendorId,
-        sourceUrl: listing.imageUrl,
-        objectKey,
-        thumbKey,
-        contentType: processed.contentType,
-        width: processed.width,
-        height: processed.height,
-        bytes: processed.full.length,
-        rights: "pending",
-      })
-      // At most one product photo per cigar — a concurrent capture is a no-op.
-      .onConflictDoNothing({ target: productPhotos.cigarId })
-      .returning({ id: productPhotos.id });
-    if (inserted[0]) stats.photosCaptured += 1;
-    else {
-      await deps.storage.delete(objectKey).catch(() => {});
-      await deps.storage.delete(thumbKey).catch(() => {});
+    // GUARD AND INSERT IN ONE STATEMENT. `INSERT ... SELECT ... WHERE <authority>`
+    // evaluates the write authority in the same snapshot as the write, closing the
+    // window the pre-flight above cannot: between that read and here we downloaded
+    // and processed an image, and a concurrent lane (locks are per vendor+mode, so
+    // a `both` lane and a focused lane run together by design) can link this cigar
+    // and revoke our authority in exactly that gap.
+    //
+    // ON CONFLICT still guards the slot itself, so a zero-row result means one of
+    // two things — the slot was taken, or the authority is gone — and the two need
+    // opposite answers from the caller. They are told apart below by re-reading the
+    // slot, which is one SELECT on the path that already decided not to write.
+    const inserted = await deps.db.execute(sql`
+      INSERT INTO product_photos
+        (cigar_id, vendor_id, source_url, object_key, thumb_key, content_type, width, height, bytes, rights)
+      SELECT ${cigarId}::uuid, ${vendorId}::uuid, ${listing.imageUrl}, ${objectKey}, ${thumbKey},
+             ${processed.contentType}, ${processed.width}, ${processed.height}, ${processed.full.length},
+             'pending'
+      WHERE ${mayWriteCatalogPhotoSql(focus, sql`${cigarId}::uuid`)}
+      ON CONFLICT (cigar_id) DO NOTHING
+      RETURNING id
+    `);
+    if (inserted.rows.length > 0) {
+      stats.photosCaptured += 1;
+      return "wrote";
     }
+
+    // Nothing was written, so the bytes we uploaded are orphans either way — the
+    // else-branch's cleanup was already here for the ON CONFLICT case and covers
+    // both.
+    await deps.storage.delete(objectKey).catch(() => {});
+    await deps.storage.delete(thumbKey).catch(() => {});
+
+    // Slot filled by someone else → the ask's photo exists, which is the answer the
+    // caller needs; slot still empty → the authority moved under us and this is a
+    // refusal, counted exactly like the pre-flight's.
+    const raced = await deps.db
+      .select({ id: productPhotos.id })
+      .from(productPhotos)
+      .where(eq(productPhotos.cigarId, cigarId))
+      .limit(1);
+    if (raced[0]) return "wrote";
+    stats.photosSkippedMarket = (stats.photosSkippedMarket ?? 0) + 1;
+    return "refused";
   } catch (error) {
     await deps.storage.delete(objectKey).catch(() => {});
     await deps.storage.delete(thumbKey).catch(() => {});
@@ -277,6 +398,8 @@ async function capturePhoto(
 async function ingestListing(
   deps: IngestDeps,
   options: IngestOptions,
+  focus: VendorFocus | null,
+  crawlRunId: string | null,
   url: string,
   listing: NormalizedListing,
   product: JsonLdProduct,
@@ -286,19 +409,44 @@ async function ingestListing(
   const listingKey = pathOf(url);
 
   const cigarId = await deps.db.transaction(async (tx) => {
-    const hit = await findCatalogMatch(tx, listing.name);
+    // `vendorFocus` is the seed/offers half of #170, and the half that has already
+    // fired in production: BOTH live cross-market rows came through here, not
+    // through the drain. A CC vendor walking its own sitemap trigram-matched an NC
+    // catalogue row and auto-linked it. The guard is a pure negative filter — it
+    // can only ever refuse a link, never redirect one.
+    const result = await findCatalogMatch(tx, listing.name, { vendorFocus: focus });
     let linkedCigarId: string | null = null;
     let status: "auto" | "unmatched";
+    // Only ever set alongside status='unmatched'; see listing_matches.unmatched_reason.
+    let unmatchedReason: "market_refusal" | "no_match" | null = null;
 
-    if (hit) {
-      linkedCigarId = hit.cigarId;
+    if (result.kind === "match") {
+      linkedCigarId = result.hit.cigarId;
       status = "auto";
+    } else if (result.kind === "refused") {
+      // A REFUSAL DOES NOT CREATE, in seed mode either. We found a strong name
+      // candidate and declined it on market grounds — that is an unresolved
+      // question, not evidence of a new cigar. Falling through to
+      // createCigarFromListing (which is what this did) would mint a duplicate of
+      // the row we just refused every time the refusal was wrong, and a wrong
+      // refusal is exactly what a wrong `vendors.focus` produces (#170: Cuban
+      // Lou's was recorded 'CC' while selling Perdomo). A bad link is named,
+      // revisable and re-written next crawl; a duplicate catalogue row is none of
+      // those. So: leave the listing UNMATCHED, with no cigar, for the triage
+      // queue a curator already works — the same landing place `offers` mode uses.
+      // The reason rides the row (0025): without it the refusal is byte-identical
+      // to an ordinary no-match, and the queue could not show one without showing
+      // every cascade leftover too.
+      status = "unmatched";
+      unmatchedReason = "market_refusal";
+      stats.linksRefusedMarket = (stats.linksRefusedMarket ?? 0) + 1;
     } else if (options.mode === "seed") {
       linkedCigarId = await createCigarFromListing(tx, listing.name);
       stats.cigarsCreated += 1;
       status = "auto";
     } else {
       status = "unmatched";
+      unmatchedReason = "no_match";
     }
 
     const match = await upsertListingMatch(tx, {
@@ -307,6 +455,8 @@ async function ingestListing(
       cigarId: linkedCigarId,
       status,
       now,
+      unmatchedReason,
+      runId: crawlRunId,
     });
     if (status === "auto") stats.matchesAuto += 1;
 
@@ -331,12 +481,25 @@ async function ingestListing(
     });
     if (observation.inserted) stats.offersWritten += 1;
 
-    return linkedCigarId;
+    // THE ROW'S DECISION, NOT THIS RUN'S CANDIDATE. `linkedCigarId` is what the
+    // resolver computed a moment ago; `match.cigarId` is what the listing_matches
+    // row actually says after the upsert, and the two disagree precisely where it
+    // matters. upsertListingMatch DECLINES to rewrite a row a curator or an agent
+    // decided (ADR-006, migration 0017) and returns it untouched — 591 such rows
+    // on prod, every one of them an `unmatched` verdict on a listing the resolver
+    // still name-matches. Returning the local candidate meant the photo path then
+    // fired against the very cigar the agent had rejected, on every crawl, forever:
+    // the link was correctly refused and the one permanent artifact was written
+    // anyway. Reading the committed row makes the rejection stick — a declined
+    // upsert yields null and nothing is captured — and, on a row an agent
+    // CONFIRMED against a different cigar, aims the capture at that cigar instead
+    // of at ours, which is the same rule producing the other right answer.
+    return match.cigarId;
   });
 
   if (cigarId) {
     try {
-      await capturePhoto(deps, options.vendorId, cigarId, listing, stats);
+      await capturePhoto(deps, options.vendorId, focus, cigarId, listing, stats);
     } catch (error) {
       // Photo ingestion is isolated from the offer write (ADR-007).
       stats.errors += 1;
@@ -350,6 +513,8 @@ async function ingestListing(
 async function walkListings(
   deps: IngestDeps,
   options: IngestOptions,
+  focus: VendorFocus | null,
+  crawlRunId: string | null,
   stats: IngestStats,
   report: string[],
 ): Promise<void> {
@@ -391,7 +556,7 @@ async function walkListings(
         continue;
       }
 
-      await ingestListing(deps, options, url, listing, product, stats);
+      await ingestListing(deps, options, focus, crawlRunId, url, listing, product, stats);
     } catch (error) {
       stats.errors += 1;
       void error;
@@ -409,6 +574,8 @@ async function nameSimilarity(deps: IngestDeps, a: string, b: string): Promise<n
 async function drainEnrichment(
   deps: IngestDeps,
   options: IngestOptions,
+  focus: VendorFocus | null,
+  crawlRunId: string | null,
   stats: IngestStats,
   report: string[],
 ): Promise<void> {
@@ -421,20 +588,6 @@ async function drainEnrichment(
 
   const urls = await productUrls(deps, adapter, stats);
   const candidates = urls.map((url) => ({ url, tokens: slugTokens(lastSegment(pathOf(url))) }));
-
-  // This vendor's market, read from the REGISTRY rather than from the adapter.
-  // The adapter carries the same field, but the exhaustion rollup reads
-  // `vendors.focus`, and a drain filtered on a different copy of that fact could
-  // look at a request it is not counted against — a whole class of drift removed
-  // for one indexed read per run. NULL focus means unknown, which covers
-  // everything: the filter is a NEGATIVE one, and both this clause and the
-  // rollup's come from coversMarketSql so the two cannot drift.
-  const vendorRows = await deps.db
-    .select({ focus: vendors.focus })
-    .from(vendors)
-    .where(eq(vendors.id, options.vendorId))
-    .limit(1);
-  const focus = vendorRows[0]?.focus ?? null;
 
   const limit = options.limit ?? ENRICH_DEFAULT_LIMIT;
 
@@ -455,14 +608,29 @@ async function drainEnrichment(
   // `fulfilled` is deliberately absent: one catalogue photo per cigar (ADR-007)
   // means the ask is answered. The join to `cigars` also kills the per-request
   // SELECT the old loop did, so the canonical name and market arrive in one read.
+  //
+  // THE MARKET FILTER READS THE EVIDENCED MARKET, NOT `cigars.type` (#170). On the
+  // raw column the predicate is inert for 884 of prod's 971 active cigars, because
+  // `coversMarketSql` admits an unknown market by design — so a CC lane could and
+  // would select 91% of the catalogue. The evidenced market resolves 878 of those
+  // 884 from links the crawler already wrote (see evidencedMarketSql), which is
+  // what turns a filter that is correct-but-inert into one that bites.
+  //
+  // The same fragment is SELECTED as `market` and handed to finalizeEnrichment, so
+  // the rollup's denominator is computed from the identical value this open set was
+  // filtered with. Two evaluations of a correlated subquery per candidate row is
+  // the price of that coupling, and at LIMIT 10 it is not a price worth optimizing
+  // away — a drain that filters on one market while the rollup counts on another
+  // holds requests open forever.
   const open = await deps.db.execute(sql`
-    SELECT r.id AS request_id, c.id AS cigar_id, c.canonical_name, c.type
+    SELECT r.id AS request_id, c.id AS cigar_id, c.canonical_name,
+           ${evidencedMarketSql(sql`c.id`)} AS market
     FROM enrichment_requests r
     JOIN cigars c ON c.id = r.cigar_id
     LEFT JOIN enrichment_attempts a
            ON a.request_id = r.id AND a.vendor_id = ${options.vendorId}
     WHERE r.status IN ('pending', 'in_progress', 'exhausted')
-      AND ${coversMarketSql(sql`${focus}::text`, sql`c.type`)}
+      AND ${coversMarketSql(sql`${focus}::text`, evidencedMarketSql(sql`c.id`))}
       AND ${vendorNotRetiredSql(sql`COALESCE(a.attempts, 0)`, sql`COALESCE(a.errors, 0)`)}
     ORDER BY r.created_at
     LIMIT ${limit}
@@ -471,10 +639,19 @@ async function drainEnrichment(
     request_id: string;
     cigar_id: string;
     canonical_name: string;
-    type: "NC" | "CC" | null;
+    market: CigarType | null;
   }[];
 
-  const enrich = { requests: pending.length, looked: 0, matched: 0, errored: 0, spent: 0, blocked: 0 };
+  // `skippedMarket` and `photoRefused` are deliberately NOT seeded to 0 — they are
+  // absent-when-zero (see IngestStats.enrich) and are created on first use.
+  const enrich: NonNullable<IngestStats["enrich"]> = {
+    requests: pending.length,
+    looked: 0,
+    matched: 0,
+    errored: 0,
+    spent: 0,
+    blocked: 0,
+  };
   stats.enrich = enrich;
 
   for (const request of pending) {
@@ -487,14 +664,29 @@ async function drainEnrichment(
       .sort((a, b) => b.score - a.score)
       .slice(0, MAX_ENRICH_CANDIDATES);
 
-    const outcome = await tryEnrichCandidates(deps, options, cigar, ranked, candidates.length, stats, report);
+    const outcome = await tryEnrichCandidates(
+      deps,
+      options,
+      focus,
+      crawlRunId,
+      cigar,
+      ranked,
+      candidates.length,
+      stats,
+      report,
+    );
     if (outcome === "error") enrich.errored += 1;
     else enrich.looked += 1;
     if (outcome === "match") enrich.matched += 1;
+    // A photo refusal is a COMPLETED look (`looked` above) that is not a `match`:
+    // the listing was found and linked, and the artifact the ask existed for was
+    // refused. Counting it as matched would report a fulfilled ask that is still
+    // open, which is the misreport #209 is about.
+    if (outcome === "photo_refused") enrich.photoRefused = (enrich.photoRefused ?? 0) + 1;
 
     if (options.dryRun) continue;
 
-    const retired = await finalizeEnrichment(deps, options, request.request_id, request.type, outcome);
+    const retired = await finalizeEnrichment(deps, options, request.request_id, request.market, outcome);
     if (retired === "exhausted") enrich.spent += 1;
     else if (retired === "blocked") enrich.blocked += 1;
   }
@@ -519,6 +711,14 @@ async function drainEnrichment(
 //           it never burns an attempt, and ERROR_BUDGET bounds it so a permanently
 //           broken vendor cannot pin the request open and re-fetch the same
 //           failures every night.
+//   photo_refused — a MATCH whose catalogue-photo write the authority guard
+//           refused (#209). Its own outcome because it must not behave like any of
+//           the three above: it is not a `match` (the artifact the ask exists for
+//           was not written, so the ask is not fulfilled), and it is emphatically
+//           not a `miss` — the catalogue plainly carries the cigar, so burning an
+//           attempt would march the request toward `exhausted`, whose meaning is
+//           "we read this catalogue and it is not there". Two refusals would then
+//           retire the ask under a sentence that is false. See finalizeEnrichment.
 //
 // THE LINE BETWEEN THE LAST TWO IS A PARSED PRODUCT, NOT A 200. An over-matching
 // product gate answers 200 all day and parses nothing: the live probe recorded in
@@ -539,6 +739,8 @@ async function drainEnrichment(
 async function tryEnrichCandidates(
   deps: IngestDeps,
   options: IngestOptions,
+  focus: VendorFocus | null,
+  crawlRunId: string | null,
   cigar: { id: string; canonicalName: string },
   ranked: { url: string }[],
   enumerated: number,
@@ -578,13 +780,27 @@ async function tryEnrichCandidates(
     }
 
     const now = deps.now();
-    await deps.db.transaction(async (tx) => {
+    // WRITE AUTHORITY, re-evaluated at the write (#170). The open set already
+    // filtered on the evidenced market, so this normally agrees — it is here
+    // because the two reads are seconds of polite HTTP apart, and in that window a
+    // curator can set `cigars.type` or another lane can link the row and turn an
+    // unknown market into a known, conflicting one. Authority belongs at the write
+    // site; a filter on the way in is an optimization, not a guarantee.
+    //
+    // Evaluated INSIDE the transaction that writes the match, so the check and the
+    // write see one snapshot.
+    const linked = await deps.db.transaction(async (tx) => {
+      if (!coversMarket(focus, await evidencedMarket(tx, cigar.id))) return false;
       const match = await upsertListingMatch(tx, {
         vendorId: options.vendorId,
         listingKey: pathOf(candidate.url),
         cigarId: cigar.id,
         status: "auto",
         now,
+        // The drain only ever LINKS, so any reason the row carried from a previous
+        // non-link is stale and is cleared with the write.
+        unmatchedReason: null,
+        runId: crawlRunId,
       });
       stats.matchesAuto += 1;
       const observation = await recordPriceObservation(tx, {
@@ -604,24 +820,55 @@ async function tryEnrichCandidates(
         seenAt: now,
       });
       if (observation.inserted) stats.offersWritten += 1;
+      return true;
     });
 
-    // KNOWN MISREPORT, deliberately unchanged by #158 and stated rather than
-    // silently carried: a capture that throws still returns `match`, so a request
-    // whose whole point was the catalogue photo is marked `fulfilled` with no photo
-    // — and `fulfilled` is terminal in the drain's open set, as it was before 0023.
-    // The ADR-006 amendment making the catalogue photo the point of the request
-    // makes this worse, not better. It is NOT reclassified here because the right
-    // verdict is arguable (the vendor does carry the cigar, so it is not a `miss`;
-    // treating it as an `error` would retry it against ERROR_BUDGET) and it is a
-    // product call, not a ledger one. The row stays visible: it reports as
-    // exhausted-AND-fulfilled on the backlog press, which `retryExhausted` clears.
+    // A refusal ends the LOOK, not just this candidate: the conflict is a property
+    // of (this vendor, this cigar), so every remaining candidate would be refused
+    // for the same reason. It scores as a `miss` — we read the vendor's catalogue
+    // and declined to conclude from it — never as an `error`, which would burn
+    // ERROR_BUDGET on a guard doing its job and re-fetch the same pages nightly.
+    if (!linked) {
+      if (stats.enrich) stats.enrich.skippedMarket = (stats.enrich.skippedMarket ?? 0) + 1;
+      return "miss";
+    }
+
+    // THE PHOTO IS THE ASK, so its refusal cannot be reported as the ask fulfilled
+    // (#209). This used to be a fire-and-forget call whose only visible failure was
+    // a throw: `capturePhoto` returned void, so a refusal and a write were the same
+    // thing here, and the request went on to be marked `fulfilled` — terminal in
+    // the drain's open set — with the slot still empty. The ADR-006 amendment that
+    // makes the catalogue photo the point of an enrichment request is exactly what
+    // makes that fatal rather than untidy.
+    //
+    // A refusal is now its own outcome. What it must NOT do is burn the vendor's
+    // attempt: `attempts` running out is what licenses `exhausted`, and `exhausted`
+    // asserts "we read this vendor's catalogue and the cigar is not in it" — which
+    // this vendor's own link disproves. Two refusals producing that verdict would
+    // be the ledger laundering the ADR amendment forbids.
+    //
+    // THE RESIDUAL, and it is a real one: this leaves the ask open against a vendor
+    // whose refusal is usually structural (a focused vendor already stocks the row,
+    // so a `both` lane will be refused again tomorrow), and nothing bounds the
+    // retry. That is the deliberate trade — an ask that is visibly stuck beats an
+    // ask silently retired under a false verdict — and it is why the refusal is
+    // WRITTEN to the ledger rather than merely counted: the backlog press names the
+    // refusing lane in `photoRefusedVendors`, so the operator can see why a row
+    // will not clear and disable the lane that is holding it.
+    //
+    // A capture that THROWS is still reported as `match` and still marks the ask
+    // fulfilled. That is the one half of #209 left standing, and deliberately: a
+    // throw is a transport or pipeline failure rather than a verdict, `miss` would
+    // be false about the catalogue and `error` would retry it against ERROR_BUDGET,
+    // and choosing between those is a product call this correctness pass should not
+    // make on its own.
+    let captured: PhotoCapture = "skipped";
     try {
-      await capturePhoto(deps, options.vendorId, cigar.id, listing, stats);
+      captured = await capturePhoto(deps, options.vendorId, focus, cigar.id, listing, stats);
     } catch {
       stats.errors += 1;
     }
-    return "match";
+    return captured === "refused" ? "photo_refused" : "match";
   }
   return parsed ? "miss" : "error";
 }
@@ -647,7 +894,9 @@ async function finalizeEnrichment(
   deps: IngestDeps,
   options: IngestOptions,
   requestId: string,
-  type: "NC" | "CC" | null,
+  // The EVIDENCED market, carried over from the open-set SELECT so the rollup's
+  // denominator is computed from the same value the drain filtered on (#170 §2c).
+  market: CigarType | null,
   outcome: EnrichmentOutcome,
 ): Promise<Retirement> {
   const now = deps.now();
@@ -658,8 +907,10 @@ async function finalizeEnrichment(
     // across every vendor — never a budget again. Incremented in SQL rather than
     // read-modify-written, and on every COMPLETED look (miss or match, never an
     // error), so it stays a true count and legacy pre-0023 values — which counted
-    // real looks too — keep their meaning.
-    if (outcome !== "error") {
+    // real looks too — keep their meaning. A `photo_refused` look is excluded for
+    // the same reason it is excluded from the per-vendor counter: the two numbers
+    // mean the same thing and must not disagree about the same look.
+    if (outcome !== "error" && outcome !== "photo_refused") {
       await tx
         .update(enrichmentRequests)
         .set({ attempts: sql`${enrichmentRequests.attempts} + 1` })
@@ -674,7 +925,21 @@ async function finalizeEnrichment(
       return "open";
     }
 
-    const coverage = await enrichmentCoverageForRequest(tx, requestId, type);
+    // A PHOTO REFUSAL RETIRES NOTHING. It is not `fulfilled` (the slot is empty) and
+    // it cannot be rolled up toward `exhausted` either, because the ledger row it
+    // just wrote carries attempts = 0: this vendor has not spent a look, so
+    // `retired()` is false for it and the rollup below would be reading a lane that
+    // still owes the ask. Short-circuiting is the same answer the rollup would
+    // give, one query cheaper, and it says so at the point where a reader asks why.
+    if (outcome === "photo_refused") {
+      await tx
+        .update(enrichmentRequests)
+        .set({ status: "pending", resolvedAt: null })
+        .where(eq(enrichmentRequests.id, requestId));
+      return "open";
+    }
+
+    const coverage = await enrichmentCoverageForRequest(tx, requestId, market);
     if (coverage.exhausted) {
       await tx
         .update(enrichmentRequests)
@@ -706,18 +971,40 @@ async function finalizeEnrichment(
 
 // --- entry -------------------------------------------------------------------
 
+// PRECONDITION, and it is not enforceable from here: a non-dry run must be entered
+// while holding this lane's advisory lock (cli.ts wraps the call in
+// withVendorLaneLock). The stranded-run sweep below is only correct under it —
+// without the lock it could fail a run that is genuinely in flight.
 export async function runIngest(deps: IngestDeps, options: IngestOptions): Promise<IngestResult> {
   const stats = emptyStats();
   const report: string[] = [];
 
-  const run = async (): Promise<void> => {
-    if (options.mode === "enrich") await drainEnrichment(deps, options, stats, report);
-    else await walkListings(deps, options, stats, report);
+  // This vendor's market, read ONCE from the REGISTRY rather than from the adapter.
+  // The adapter carries the same field, but every market predicate downstream —
+  // the drain's open set, the exhaustion rollup, both write guards — reads
+  // `vendors.focus`, and a crawl acting on a different copy of that fact could
+  // write where the rollup says it may not. One indexed read per run removes the
+  // whole class of drift. NULL focus means unknown, which the negative filter
+  // treats as covering everything and the photo guard treats as no authority to
+  // assert either way.
+  const vendorRows = await deps.db
+    .select({ focus: vendors.focus })
+    .from(vendors)
+    .where(eq(vendors.id, options.vendorId))
+    .limit(1);
+  const focus = vendorRows[0]?.focus ?? null;
+
+  // The crawl_runs row this pass belongs to, threaded to the write sites so an
+  // audited write (a market downgrade unlinking a listing) names the run that made
+  // it. Null on a dry run, which opens no row to name.
+  const run = async (crawlRunId: string | null): Promise<void> => {
+    if (options.mode === "enrich") await drainEnrichment(deps, options, focus, crawlRunId, stats, report);
+    else await walkListings(deps, options, focus, crawlRunId, stats, report);
   };
 
   if (options.dryRun) {
     try {
-      await run();
+      await run(null);
       stats.pagesFetched = deps.fetcher.pagesFetched;
       return { crawlRunId: null, status: "succeeded", stats, report };
     } catch (error) {
@@ -726,27 +1013,33 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
     }
   }
 
-  const started = await deps.db
-    .insert(crawlRuns)
-    .values({ vendorId: options.vendorId, kind: options.mode, status: "running", startedAt: deps.now() })
-    .returning({ id: crawlRuns.id });
-  const crawlRunId = started[0]!.id;
+  // #155: close out anything a previous process for this lane left `running`
+  // before opening a new row, so a pod lost to SIGKILL/OOM/node-loss does not leave
+  // an immortal row nothing re-selects. Lock-scoped, hence no age ceiling — see
+  // reclaimStrandedRuns.
+  await reclaimStrandedRuns(deps.db, { vendorId: options.vendorId, kind: options.mode });
+
+  const record = await openCrawlRun(deps.db, {
+    vendorId: options.vendorId,
+    kind: options.mode,
+    now: deps.now,
+    host: deps.signalHost,
+  });
 
   try {
-    await run();
+    await run(record.crawlRunId);
     stats.pagesFetched = deps.fetcher.pagesFetched;
-    await deps.db
-      .update(crawlRuns)
-      .set({ status: "succeeded", stats, finishedAt: deps.now() })
-      .where(eq(crawlRuns.id, crawlRunId));
-    return { crawlRunId, status: "succeeded", stats, report };
+    await record.close("succeeded", { stats });
+    return { crawlRunId: record.crawlRunId, status: "succeeded", stats, report };
   } catch (error) {
     stats.pagesFetched = deps.fetcher.pagesFetched;
     const message = errorText(error);
-    await deps.db
-      .update(crawlRuns)
-      .set({ status: "failed", stats, error: message, finishedAt: deps.now() })
-      .where(eq(crawlRuns.id, crawlRunId));
-    return { crawlRunId, status: "failed", stats, error: message, report };
+    await record.close("failed", { stats, error: message });
+    return { crawlRunId: record.crawlRunId, status: "failed", stats, error: message, report };
+  } finally {
+    // Idempotent with close(); the point is that a throw between the two — or a
+    // caller that keeps the process alive — never leaves a listener holding a
+    // reference to a run that is already over.
+    record.dispose();
   }
 }
