@@ -224,6 +224,20 @@ describe("media selection", () => {
     const parsed = parseImageInfo(fixtureJson("commons-imageinfo-svg-nothumb.json"), "File:Padron logo.svg");
     expect(parsed).toEqual({ blocked: "unsupported_media" });
   });
+
+  it("falls back to the ORIGINAL when Commons offers no thumb and the mime is accepted — an unbounded url", () => {
+    // The path THUMB_WIDTH does not cover: no thumburl, a decodable mime, and a
+    // 30MB original. Nothing here caps the download; storeImage's MAX_IMAGE_BYTES
+    // does, which is why this fixture exists.
+    const parsed = parseImageInfo(fixtureJson("commons-imageinfo-jpeg-nothumb.json"), "File:Partagas factory.jpg");
+    expect("image" in parsed).toBe(true);
+    if (!("image" in parsed)) return;
+    expect(parsed.image.mime).toBe("image/jpeg");
+    expect(parsed.image.downloadUrl).not.toContain("/thumb/");
+    expect(parsed.image.downloadUrl).toBe(
+      "https://upload.wikimedia.org/wikipedia/commons/3/3f/Partagas_factory.jpg",
+    );
+  });
 });
 
 describe("resolveBrandImage", () => {

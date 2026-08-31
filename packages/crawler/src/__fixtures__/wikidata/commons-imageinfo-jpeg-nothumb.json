@@ -1,0 +1,37 @@
+{
+  "query": {
+    "pages": [
+      {
+        "pageid": 5561,
+        "ns": 6,
+        "title": "File:Partagas factory.jpg",
+        "imagerepository": "local",
+        "imageinfo": [
+          {
+            "size": 31457280,
+            "width": 8688,
+            "height": 5792,
+            "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Partagas_factory.jpg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Partagas_factory.jpg",
+            "mime": "image/jpeg",
+            "extmetadata": {
+              "License": {
+                "value": "cc-by-sa-4.0",
+                "source": "commons-desc-page"
+              },
+              "LicenseShortName": {
+                "value": "CC BY-SA 4.0",
+                "source": "commons-desc-page"
+              },
+              "Artist": {
+                "value": "Jane Photographer",
+                "source": "commons-desc-page"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "success": 1
+}

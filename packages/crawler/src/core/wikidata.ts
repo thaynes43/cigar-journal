@@ -26,7 +26,10 @@ const SEARCH_LIMIT = 15;
 
 // Commons rasterizes SVG to PNG for thumbnails, and most brand logos on Commons
 // ARE SVG — which processPhoto's accepted set rejects. Always ask for a thumb at
-// this width: it caps the download (originals run 20–40MB) and hands back a raster.
+// this width: it hands back a raster and, in the ordinary case, a small file.
+// It is NOT a size bound. Commons can answer with no thumburl at all, and an
+// accepted-mime original (20–40MB) is then the download — the actual cap is
+// fetchBinary's `maxBytes`, which every caller of these URLs passes.
 const THUMB_WIDTH = 1024;
 
 // Mirrors @cj/photos' pipeline ACCEPTED set (not importable — it is private to
@@ -476,9 +479,10 @@ export function parseImageInfo(
   const attributionRequired =
     declared != null ? declared.toLowerCase() !== "false" : !NO_ATTRIBUTION_REQUIRED.test(code);
 
-  // Always prefer the thumb: it bounds the download AND rasterizes SVG, which the
+  // Always prefer the thumb: it is far smaller AND rasterizes SVG, which the
   // image pipeline cannot decode. The original is a fallback only when its own
-  // mime is one the pipeline accepts.
+  // mime is one the pipeline accepts — and it can be tens of megabytes, so this
+  // choice narrows the download without bounding it; fetchBinary does that.
   const thumbUrl = typeof info.thumburl === "string" ? info.thumburl : null;
   const thumbMime = typeof info.thumbmime === "string" ? info.thumbmime : "image/png";
   const originalUrl = typeof info.url === "string" ? info.url : null;

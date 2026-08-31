@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { ProcessedPhoto } from "@cj/photos";
-import type { Fetcher } from "../core/fetcher.js";
+import { MaxBytesExceededError, type Fetcher } from "../core/fetcher.js";
 
 // Test-only helpers: load the recorded Fox fixtures, drive ingest through an
 // injected in-memory fetcher (no network — guardrail), and a photo-pipeline stub
@@ -53,13 +53,17 @@ export function createMockFetcher(routes: Record<string, MockRoute>): MockFetche
       }
       return { status: route.status ?? 200, body: route.body ?? "" };
     },
-    async fetchBinary(url: string) {
+    async fetchBinary(url: string, maxBytes?: number) {
       requested.push(url);
       const route = routes[url];
       if (!route) return { status: 404, body: Buffer.alloc(0), contentType: "application/octet-stream" };
+      const body = route.binary ?? Buffer.from("bytes");
+      // Honors the cap the real fetcher enforces, so a caller's oversize handling
+      // is exercised here rather than only against the network.
+      if (maxBytes != null && body.length > maxBytes) throw new MaxBytesExceededError(maxBytes, url);
       return {
         status: route.status ?? 200,
-        body: route.binary ?? Buffer.from("bytes"),
+        body,
         contentType: route.contentType ?? "image/jpeg",
       };
     },
