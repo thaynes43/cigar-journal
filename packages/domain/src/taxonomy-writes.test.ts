@@ -65,10 +65,36 @@ describe("taxonomy writes", () => {
     // Aliases are MATCHING KEYS, derived here rather than accepted from the
     // caller: a display spelling stored in `aliases` would simply never be probed
     // for, which is a silent failure rather than a loud one.
-    it("derives folded keys and keeps the row's own slug", () => {
-      expect(aliasKeysFor("Padrón")).toEqual(["padr-n", "padron"]);
+    it("derives folded keys and nothing else", () => {
       expect(aliasKeysFor("Liga Privada")).toEqual(["liga-privada"]);
       expect(aliasKeysFor("No. 9", ["Number 9"])).toEqual(["no-9", "number-9"]);
+    });
+
+    // The Wave 3 residue #220 missed. The name-derived key used to include
+    // `brandSlug(name)` so the row's own slug rode along in the probe — correct
+    // while slugs were transcriptions, junk once `mintRegistrySlug` folded, since
+    // the folded key IS the minted slug and no vendor writes an accent as a
+    // hyphen. One accented name, one key.
+    it("emits exactly one name-derived key for an accented name — the folded one", () => {
+      for (const [name, key] of [
+        ["Padrón", "padron"],
+        ["Cavalier Genève", "cavalier-geneve"],
+        ["Don Pepín García", "don-pepin-garcia"],
+        ["Jaime García", "jaime-garcia"],
+      ] as const) {
+        expect(aliasKeysFor(name)).toEqual([key]);
+        // The key a mint stores and the slug it addresses on are the same string,
+        // which is what lets one GIN probe answer both questions.
+        expect(aliasKeysFor(name)).toContain(mintRegistrySlug(name));
+        expect(aliasKeysFor(name)).not.toContain(brandSlug(name));
+      }
+    });
+
+    // A caller may still ADD the transcription deliberately — it folds to itself,
+    // being ASCII already — which is what keeps a legacy URL key reachable after
+    // a slug rename (migration 0029, Padrón).
+    it("accepts a legacy transcription as an explicit extra key", () => {
+      expect(aliasKeysFor("Padrón", ["padr-n"])).toEqual(["padr-n", "padron"]);
     });
   });
 
@@ -254,8 +280,12 @@ describe("taxonomy writes", () => {
       const refusal = await createBrand(h.deps, curator, { name: "Padrón" }).catch((err: unknown) => err);
       expect(refusal).toBeInstanceOf(ValidationError);
       // It refuses on the FOLDED key, and names the spelling already holding it.
+      // The message used to read `padr-n`: the mint derived the transcription as
+      // well, it sorted first, and so the refusal quoted a key the curator never
+      // typed and could not see. Now one name derives one key, and the key the
+      // refusal names is the one that actually collided.
       expect((refusal as ValidationError).fields).toEqual([
-        { path: "aliases", message: "The matching key 'padr-n' is already claimed by 'Padrón'." },
+        { path: "aliases", message: "The matching key 'padron' is already claimed by 'Padrón'." },
       ]);
 
       // NO SECOND ROW. Not by folded key, and not by either slug flavor.

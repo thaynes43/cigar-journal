@@ -88,6 +88,40 @@ const slugFold = (value: string): SQL =>
 const slugMatch = (column: SQL, value: string): SQL =>
   sql`(${column} = ${value} OR ${column} = ${slugFold(value)})`;
 
+// The same match for a BRAND, plus the arm that keeps a RENAMED slug's old links
+// alive. Migration 0029 renames `Padrón` from the transcription `padr-n` to the
+// folded `padron`, and neither arm above can survive that: `padr-n` is lossy, so
+// no normalization recovers `padron` from it. `/cigars/brands/padr-n` — a 307
+// into `?brand=padr-n` — and every pre-wave `?brand=Padrón` link would land on an
+// empty grid under a header naming nothing.
+//
+// What DOES survive the rename is the row's matching keys. `padr-n` stays in
+// `brands.aliases` (0026 seeded it there, and after the rename it is no longer
+// derived from the name, so it is an ordinary key the alias editor will keep).
+// So the third arm probes `aliases` — with the STORED slug rule and never with
+// `fold()`, exactly as above, which is what makes `?brand=Padrón` land too:
+// slugFold("Padrón") is `padr-n`, the retained key.
+//
+// THE GUARD IS WHAT MAKES THIS SAFE, and it is why the first two arms could not
+// simply be pointed at `aliases`. A row's aliases hold its FOLDED key as well as
+// its transcription, so an unguarded alias probe for `padron-test` would match
+// the accented `Padrón Test` in addition to the ASCII `Padron Test` that owns
+// that slug outright — the widening this module has refused since #215, pinned
+// by the negative test in catalog-hierarchy.test.ts. Firing the arm only when NO
+// brand owns the value as a slug makes it a strict last resort: it can never add
+// a marca to a result the slug arms already answered, so the only links it can
+// change are the ones that currently resolve to nothing.
+//
+// Brand only, deliberately. Line and blend slugs are unique per PARENT, not
+// globally, so a global alias arm there could pull two marcas' `reserva` into one
+// drill. Nothing has renamed a line or blend slug; when something does, it will
+// need the ancestor scope in the guard, and that is a change to make then.
+const brandSlugMatch = (column: SQL, aliasColumn: SQL, value: string): SQL =>
+  sql`(${slugMatch(column, value)} OR (
+        (${value} = ANY(${aliasColumn}) OR ${slugFold(value)} = ANY(${aliasColumn}))
+        AND NOT EXISTS (SELECT 1 FROM brands slug_owner WHERE ${slugMatch(sql`slug_owner.slug`, value)})
+      ))`;
+
 // One predicate per pinned level (DESIGN-004 D-01: "a drill is nothing but
 // setting one of them"). They AND with q/type/own/overlay by construction, which
 // is why filters compose with drills for free.
@@ -110,7 +144,9 @@ export function hierarchyConditions(filter: CatalogHierarchyFilter | undefined):
   const { brand, line, blend, vitola } = filter;
   if (brand) {
     conds.push(
-      brand === HIERARCHY_UNFILED ? sql`c.brand_id IS NULL` : slugMatch(sql`br.slug`, brand),
+      brand === HIERARCHY_UNFILED
+        ? sql`c.brand_id IS NULL`
+        : brandSlugMatch(sql`br.slug`, sql`br.aliases`, brand),
     );
   }
   if (line) {
@@ -314,7 +350,7 @@ export async function lookupHierarchyEntity(
         SELECT b.id::text AS id, b.slug AS slug, b.name AS name,
                NULL::text AS parent_slug, NULL::text AS parent_name
         FROM brands b
-        WHERE ${slugMatch(sql`b.slug`, slug)}
+        WHERE ${brandSlugMatch(sql`b.slug`, sql`b.aliases`, slug)}
         ORDER BY b.name ASC
         LIMIT 1
       `;
@@ -326,7 +362,7 @@ export async function lookupHierarchyEntity(
         FROM lines ln
         LEFT JOIN brands b ON b.id = ln.brand_id
         WHERE ${slugMatch(sql`ln.slug`, slug)}
-          ${brandScope != null ? sql`AND ${slugMatch(sql`b.slug`, brandScope)}` : sql``}
+          ${brandScope != null ? sql`AND ${brandSlugMatch(sql`b.slug`, sql`b.aliases`, brandScope)}` : sql``}
         ORDER BY ln.name ASC
         LIMIT 1
       `;
@@ -340,7 +376,7 @@ export async function lookupHierarchyEntity(
         LEFT JOIN brands b ON b.id = ln.brand_id
         WHERE ${slugMatch(sql`bl.slug`, slug)}
           ${lineScope != null ? sql`AND ${slugMatch(sql`ln.slug`, lineScope)}` : sql``}
-          ${brandScope != null ? sql`AND ${slugMatch(sql`b.slug`, brandScope)}` : sql``}
+          ${brandScope != null ? sql`AND ${brandSlugMatch(sql`b.slug`, sql`b.aliases`, brandScope)}` : sql``}
         ORDER BY bl.name ASC
         LIMIT 1
       `;
