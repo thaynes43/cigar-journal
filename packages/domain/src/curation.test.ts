@@ -2147,6 +2147,47 @@ describe("curation", () => {
       expect((audit.after as { cascadeUnmatched?: string[] }).cascadeUnmatched).toEqual([matchId]);
     });
 
+    it("shows a crawler's own unmatched listings and hides everyone else's", async () => {
+      // The three rows that share one database state — `status='unmatched'`,
+      // `cigar_id` null — and mean entirely different things (#170 verify round 2).
+      // Only the crawler's own non-links belong in triage.
+      const key = () => `tri-${newRequestId()}`;
+      const [refused] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: key(), cigarId: null, status: "unmatched", unmatchedReason: "market_refusal" })
+        .returning({ id: listingMatches.id });
+      const [noMatch] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: key(), cigarId: null, status: "unmatched", unmatchedReason: "no_match" })
+        .returning({ id: listingMatches.id });
+      // A settled verdict — 591 of these on prod. Re-asking a question a human
+      // already answered is worse than never having asked it.
+      const [decided] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: key(), cigarId: null, status: "unmatched", decidedBy: "agent" })
+        .returning({ id: listingMatches.id });
+      // No reason: not the crawler's guess at all. This is the shape the
+      // excludeCigar cascade leaves behind (#126), which must stay gone.
+      const [cascaded] = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: key(), cigarId: null, status: "unmatched" })
+        .returning({ id: listingMatches.id });
+
+      const seen = new Map<string, WorklistMatch>();
+      let cursor: string | null = null;
+      for (let i = 0; i < 500; i++) {
+        const page = await curationWorklist(h.deps, admin, { kind: "match_triage", limit: 200, cursor });
+        for (const m of page.matches!) seen.set(m.matchId, m);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+
+      expect(seen.get(refused!.id)).toMatchObject({ status: "unmatched", reason: "market_refusal" });
+      expect(seen.get(noMatch!.id)).toMatchObject({ status: "unmatched", reason: "no_match" });
+      expect(seen.has(decided!.id)).toBe(false);
+      expect(seen.has(cascaded!.id)).toBe(false);
+    });
+
     it("keeps the excluded cigar's auto match out of match_triage", async () => {
       const cigarId = await h.seedCigar({ canonicalName: `Triage Gone ${newRequestId().slice(0, 8)}` });
       const matchId = await addAutoMatch(cigarId);

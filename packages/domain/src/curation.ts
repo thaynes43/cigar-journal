@@ -1975,10 +1975,40 @@ async function cigarWorklistPage(
   return { cigars: page.map(toWorklistCigar), nextCursor };
 }
 
-// A page of vendor listing→cigar auto-matches awaiting triage. The listing side
-// (vendor name, key, latest offer URL) and the resolver's guessed cigar facts sit
-// side by side so a confirm/unmatch verdict is judgeable without another read.
+// A page of vendor listings awaiting triage, in BOTH shapes the crawler produces.
+// The listing side (vendor name, key, latest offer URL) and the resolver's guessed
+// cigar facts sit side by side so a verdict is judgeable without another read.
 // Keyset-ordered by the match's (createdAt, id).
+//
+// THIS READ USED TO SHOW ONLY `status='auto'`, and that made the crawler's own
+// refusals invisible. #170 gave the resolver a third answer — a candidate cleared
+// the similarity floor and was DECLINED because the vendor's focus contradicts the
+// cigar's evidenced market — and routed it here, "to the triage queue a curator
+// already works". It was not routed anywhere: a refusal writes `unmatched`, this
+// read filtered `unmatched` out, and the claim was false in the code, the CLI
+// output and the PR body alike. Prod was carrying 3 such rows already, from the
+// ordinary no-match path, and no surface in the system named them.
+//
+// WHAT IS ADMITTED, and each exclusion is load-bearing:
+//   * `status='auto'` — the proposed links, as before.
+//   * `status='unmatched'` with `decided_by='crawler'` AND a reason set — the
+//     resolver's own non-links (0026). The reason column is what distinguishes
+//     them from the excludeCigar cascade (#126), which also leaves
+//     crawler-decided `unmatched` rows behind and whose whole point was to remove
+//     20 gift-card listings from this queue FOR GOOD. Keying on `decided_by`
+//     alone would have resurrected them.
+//   * NOT `decided_by` in ('curator', 'agent') — 591 rows on prod. Those are
+//     SETTLED DECISIONS. A queue that re-asks a question a human already answered
+//     is worse than one that never asked.
+//
+// WHAT A CURATOR CAN DO WITH AN UNMATCHED ROW IS DEFERRED (Wave 2, matching v2).
+// `setListingMatchStatus` takes `confirmed | unmatched` and confirms whatever
+// cigar the row already points at — which for these rows is nothing, so there is
+// no verdict to give yet. The resolution verbs (link-to-cigar, create-from-listing)
+// are a matching-v2 question, not a visibility one. Making the rows VISIBLE is
+// what this read is for: a refusal cluster from one vendor is the signal that its
+// `vendors.focus` is wrong, which is the defect that started #170, and it was
+// unobservable.
 async function matchTriagePage(
   db: Database,
   cursor: [string, string] | null,
@@ -1991,6 +2021,7 @@ async function matchTriagePage(
   // cigarWorklistPage note on the ms-truncation trap).
   const result = await db.execute(sql`
     SELECT lm.id AS match_id, lm.listing_key, lm.created_at::text AS match_created_at_text,
+           lm.status, lm.unmatched_reason,
            v.name AS vendor_name,
            (SELECT o.listing_url FROM offers o
               WHERE o.listing_match_id = lm.id
@@ -2004,10 +2035,15 @@ async function matchTriagePage(
     FROM listing_matches lm
     JOIN vendors v ON v.id = lm.vendor_id
     LEFT JOIN cigars c ON c.id = lm.cigar_id
-    -- Only auto matches whose cigar is still active surface for triage: a match
-    -- pointing at an excluded/merged cigar must not resurface (DESIGN-003 §Curation,
-    -- #126). A null-cigar 'auto' row (defensive — the resolver links one) still shows.
-    WHERE lm.status = 'auto' AND (c.id IS NULL OR c.catalog_status = 'active') ${keyset}
+    -- Only matches whose cigar is still active surface for triage: a match pointing
+    -- at an excluded/merged cigar must not resurface (DESIGN-003 §Curation, #126).
+    -- A null-cigar 'auto' row (defensive — the resolver links one) still shows, and
+    -- an unmatched row has no cigar by construction.
+    WHERE (
+            lm.status = 'auto'
+            OR (lm.status = 'unmatched' AND lm.decided_by = 'crawler' AND lm.unmatched_reason IS NOT NULL)
+          )
+      AND (c.id IS NULL OR c.catalog_status = 'active') ${keyset}
     ORDER BY lm.created_at ASC, lm.id ASC
     LIMIT ${limit + 1}
   `);
@@ -2015,6 +2051,8 @@ async function matchTriagePage(
     match_id: string;
     listing_key: string;
     match_created_at_text: string;
+    status: "auto" | "unmatched";
+    unmatched_reason: "market_refusal" | "no_match" | null;
     vendor_name: string;
     listing_url: string | null;
     cigar_id: string | null;
@@ -2038,6 +2076,10 @@ async function matchTriagePage(
     vendorName: r.vendor_name,
     listingKey: r.listing_key,
     listingUrl: r.listing_url,
+    status: r.status,
+    // Absent on an `auto` row rather than null: an unmatched row always has one
+    // (the read admits no other kind), so present-vs-absent tracks the two shapes.
+    ...(r.unmatched_reason != null ? { reason: r.unmatched_reason } : {}),
     cigar:
       r.cigar_id != null
         ? {
@@ -2435,6 +2477,14 @@ async function queueBacklogWithinTx(
       // #156; this is the honest report until then.
       ...(status === "already_queued" && classified.coverage.awaiting.length > 0
         ? { awaitingVendors: classified.coverage.awaiting.map((v) => v.name) }
+        : {}),
+      // ...and the third reading (#209), on the same verdict. A lane that found
+      // the cigar and was refused its photo slot holds the ask open without ever
+      // being able to close it — no attempt is burned, so it cannot retire, and
+      // the refusal is structural, so it recurs every crawl. On this report that
+      // was an `already_queued` indistinguishable from one being worked tonight.
+      ...(status === "already_queued" && classified.coverage.photoRefused.length > 0
+        ? { photoRefusedVendors: classified.coverage.photoRefused.map((v) => v.name) }
         : {}),
     });
   }

@@ -147,7 +147,10 @@ Catalog curation (admin only). The get_curation_queue read and the eight curatio
 write tools are for an operations agent maintaining the catalog — not for
 conversational journaling; a normal chat session never uses them. get_curation_queue
 pages the work by kind (unverified, duplicates, match_triage, unbranded, untyped,
-missing_photos); drain a kind with its nextCursor. Apply only what the evidence
+missing_photos); drain a kind with its nextCursor. A match_triage row carries a
+status: auto is a proposed link to rule on, unmatched is a listing the crawler
+linked to nothing and its reason says why — report those, they have no verdict
+tool yet. Apply only what the evidence
 supports: high-confidence corrections apply directly (set_cigar_facts overwrites a
 wrong brand/line/type/manufacturer; rename_cigar corrects a wrong canonical name;
 verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for

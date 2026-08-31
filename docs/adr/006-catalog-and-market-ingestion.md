@@ -375,10 +375,21 @@ LLM-created cigars accumulate until curated.
     lane — from its own fleet, so the vendor that could have contradicted the claim
     could never be asked. Migration 0025 records the shop as `'both'`, which
     collapses every one of those inferences to unknown with **no algorithm change**
-    (`focus='both'` already contributes no evidence), and the seal cannot re-form:
-    with no CC-focus vendor in the registry, linkage evidence can no longer produce
-    CC at all — only a curator setting `cigars.type` can, which is authoritative by
-    construction. **The rule this establishes:** a shop that trades in both markets
+    (`focus='both'` already contributes no evidence).
+  - **Evidence comes only from crawl-enabled vendors, and that is what un-seals
+    it** (added 2026-08-31). Correcting the one row above removes today's seal but
+    does not stop the next one: `approved-import` stamps `focus='CC'` on every
+    vendor it adds (#210), so the next approved Cuban shop would re-form the seal
+    the day it lands. "No CC-focus vendor exists right now" is a fact about the
+    registry, not a property of the design. The structural statement is instead:
+    *linkage evidence is read only from vendors with `crawl_enabled = true`* — the
+    same set the fleet is drawn from, because a vendor that cannot be asked cannot
+    be evidence either. Two consequences, and both are the point: a mis-focused
+    shop can only ever seal rows while it is enabled, and **disabling it frees
+    every row it sealed**, today, with no migration — which is the lever this ADR
+    already promises and, before this, did not actually deliver. `cigars.type`
+    still overrides everything, and remains authoritative by construction.
+    **The rule this establishes:** a shop that trades in both markets
     is recorded `'both'`, whatever its name suggests; recording it as one market
     manufactures evidence, and the cost is paid by a *different* vendor's lane.
     **The residual, named and not fixed here:** `vendors.focus` conflates *what a

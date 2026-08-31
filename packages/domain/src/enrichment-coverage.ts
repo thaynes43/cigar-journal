@@ -56,7 +56,10 @@ export const ERROR_BUDGET = 3;
 // than any real request". Used only for the unreachable missing-request case.
 const FAR_FUTURE = new Date(8_640_000_000_000_000);
 
-export type EnrichmentOutcome = "match" | "miss" | "error";
+// How one vendor's look at one ask ended. The first three are verdicts about a
+// CATALOGUE; `photo_refused` is a verdict about an ARTIFACT and behaves unlike all
+// of them — see recordEnrichmentAttempt and migration 0026.
+export type EnrichmentOutcome = "match" | "miss" | "error" | "photo_refused";
 
 export interface VendorBrief {
   vendorId: string;
@@ -117,6 +120,15 @@ export interface EnrichmentCoverage {
   // "V did not carry this on 2026-08-30" stays true and is worth having when V
   // comes back.
   tried: VendorAttemptSummary[];
+  // Lanes whose LAST word on an open ask was a refused catalogue photo (#209):
+  // they found the cigar, linked it, and were denied the one permanent slot. The
+  // only honest answer to "why will this ask never clear?" for such a row — the
+  // refusal is usually structural, so the lane will refuse again tomorrow, and it
+  // burns no budget, so the ask cannot retire on it either. Without this the row
+  // is an `already_queued` with an `awaitingVendors` entry, indistinguishable from
+  // one a lane simply has not reached yet. The operator's lever is the same one
+  // the rest of this module documents: disable the lane, and the ask is freed.
+  photoRefused: VendorBrief[];
   // At least one non-fulfilled request has a completed look from every counted
   // lane. "We looked and found nothing."
   exhausted: boolean;
@@ -220,6 +232,26 @@ export function mayWriteCatalogPhoto(focus: VendorFocus | null, facts: PhotoAuth
   return !facts.focusedStockist;
 }
 
+// THE SAME RULE, AS A PREDICATE THE INSERT ITSELF CAN EVALUATE.
+//
+// `mayWriteCatalogPhoto` above is read into JS, and on the capture path the read
+// and the INSERT are separated by a whole image download — seconds of third-party
+// HTTP. In that window another lane can link the cigar and move the evidenced
+// market, or a curator can set `cigars.type`, and the insert then writes under an
+// authority that no longer holds. The lane lock does not close it: locks are per
+// (vendor, mode), so a `both` lane and a focused lane are concurrent by design and
+// the `both` lane is exactly the one whose authority a focused link revokes.
+//
+// So the capture keeps the JS read as a cheap pre-flight (it saves the vendor's
+// bandwidth on a photo we already know we may not write) and re-states the same
+// predicate as the INSERT's own WHERE clause, which is evaluated in the write's
+// snapshot and is therefore the authority. The two must not drift: this is the
+// same rule, in the same two halves, and any change to one belongs in both.
+export function mayWriteCatalogPhotoSql(focus: VendorFocus | null, cigarId: SQL): SQL {
+  if (focus === "NC" || focus === "CC") return sql`(${evidencedMarketSql(cigarId)} = ${focus})`;
+  return sql`(NOT ${focusedStockistSql(cigarId)})`;
+}
+
 // The two facts the slot guard needs about a cigar, read together.
 export interface PhotoAuthority {
   // The evidenced market (above): `cigars.type`, else the single market shared by
@@ -230,15 +262,19 @@ export interface PhotoAuthority {
   focusedStockist: boolean;
 }
 
-// "Does a vendor with a real market already stock this cigar?" Same join as the
-// evidence subquery, without the single-market HAVING: here a disagreement is
-// still two focused stockists, and both outrank a market-agnostic vendor.
+// "Does a CRAWL-ENABLED vendor with a real market already stock this cigar?" Same
+// join as the evidence subquery, with the same `crawl_enabled` restriction (see
+// EVIDENCE COMES ONLY FROM ENABLED VENDORS below) and without the single-market
+// HAVING: here a disagreement is still two focused stockists, and both outrank a
+// market-agnostic vendor. Disabling a shop therefore stops it pre-empting the slot
+// too, which is the same lever doing the same thing on the other half of the guard.
 export function focusedStockistSql(cigarId: SQL): SQL {
   return sql`EXISTS (
     SELECT 1
       FROM listing_matches fs_lm
       JOIN vendors fs_v ON fs_v.id = fs_lm.vendor_id
      WHERE fs_lm.cigar_id = ${cigarId}
+       AND fs_v.crawl_enabled
        AND fs_v.focus IN ('NC', 'CC')
   )`;
 }
@@ -290,12 +326,29 @@ export async function photoAuthority(q: Queryer, cigarId: string): Promise<Photo
 // vendor that trades in both markets MUST be recorded 'both' — recording it as the
 // market its name suggests silently manufactures evidence.
 //
-// Two deliberate exclusions from the evidence set:
+// Three deliberate exclusions from the evidence set:
 //   * `focus='both'` vendors — a both-market vendor stocking a cigar says nothing
 //     about which market it belongs to;
 //   * conflicting evidence — an aggregate with no GROUP BY returns one row and
 //     the HAVING filters it out, so two disagreeing sources yield NULL (unknown),
-//     which is the conservative answer and the one the guards want.
+//     which is the conservative answer and the one the guards want;
+//   * `crawl_enabled = false` vendors — see below.
+//
+// EVIDENCE COMES ONLY FROM ENABLED VENDORS, and that is a STRUCTURAL property, not
+// a convenience. The seal in the paragraph above — an evidenced-CC row dropping the
+// only lane that could contradict it — was closed in the first pass by a fact about
+// today's registry (nobody is recorded 'CC' any more). That is circumstance, not
+// structure: `approved-import` mints every vendor it adds with `focus='CC'` (#210),
+// so the next approved Cuban shop would re-form the seal the day it lands, with no
+// code change and no review. Reading evidence only from CRAWL-ENABLED vendors makes
+// the un-seal hold on its own terms, and it is the same set the fleet is drawn from
+// (`enrichVendorFleet`): a vendor that cannot be asked cannot be evidence either.
+//
+// It also makes `crawl_enabled = false` mean what ADR-006 already promises it
+// means. Before this, disabling a mis-focused shop dropped it from the fleet but
+// LEFT ITS EVIDENCE STANDING, so the rows it had sealed stayed sealed and the
+// documented lever did not actually free them. Now disabling the shop frees them,
+// today, with no migration — which is the whole point of having the lever.
 //
 // A WRONG AUTO-LINK BECOMES EVIDENCE, which is the very defect #170 is about.
 // Bounded in the right direction: this value can only ever EXCLUDE a vendor,
@@ -310,6 +363,7 @@ export function evidencedMarketSql(cigarId: SQL): SQL {
        FROM listing_matches ev_lm
        JOIN vendors ev_v ON ev_v.id = ev_lm.vendor_id
       WHERE ev_lm.cigar_id = ${cigarId}
+        AND ev_v.crawl_enabled
         AND ev_v.focus IN ('NC', 'CC')
      HAVING COUNT(DISTINCT ev_v.focus) = 1)
   )`;
@@ -425,12 +479,16 @@ interface LedgerRow {
   name: string;
   attempts: number;
   errors: number;
+  // The last thing this vendor did to this ask. Read for exactly one question —
+  // is this lane holding the ask open with a photo refusal? — which neither
+  // counter can answer, since a refusal burns neither of them (#209).
+  lastOutcome: string;
   lastAttemptAt: Date;
 }
 
 async function ledgerRows(q: Queryer, where: ReturnType<typeof sql>): Promise<LedgerRow[]> {
   const result = await q.execute(sql`
-    SELECT a.request_id, a.vendor_id, v.name, a.attempts, a.errors, a.last_attempt_at
+    SELECT a.request_id, a.vendor_id, v.name, a.attempts, a.errors, a.last_outcome, a.last_attempt_at
     FROM enrichment_attempts a
     JOIN enrichment_requests r ON r.id = a.request_id
     JOIN vendors v ON v.id = a.vendor_id
@@ -444,6 +502,7 @@ async function ledgerRows(q: Queryer, where: ReturnType<typeof sql>): Promise<Le
       name: string;
       attempts: number;
       errors: number;
+      last_outcome: string;
       last_attempt_at: string | Date;
     }[]
   ).map((r) => ({
@@ -452,6 +511,7 @@ async function ledgerRows(q: Queryer, where: ReturnType<typeof sql>): Promise<Le
     name: r.name,
     attempts: Number(r.attempts),
     errors: Number(r.errors),
+    lastOutcome: r.last_outcome,
     lastAttemptAt: r.last_attempt_at instanceof Date ? r.last_attempt_at : new Date(r.last_attempt_at),
   }));
 }
@@ -462,6 +522,7 @@ interface Rollup {
   // Vendor ids, unioned across the rolled-up requests.
   counted: Set<string>;
   awaiting: Set<string>;
+  photoRefused: Set<string>;
 }
 
 // The request identity the rollup needs: `createdAt` is load-bearing since #185,
@@ -532,6 +593,13 @@ function rollup(fleet: FleetVendor[], rows: LedgerRow[], requests: RequestRef[])
   const blocked = new Set<string>();
   const countedAll = new Set<string>();
   const awaiting = new Set<string>();
+  // Read off the ledger rather than off the fleet: a lane can refuse a photo and
+  // then be disabled, and the fact that it refused is still the reason the ask sat
+  // open. Scoped to the requests being rolled up, like everything else here.
+  const photoRefused = new Set<string>();
+  for (const row of rows) {
+    if (row.lastOutcome === "photo_refused") photoRefused.add(row.vendorId);
+  }
   for (const request of requests) {
     const perVendor = byRequest.get(request.id) ?? new Map<string, LedgerRow>();
     const counted = fleet.filter((vendor) => counts(vendor, perVendor, request.createdAt));
@@ -546,7 +614,7 @@ function rollup(fleet: FleetVendor[], rows: LedgerRow[], requests: RequestRef[])
     if (ledgers.every((row) => looked(row!))) exhausted.add(request.id);
     else blocked.add(request.id);
   }
-  return { exhausted, blocked, counted: countedAll, awaiting };
+  return { exhausted, blocked, counted: countedAll, awaiting, photoRefused };
 }
 
 // Sum a vendor's spend across however many requests were rolled up, so a cigar
@@ -576,6 +644,17 @@ function brief(vendors: FleetVendor[]): VendorBrief[] {
   return vendors.map(({ vendorId, name }) => ({ vendorId, name }));
 }
 
+// The refusing lanes, named from the LEDGER and not from the fleet. A lane can
+// refuse a photo and then be disabled or re-focused out of the fleet, and the
+// refusal is still the reason the ask sat open — same reasoning as `tried`.
+function refusedBrief(rows: LedgerRow[], ids: Set<string>): VendorBrief[] {
+  const out = new Map<string, VendorBrief>();
+  for (const row of rows) {
+    if (ids.has(row.vendorId)) out.set(row.vendorId, { vendorId: row.vendorId, name: row.name });
+  }
+  return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function toDate(value: string | Date): Date {
   return value instanceof Date ? value : new Date(value);
 }
@@ -602,12 +681,13 @@ export async function enrichmentCoverageForRequest(
   // retires — rather than dating it at the epoch, which would count every lane
   // that ever ran and retire a row on evidence about a request that is gone.
   const ref: RequestRef = { id: requestId, createdAt: createdAt == null ? FAR_FUTURE : toDate(createdAt) };
-  const { exhausted, blocked, counted, awaiting } = rollup(fleet, rows, [ref]);
+  const { exhausted, blocked, counted, awaiting, photoRefused } = rollup(fleet, rows, [ref]);
   return {
     eligible: brief(fleet),
     live: brief(fleet.filter((v) => counted.has(v.vendorId))),
     awaiting: brief(fleet.filter((v) => awaiting.has(v.vendorId))),
     tried: summarize(rows),
+    photoRefused: refusedBrief(rows, photoRefused),
     exhausted: exhausted.size > 0,
     blocked: blocked.size > 0,
     openRequests: 1 - exhausted.size - blocked.size,
@@ -638,15 +718,25 @@ export async function enrichmentCoverageForCigar(
     // No ask, so no denominator: `live`/`awaiting` are per-request facts and there
     // is no request to hold them. `eligible` is still the fleet — who COULD be
     // asked does not depend on anyone having asked.
-    return { eligible, live: [], awaiting: [], tried: [], exhausted: false, blocked: false, openRequests: 0 };
+    return {
+      eligible,
+      live: [],
+      awaiting: [],
+      tried: [],
+      photoRefused: [],
+      exhausted: false,
+      blocked: false,
+      openRequests: 0,
+    };
   }
   const rows = await ledgerRows(q, sql`r.cigar_id = ${cigarId} AND r.status <> 'fulfilled'`);
-  const { exhausted, blocked, counted, awaiting } = rollup(fleet, rows, requests);
+  const { exhausted, blocked, counted, awaiting, photoRefused } = rollup(fleet, rows, requests);
   return {
     eligible,
     live: brief(fleet.filter((v) => counted.has(v.vendorId))),
     awaiting: brief(fleet.filter((v) => awaiting.has(v.vendorId))),
     tried: summarize(rows),
+    photoRefused: refusedBrief(rows, photoRefused),
     exhausted: exhausted.size > 0,
     blocked: blocked.size > 0,
     openRequests: requests.length - exhausted.size - blocked.size,
@@ -664,25 +754,37 @@ export async function enrichmentCoverageForCigar(
 //
 // `errors` is reset by any completed look because the budget is for CONSECUTIVE
 // failures: a vendor that answers once is not permanently broken.
+//
+// `photo_refused` BURNS NEITHER COUNTER (#209). It is a completed look — so it
+// clears `errors`, the vendor demonstrably answered — but it must not touch
+// `attempts`, because `attempts` reaching ATTEMPTS_PER_VENDOR is the whole of the
+// licence for `exhausted`, and `exhausted` says "we read this vendor's catalogue
+// and the cigar is not in it". A refusal is the opposite finding: the vendor's own
+// link proves the catalogue carries it, and what was declined was the photo. Two
+// refusals retiring the ask under that sentence would be exactly the manufactured
+// evidence the ADR-006 amendment forbids. The row is still WRITTEN, and that is
+// the point of writing it: it is the only record that the ask is being held open
+// by a specific lane's refusal rather than waiting for a lane to get to it.
 export async function recordEnrichmentAttempt(
   q: Queryer,
   input: { requestId: string; vendorId: string; outcome: EnrichmentOutcome; at: Date; note?: string | null },
 ): Promise<void> {
   const isError = input.outcome === "error";
+  const looked = !isError && input.outcome !== "photo_refused";
   await q.execute(sql`
     INSERT INTO enrichment_attempts
       (request_id, vendor_id, attempts, errors, last_outcome, last_attempt_at, note)
     VALUES (
       ${input.requestId},
       ${input.vendorId},
-      ${isError ? 0 : 1},
+      ${looked ? 1 : 0},
       ${isError ? 1 : 0},
       ${input.outcome},
       ${input.at},
       ${input.note ?? null}
     )
     ON CONFLICT (request_id, vendor_id) DO UPDATE SET
-      attempts = enrichment_attempts.attempts + ${isError ? 0 : 1},
+      attempts = enrichment_attempts.attempts + ${looked ? 1 : 0},
       errors = ${isError ? sql`enrichment_attempts.errors + 1` : sql`0`},
       last_outcome = ${input.outcome},
       last_attempt_at = ${input.at},

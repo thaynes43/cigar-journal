@@ -87,8 +87,9 @@ init container at startup (ADR-003).
   must outlive the client row it names.
 - `0025_enrichment_market_evidence.sql` — two read-path indexes,
   `listing_matches (cigar_id) WHERE cigar_id IS NOT NULL` and
-  `crawl_runs (vendor_id, kind, status, started_at DESC)`, plus **one registry
-  correction**: `vendors.focus` for Cuban Lou's, `'CC'` → `'both'`.
+  `crawl_runs (vendor_id, kind, status, started_at DESC)`, plus **two
+  corrections**: `vendors.focus` for Cuban Lou's, `'CC'` → `'both'`, and the
+  deletion of the one wrong-market product photo the defect actually wrote.
   Schema-neutral (no column, no constraint, no catalogue backfill) but **not
   write-free**. The shop was recorded `'CC'` on the strength of its name; measured
   against the live catalogue on 2026-08-31 it stocks Perdomo, Gurkha, CAO, Rocky
@@ -124,3 +125,26 @@ init container at startup (ADR-003).
   overridden the moment a curator types the cigar. #157 and #155 need no
   migration either: 0023 already normalized the legacy `in_progress` rows and the
   drain no longer writes that state, so there is no state for a reaper to guard.
+  The **photo delete** is the artifact half: an `NC` vendor's picture of an
+  Altadis `Romeo y Julieta 1875` sits in the one permanent slot of the Cuban
+  `Petit Royales Romeo y Julieta`. The crawler cannot remove it — `product_photos`
+  is `UNIQUE(cigar_id)` and nothing in the crawler ever deletes one — so the guard
+  this PR adds prevents the next such photo and is powerless over this one.
+  Guarded on `source_url` rather than on the cigar id, so the predicate asserts
+  the very fact that makes the photo wrong and cannot delete a correct photo
+  uploaded before the migration runs.
+- `0026_refusal_visibility.sql` — `listing_matches.unmatched_reason` (nullable
+  text, `'market_refusal' | 'no_match'`) and a widened
+  `enrichment_attempts.last_outcome` CHECK admitting `'photo_refused'`. Both make
+  a crawler refusal legible where it was previously indistinguishable from an
+  ordinary negative. A refused listing used to write byte-for-byte the row an
+  ordinary no-match writes — and the row the `excludeCigar` cascade leaves behind
+  — so the triage queue could not show refusals without also resurrecting the
+  gift-card listings #126 removed; keying the read on this column separates them.
+  Backfilled `'no_match'` for the rows already in the crawler-unmatched state
+  (exactly 3 on prod, all untouched since the resolver wrote them), so they
+  surface at deploy rather than after the next crawl. `'photo_refused'` records a
+  look that completed and was then refused the catalogue-photo slot: it burns
+  neither `attempts` nor `errors`, because `attempts` running out licenses the
+  sentence "we read this catalogue and the cigar is not in it", which a refusal
+  would make false.

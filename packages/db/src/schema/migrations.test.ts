@@ -3,6 +3,9 @@ import { eq, sql } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "../testing/embedded-pg.js";
 import { migrate } from "../scripts/migrate.js";
 import { vendors } from "./vendors.js";
+import { cigars } from "./cigars.js";
+import { productPhotos } from "./product-photos.js";
+import { listingMatches } from "./listing-matches.js";
 
 // Migrations apply cleanly from empty against a real Postgres 16 (embedded
 // binary). Also asserts idempotency and that the core extensions/objects land.
@@ -255,5 +258,125 @@ describe("migrations", () => {
     expect(await focusOf(redecided[0]!.id)).toBe("NC");
     // And no other vendor is in range of the name predicate.
     expect(await focusOf(other[0]!.id)).toBe("NC");
+  });
+
+  // The artifact half of 0025 (#170). The guard rides on `source_url` and not on
+  // the cigar id, because the source URL is the EVIDENCE: it names foxcigar.com and
+  // it names the 1875 Petit Bully, so the predicate asserts the very thing that
+  // makes the photo wrong. A hand-copied id would delete whatever occupies the slot
+  // at deploy time — including a correct photo a curator uploaded in the meantime,
+  // which is the one outcome worse than leaving the bad one.
+  const FOX_RYJ_IMG =
+    "https://foxcigar.com/wp-content/uploads/2026/04/fox-product-romeo-y-julieta-1875-petit-bully-1000034200-0-1.jpg";
+
+  it("0025 deletes only the wrong-market Romeo y Julieta photo", async () => {
+    const stmt = sql`
+      DELETE FROM product_photos pp USING cigars c
+       WHERE c.id = pp.cigar_id
+         AND c.canonical_name = 'Petit Royales Romeo y Julieta'
+         AND pp.source_url = ${FOX_RYJ_IMG}
+    `;
+    const photo = async (cigarId: string, sourceUrl: string, tag: string) => {
+      await pg.db.insert(productPhotos).values({
+        cigarId,
+        sourceUrl,
+        objectKey: `obj/${tag}`,
+        thumbKey: `thumb/${tag}`,
+        contentType: "image/jpeg",
+        width: 800,
+        height: 600,
+        bytes: 1234,
+      });
+    };
+    const seed = async (name: string) =>
+      (await pg.db.insert(cigars).values({ canonicalName: name }).returning({ id: cigars.id }))[0]!.id;
+
+    const target = await seed("Petit Royales Romeo y Julieta");
+    // Same cigar, a photo somebody else supplied: the delete must not reach it.
+    const replaced = await seed("Petit Royales Romeo y Julieta");
+    // Same wrong source, a different cigar: nor this one.
+    const elsewhere = await seed("Romeo y Julieta 1875 Petit Bully");
+
+    await photo(target, FOX_RYJ_IMG, "target");
+    await photo(replaced, "https://curator.example/uploaded.jpg", "replaced");
+    await photo(elsewhere, FOX_RYJ_IMG, "elsewhere");
+
+    await pg.db.execute(stmt);
+    // Idempotent: a re-run finds nothing left to delete.
+    await pg.db.execute(stmt);
+
+    const remaining = async (cigarId: string) =>
+      (await pg.db.select().from(productPhotos).where(eq(productPhotos.cigarId, cigarId))).length;
+    expect(await remaining(target)).toBe(0);
+    expect(await remaining(replaced)).toBe(1);
+    expect(await remaining(elsewhere)).toBe(1);
+  });
+
+  // 0026: the two columns that make a crawler refusal legible. Both replace a state
+  // in which a refusal was byte-identical to an ordinary negative.
+  it("0026 admits the crawler's unmatched reasons and rejects anything else", async () => {
+    const [vendor] = await pg.db.insert(vendors).values({ name: "Reason Vendor" }).returning({ id: vendors.id });
+    const insert = (reason: string | null) =>
+      pg.db.insert(listingMatches).values({
+        vendorId: vendor!.id,
+        listingKey: `reason-${reason ?? "null"}-${Math.random()}`,
+        status: "unmatched",
+        unmatchedReason: reason as "market_refusal" | "no_match" | null,
+      });
+
+    await expect(insert("market_refusal")).resolves.toBeDefined();
+    await expect(insert("no_match")).resolves.toBeDefined();
+    // NULL is the third meaning — not the crawler's guess at all — and stays legal.
+    await expect(insert(null)).resolves.toBeDefined();
+    await expect(insert("because-i-said-so")).rejects.toThrow();
+  });
+
+  // The backfill, asserted on rows the test inserts (the test database starts
+  // empty). It is what makes prod's 3 existing crawler-unmatched listings appear in
+  // triage at deploy rather than after the next crawl rewrites them, and it must
+  // reach nothing else — an agent's verdict is settled, and a cascade row has no
+  // reason by construction.
+  it("0026's backfill claims only crawler-decided unmatched rows", async () => {
+    const stmt = sql`
+      UPDATE listing_matches SET unmatched_reason = 'no_match'
+       WHERE status = 'unmatched' AND decided_by = 'crawler' AND unmatched_reason IS NULL
+    `;
+    const [vendor] = await pg.db.insert(vendors).values({ name: "Backfill Vendor" }).returning({ id: vendors.id });
+    const add = async (values: { status: "auto" | "unmatched"; decidedBy?: "crawler" | "curator" | "agent" }) =>
+      (
+        await pg.db
+          .insert(listingMatches)
+          .values({ vendorId: vendor!.id, listingKey: `bf-${Math.random()}`, ...values })
+          .returning({ id: listingMatches.id })
+      )[0]!.id;
+
+    const crawlerUnmatched = await add({ status: "unmatched" });
+    const agentUnmatched = await add({ status: "unmatched", decidedBy: "agent" });
+    const crawlerAuto = await add({ status: "auto" });
+
+    await pg.db.execute(stmt);
+    await pg.db.execute(stmt); // idempotent — the guard is `IS NULL`
+
+    const reasonOf = async (id: string) =>
+      (await pg.db.select().from(listingMatches).where(eq(listingMatches.id, id)))[0]!.unmatchedReason;
+    expect(await reasonOf(crawlerUnmatched)).toBe("no_match");
+    expect(await reasonOf(agentUnmatched)).toBeNull();
+    expect(await reasonOf(crawlerAuto)).toBeNull();
+  });
+
+  it("0026 admits photo_refused as an attempt outcome", async () => {
+    const check = await pg.db.execute(sql`
+      SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+       WHERE conrelid = 'enrichment_attempts'::regclass
+         AND conname = 'enrichment_attempts_last_outcome_check'
+    `);
+    const def = (check.rows as { def: string }[])[0]?.def ?? "";
+    // A refusal is a fourth verdict, not a re-labelled miss: it burns no attempt,
+    // because `attempts` running out is what licenses "we read this catalogue and
+    // the cigar is not in it" — which a refusal disproves.
+    expect(def).toMatch(/photo_refused/);
+    expect(def).toMatch(/miss/);
+    expect(def).toMatch(/match/);
+    expect(def).toMatch(/error/);
   });
 });

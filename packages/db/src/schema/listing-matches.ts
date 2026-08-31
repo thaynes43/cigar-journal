@@ -20,6 +20,18 @@ export const listingMatches = pgTable(
     // freely re-writable; a `curator`/`agent` verdict (setListingMatchStatus) is
     // preserved by the crawler on re-crawl. Backfilled 'crawler'.
     decidedBy: text("decided_by").$type<"crawler" | "curator" | "agent">().notNull().default("crawler"),
+    // WHY a crawler-unmatched row is unmatched (migration 0026, #170). Set only by
+    // the resolver, and only on a row it decided:
+    //   market_refusal — a candidate cleared the similarity floor and was DECLINED
+    //                    because this vendor's focus contradicts the cigar's
+    //                    evidenced market. The actionable one.
+    //   no_match       — nothing cleared the floor.
+    //   null           — nobody's guess: an 'auto'/'confirmed' link, a
+    //                    curator/agent verdict, or the excludeCigar cascade (#126),
+    //                    which the triage read must keep excluded.
+    // Always written by upsertListingMatch, so a re-matched row cannot keep a
+    // stale reason.
+    unmatchedReason: text("unmatched_reason").$type<"market_refusal" | "no_match">(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

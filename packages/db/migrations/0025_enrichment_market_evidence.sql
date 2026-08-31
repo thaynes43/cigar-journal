@@ -11,12 +11,15 @@
 -- derived value sharpens with every crawl that links a listing and is overridden
 -- outright the moment a curator types the cigar.
 --
--- It is NOT write-free. It corrects ONE registry row (`vendors.focus` for Cuban
--- Lou's, at the bottom of this file). That is the opposite kind of write from the
--- one forbidden above and the distinction is the whole point: `cigars.type` would
--- be a catalogue fact INFERRED from a weak signal, while `vendors.focus` is a
--- registry fact about a shop that we simply recorded WRONG. Correcting a wrong
--- posture is not manufacturing a fact.
+-- It is NOT write-free. It makes two corrections, both at the bottom of this file:
+-- ONE registry row (`vendors.focus` for Cuban Lou's) and ONE catalogue photo (the
+-- wrong-market product photo the defect actually wrote). Both are the opposite
+-- kind of write from the one forbidden above, and the distinction is the whole
+-- point: `cigars.type` would be a catalogue fact INFERRED from a weak signal,
+-- while `vendors.focus` is a registry fact about a shop that we simply recorded
+-- WRONG, and the photo is not an inference at all — it is a picture of a
+-- Nicaraguan cigar sitting in a Cuban cigar's one permanent slot. Correcting a
+-- wrong posture, and deleting a wrong artifact, is not manufacturing a fact.
 
 -- The evidenced market asks "which single-market vendors already stock this
 -- cigar?" — a correlated subquery keyed on `listing_matches.cigar_id`, evaluated
@@ -67,3 +70,37 @@ UPDATE vendors
    SET focus = 'both'
  WHERE name = 'Cuban Lou''s'
    AND focus = 'CC';
+
+-- THE ONE ARTIFACT THE DEFECT ACTUALLY PRODUCED (#170). Everything above stops
+-- the mis-link happening again; this removes what it already wrote.
+--
+-- `Petit Royales Romeo y Julieta` is `type='CC'`. Fox Cigar (`focus='NC'`) walked
+-- its own sitemap, trigram-matched its Altadis `Romeo y Julieta 1875 Petit Bully`
+-- listing to it, and — because the photo slot is filled straight after the link —
+-- put Fox's photograph of a NICARAGUAN cigar into the one permanent slot of a
+-- CUBAN one. That is the whole of #170 in a single row: not a debatable link but a
+-- picture of the wrong cigar, shown to the owner as the catalogue's own.
+--
+-- It has to be deleted here because the crawler cannot: `product_photos` is
+-- UNIQUE(cigar_id), inserted onConflictDoNothing, and NOTHING in the crawler ever
+-- deletes a row. First write wins forever, so the guard added in this PR prevents
+-- the next one and is powerless over this one. With the row gone the cigar
+-- re-enters the `missing_photos` worklist and a covering source can fill it.
+--
+-- GUARDED ON `source_url`, not on the cigar name and not on the id, because the
+-- source URL is the evidence: it names foxcigar.com and it names the 1875 Petit
+-- Bully, so the predicate asserts exactly the thing that makes this photo wrong.
+-- A hand-copied uuid would delete whatever occupies that slot at deploy time —
+-- including a correct photo a curator uploaded in the meantime, which is the one
+-- outcome worse than leaving the bad one. Verified read-only against prod on
+-- 2026-08-31: one row matches, id 3a5e2010-…, rights 'pending'.
+--
+-- The S3/MinIO objects it referenced are deliberately left in place: a migration
+-- cannot reach the object store, and an orphaned key costs a few KB, while a
+-- delete this file could not verify would be a delete it could not undo.
+DELETE FROM product_photos pp
+ USING cigars c
+ WHERE c.id = pp.cigar_id
+   AND c.canonical_name = 'Petit Royales Romeo y Julieta'
+   AND pp.source_url =
+       'https://foxcigar.com/wp-content/uploads/2026/04/fox-product-romeo-y-julieta-1875-petit-bully-1000034200-0-1.jpg';

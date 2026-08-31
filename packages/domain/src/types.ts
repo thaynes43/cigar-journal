@@ -1265,6 +1265,19 @@ export interface EnrichmentBacklogEntry {
   // Omitted rather than sent empty: at 100 rows a press an always-present array is
   // payload noise, and the absent case has its own meaning above.
   awaitingVendors?: string[];
+  // The third reading of the same "why is this still queued?" question, and the
+  // one neither list above can give (#209): lanes that FOUND this cigar, linked
+  // it, and were refused its one catalogue-photo slot by the write-authority
+  // guard. Present only on `already_queued`.
+  //
+  // Such a lane holds the ask open without moving it: the refusal burns no
+  // attempt (it is not evidence about a catalogue that demonstrably carries the
+  // cigar), so the row can never retire on it, and the refusal is usually
+  // structural — a focused vendor already stocks the row — so tomorrow's crawl
+  // refuses it again. Named here because that is the difference between an ask
+  // waiting its turn and an ask that will wait forever, and the operator's lever
+  // is the same one `awaitingVendors` documents: drop the lane from the fleet.
+  photoRefusedVendors?: string[];
 }
 
 // `limit` is clamped to [1, ENRICHMENT_BACKLOG_MAX] (curation.ts) — the ceiling is
@@ -1629,6 +1642,22 @@ export interface WorklistMatch {
   listingKey: string;
   listingUrl: string | null; // most-recent offer's listing URL, when one exists
   cigar: WorklistCigar | null; // the auto-matched cigar (null once cleared)
+  // What the crawler DID with this listing — the two rows in this queue are not
+  // the same question. `auto` is a proposed link to judge (confirm or unmatch);
+  // `unmatched` is a listing the crawler produced no link for, where the verdict
+  // is a resolution (point it at a cigar, or create one) rather than a review.
+  // A narrowing of ListingMatchStatus: `confirmed` is settled and never surfaces.
+  status: "auto" | "unmatched";
+  // Present only on `unmatched`, saying WHY the crawler produced no link:
+  //   market_refusal — a candidate cleared the similarity floor and was declined
+  //                    because the vendor's focus contradicts the cigar's
+  //                    evidenced market. Something IS here; the crawler would not
+  //                    guess. These are the rows a wrong `vendors.focus` produces,
+  //                    so a cluster of them from one shop is a signal about the
+  //                    shop, not about the catalogue.
+  //   no_match       — nothing cleared the floor.
+  // Absent means the row is an `auto` proposal, which needs no reason.
+  reason?: "market_refusal" | "no_match";
 }
 
 // One page of the worklist. Exactly one of the payload arrays is populated per

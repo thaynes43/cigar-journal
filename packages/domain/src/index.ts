@@ -169,6 +169,7 @@ export {
   coversMarketSql,
   coversMarket,
   mayWriteCatalogPhoto,
+  mayWriteCatalogPhotoSql,
   evidencedMarketSql,
   evidencedMarket,
   focusedStockistSql,

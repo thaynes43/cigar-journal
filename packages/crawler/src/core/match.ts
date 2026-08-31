@@ -1,6 +1,13 @@
 import { and, eq, sql } from "drizzle-orm";
-import { cigars, listingMatches, type ListingMatchRow } from "@cj/db";
-import { coversMarket, evidencedMarket, type CigarType, type Queryer, type VendorFocus } from "@cj/domain";
+import { auditLog, cigars, listingMatches, type ListingMatchRow } from "@cj/db";
+import {
+  auditActor,
+  coversMarket,
+  evidencedMarket,
+  type CigarType,
+  type Queryer,
+  type VendorFocus,
+} from "@cj/domain";
 
 // Listing → catalog matching (ADR-006). Same trigram machinery the domain search
 // uses: an exact case-insensitive canonical-name hit wins outright, else the best
@@ -105,6 +112,14 @@ export interface UpsertMatchInput {
   cigarId: string | null;
   status: "auto" | "unmatched";
   now: Date;
+  // WHY this row is unmatched, when the resolver is the one saying so (0026).
+  // Always written — including as null on an `auto` upsert — so a row that
+  // becomes a link again cannot carry a stale reason from when it was not one.
+  unmatchedReason?: "market_refusal" | "no_match" | null;
+  // The `crawl_runs` row this write belongs to, stamped on the audit row a
+  // downgrade emits. Null on a dry run and in unit callers, which write no
+  // crawl_runs row to correlate to.
+  runId?: string | null;
 }
 
 // Upsert the (vendorId, listingKey) match. The crawler NEVER overwrites a
@@ -126,11 +141,48 @@ export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): 
   const row = existing[0];
   if (row) {
     if (row.decidedBy !== "crawler" || row.status === "confirmed") return row;
+    const reason = input.unmatchedReason ?? null;
     const updated = await db
       .update(listingMatches)
-      .set({ cigarId: input.cigarId, status: input.status, updatedAt: input.now })
+      .set({ cigarId: input.cigarId, status: input.status, unmatchedReason: reason, updatedAt: input.now })
       .where(eq(listingMatches.id, row.id))
       .returning();
+
+    // A DOWNGRADE IS AN UNLINK, AND AN UNLINK MUST BE ATTRIBUTABLE. Every other
+    // path that clears a listing→cigar link writes an audit row with a before
+    // snapshot: setListingMatchStatus does it for a curator or an agent, and
+    // excludeCigar does it for the cascade. The crawler's own downgrade — the
+    // market guard refusing a link the last crawl made, which is exactly the
+    // `Romeo y Julieta 1875` unlink this PR exists to produce — was a bare UPDATE.
+    // The row simply changed, with nothing anywhere saying it had, so the one
+    // write #170 was written to perform was the one write nobody could see.
+    //
+    // Only on a real transition (`cigar_id` actually changed): a re-crawl rewrites
+    // every match row every night, and an audit log that records "unchanged"
+    // 1,284 times a run is an audit log nobody reads. `actor: 'import'` with a
+    // null `user_id` is the crawler's established shape (approved-import); the
+    // action is shared with setListingMatchStatus so one query answers "what
+    // moved this link?" whoever moved it.
+    if (row.cigarId != null && row.cigarId !== input.cigarId) {
+      const before = {
+        id: row.id,
+        vendorId: row.vendorId,
+        listingKey: row.listingKey,
+        cigarId: row.cigarId,
+        status: row.status,
+        decidedBy: row.decidedBy,
+      };
+      await db.insert(auditLog).values({
+        userId: null,
+        ...auditActor(undefined, "import"),
+        action: "listing_match.set_status",
+        smokeId: null,
+        before,
+        after: { ...before, cigarId: input.cigarId, status: input.status, unmatchedReason: reason },
+        correlationId: input.runId ?? null,
+        runId: input.runId ?? null,
+      });
+    }
     return updated[0]!;
   }
 
@@ -141,6 +193,7 @@ export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): 
       listingKey: input.listingKey,
       cigarId: input.cigarId,
       status: input.status,
+      unmatchedReason: input.unmatchedReason ?? null,
       createdAt: input.now,
       updatedAt: input.now,
     })

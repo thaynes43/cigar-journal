@@ -221,9 +221,18 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
     // nobody having finished a look, which is never a fact about a catalogue.
     lines.push(
       `  enrich: requests=${enrich.requests} looked=${enrich.looked} matched=${enrich.matched} ` +
-        `errors=${enrich.errored} spent=${enrich.spent} blocked=${enrich.blocked} ` +
-        `skipped-market=${enrich.skippedMarket}`,
+        `errors=${enrich.errored} spent=${enrich.spent} blocked=${enrich.blocked}`,
     );
+    // The two refusal counters are absent-when-zero in the stats (so the JSONB of a
+    // run that refused nothing is unchanged), and they are printed on the same
+    // terms: a line that says `skipped-market=0` every night is a line an operator
+    // stops reading, which is how a non-zero one goes unnoticed.
+    if (enrich.skippedMarket) lines.push(`  enrich links refused (market): ${enrich.skippedMarket}`);
+    if (enrich.photoRefused) {
+      // Not a retirement and not a fulfilment: these asks are still open, and they
+      // will stay open until a vendor that may write the slot reaches them (#209).
+      lines.push(`  enrich photo refused, request left open: ${enrich.photoRefused}`);
+    }
   }
   if (result.error) lines.push(`  error: ${result.error}`);
   if (result.report.length > 0) {

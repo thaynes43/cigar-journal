@@ -12,8 +12,9 @@ import {
   listingMatches,
   enrichmentRequests,
   enrichmentAttempts,
+  auditLog,
 } from "@cj/db";
-import { enrichVendorFleet } from "@cj/domain";
+import { curationWorklist, enrichmentCoverageForCigar, enrichVendorFleet } from "@cj/domain";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { runIngest, type IngestDeps } from "./core/ingest.js";
 import { findCatalogMatch, upsertListingMatch } from "./core/match.js";
@@ -251,6 +252,53 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(recrawl.status).toBe("unmatched");
     expect(recrawl.cigarId).toBeNull();
     expect(recrawl.decidedBy).toBe("curator");
+  });
+
+  // AN UNLINK MUST BE ATTRIBUTABLE. Every other path that clears a listing→cigar
+  // link writes an audit row with a before snapshot — setListingMatchStatus for a
+  // curator or an agent, excludeCigar for the cascade. The crawler's own market
+  // downgrade, which is the one write #170 exists to perform (the `Romeo y Julieta
+  // 1875` unlink), was a bare UPDATE: the row simply changed and nothing anywhere
+  // recorded that it had.
+  it("upsertListingMatch audits a downgrade that unlinks a cigar, and only a real one", async () => {
+    const cigar = await seedCigar(`Downgrade Audit ${randomUUID().slice(0, 8)}`);
+    const listingKey = `/shop/downgrade-audit-${randomUUID().slice(0, 8)}/`;
+    const auto = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+
+    await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: null,
+      status: "unmatched",
+      unmatchedReason: "market_refusal",
+      runId: "crawl-run-downgrade",
+      now: now(),
+    });
+
+    const audited = async () =>
+      pg.db.select().from(auditLog).where(eq(auditLog.action, "listing_match.set_status"));
+    const rows = await audited();
+    const row = rows.find((a) => (a.before as { id?: string }).id === auto.id);
+    expect(row).toBeTruthy();
+    // The crawler's shape: no signed-in principal, no OAuth client, the run named.
+    expect(row!.actor).toBe("import");
+    expect(row!.userId).toBeNull();
+    expect(row!.runId).toBe("crawl-run-downgrade");
+    expect((row!.before as { cigarId: string | null }).cigarId).toBe(cigar);
+    expect((row!.after as { cigarId: string | null }).cigarId).toBeNull();
+
+    // ...and ONLY a real transition. A re-crawl rewrites every match row nightly —
+    // 1,284 of them on prod — and an audit log that records "unchanged" that many
+    // times a run is an audit log nobody reads.
+    await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: null,
+      status: "unmatched",
+      unmatchedReason: "market_refusal",
+      now: now(),
+    });
+    expect(await audited()).toHaveLength(rows.length);
   });
 
   it("upsertListingMatch preserves an agent decision", async () => {
@@ -1017,7 +1065,11 @@ describe("crawler ingest (embedded Postgres)", () => {
     const requestId = await seedRequest(cigarId);
 
     const run = await enrichRun(nc, hitRoutes, createMemoryPhotoStorage());
-    expect(run.stats.enrich).toMatchObject({ requests: 1, matched: 1, skippedMarket: 0 });
+    expect(run.stats.enrich).toMatchObject({ requests: 1, matched: 1 });
+    // Both refusal counters are absent-when-zero, like their run-level siblings, so
+    // a run that refused nothing serialises byte-identically into crawl_runs.
+    expect(run.stats.enrich!.skippedMarket).toBeUndefined();
+    expect(run.stats.enrich!.photoRefused).toBeUndefined();
     expect(run.stats.photosCaptured).toBe(1);
     expect(run.stats.photosSkippedMarket).toBeUndefined();
     expect(await photosFor(cigarId)).toHaveLength(1);
@@ -1044,14 +1096,63 @@ describe("crawler ingest (embedded Postgres)", () => {
 
     const run = await enrichRun(drainer, hitRoutes, createMemoryPhotoStorage());
     // Unknown market cannot rule the lane out, so it looks and it links...
-    expect(run.stats.enrich).toMatchObject({ requests: 1, matched: 1 });
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, photoRefused: 1 });
     expect(run.stats.offersWritten).toBe(1);
     expect((await matchesFor(drainer)).some((m) => m.cigarId === cigarId)).toBe(true);
     // ...and the one permanent slot stays empty, which is the point of the issue.
     expect(await photosFor(cigarId)).toHaveLength(0);
     expect(run.stats.photosCaptured).toBe(0);
     expect(run.stats.photosSkippedMarket).toBe(1);
-    expect((await requestRow(requestId)).status).toBe("fulfilled");
+
+    // AND THE ASK IS NOT FULFILLED (#209). It used to be: capturePhoto returned
+    // void, the drain read "no throw" as a match, and the request went terminal
+    // with the slot still empty — the photo was the whole point of the ask. This
+    // assertion asserted `fulfilled`; it was asserting the defect.
+    expect((await requestRow(requestId)).status).toBe("pending");
+
+    // Nor does the refusal spend the vendor. `attempts` reaching its budget is what
+    // licenses `exhausted` — "we read this catalogue and it is not there" — which
+    // this vendor's own link disproves. The ledger records WHAT happened without
+    // moving the ask toward a verdict that would be false.
+    const ledger = await ledgerRows(requestId);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]).toMatchObject({ attempts: 0, errors: 0, lastOutcome: "photo_refused" });
+  });
+
+  // THE GUARD IS THE INSERT, NOT THE READ BEFORE IT. The authority used to be read
+  // into JS and then trusted across a whole image download — seconds of third-party
+  // HTTP — and the lane lock does not close that window, because locks are per
+  // (vendor, mode): a `both` lane and a focused lane run concurrently BY DESIGN,
+  // and a focused link is exactly what revokes a `both` lane's authority. So the
+  // predicate is re-stated as the INSERT's own WHERE clause and evaluated in the
+  // write's snapshot. `processPhoto` stands in for the window here, because it is
+  // the one seam that is deterministically inside it.
+  it("the photo slot guard is evaluated at the INSERT, not before the download", async () => {
+    const nc = await makeVendor("Toctou NC", "NC");
+    const cc = await makeVendor("Toctou CC", "CC");
+    await arrange([nc, cc]);
+
+    const cigarId = await seedCigar(OLIVA_NAME, null);
+    const requestId = await seedRequest(cigarId);
+
+    const racing: IngestDeps = {
+      ...deps(createMockFetcher(hitRoutes), createMemoryPhotoStorage()),
+      processPhoto: async (input, contentType) => {
+        // Mid-download: a CC lane links the same cigar. The evidence now disagrees
+        // and resolves to unknown, so this NC lane's authority is gone — after its
+        // pre-flight read said it had one.
+        await stock(cc, cigarId);
+        return fakeProcessPhoto(input, contentType);
+      },
+    };
+    const run = await runIngest(racing, { adapter: foxCigar, vendorId: nc, mode: "enrich" });
+
+    // The pre-flight passed (the lane was self-evidencing when it read), so a guard
+    // that only ran there would have written the slot.
+    expect(await photosFor(cigarId)).toHaveLength(0);
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(run.stats.photosSkippedMarket).toBe(1);
+    expect((await requestRow(requestId)).status).toBe("pending");
   });
 
   // The same refusal in the other direction, so the guard is not accidentally
@@ -1068,7 +1169,7 @@ describe("crawler ingest (embedded Postgres)", () => {
     await stock(cc, cigarId);
 
     const run = await enrichRun(drainer, hitRoutes, createMemoryPhotoStorage());
-    expect(run.stats.enrich).toMatchObject({ matched: 1 });
+    expect(run.stats.enrich).toMatchObject({ looked: 1, matched: 0, photoRefused: 1 });
     expect(await photosFor(cigarId)).toHaveLength(0);
     expect(run.stats.photosSkippedMarket).toBe(1);
   });
@@ -1186,6 +1287,48 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(await photosFor(ncCigar)).toHaveLength(0);
   });
 
+  // ...AND THE TRIAGE QUEUE ACTUALLY SHOWS IT. The claim above — "the triage queue
+  // a curator already works" — was made by the code comments, the CLI summary and
+  // the PR body, and was false in all three: `matchTriagePage` read `status='auto'`
+  // only, so every refusal landed somewhere nobody could see. Asserted end to end
+  // through the real curation read rather than against the row, because the row was
+  // never the thing in doubt.
+  it("a refused seed listing is visible in match_triage, marked as a market refusal", async () => {
+    const nc = await makeVendor("Triage Walk NC", "NC");
+    const cc = await makeVendor("Triage Walk CC", "CC");
+    await arrange([nc, cc]);
+
+    const ncCigar = await seedCigar(OLIVA_NAME, null);
+    await stock(nc, ncCigar);
+
+    await runIngest(deps(createMockFetcher(hitRoutes), createMemoryPhotoStorage()), {
+      adapter: foxCigar,
+      vendorId: cc,
+      mode: "seed",
+    });
+    const refused = (await matchesFor(cc))[0]!;
+
+    const curator = { userId: randomUUID(), role: "admin" as const };
+    let found;
+    let cursor: string | null = null;
+    for (let i = 0; i < 500 && !found; i++) {
+      const page = await curationWorklist({ db: pg.db, now }, curator, {
+        kind: "match_triage",
+        limit: 200,
+        cursor,
+      });
+      found = page.matches!.find((m) => m.matchId === refused.id);
+      cursor = page.nextCursor;
+      if (!cursor) break;
+    }
+
+    expect(found).toBeTruthy();
+    // Marked distinguishably from an auto proposal: there is no cigar to confirm,
+    // and the reason says a candidate WAS found and declined — which is the signal
+    // that this vendor's recorded focus may be the thing that is wrong.
+    expect(found).toMatchObject({ status: "unmatched", reason: "market_refusal", cigar: null });
+  });
+
   // --- the `both`-focus vendor: evidence, and the seal that used to close ------
   //
   // Cuban Lou's is recorded `focus='both'` from migration 0025, because measured
@@ -1218,6 +1361,35 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(await ledgerRows(requestId)).toHaveLength(1);
   });
 
+  // THE UN-SEAL IS STRUCTURAL, NOT CIRCUMSTANTIAL. Correcting Cuban Lou's removes
+  // today's seal; it does not stop the next one. `approved-import` stamps
+  // `focus='CC'` on every vendor it adds (#210), so the next approved Cuban shop
+  // re-forms the seal the day it lands — "no CC-focus vendor exists right now" is a
+  // fact about the registry, not a property of the design. Evidence is therefore
+  // read only from CRAWL-ENABLED vendors: a lane that cannot be asked cannot be
+  // evidence, and the disable lever ADR-006 already promises finally does what the
+  // ADR says it does. Without the `crawl_enabled` clause in evidencedMarketSql the
+  // second assertion is 0 — the shop is out of the fleet and its evidence still
+  // holds the row shut.
+  it("disabling a mis-focused shop frees the rows its links sealed", async () => {
+    const misfocused = await makeVendor("Unseal Import CC", "CC");
+    const fox = await makeVendor("Unseal Fox", "NC");
+    await arrange([misfocused, fox]);
+
+    const cigarId = await seedCigar(`Unseal Perdomo ${randomUUID().slice(0, 8)}`, null);
+    await seedRequest(cigarId);
+    await stock(misfocused, cigarId);
+
+    // Sealed: the CC shop's link is the only evidence, the row reads evidenced-CC,
+    // and the NC lane is filtered out of its own open set.
+    expect((await enrichRun(fox, missRoutes)).stats.enrich!.requests).toBe(0);
+
+    // The lever, pulled. Nothing else changes — no migration, no re-crawl, no
+    // touching the sealed rows.
+    await setFleet([fox]);
+    expect((await enrichRun(fox, missRoutes)).stats.enrich!.requests).toBe(1);
+  });
+
   // WRITE AUTHORITY FOR A VENDOR WITH NO MARKET. `mayWriteCatalogPhoto('both', …)`
   // used to return true unconditionally, which made `both` the most privileged
   // focus a vendor could hold: it could take the one permanent slot on any cigar,
@@ -1234,13 +1406,25 @@ describe("crawler ingest (embedded Postgres)", () => {
     const run = await enrichRun(cubanLous, hitRoutes, createMemoryPhotoStorage());
     // 'both' covers every market, so the lane is eligible, looks, and LINKS — the
     // link is named, revisable and re-written next crawl.
-    expect(run.stats.enrich).toMatchObject({ requests: 1, matched: 1 });
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, photoRefused: 1 });
     expect((await matchesFor(cubanLous)).some((m) => m.cigarId === cigarId)).toBe(true);
     // ...and the permanent slot is left for the vendor whose focus covers the row.
     expect(await photosFor(cigarId)).toHaveLength(0);
     expect(run.stats.photosCaptured).toBe(0);
     expect(run.stats.photosSkippedMarket).toBe(1);
-    expect((await requestRow(requestId)).status).toBe("fulfilled");
+
+    // The ask stays OPEN for the vendor that may actually write the slot (#209).
+    // This is the case that mattered most: the refusal here is structural — Fox
+    // stocks the row and always will — so marking the ask fulfilled retired it
+    // permanently with an empty slot and no vendor left to ask.
+    expect((await requestRow(requestId)).status).toBe("pending");
+    const ledger = await ledgerRows(requestId);
+    expect(ledger[0]).toMatchObject({ attempts: 0, lastOutcome: "photo_refused" });
+
+    // And the ask says WHO is holding it open. Without this the row is an
+    // `already_queued` indistinguishable from one a lane has simply not reached.
+    const coverage = await enrichmentCoverageForCigar(pg.db, cigarId, null);
+    expect(coverage.photoRefused.map((v) => v.vendorId)).toEqual([cubanLous]);
   });
 
   // The other half, or the guard would just be "a `both` vendor never photographs
@@ -1266,9 +1450,15 @@ describe("crawler ingest (embedded Postgres)", () => {
   // the property is asserted through the real seed walk rather than assumed.
   it("an agent decision survives a focus-aware seed walk untouched", async () => {
     const nc = await makeVendor("Agent Guard NC", "NC");
-    await arrange([nc]);
+    // A second NC lane stocks the cigar, so its evidenced market is KNOWN and the
+    // photo guard would PERMIT the capture. Without it the guard refuses on its own
+    // and the photo assertion below passes whatever the capture is aimed at —
+    // vacuously, which is exactly how this defect stayed invisible.
+    const stockist = await makeVendor("Agent Guard Stockist NC", "NC");
+    await arrange([nc, stockist]);
 
     const cigarId = await seedCigar(PADRON_NAME, null);
+    await stock(stockist, cigarId);
     const decided = await upsertListingMatch(pg.db, {
       vendorId: nc,
       listingKey: "/shop/padron-1964-anniversary-maduro-torpedo/",
@@ -1287,7 +1477,7 @@ describe("crawler ingest (embedded Postgres)", () => {
       [PADRON_URL]: { body: loadFixture("product-padron.html") },
       [PADRON_IMG]: { binary: Buffer.from("padron-image"), contentType: "image/jpeg" },
     };
-    await runIngest(deps(createMockFetcher(routes), createMemoryPhotoStorage()), {
+    const run = await runIngest(deps(createMockFetcher(routes), createMemoryPhotoStorage()), {
       adapter: foxCigar,
       vendorId: nc,
       mode: "offers",
@@ -1295,6 +1485,15 @@ describe("crawler ingest (embedded Postgres)", () => {
 
     const after = (await pg.db.select().from(listingMatches).where(eq(listingMatches.id, decided.id)))[0]!;
     expect(after).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent" });
+
+    // AND THE REJECTION HOLDS FOR THE PHOTO TOO. The link was correctly declined
+    // and the capture fired anyway: ingestListing returned the cigar the resolver
+    // had just picked rather than the one the committed row names, so every crawl
+    // re-tempted the one permanent artifact against a cigar an agent had rejected —
+    // 591 rows on prod, nightly. Reading `match.cigarId` makes a declined upsert
+    // yield null, and null captures nothing.
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(await photosFor(cigarId)).toHaveLength(0);
   });
 
   // §2c, THE COUPLING. The drain's open set has to be the exact complement of the
