@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.1](https://github.com/thaynes43/cigar-journal/compare/v0.31.0...v0.31.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* **taxonomy:** mint-time slugs fold accents — clean URL keys for new registry rows ([#220](https://github.com/thaynes43/cigar-journal/issues/220)) ([27f9f0b](https://github.com/thaynes43/cigar-journal/commit/27f9f0be3c54c5c034879f90b71a4f6d3680cab8))
+
 ## [0.31.0](https://github.com/thaynes43/cigar-journal/compare/v0.30.0...v0.31.0) (2026-08-31)
 
 
