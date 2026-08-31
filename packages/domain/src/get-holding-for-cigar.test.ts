@@ -99,4 +99,24 @@ describe("getHoldingForCigar", () => {
     expect(holding.agingSince).toBeNull();
     expect(holding.remaining).toBe(0);
   });
+
+  it("getHoldingForCigar answers a malformed id exactly as it answers an unknown one", async () => {
+    // #206. The cigarId reaches here from a form's route param, and used to carry
+    // into a `uuid` column as-is (Postgres 22P02 → a 500). This read reports a
+    // quantity, so the empty holding — not an error — is the answer both cases
+    // share; the equality is the contract, the literal pins what it settles on.
+    const user = await h.createUser("hold-malformed@example.com");
+    const malformed = await getHoldingForCigar(h.deps, user, "not-a-uuid");
+    const unknown = await getHoldingForCigar(h.deps, user, newRequestId());
+    expect({ ...malformed, cigarId: null }).toEqual({ ...unknown, cigarId: null });
+    expect(malformed).toEqual({
+      cigarId: "not-a-uuid",
+      hasHolding: false,
+      totalAcquired: 0,
+      remaining: 0,
+      overConsumed: 0,
+      agingSince: null,
+      lots: [],
+    });
+  });
 });

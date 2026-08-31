@@ -7,6 +7,7 @@ import { auditActor } from "./audit-attribution.js";
 import { fingerprint } from "./fingerprint.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError } from "./errors.js";
+import { isUuid } from "./uuid.js";
 import type { ProductPhotoRights } from "./types.js";
 
 // The product tier of ADR-007: at most one photo per catalog cigar, captured by
@@ -28,6 +29,11 @@ export interface ProductPhotoObject {
 // and `approved` both serve the authed catalog; the public gate (approved-only)
 // lands with the public serving path.
 export async function getProductPhoto(deps: Deps, args: { cigarId: string }): Promise<ProductPhotoObject> {
+  // The cigar id is the serving route's path segment, so a mangled one is an
+  // ordinary bad image URL: nothing serves, which is already how a photoless or
+  // suppressed cigar answers here (./uuid.ts).
+  if (!isUuid(args.cigarId)) throw new PhotoNotFoundError();
+
   const rows = await deps.db
     .select({
       objectKey: productPhotos.objectKey,
@@ -52,6 +58,12 @@ export async function getProductPhotoState(
   args: { cigarId: string },
 ): Promise<{ rights: ProductPhotoRights } | null> {
   assertCurator(principal);
+  // After the role gate, never before it — a non-curator must still be refused
+  // rather than told "no photo". Then: no row, which is what a cigar with no photo
+  // (and a cigar that does not exist) already yields, so the control renders its
+  // Add state (./uuid.ts).
+  if (!isUuid(args.cigarId)) return null;
+
   const rows = await deps.db
     .select({ rights: productPhotos.rights })
     .from(productPhotos)
@@ -117,6 +129,11 @@ export async function attachProductPhoto(
   input: AttachProductPhotoInput,
 ): Promise<AttachProductPhotoResult> {
   assertCurator(principal);
+  // Ahead of the fingerprint, the pipeline, the uploads, and the transaction: a
+  // malformed id can never have produced a stored idempotency result to replay, so
+  // there is nothing earlier for it to reach, and the existence check further down
+  // is the answer it would have got anyway (./uuid.ts).
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
 
   const imageDigest = createHash("sha256").update(input.image).digest("hex");
   const requestFingerprint = fingerprint({ cigarId: input.cigarId, imageDigest });

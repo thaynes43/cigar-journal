@@ -5,6 +5,7 @@ import type { Deps, Principal } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
 import type { SmokePhotoKind } from "./types.js";
 import { CigarNotFoundError, SmokeNotFoundError, UnauthorizedError, UploadTokenInvalidError } from "./errors.js";
+import { isUuid } from "./uuid.js";
 
 // Single-use, 24h photo upload links (ADR-007, issue #44 part 2; extended
 // for product photos in DESIGN-003 §Images, issue #127). Two kinds share the
@@ -74,6 +75,11 @@ export async function mintPhotoUploadToken(
   principal: Principal,
   input: MintPhotoUploadTokenInput,
 ): Promise<MintedPhotoUploadToken> {
+  // The smokeId reaches here from an MCP tool argument, which is a bare string by
+  // contract. Nothing to bind a link to, answered as the cross-user smoke is, and
+  // ahead of the issuing transaction (./uuid.ts).
+  if (!isUuid(input.smokeId)) throw new SmokeNotFoundError();
+
   const rows = await deps.db.select().from(smokes).where(eq(smokes.id, input.smokeId)).limit(1);
   const smoke = rows[0];
   if (!smoke || smoke.userId !== principal.userId) throw new SmokeNotFoundError();
@@ -126,6 +132,10 @@ export async function mintProductPhotoUploadToken(
   if (principal.role !== "admin") {
     throw new UnauthorizedError("Minting a product-photo upload link is restricted to catalog curators.");
   }
+  // After the role gate and before the issuing transaction — a malformed id names
+  // no cigar, the same answer the existence check below gives (./uuid.ts).
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
+
   const rows = await deps.db.select({ id: cigars.id }).from(cigars).where(eq(cigars.id, input.cigarId)).limit(1);
   if (!rows[0]) throw new CigarNotFoundError();
 

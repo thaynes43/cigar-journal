@@ -5,6 +5,7 @@ import type { Deps, Principal, Queryer } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
 import type { CreateInviteInput, InviteView, MintedInvite, RevokeInviteInput } from "./types.js";
 import { InviteInvalidError, UnauthorizedError, ValidationError } from "./errors.js";
+import { isUuid } from "./uuid.js";
 
 // Invite-gated registration (ADR-010, issue #46). An admin mints a link bound to
 // one email address; the invitee redeems it once to create a LOCAL email+password
@@ -135,6 +136,12 @@ export async function revokeInvite(
   if (principal.role !== "admin") {
     throw new UnauthorizedError("Revoking an invite is restricted to admins.");
   }
+  // A malformed id joins the same single refusal the conditional UPDATE already
+  // gives an unknown, spent, or already-revoked invite — no new oracle, and the
+  // admin check still takes precedence so the id's shape tells a non-admin
+  // nothing. Before the transaction: a 22P02 inside it would abort the
+  // transaction rather than return no rows (./uuid.ts).
+  if (!isUuid(input.inviteId)) throw new InviteInvalidError();
   const now = deps.now();
   return deps.db.transaction(async (tx) => {
     const updated = await tx

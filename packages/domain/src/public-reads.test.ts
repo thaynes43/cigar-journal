@@ -123,6 +123,23 @@ describe("public journal reads (issue #96)", () => {
     expect(all.nextCursor).toBeNull();
   });
 
+  it("serves the first page for a forged cursor rather than failing the anonymous read", async () => {
+    // #206. This is the only id-bearing value an ANONYMOUS caller supplies, and
+    // the cursor's id is spent as `${c.id}::uuid`. A forged envelope — correct
+    // base64, correct JSON, correct arity, junk contents — used to reach Postgres
+    // and 22P02 its way to a 500 on a public URL. The documented behaviour is to
+    // degrade, so a forged cursor must be indistinguishable from no cursor.
+    const forged = Buffer.from(
+      JSON.stringify(["2026-01-02T03:04:05.000Z", "2026-01-02T03:04:06.000Z", "not-a-uuid"]),
+      "utf8",
+    ).toString("base64url");
+
+    const first = await queryPublicSmokes(h.deps, { limit: 25 });
+    const withForged = await queryPublicSmokes(h.deps, { limit: 25, cursor: forged });
+    expect(withForged).toEqual(first);
+    expect(withForged.smokes.map((s) => s.smokeId)).toContain(publicSmokeId);
+  });
+
   it("derives the public summary from the narrative, never the impression", async () => {
     const all = await queryPublicSmokes(h.deps, { limit: 25 });
     const newer = all.smokes.find((s) => s.smokeId === publicSmokeId);
@@ -161,6 +178,34 @@ describe("public journal reads (issue #96)", () => {
     expect(err).toBeInstanceOf(PhotoNotFoundError);
     const missing = await getPublicSmokePhoto(h.deps, { photoId: newRequestId() }).catch((e: unknown) => e);
     expect(missing).toBeInstanceOf(PhotoNotFoundError);
+  });
+
+  // #206. Both anonymous reads take their id straight off a URL anyone may type,
+  // so an unparseable one used to carry into a `uuid` column and raise 22P02 — a
+  // 500 on the one surface that has no session to blame. The assertion is the
+  // equality: malformed must be INDISTINGUISHABLE from unknown-but-valid.
+  it("getPublicSmoke answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await getPublicSmoke(h.deps, { smokeId: "not-a-uuid" }).catch((e: unknown) => e);
+    const unknown = await getPublicSmoke(h.deps, { smokeId: newRequestId() }).catch((e: unknown) => e);
+    expect(malformed).toBeInstanceOf(SmokeNotFoundError);
+    expect(unknown).toBeInstanceOf(SmokeNotFoundError);
+    expect((malformed as SmokeNotFoundError).toPayload()).toEqual(
+      (unknown as SmokeNotFoundError).toPayload(),
+    );
+  });
+
+  it("getPublicSmokePhoto answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await getPublicSmokePhoto(h.deps, { photoId: "not-a-uuid" }).catch(
+      (e: unknown) => e,
+    );
+    const unknown = await getPublicSmokePhoto(h.deps, { photoId: newRequestId() }).catch(
+      (e: unknown) => e,
+    );
+    expect(malformed).toBeInstanceOf(PhotoNotFoundError);
+    expect(unknown).toBeInstanceOf(PhotoNotFoundError);
+    expect((malformed as PhotoNotFoundError).toPayload()).toEqual(
+      (unknown as PhotoNotFoundError).toPayload(),
+    );
   });
 
   async function insertPhoto(userId: string, smokeId: string): Promise<string> {

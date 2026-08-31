@@ -3,9 +3,14 @@ import { eq } from "drizzle-orm";
 import { auditLog, productPhotos, purchases, smokeConsumptions, smokes } from "@cj/db";
 import { createMemoryPhotoStorage, type ProcessedPhoto } from "@cj/photos";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
-import { attachProductPhoto, getProductPhotoState, type ProcessProductPhoto } from "./product-photos.js";
+import {
+  attachProductPhoto,
+  getProductPhoto,
+  getProductPhotoState,
+  type ProcessProductPhoto,
+} from "./product-photos.js";
 import { cigarsMissingPhotos } from "./curation.js";
-import { CigarNotFoundError, UnauthorizedError } from "./errors.js";
+import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError } from "./errors.js";
 import type { Principal } from "./index.js";
 
 // The pipeline is injected, so these tests need neither sharp nor real image
@@ -68,6 +73,27 @@ describe("product photos", () => {
         contentType: "image/jpeg",
       }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(CigarNotFoundError);
+    });
+
+    // #206. A non-uuid cigarId used to reach the `uuid` column and raise Postgres
+    // 22P02 — untyped, so it escaped this not-found path as a 500. The equality is
+    // the contract: malformed must be INDISTINGUISHABLE from unknown-but-valid.
+    it("attachProductPhoto answers a malformed id exactly as it answers an unknown one", async () => {
+      const storage = createMemoryPhotoStorage();
+      const attach = (cigarId: string) =>
+        attachProductPhoto(h.deps, storage, fakeProcessPhoto("x"), admin, {
+          clientRequestId: newRequestId(),
+          cigarId,
+          image: Buffer.from("bytes"),
+          contentType: "image/jpeg",
+        }).catch((e: unknown) => e);
+      const malformed = await attach("not-a-uuid");
+      const unknown = await attach(newRequestId());
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
     });
 
     it("attaches an approved photo, stores both objects under product/<id>/, and audits", async () => {
@@ -206,6 +232,31 @@ describe("product photos", () => {
       expect(await getProductPhotoState(h.deps, admin, { cigarId })).toEqual({ rights: "approved" });
 
       await expect(getProductPhotoState(h.deps, user, { cigarId })).rejects.toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("getProductPhotoState answers a malformed id exactly as it answers an unknown one", async () => {
+      // This read reports state rather than identity, so null — no row — is the
+      // answer both cases share, and the control renders its Add state for each.
+      const malformed = await getProductPhotoState(h.deps, admin, { cigarId: "not-a-uuid" });
+      const unknown = await getProductPhotoState(h.deps, admin, { cigarId: newRequestId() });
+      expect(malformed).toEqual(unknown);
+      expect(malformed).toBeNull();
+    });
+  });
+
+  describe("getProductPhoto", () => {
+    it("answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await getProductPhoto(h.deps, { cigarId: "not-a-uuid" }).catch(
+        (e: unknown) => e,
+      );
+      const unknown = await getProductPhoto(h.deps, { cigarId: newRequestId() }).catch(
+        (e: unknown) => e,
+      );
+      expect(malformed).toBeInstanceOf(PhotoNotFoundError);
+      expect(unknown).toBeInstanceOf(PhotoNotFoundError);
+      expect((malformed as PhotoNotFoundError).toPayload()).toEqual(
+        (unknown as PhotoNotFoundError).toPayload(),
+      );
     });
   });
 

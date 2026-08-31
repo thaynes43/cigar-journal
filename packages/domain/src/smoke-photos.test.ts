@@ -163,4 +163,60 @@ describe("smoke photos", () => {
     const summary = result.smokes.find((s) => s.smokeId === smokeId);
     expect(summary?.photoCount).toBe(2);
   });
+
+  // #206. Every entry point below takes an id the caller chose — an MCP tool
+  // argument or an image-URL segment — and carried it raw into a `uuid` column,
+  // where a non-uuid raised Postgres 22P02 and escaped as a 500. Each assertion is
+  // the same: malformed must be INDISTINGUISHABLE from unknown-but-valid.
+  it("addSmokePhoto answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await addSmokePhoto(h.deps, storage, user, {
+      smokeId: "not-a-uuid",
+      image: image(),
+    }).catch((e: unknown) => e);
+    const unknown = await addSmokePhoto(h.deps, storage, user, {
+      smokeId: newRequestId(),
+      image: image(),
+    }).catch((e: unknown) => e);
+    expect(malformed).toBeInstanceOf(SmokeNotFoundError);
+    expect(unknown).toBeInstanceOf(SmokeNotFoundError);
+    expect((malformed as SmokeNotFoundError).toPayload()).toEqual(
+      (unknown as SmokeNotFoundError).toPayload(),
+    );
+  });
+
+  it("listSmokePhotos answers a malformed id exactly as it answers an unknown one", async () => {
+    // A listing, not an identity: emptiness is the shared answer.
+    const malformed = await listSmokePhotos(h.deps, user, { smokeId: "not-a-uuid" });
+    const unknown = await listSmokePhotos(h.deps, user, { smokeId: newRequestId() });
+    expect(malformed).toEqual(unknown);
+    expect(malformed).toEqual([]);
+  });
+
+  it("getSmokePhoto answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await getSmokePhoto(h.deps, user, { photoId: "not-a-uuid" }).catch(
+      (e: unknown) => e,
+    );
+    const unknown = await getSmokePhoto(h.deps, user, { photoId: newRequestId() }).catch(
+      (e: unknown) => e,
+    );
+    expect(malformed).toBeInstanceOf(PhotoNotFoundError);
+    expect(unknown).toBeInstanceOf(PhotoNotFoundError);
+    expect((malformed as PhotoNotFoundError).toPayload()).toEqual(
+      (unknown as PhotoNotFoundError).toPayload(),
+    );
+  });
+
+  it("removeSmokePhoto answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await removeSmokePhoto(h.deps, storage, user, {
+      photoId: "not-a-uuid",
+    }).catch((e: unknown) => e);
+    const unknown = await removeSmokePhoto(h.deps, storage, user, {
+      photoId: newRequestId(),
+    }).catch((e: unknown) => e);
+    expect(malformed).toBeInstanceOf(PhotoNotFoundError);
+    expect(unknown).toBeInstanceOf(PhotoNotFoundError);
+    expect((malformed as PhotoNotFoundError).toPayload()).toEqual(
+      (unknown as PhotoNotFoundError).toPayload(),
+    );
+  });
 });

@@ -3046,4 +3046,354 @@ describe("curation", () => {
       expect(error).toBeInstanceOf(UnauthorizedError);
     });
   });
+
+  // --- malformed ids (#206) -------------------------------------------------
+  //
+  // Every curation entry point takes an id the caller chose, and each one used to
+  // carry that raw string into a `uuid` column, where Postgres raises an untyped
+  // 22P02 — which escaped the domain's refusal paths and surfaced as a 500 rather
+  // than the error the tool contract promises. The assertion below is always the
+  // same shape: malformed must be INDISTINGUISHABLE from unknown-but-well-formed,
+  // because that equality — not the particular error — is the contract being
+  // pinned. Comparing `toPayload()` compares everything an adapter serializes,
+  // which for a ValidationError includes its field path and message.
+  //
+  // Every call takes a FRESH clientRequestId so the idempotency envelope can never
+  // replay an earlier answer and satisfy the comparison without exercising it.
+  describe("malformed ids", () => {
+    it("verifyCigar answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await verifyCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await verifyCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    it("excludeCigar answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await excludeCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await excludeCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    it("restoreCigar answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await restoreCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await restoreCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    it("setCigarFacts answers a malformed id exactly as it answers an unknown one", async () => {
+      const fields = { brand: "Malformed Facts Brand" };
+      const malformed = await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: "not-a-uuid",
+        fields,
+      }).catch((e: unknown) => e);
+      const unknown = await setCigarFacts(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: newRequestId(),
+        fields,
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    it("renameCigar answers a malformed id exactly as it answers an unknown one", async () => {
+      // A valid name on both calls: the empty-name refusal is checked before the
+      // row is loaded, and would answer for the id guard instead of it.
+      const canonicalName = "Malformed Rename Target";
+      const malformed = await renameCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: "not-a-uuid",
+        canonicalName,
+      }).catch((e: unknown) => e);
+      const unknown = await renameCigar(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: newRequestId(),
+        canonicalName,
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    it("mergeCigars answers a malformed id in either position exactly as an unknown one", async () => {
+      // The two ids must differ on every call: an equal pair is refused as a
+      // self-merge before either side is loaded, so it would never reach the guard.
+      const real = await seedUnverified("Malformed Merge Partner");
+      const asSource = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: "not-a-uuid",
+        targetCigarId: real,
+      }).catch((e: unknown) => e);
+      const asTarget = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: real,
+        targetCigarId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: newRequestId(),
+        targetCigarId: real,
+      }).catch((e: unknown) => e);
+      expect(asSource).toBeInstanceOf(CigarNotFoundError);
+      expect(asTarget).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((asSource as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+      expect((asTarget as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    it("dismissDuplicate answers a malformed id in either position exactly as an unknown one", async () => {
+      const real = await seedUnverified("Malformed Dismissal Partner");
+      const asA = await dismissDuplicate(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarAId: "not-a-uuid",
+        cigarBId: real,
+      }).catch((e: unknown) => e);
+      const asB = await dismissDuplicate(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarAId: real,
+        cigarBId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await dismissDuplicate(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarAId: real,
+        cigarBId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(asA).toBeInstanceOf(CigarNotFoundError);
+      expect(asB).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((asA as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+      expect((asB as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    it("setListingMatchStatus answers a malformed id exactly as it answers an unknown one", async () => {
+      // A listing match has no not-found code of its own (curator-only surface), so
+      // both cases are the same field-pathed validation_error.
+      const malformed = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId: "not-a-uuid",
+        status: "unmatched",
+      }).catch((e: unknown) => e);
+      const unknown = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId: newRequestId(),
+        status: "unmatched",
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect(unknown).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "matchId", message: "No listing match matches the given id." },
+      ]);
+      expect((malformed as ValidationError).toPayload()).toEqual(
+        (unknown as ValidationError).toPayload(),
+      );
+    });
+
+    it("setProductPhotoRights answers a malformed id exactly as it answers an unknown one", async () => {
+      // This one reaches product_photos directly rather than the cigar, so its
+      // established answer for an id it cannot resolve is photo_not_found — a cigar
+      // with no photo row and no cigar at all are already the same refusal here, and
+      // the guard must not introduce a third answer.
+      const malformed = await setProductPhotoRights(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: "not-a-uuid",
+        rights: "approved",
+      }).catch((e: unknown) => e);
+      const unknown = await setProductPhotoRights(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        cigarId: newRequestId(),
+        rights: "approved",
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(PhotoNotFoundError);
+      expect(unknown).toBeInstanceOf(PhotoNotFoundError);
+      expect(malformed).not.toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as PhotoNotFoundError).toPayload()).toEqual(
+        (unknown as PhotoNotFoundError).toPayload(),
+      );
+    });
+
+    it("unmergeCigars answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await unmergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        mergeId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await unmergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        mergeId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect(unknown).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "mergeId", message: "No merge matches the given id." },
+      ]);
+      expect((malformed as ValidationError).toPayload()).toEqual(
+        (unknown as ValidationError).toPayload(),
+      );
+    });
+
+    it("undoCurationAction answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await undoCurationAction(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        auditId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect(unknown).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "auditId", message: "No audit action matches the given id." },
+      ]);
+      expect((malformed as ValidationError).toPayload()).toEqual(
+        (unknown as ValidationError).toPayload(),
+      );
+    });
+
+    // The worklist cursor is the most exposed id in the file: it is opaque, so a
+    // caller cannot inspect or repair it, and both halves are spent UNQUOTED
+    // (::timestamptz / ::uuid). A base64url envelope of the right shape carrying a
+    // junk id therefore used to reach the database and raise the same untyped cast
+    // error. Here the contract is not a refusal but a degrade: an unusable cursor
+    // yields the FIRST PAGE, exactly as an absent one does.
+    it("curationWorklist degrades a time-ordered cursor with a junk id to the first page", async () => {
+      await seedUnverified("Malformed Cursor Worklist One");
+      await seedUnverified("Malformed Cursor Worklist Two");
+
+      // A well-formed envelope: a real Postgres timestamp in the slot the keyset
+      // casts to ::timestamptz, junk in the slot it casts to ::uuid.
+      const junk = Buffer.from(
+        JSON.stringify(["2026-01-01 00:00:00+00", "not-a-uuid"]),
+        "utf8",
+      ).toString("base64url");
+
+      const degraded = await curationWorklist(h.deps, admin, {
+        kind: "unverified",
+        limit: 5,
+        cursor: junk,
+      });
+      const firstPage = await curationWorklist(h.deps, admin, {
+        kind: "unverified",
+        limit: 5,
+        cursor: null,
+      });
+      // Non-empty, or the equality below would hold for two empty pages.
+      expect(degraded.cigars!.length).toBeGreaterThan(0);
+      expect(degraded).toEqual(firstPage);
+    });
+
+    it("curationWorklist degrades a duplicates cursor with a junk id to the first page", async () => {
+      // The duplicates lane pairs two cigar ids, so it casts BOTH halves to ::uuid —
+      // a different typing from the time-ordered lanes, and the reason the junk here
+      // sits in the first half.
+      await h.seedCigar({ canonicalName: "Zqfm Cursor Dup Robusto" });
+      await h.seedCigar({ canonicalName: "Zqfm Cursor Dup Robustoo" });
+
+      const junk = Buffer.from(JSON.stringify(["not-a-uuid", newRequestId()]), "utf8").toString(
+        "base64url",
+      );
+
+      const degraded = await curationWorklist(h.deps, admin, {
+        kind: "duplicates",
+        limit: 200,
+        cursor: junk,
+      });
+      const firstPage = await curationWorklist(h.deps, admin, {
+        kind: "duplicates",
+        limit: 200,
+        cursor: null,
+      });
+      expect(degraded.duplicates!.length).toBeGreaterThan(0);
+      expect(degraded).toEqual(firstPage);
+    });
+
+    it("curationWorklist degrades a REAL cursor carried to a lane that types it differently", async () => {
+      // The subtle half of #206, and the one a shape check alone cannot catch.
+      // Cursors are opaque, so a client can page one lane and then switch `kind`
+      // while still holding its cursor. Both cursors below are genuine — this
+      // system issued them — but the lanes disagree about which half is which: the
+      // duplicates lane casts both to ::uuid, every other lane casts the first to
+      // ::timestamptz. Handing either to the other lane put a uuid where a
+      // timestamp was expected (or the reverse) and raised exactly the untyped cast
+      // error this issue is about. Only the lane knows its own typing, so the
+      // decoder is told; a cursor that does not fit the lane is one we did not
+      // issue FOR THAT LANE, and restarts.
+      await h.seedCigar({ canonicalName: "Zqfm Crosskind Robusto" });
+      await h.seedCigar({ canonicalName: "Zqfm Crosskind Robustoo" });
+
+      const timeOrdered = Buffer.from(
+        JSON.stringify(["2026-01-01 00:00:00+00", newRequestId()]),
+        "utf8",
+      ).toString("base64url");
+      const duplicatesShaped = Buffer.from(
+        JSON.stringify([newRequestId(), newRequestId()]),
+        "utf8",
+      ).toString("base64url");
+
+      // A time-ordered cursor handed to the duplicates lane.
+      const dupFirst = await curationWorklist(h.deps, admin, { kind: "duplicates", limit: 200, cursor: null });
+      const dupCrossed = await curationWorklist(h.deps, admin, {
+        kind: "duplicates",
+        limit: 200,
+        cursor: timeOrdered,
+      });
+      expect(dupCrossed.duplicates!.length).toBeGreaterThan(0);
+      expect(dupCrossed).toEqual(dupFirst);
+
+      // A duplicates cursor handed to a time-ordered lane.
+      const unverifiedFirst = await curationWorklist(h.deps, admin, {
+        kind: "unverified",
+        limit: 200,
+        cursor: null,
+      });
+      const unverifiedCrossed = await curationWorklist(h.deps, admin, {
+        kind: "unverified",
+        limit: 200,
+        cursor: duplicatesShaped,
+      });
+      expect(unverifiedCrossed.cigars!.length).toBeGreaterThan(0);
+      expect(unverifiedCrossed).toEqual(unverifiedFirst);
+    });
+  });
 });

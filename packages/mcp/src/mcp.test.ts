@@ -3554,4 +3554,136 @@ describe("@cj/mcp adapter", () => {
       expect(res.entries.map((e) => e.cigarId)).toEqual([extra]); // quantity 9 leads
     });
   });
+
+  // ---- malformed ids (issue #206) -------------------------------------------
+
+  describe("malformed ids", () => {
+    // Every id input here is a bare `z.string()` by contract, so a non-uuid is not
+    // a schema rejection — it reaches the domain. Before the sweep it reached a
+    // Postgres `uuid` column, raised 22P02, and, being untyped, fell through
+    // results.ts `toErrorPayload` to `unavailable` (recoverable, action retry) —
+    // the one answer an agent client acts on by retrying a permanently malformed
+    // id forever. The typed code is what makes it stop and do the right thing:
+    // `cigar_not_found` carries action `search_first`, `smoke_not_found` is
+    // unrecoverable. So every case asserts the code AND, explicitly, that it is
+    // not `unavailable` — the regression, not the wording, is what is pinned.
+    const BAD = "not-a-uuid";
+
+    function expectCode(result: CallToolResult, code: string): Record<string, unknown> {
+      const error = errorOf(result);
+      expect(error.code, "a malformed id must never be answered as retryable").not.toBe("unavailable");
+      expect(error.code).toBe(code);
+      return error;
+    }
+
+    it("get_cigar: malformed cigarId → cigar_not_found, identical to an unknown id", async () => {
+      await withClient(ownerFull, async (client) => {
+        const malformed = await call(client, "get_cigar", { cigarId: BAD });
+        const unknown = await call(client, "get_cigar", { cigarId: randomUUID() });
+        // The contract of #206: from outside, malformed and unknown are one answer.
+        expect(expectCode(malformed, "cigar_not_found")).toEqual(errorOf(unknown));
+      });
+    });
+
+    it("get_smoke: malformed smokeId → smoke_not_found, identical to an unknown id", async () => {
+      // The reference case (#204), from which the sweep generalised.
+      await withClient(ownerFull, async (client) => {
+        const malformed = await call(client, "get_smoke", { smokeId: BAD });
+        const unknown = await call(client, "get_smoke", { smokeId: randomUUID() });
+        expect(expectCode(malformed, "smoke_not_found")).toEqual(errorOf(unknown));
+      });
+    });
+
+    it("get_offers: malformed cigarId → an empty success, not an error", async () => {
+      // Its two reads answer empty rather than throw for an id nobody has priced,
+      // so the guard collapses malformed into that same empty — no error to raise.
+      await withClient(ownerCatalogOnly, async (client) => {
+        const malformed = await call(client, "get_offers", { cigarId: BAD });
+        expect(malformed.isError).toBeFalsy();
+        const data = payloadOf(malformed) as OffersPayload;
+        expect(data.offers).toEqual([]);
+        expect(data.history).toEqual({
+          firstSeenAt: null,
+          lastSeenAt: null,
+          minPricePerStick: null,
+          maxPricePerStick: null,
+          observationCount: 0,
+        });
+        expect(payloadOf(await call(client, "get_offers", { cigarId: randomUUID() }))).toEqual(data);
+      });
+    });
+
+    it("update_smoke: malformed smokeId → smoke_not_found", async () => {
+      await withClient(ownerFull, async (client) => {
+        expectCode(
+          await call(client, "update_smoke", {
+            clientRequestId: randomUUID(),
+            smokeId: BAD,
+            changes: { assessment: { rating: 90 } },
+          }),
+          "smoke_not_found",
+        );
+      });
+    });
+
+    it("set_want: malformed cigarId → cigar_not_found", async () => {
+      await withClient(ownerFull, async (client) => {
+        expectCode(await call(client, "set_want", { cigarId: BAD, wanted: true }), "cigar_not_found");
+      });
+    });
+
+    it("set_favorite: malformed cigarId → cigar_not_found", async () => {
+      await withClient(ownerFull, async (client) => {
+        expectCode(
+          await call(client, "set_favorite", { cigarId: BAD, favorited: true }),
+          "cigar_not_found",
+        );
+      });
+    });
+
+    it("update_cigar: malformed cigarId → cigar_not_found", async () => {
+      await withClient(ownerFull, async (client) => {
+        expectCode(
+          await call(client, "update_cigar", {
+            clientRequestId: randomUUID(),
+            cigarId: BAD,
+            fields: { line: "Never Written" },
+          }),
+          "cigar_not_found",
+        );
+      });
+    });
+
+    it("record_price: malformed cigarId → cigar_not_found", async () => {
+      // A valid source and price, so the answer is about the id and nothing else —
+      // record_price validates its own fields before it looks at the cigar.
+      await withClient(ownerFull, async (client) => {
+        expectCode(
+          await call(client, "record_price", {
+            clientRequestId: randomUUID(),
+            cigarId: BAD,
+            sourceName: "Somewhere",
+            price: 12,
+          }),
+          "cigar_not_found",
+        );
+      });
+    });
+
+    it("request_cigar_enrichment: malformed cigarId → cigar_not_found", async () => {
+      await withClient(ownerFull, async (client) => {
+        expectCode(
+          await call(client, "request_cigar_enrichment", { cigarId: BAD }),
+          "cigar_not_found",
+        );
+      });
+    });
+
+    it("add_smoke_photo: malformed smokeId → smoke_not_found", async () => {
+      // Mode B: no link is minted for a smoke that cannot exist.
+      await withClient(ownerFull, async (client) => {
+        expectCode(await call(client, "add_smoke_photo", { smokeId: BAD }), "smoke_not_found");
+      });
+    });
+  });
 });

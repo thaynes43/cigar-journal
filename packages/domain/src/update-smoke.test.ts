@@ -5,7 +5,12 @@ import { createHarness, newRequestId, type DomainHarness } from "./testing/harne
 import { saveSmoke } from "./save-smoke.js";
 import { updateSmoke } from "./update-smoke.js";
 import type { Principal } from "./index.js";
-import { VersionConflictError, SmokeNotFoundError, ValidationError } from "./errors.js";
+import {
+  VersionConflictError,
+  SmokeNotFoundError,
+  CigarNotFoundError,
+  ValidationError,
+} from "./errors.js";
 
 describe("updateSmoke", () => {
   let h: DomainHarness;
@@ -244,5 +249,95 @@ describe("updateSmoke", () => {
     const row = await consumptionRow(saved.smoke.smokeId);
     expect(row).not.toBeNull(); // the link survives
     expect(row!.purchaseId).toBeNull(); // but the foreign lot is dropped
+  });
+
+  // ---- malformed ids (#206) -------------------------------------------------
+  //
+  // Every id below used to be carried straight into a `uuid` column, where
+  // Postgres raises 22P02 — untyped, so it escaped these refusal paths and
+  // surfaced as a 500, and inside the transaction it also poisoned the
+  // transaction the envelope needs to unwind. The assertion is always the same
+  // shape: malformed must be INDISTINGUISHABLE from unknown-but-well-formed,
+  // because that equality, not the particular payload, is the contract.
+
+  it("updateSmoke answers a malformed smokeId exactly as it answers an unknown one", async () => {
+    const changes = { assessment: { rating: 60 } };
+    const malformed = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId: "not-a-uuid",
+      changes,
+    }).catch((e: unknown) => e);
+    const unknown = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId: newRequestId(),
+      changes,
+    }).catch((e: unknown) => e);
+
+    expect(malformed).toBeInstanceOf(SmokeNotFoundError);
+    expect(unknown).toBeInstanceOf(SmokeNotFoundError);
+    expect((malformed as SmokeNotFoundError).toPayload()).toEqual(
+      (unknown as SmokeNotFoundError).toPayload(),
+    );
+  });
+
+  it("updateSmoke answers a malformed cigar resolveTo exactly as it answers an unknown one", async () => {
+    // A valid, owned smokeId, so the smoke guard is certainly passed and it is
+    // the second id — the re-point target — under test.
+    const malformed = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: { cigar: { resolveTo: "not-a-uuid" } },
+    }).catch((e: unknown) => e);
+    const unknown = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: { cigar: { resolveTo: newRequestId() } },
+    }).catch((e: unknown) => e);
+
+    expect(malformed).toBeInstanceOf(CigarNotFoundError);
+    expect(unknown).toBeInstanceOf(CigarNotFoundError);
+    expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+      (unknown as CigarNotFoundError).toPayload(),
+    );
+
+    // Neither refusal moved the smoke: still version 1, still its own cigar.
+    const smoke = (await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId)))[0]!;
+    expect(smoke.version).toBe(1);
+    expect(smoke.cigarId).toBe(cigarId);
+  });
+
+  it("updateSmoke answers a malformed consumption purchaseId exactly as it answers an unowned one", async () => {
+    // The lot is a field of the request, not the identity being addressed, so
+    // the answer being matched here is validation_error — the existing one for a
+    // lot that does not exist, is not the caller's, or belongs to another cigar.
+    const malformed = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: { consumption: { fromHumidor: true, purchaseId: "not-a-uuid" } },
+    }).catch((e: unknown) => e);
+    const unknown = await updateSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      smokeId,
+      changes: { consumption: { fromHumidor: true, purchaseId: newRequestId() } },
+    }).catch((e: unknown) => e);
+
+    expect(malformed).toBeInstanceOf(ValidationError);
+    expect(unknown).toBeInstanceOf(ValidationError);
+    expect((malformed as ValidationError).fields).toEqual([
+      {
+        path: "changes.consumption.purchaseId",
+        message: "No humidor lot of this cigar matches the given purchaseId.",
+      },
+    ]);
+    expect((malformed as ValidationError).toPayload()).toEqual(
+      (unknown as ValidationError).toPayload(),
+    );
+
+    // The refusal happens inside the transaction, after the version bump is
+    // staged — so the rollback is part of the contract: nothing was linked and
+    // nothing was bumped.
+    expect(await consumptionRow(smokeId)).toBeNull();
+    const smoke = (await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId)))[0]!;
+    expect(smoke.version).toBe(1);
   });
 });

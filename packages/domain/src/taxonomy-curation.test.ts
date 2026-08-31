@@ -23,7 +23,12 @@ import {
   splitCigar,
 } from "./taxonomy-curation.js";
 import { undoCurationAction } from "./curation.js";
-import { IdempotencyConflictError, UnauthorizedError, ValidationError } from "./errors.js";
+import {
+  CigarNotFoundError,
+  IdempotencyConflictError,
+  UnauthorizedError,
+  ValidationError,
+} from "./errors.js";
 import type { Principal } from "./deps.js";
 
 // The enveloped curation surface over the Wave 2 registry primitives (ADR-012
@@ -241,6 +246,26 @@ describe("taxonomy curation", () => {
       ).rejects.toBeInstanceOf(UnauthorizedError);
     });
 
+    // #206. Every enveloped service below reads its idempotency key before it
+    // touches the id it was given, so a 22P02 there would abort a transaction
+    // that had already run work. The guard sits before the transaction, and
+    // answers exactly what the miss inside it answers.
+    it("answers a malformed brandId exactly as it answers an unknown one", async () => {
+      const malformed = await registerTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        brandId: "not-a-uuid",
+        line: { name: "Sweep Line" },
+      }).catch((e: unknown) => e);
+      const unknown = await registerTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        brandId: newRequestId(),
+        line: { name: "Sweep Line" },
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([{ path: "brandId", message: "No such brand." }]);
+    });
+
     // Mint-time slugs fold accents; the rows seeded before that change do not.
     // Get-or-create has to span both flavors, and it breaks a DIFFERENT case in
     // each direction if it only probes one — so both directions are pinned.
@@ -430,6 +455,24 @@ describe("taxonomy curation", () => {
           add: ["Denied"],
         }),
       ).rejects.toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await updateRegistryAliases(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "blend",
+        id: "not-a-uuid",
+        add: ["Sweep Spelling"],
+      }).catch((e: unknown) => e);
+      const unknown = await updateRegistryAliases(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "blend",
+        id: newRequestId(),
+        add: ["Sweep Spelling"],
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([{ path: "id", message: "No such blend." }]);
     });
   });
 
@@ -652,6 +695,69 @@ describe("taxonomy curation", () => {
       await expect(
         assignCigarTaxonomy(h.deps, member, { clientRequestId: newRequestId(), cigarId, brandId: padronId }),
       ).rejects.toBeInstanceOf(UnauthorizedError);
+    });
+
+    it("answers a malformed cigarId exactly as it answers an unknown one", async () => {
+      const malformed = await assignCigarTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId: "not-a-uuid",
+        brandId: padronId,
+      }).catch((e: unknown) => e);
+      const unknown = await assignCigarTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId: newRequestId(),
+        brandId: padronId,
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    // A malformed lineId is answered by the ancestry assertion, through the guard
+    // in `loadAncestryContext` — the level could not be resolved, which is what an
+    // unknown line has always meant here.
+    it("answers a malformed lineId exactly as it answers an unknown one", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Assign Malformed Line Subject" });
+      const malformed = await assignCigarTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        brandId: padronId,
+        lineId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await assignCigarTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        brandId: padronId,
+        lineId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "lineId", message: "The referenced line could not be resolved." },
+      ]);
+    });
+
+    // The marca is the one level nothing resolves before the write — `brandId` is
+    // carried into `namesForAncestry`, which looked it up directly. A preview
+    // naming a brand that cannot exist has to behave like one naming a brand that
+    // merely does not: no row found, the row's own free text stands in.
+    it("previews a malformed brandId exactly as it previews an unknown one", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Preview Malformed Brand Subject" });
+      const malformed = await assignCigarTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        brandId: "not-a-uuid",
+        preview: true,
+      });
+      const unknown = await assignCigarTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        brandId: newRequestId(),
+        preview: true,
+      });
+      expect(malformed).toEqual(unknown);
+      expect(malformed.changedFields).toEqual(["brandId"]);
     });
   });
 
@@ -1208,6 +1314,92 @@ describe("taxonomy curation", () => {
       // Get-or-create: the leaf minted the first time is found, not duplicated.
       expect(again.splits[0]).toMatchObject({ cigarId: split.splits[0]!.cigarId, created: false });
       expect((await matchRow(listingId)).cigarId).toBe(split.splits[0]!.cigarId);
+    });
+
+    it("answers a malformed cigarId exactly as it answers an unknown one", async () => {
+      const { listingIds } = await seedBucket("Perdomo Malformed Bucket Id", 1);
+      const splits = [{ listingIds: [listingIds[0]!], vitolaName: "Robusto" }];
+      const malformed = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId: "not-a-uuid",
+        splits,
+      }).catch((e: unknown) => e);
+      const unknown = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId: newRequestId(),
+        splits,
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+
+    it("answers a malformed targetCigarId exactly as an unknown one, on the arm that named it", async () => {
+      const { cigarId, listingIds } = await seedBucket("Perdomo Malformed Target Bucket", 2);
+      const armsWith = (targetCigarId: string) => [
+        { listingIds: [listingIds[0]!], vitolaName: "Target Path Robusto" },
+        { listingIds: [listingIds[1]!], targetCigarId },
+      ];
+      const malformed = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: armsWith("not-a-uuid"),
+      }).catch((e: unknown) => e);
+      const unknown = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: armsWith(newRequestId()),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      // The per-index path is the whole value of the message — it points the
+      // curator at the arm they got wrong, not at "the split".
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "splits.1.targetCigarId", message: "No such cigar." },
+      ]);
+    });
+
+    // THE ONE THAT WAS COSTING THE MOST. Every named listing is read in a single
+    // `inArray(...)` probe, so one malformed id in one arm raised 22P02 for the
+    // whole call — a multi-arm split answering a 500 where the code already had a
+    // precise, per-id refusal to give.
+    it("names the one malformed listing id rather than failing the whole split", async () => {
+      const { cigarId, listingIds } = await seedBucket("Perdomo Malformed Listing Bucket", 2);
+      const malformed = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [
+          { listingIds: [listingIds[0]!], vitolaName: "Listing Path Robusto" },
+          { listingIds: ["not-a-uuid"], vitolaName: "Listing Path Toro" },
+        ],
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "splits", message: "No listing match matches id not-a-uuid." },
+      ]);
+
+      // Word for word what an unknown-but-valid id is answered with, the id being
+      // the only difference — which is the point: the refusal names the offender.
+      const ghost = newRequestId();
+      const unknown = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [
+          { listingIds: [listingIds[0]!], vitolaName: "Listing Path Robusto" },
+          { listingIds: [ghost], vitolaName: "Listing Path Toro" },
+        ],
+      }).catch((e: unknown) => e);
+      expect(unknown).toBeInstanceOf(ValidationError);
+      expect((unknown as ValidationError).fields).toEqual([
+        { path: "splits", message: `No listing match matches id ${ghost}.` },
+      ]);
+
+      // And the good arm did not half-apply: a split lands whole or not at all.
+      expect((await matchRow(listingIds[0]!)).cigarId).toBe(cigarId);
+      expect(
+        await h.deps.db.select().from(cigars).where(eq(cigars.canonicalName, "Perdomo Listing Path Robusto")),
+      ).toHaveLength(0);
     });
   });
 });

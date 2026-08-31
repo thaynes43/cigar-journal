@@ -12,6 +12,11 @@ export { normalizeDescriptor, normalizeDescriptors } from "./descriptors.js";
 // null at their credential-less surfaces.
 export { auditActor } from "./audit-attribution.js";
 export { fingerprint } from "./fingerprint.js";
+// The one definition of "is this string shaped like an id we could have issued".
+// Exported because the adapters that resolve an id WITHOUT going through a domain
+// service — the photo byte routes, the OAuth consent transaction — owe callers
+// the same answer, and a second copy of the regex is a second contract (#206).
+export { isUuid } from "./uuid.js";
 
 export { saveSmoke } from "./save-smoke.js";
 export { addCigar } from "./add-cigar.js";

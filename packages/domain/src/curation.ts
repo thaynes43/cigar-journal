@@ -83,6 +83,7 @@ import { classifyEnrichmentRequest, type EnrichmentClassification } from "./enri
 import { liveEnrichMarkets } from "./enrichment-coverage.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
+import { isUuid } from "./uuid.js";
 
 // Catalog hygiene — the curator's toolkit (ADR-006). Merge re-points every
 // reference off a duplicate and tombstones it (recording what moved, so unmerge
@@ -219,12 +220,22 @@ function productPhotoSnapshot(row: ProductPhotoRow): Record<string, unknown> {
   };
 }
 
+// The two loaders below are where every curation entry point meets its id, and
+// both already express "no such row" as undefined — so a malformed id is answered
+// by returning undefined, and each caller converts that into its own established
+// refusal (CigarNotFoundError, or the field-pathed ValidationError for a match)
+// without knowing the guard exists. That is why the check sits here rather than at
+// the dozen entry points: one place to be right, and no entry point can be added
+// later that forgets it. Every caller runs inside a transaction, so refusing
+// before the query also keeps a 22P02 from aborting it (#206, ./uuid.ts).
 async function loadCigar(tx: Queryer, cigarId: string): Promise<CigarRow | undefined> {
+  if (!isUuid(cigarId)) return undefined;
   const rows = await tx.select().from(cigars).where(eq(cigars.id, cigarId)).limit(1);
   return rows[0];
 }
 
 async function loadListingMatch(tx: Queryer, matchId: string): Promise<ListingMatchRow | undefined> {
+  if (!isUuid(matchId)) return undefined;
   const rows = await tx.select().from(listingMatches).where(eq(listingMatches.id, matchId)).limit(1);
   return rows[0];
 }
@@ -721,6 +732,12 @@ export async function unmergeCigars(
   input: UnmergeCigarsInput,
 ): Promise<UnmergeCigarsResult> {
   assertCurator(principal);
+  // The merge ledger is reached directly (claimMerge), not through a loader, so
+  // the guard repeats claimMerge's own "no such merge" answer verbatim — same
+  // path, same message — before the transaction opens (./uuid.ts).
+  if (!isUuid(input.mergeId)) {
+    throw new ValidationError([{ path: "mergeId", message: "No merge matches the given id." }]);
+  }
   const requestFingerprint = fingerprint(input);
 
   try {
@@ -1525,6 +1542,11 @@ export async function setProductPhotoRights(
   input: SetProductPhotoRightsInput,
 ): Promise<SetProductPhotoRightsResult> {
   assertCurator(principal);
+  // This one reaches product_photos directly rather than through loadCigar, and
+  // so answers PhotoNotFoundError — a cigar with no photo row is the same refusal
+  // as no cigar at all here. Before the transaction: a 22P02 would abort it
+  // (./uuid.ts).
+  if (!isUuid(input.cigarId)) throw new PhotoNotFoundError();
   const requestFingerprint = fingerprint(input);
 
   try {
@@ -1973,11 +1995,43 @@ function encodeWorklistCursor(parts: [string, string]): string {
   return Buffer.from(JSON.stringify(parts), "utf8").toString("base64url");
 }
 
-function decodeWorklistCursor(raw: string | null | undefined): [string, string] | null {
+// Postgres' own rendering of a timestamptz (`created_at::text`), which is what
+// the three time-ordered lanes put in the cursor's first slot — full microsecond
+// precision and a space rather than a T, so it is deliberately matched by shape
+// instead of Date.parse, whose acceptance of that spelling is not guaranteed.
+const PG_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?([+-]\d{2}(:?\d{2})?|Z)?$/;
+
+// Both halves are spent unquoted — every lane casts the second to ::uuid, and the
+// first to ::timestamptz except the duplicates lane, which pairs two cigar ids and
+// casts both to ::uuid. A well-formed envelope carrying junk therefore used to
+// reach the database and raise an untyped cast error (22P02, or 22007 for the
+// instant), which is a 500 rather than the graceful first page promised above.
+// Accepting only what the encoder can emit makes that promise true; anything else
+// is a cursor we did not issue, and absent is the honest reading (#206, ./uuid.ts).
+//
+// The caller declares which shape ITS lane will cast the first half to, because
+// checking "uuid or instant" is not enough: cursors are opaque, so a client that
+// pages the duplicates lane and then switches `kind` while still holding its
+// cursor hands a pair of uuids to a lane that casts the first to ::timestamptz.
+// That cursor is real — we issued it — and a shape check that accepts either
+// spelling waves it through to the same 500 this guard exists to prevent. Only the
+// lane knows which half is which, so only the lane can say.
+type WorklistCursorHead = "uuid" | "instant";
+
+function decodeWorklistCursor(
+  raw: string | null | undefined,
+  head: WorklistCursorHead,
+): [string, string] | null {
   if (!raw) return null;
   try {
     const parsed: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
-    if (Array.isArray(parsed) && typeof parsed[0] === "string" && typeof parsed[1] === "string") {
+    if (
+      Array.isArray(parsed) &&
+      typeof parsed[0] === "string" &&
+      typeof parsed[1] === "string" &&
+      (head === "uuid" ? isUuid(parsed[0]) : PG_TIMESTAMP_RE.test(parsed[0])) &&
+      isUuid(parsed[1])
+    ) {
       return [parsed[0], parsed[1]];
     }
     return null;
@@ -2289,7 +2343,9 @@ export async function curationWorklist(
   assertCurator(principal);
   const db = deps.db;
   const limit = Math.min(Math.max(input.limit ?? WORKLIST_DEFAULT_LIMIT, 1), WORKLIST_MAX_LIMIT);
-  const cursor = decodeWorklistCursor(input.cursor);
+  // Only the duplicates lane pairs two cigar ids; every other kind leads with the
+  // boundary row's created_at.
+  const cursor = decodeWorklistCursor(input.cursor, input.kind === "duplicates" ? "uuid" : "instant");
 
   switch (input.kind) {
     case "unverified": {
@@ -2870,7 +2926,7 @@ export async function agentRunRows(
 ): Promise<AgentRunRowsResult> {
   assertCurator(principal);
   const limit = Math.min(Math.max(input.limit ?? RUN_ROWS_DEFAULT_LIMIT, 1), RUN_ROWS_MAX_LIMIT);
-  const cursor = decodeWorklistCursor(input.cursor);
+  const cursor = decodeWorklistCursor(input.cursor, "instant");
   const keyset = cursor
     ? sql`AND (a.created_at, a.id) < (${cursor[0]}::timestamptz, ${cursor[1]}::uuid)`
     : sql``;
@@ -2967,6 +3023,11 @@ export async function undoCurationAction(
   input: UndoCurationActionInput,
 ): Promise<UndoCurationActionResult> {
   assertCurator(principal);
+  // The audit row is reached directly, so this repeats undoWithinTx's own
+  // "no such action" answer before the transaction opens (./uuid.ts).
+  if (!isUuid(input.auditId)) {
+    throw new ValidationError([{ path: "auditId", message: "No audit action matches the given id." }]);
+  }
   const requestFingerprint = fingerprint(input);
 
   try {

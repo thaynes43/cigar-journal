@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { vendors, offers, enrichmentRequests, productPhotos, cigars } from "@cj/db";
+import { vendors, offers, enrichmentRequests, productPhotos, cigars, auditLog } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { requestCigarEnrichment } from "./enrichment.js";
 import { updateCigar } from "./update-cigar.js";
@@ -76,6 +76,30 @@ describe("catalog repair + price observations", () => {
         requestCigarEnrichment(h.deps, user, { cigarId: "00000000-0000-0000-0000-000000000000" }),
       ).rejects.toBeInstanceOf(CigarNotFoundError);
     });
+
+    // #206. classifyEnrichmentRequest is the transaction's very first statement,
+    // so an unguarded non-uuid aborted the transaction on entry and surfaced as a
+    // 500. This is also the only external door to the coverage reads, whose
+    // raw-SQL cigar_id comparisons carry no explicit cast. The guard's answer is
+    // the one classifyEnrichmentRequest already gives for a cigar that does not
+    // exist, and that equality is what is pinned here.
+    it("answers a malformed cigarId exactly as it answers an unknown one", async () => {
+      const queuedBefore = await h.deps.db.select().from(enrichmentRequests);
+      const attempt = (cigarId: string) =>
+        requestCigarEnrichment(h.deps, user, { cigarId }).catch((e: unknown) => e);
+
+      const malformed = await attempt("not-a-uuid");
+      const unknown = await attempt("00000000-0000-0000-0000-000000000000");
+
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+
+      // Neither refusal queued anything.
+      expect(await h.deps.db.select().from(enrichmentRequests)).toHaveLength(queuedBefore.length);
+    });
   });
 
   // ---- update_cigar ---------------------------------------------------------
@@ -127,6 +151,34 @@ describe("catalog repair + price observations", () => {
       await expect(
         updateCigar(h.deps, user, { clientRequestId: rid, cigarId, fields: { line: "different" } }),
       ).rejects.toBeInstanceOf(IdempotencyConflictError);
+    });
+
+    // #206. The transaction's first use of the id is the cigar lookup, so an
+    // unguarded non-uuid raised 22P02 inside a transaction the idempotency read
+    // had already used — a 500 rather than a not-found, and one isUniqueViolation
+    // could not recognise to recover from. The id is refused before the
+    // transaction opens, and what is pinned here is that the refusal reads as an
+    // unknown cigar.
+    it("answers a malformed cigarId exactly as it answers an unknown one", async () => {
+      const auditedBefore = await h.deps.db.select().from(auditLog);
+      const attempt = (cigarId: string) =>
+        updateCigar(h.deps, user, {
+          clientRequestId: newRequestId(),
+          cigarId,
+          fields: { line: "Some Line" },
+        }).catch((e: unknown) => e);
+
+      const malformed = await attempt("not-a-uuid");
+      const unknown = await attempt(newRequestId());
+
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+
+      // Neither refusal audited a repair.
+      expect(await h.deps.db.select().from(auditLog)).toHaveLength(auditedBefore.length);
     });
   });
 
@@ -281,6 +333,37 @@ describe("catalog repair + price observations", () => {
       h.setNow(new Date("2026-08-29T12:00:00Z"));
       const detail = await getCigar(h.deps, user, { cigarId });
       expect(detail.pricing!.refreshRecommended).toBe(true);
+    });
+
+    // #206. recordPrice's cigar lookup lives inside the mutation envelope's
+    // transaction, so an unguarded non-uuid did not merely escape as a 500: the
+    // 22P02 aborted a transaction the idempotency read had already used, and
+    // isUniqueViolation would not recognise it to recover. The id is refused
+    // before the transaction opens, and this pins the answer — malformed must be
+    // indistinguishable from unknown-but-well-formed.
+    it("answers a malformed cigarId exactly as it answers an unknown one", async () => {
+      const offersBefore = await h.deps.db.select().from(offers);
+      const attempt = (cigarId: string) =>
+        recordPrice(h.deps, user, {
+          clientRequestId: newRequestId(),
+          cigarId,
+          vendorName: "Some Shop",
+          price: 12,
+          packaging: "single",
+          sticksPerPackage: 1,
+        }).catch((e: unknown) => e);
+
+      const malformed = await attempt("not-a-uuid");
+      const unknown = await attempt(newRequestId());
+
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+
+      // Neither refusal recorded an observation.
+      expect(await h.deps.db.select().from(offers)).toHaveLength(offersBefore.length);
     });
   });
 });

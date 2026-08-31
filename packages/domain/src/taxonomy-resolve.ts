@@ -11,6 +11,7 @@ import {
   type ParseRegistry,
 } from "./catalog-parse.js";
 import { numbersCompatible, packagingCompatible, variantRelation, vitolaAgrees } from "./name-heuristics.js";
+import { isUuid } from "./uuid.js";
 import type { CigarAncestry, CigarAncestryContext } from "./cigar-ancestry.js";
 
 // The database half of matching v2: registry probes in, a `ListingParse` out,
@@ -99,23 +100,35 @@ export async function parseListing(db: Queryer, title: string): Promise<ListingP
 // checks against. A level whose row does not exist comes back null, which the
 // assertion reports as a violation — a caller asserting a line it cannot resolve
 // is exactly as wrong as one asserting a line from another brand.
+//
+// A MALFORMED ID IS AN UNRESOLVABLE LEVEL, not an error. Skipping the query
+// leaves the level to the same `?? null` a miss takes, so `assertCigarAncestry`
+// reports the identical violation and every caller keeps its own established
+// refusal without knowing the guard exists (./uuid.ts). One check here covers
+// lineId and blendId for `assignCigarTaxonomy`, `splitCigar` and
+// `assignCigarParts` alike — and all three read on a transaction a 22P02 would
+// abort, so it has to happen instead of the query rather than around it.
 export async function loadAncestryContext(db: Queryer, ancestry: CigarAncestry): Promise<CigarAncestryContext> {
   const context: CigarAncestryContext = {};
 
   if (ancestry.lineId != null) {
-    const rows = await db
-      .select({ id: lines.id, brandId: lines.brandId })
-      .from(lines)
-      .where(eq(lines.id, ancestry.lineId))
-      .limit(1);
+    const rows = isUuid(ancestry.lineId)
+      ? await db
+          .select({ id: lines.id, brandId: lines.brandId })
+          .from(lines)
+          .where(eq(lines.id, ancestry.lineId))
+          .limit(1)
+      : [];
     context.line = rows[0] ?? null;
   }
   if (ancestry.blendId != null) {
-    const rows = await db
-      .select({ id: blends.id, lineId: blends.lineId })
-      .from(blends)
-      .where(eq(blends.id, ancestry.blendId))
-      .limit(1);
+    const rows = isUuid(ancestry.blendId)
+      ? await db
+          .select({ id: blends.id, lineId: blends.lineId })
+          .from(blends)
+          .where(eq(blends.id, ancestry.blendId))
+          .limit(1)
+      : [];
     context.blend = rows[0] ?? null;
   }
 
@@ -553,12 +566,18 @@ export async function loadNamePartsForCigar(
   ancestry: CigarAncestry,
 ): Promise<{ line: string | null; blend: string | null }> {
   const parts: { line: string | null; blend: string | null } = { line: null, blend: null };
+  // Same rule as `loadAncestryContext` above: a malformed id names no row, which
+  // is the null a miss already yields (./uuid.ts).
   if (ancestry.lineId != null) {
-    const rows = await db.select({ name: lines.name }).from(lines).where(eq(lines.id, ancestry.lineId)).limit(1);
+    const rows = isUuid(ancestry.lineId)
+      ? await db.select({ name: lines.name }).from(lines).where(eq(lines.id, ancestry.lineId)).limit(1)
+      : [];
     parts.line = rows[0]?.name ?? null;
   }
   if (ancestry.blendId != null) {
-    const rows = await db.select({ name: blends.name }).from(blends).where(eq(blends.id, ancestry.blendId)).limit(1);
+    const rows = isUuid(ancestry.blendId)
+      ? await db.select({ name: blends.name }).from(blends).where(eq(blends.id, ancestry.blendId)).limit(1)
+      : [];
     parts.blend = rows[0]?.name ?? null;
   }
   return parts;

@@ -18,6 +18,7 @@ import type {
   QueryPublicSmokesResult,
 } from "./types.js";
 import { SmokeNotFoundError } from "./errors.js";
+import { isUuid } from "./uuid.js";
 import { toSmokePhotoView } from "./mapping.js";
 import { decodeSmokeCursor, encodeSmokeCursor, afterSmokeCursor } from "./smoke-cursor.js";
 
@@ -102,6 +103,13 @@ export async function getPublicSmoke(
   deps: Deps,
   args: { smokeId: string },
 ): Promise<PublicSmokeView> {
+  // This surface is anonymous — the id arrives straight off a URL anyone may type,
+  // so an unparseable one is ordinary traffic rather than a client bug. It names
+  // nothing, which is exactly what the visibility join already answers for a
+  // private or absent smoke; folding it into that same 404 keeps the three
+  // indistinguishable (./uuid.ts).
+  if (!isUuid(args.smokeId)) throw new SmokeNotFoundError();
+
   const rows = await deps.db
     .select({ smoke: smokes, cigar: { canonicalName: cigars.canonicalName } })
     .from(smokes)

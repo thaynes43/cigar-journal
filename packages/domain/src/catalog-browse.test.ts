@@ -253,6 +253,29 @@ describe("catalog browse", () => {
     expect(pages).toBe(3); // 2 + 2 + 1
   });
 
+  it("browseCatalog serves the first page for a forged cursor rather than failing", async () => {
+    // #206. The cursor's id is spent as `${cur.id}::uuid` at nine sites across the
+    // four sorts, and BOTH surfaces take the cursor as a bare string (the
+    // browse_catalog tool and catalog.browse). A forged envelope — right base64,
+    // right JSON, right arity, right sort identity, junk id — used to reach
+    // Postgres and 500. The documented behaviour for a cursor we did not issue is
+    // to restart cleanly, so it must be indistinguishable from no cursor at all.
+    const brand = `Forged ${tag}`;
+    await h.seedCigar({ canonicalName: `${brand} One`, brand });
+    await h.seedCigar({ canonicalName: `${brand} Two`, brand });
+
+    const clean = await browseCatalog(h.deps, userA, { q: brand, sort: "name" });
+    expect(clean.cigars).toHaveLength(2);
+
+    // "name:asc" is the identity the sort mints, so this cursor is rejected on its
+    // id alone — not incidentally, on a sort-identity mismatch.
+    const forged = Buffer.from(JSON.stringify(["name:asc", `${brand} One`, "not-a-uuid"]), "utf8").toString(
+      "base64url",
+    );
+    const withForged = await browseCatalog(h.deps, userA, { q: brand, sort: "name", cursor: forged });
+    expect(withForged).toEqual(clean);
+  });
+
   // --- ownership facet (PRD-003 R-UNI-2) -----------------------------------
 
   it("browseCatalog ownership facet partitions have / want / dont over the caller's overlay", async () => {

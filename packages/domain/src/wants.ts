@@ -5,6 +5,7 @@ import { auditActor } from "./audit-attribution.js";
 import type { SetWantInput, SetWantResult } from "./types.js";
 import { CigarNotFoundError } from "./errors.js";
 import { provenanceToActor } from "./mapping.js";
+import { isUuid } from "./uuid.js";
 
 // The single want mark (PRD-003 R-WANT-1..3, DESIGN-002 §Want). Independent of
 // holdings and smokes — smoking never touches it, acquisition only OFFERS the
@@ -37,6 +38,11 @@ export async function setWant(
   principal: Principal,
   input: SetWantInput,
 ): Promise<SetWantResult> {
+  // A malformed id is answered as `cigar_not_found` too — the existence probe
+  // below would raise 22P02 on it instead of returning no rows, and to the caller
+  // the two cases mean the same thing (./uuid.ts).
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
+
   // The cigar must exist — a bogus id is cigar_not_found, never a silent no-op
   // (and the FK would otherwise reject the insert as an opaque fault).
   const exists = await deps.db

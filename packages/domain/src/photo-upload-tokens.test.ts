@@ -223,5 +223,38 @@ describe("photo upload tokens", () => {
         mintProductPhotoUploadToken(h.deps, admin, { cigarId: "00000000-0000-0000-0000-000000000000" }),
       ).rejects.toBeInstanceOf(CigarNotFoundError);
     });
+
+    // #206. Both mints take an id straight from a tool argument or a route param
+    // and carried it raw into a `uuid` column, where a non-uuid raised Postgres
+    // 22P02 and escaped these not-found paths as a 500. The equality is the
+    // contract: malformed must be INDISTINGUISHABLE from unknown-but-valid.
+    it("mintProductPhotoUploadToken answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await mintProductPhotoUploadToken(h.deps, admin, {
+        cigarId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await mintProductPhotoUploadToken(h.deps, admin, {
+        cigarId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(CigarNotFoundError);
+      expect(unknown).toBeInstanceOf(CigarNotFoundError);
+      expect((malformed as CigarNotFoundError).toPayload()).toEqual(
+        (unknown as CigarNotFoundError).toPayload(),
+      );
+    });
+  });
+
+  // #206, the smoke half of the same guard.
+  it("mintPhotoUploadToken answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await mintPhotoUploadToken(h.deps, user, { smokeId: "not-a-uuid" }).catch(
+      (e: unknown) => e,
+    );
+    const unknown = await mintPhotoUploadToken(h.deps, user, { smokeId: newRequestId() }).catch(
+      (e: unknown) => e,
+    );
+    expect(malformed).toBeInstanceOf(SmokeNotFoundError);
+    expect(unknown).toBeInstanceOf(SmokeNotFoundError);
+    expect((malformed as SmokeNotFoundError).toPayload()).toEqual(
+      (unknown as SmokeNotFoundError).toPayload(),
+    );
   });
 });

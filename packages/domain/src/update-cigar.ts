@@ -10,6 +10,7 @@ import { fingerprint } from "./fingerprint.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { provenanceToActor } from "./mapping.js";
 import { CigarNotFoundError } from "./errors.js";
+import { isUuid } from "./uuid.js";
 
 // Conversational catalog repair (ADR-009), fill-nulls-only. A factual field is
 // writable ONLY while it is null AND the cigar is unverified: chat never
@@ -59,6 +60,10 @@ export async function updateCigar(
   principal: Principal,
   input: UpdateCigarInput,
 ): Promise<UpdateCigarResult> {
+  // Before the transaction, whose first id use is the cigar lookup — a 22P02
+  // there aborts a transaction the idempotency read has already used, and
+  // isUniqueViolation would not recognise it to recover (./uuid.ts).
+  if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
   const requestFingerprint = fingerprint(input);
   try {
     return await deps.db.transaction((tx) => updateWithinTx(tx, principal, input, requestFingerprint));

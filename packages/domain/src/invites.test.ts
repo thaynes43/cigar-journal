@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { auditLog, invites } from "@cj/db";
-import { createHarness, type DomainHarness } from "./testing/harness.js";
+import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import {
   INVITE_TTL_SECONDS,
   RESERVATION_WINDOW_SECONDS,
@@ -199,6 +199,23 @@ describe("invites", () => {
     await revokeInvite(h.deps, admin, { inviteId: minted.inviteId });
     await expect(revokeInvite(h.deps, admin, { inviteId: minted.inviteId })).rejects.toBeInstanceOf(
       InviteInvalidError,
+    );
+  });
+
+  // #206. The inviteId is admin-chosen and reached the `invites.id` uuid column
+  // raw. It joins the one refusal this path already gives every other unrevocable
+  // invite, so malformed must be INDISTINGUISHABLE from unknown-but-valid.
+  it("revokeInvite answers a malformed id exactly as it answers an unknown one", async () => {
+    const malformed = await revokeInvite(h.deps, admin, { inviteId: "not-a-uuid" }).catch(
+      (e: unknown) => e,
+    );
+    const unknown = await revokeInvite(h.deps, admin, { inviteId: newRequestId() }).catch(
+      (e: unknown) => e,
+    );
+    expect(malformed).toBeInstanceOf(InviteInvalidError);
+    expect(unknown).toBeInstanceOf(InviteInvalidError);
+    expect((malformed as InviteInvalidError).toPayload()).toEqual(
+      (unknown as InviteInvalidError).toPayload(),
     );
   });
 

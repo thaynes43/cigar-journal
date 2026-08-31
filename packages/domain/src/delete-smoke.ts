@@ -4,6 +4,7 @@ import type { Deps, Principal, Tx } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
 import type { DeleteSmokeInput, DeleteSmokeResult } from "./types.js";
 import { SmokeNotFoundError } from "./errors.js";
+import { isUuid } from "./uuid.js";
 import { smokeSnapshot } from "./mapping.js";
 
 // Owner-scoped hard delete of a Smoke — web-only (ADR-002 / flow 005; MCP has no
@@ -15,6 +16,11 @@ export async function deleteSmoke(
   principal: Principal,
   input: DeleteSmokeInput,
 ): Promise<DeleteSmokeResult> {
+  // The web procedure rejects a non-uuid a layer earlier (#204), so this is the
+  // domain refusing to depend on its adapter rather than a live 500 — and it
+  // refuses before opening a transaction it would only have to unwind
+  // (./uuid.ts).
+  if (!isUuid(input.smokeId)) throw new SmokeNotFoundError();
   return deps.db.transaction((tx) => deleteWithinTx(tx, principal, input));
 }
 

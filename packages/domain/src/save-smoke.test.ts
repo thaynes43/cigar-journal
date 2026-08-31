@@ -361,6 +361,41 @@ describe("saveSmoke", () => {
     expect((error as ValidationError).fields.some((f) => f.path === "consumption.purchaseId")).toBe(true);
   });
 
+  it("answers a malformed consumption purchaseId exactly as it answers an unowned one", async () => {
+    // #206. The lot check is this write's only contact with `purchases`, and an
+    // unguarded non-uuid reached the `uuid` column there as Postgres 22P02 —
+    // untyped, so it escaped as a 500 and poisoned the save's transaction. A lot
+    // is a field of the request rather than the identity being addressed, so the
+    // answer being matched is the existing validation_error for a lot that is not
+    // this cigar's — malformed and unowned are indistinguishable.
+    const cigarId = await h.seedCigar({ canonicalName: "Malformed Lot Robusto", brand: "Mal" });
+    const attempt = (purchaseId: string) =>
+      saveSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["marker"],
+        consumption: { fromHumidor: true, purchaseId },
+      }).catch((e: unknown) => e);
+
+    const malformed = await attempt("not-a-uuid");
+    const unknown = await attempt(newRequestId());
+
+    expect(malformed).toBeInstanceOf(ValidationError);
+    expect(unknown).toBeInstanceOf(ValidationError);
+    expect((malformed as ValidationError).fields).toEqual([
+      {
+        path: "consumption.purchaseId",
+        message: "No humidor lot of this cigar matches the given purchaseId.",
+      },
+    ]);
+    expect((malformed as ValidationError).toPayload()).toEqual(
+      (unknown as ValidationError).toPayload(),
+    );
+
+    // Neither attempt wrote a smoke — the whole save rolls back with the lot.
+    expect(await h.deps.db.select().from(smokes).where(eq(smokes.cigarId, cigarId))).toHaveLength(0);
+  });
+
   it("does not double-deduct on a replayed save with consumption", async () => {
     const cigarId = await h.seedCigar({ canonicalName: "Replay Consume Toro", brand: "RepC" });
     const input: SaveSmokeInput = {
