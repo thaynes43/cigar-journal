@@ -1,4 +1,4 @@
-import type { Tobacco, SmokeContext, SmokePhotoKind } from "@cj/db";
+import type { Tobacco, SmokeContext, SmokePhotoKind, CigarNameSource, SuggestedParse } from "@cj/db";
 
 // Domain vocabulary — mirrors docs/ddd/ubiquitous-language.md. Value objects are
 // plain interfaces; the Smoke aggregate is assembled by the services below.
@@ -1601,18 +1601,30 @@ export interface AgentRunRowsResult {
 // ---- Curation worklist (the admin drain queue; DESIGN-003 wave 4a) ----------
 
 // The kinds of work the curation queue surfaces. One paged read (get_curation_queue)
-// serves all six via this discriminator, rather than six tools:
+// serves all eight via this discriminator, rather than eight tools:
 //   unverified    — active cigars still unverified (the verification backlog)
 //   duplicates    — near-duplicate name pairs (human-merge candidates)
 //   match_triage  — vendor listing→cigar auto-matches awaiting confirm/unmatch
-//   unbranded     — active cigars with a null brand (brand backfill)
+//   unbranded     — active cigars not linked to a brand (the registry backfill)
+//   unlined       — active cigars on a brand but no line (ADR-012 Wave 3)
+//   unblended     — active cigars on a line but no blend (ADR-012 Wave 3)
 //   untyped       — active cigars with a null NC/CC type (type classification)
 //   missing_photos— active cigars with no product photo
+//
+// THE THREE STRUCTURAL KINDS ARE ONE LADDER, and they are keyed on the FK rather
+// than on the free-text column so that the queue empties as the structure fills.
+// `unbranded` used to mean `brand IS NULL` — the text a curator typed — which
+// counted a row spelled `Padrón` as branded while `brand_id` was still null and
+// nothing in the catalog could navigate to it. Keyed on `brand_id`, the three
+// drain in order: attach the brand, mint and attach the line, mint and attach
+// the blend, and a row that leaves `unbranded` appears in `unlined` the same day.
 export type CurationWorklistKind =
   | "unverified"
   | "duplicates"
   | "match_triage"
   | "unbranded"
+  | "unlined"
+  | "unblended"
   | "untyped"
   | "missing_photos";
 
@@ -1630,6 +1642,19 @@ export interface WorklistCigar {
   canonicalName: string;
   brand: string | null;
   line: string | null;
+  // The STRUCTURAL ancestry (ADR-012). Present alongside the free-text columns
+  // above because the two answer different questions and the structural kinds
+  // are unworkable without these: a row in `unlined` needs its `brandId` to
+  // register a line under, and `brand` text cannot supply it — that a row has
+  // brand text and no `brandId` is precisely why it is in the queue.
+  brandId: string | null;
+  lineId: string | null;
+  blendId: string | null;
+  vitola: string | null;
+  // Whether `canonicalName` is the owner's string or a projection of the parts.
+  // A curator re-parenting a `composed` row is changing its name as a side
+  // effect; on a `freeform` row the name is untouched.
+  nameSource: CigarNameSource;
   type: "NC" | "CC" | null;
   manufacturer: string | null;
   verification: Verification;
@@ -1676,13 +1701,26 @@ export interface WorklistMatch {
   //                    to the queue: a human chooses, nothing is minted.
   // Absent means the row is an `auto` proposal, which needs no reason.
   reason?: "market_refusal" | "no_match" | "no_anchor" | "ambiguous";
+  // THE RESOLVER'S OWN PARSE of this listing (migration 0027), surfaced so a
+  // curator inherits it instead of re-deriving it by eye — which is what 0027
+  // persisted it for, and what this read failed to do until ADR-012 Wave 3 needed
+  // it. It carries the brand/line/blend the title anchored to, the vitola and
+  // dimensions, and `residue`: the part of the title nobody could account for,
+  // which is the most useful field on an ambiguous row.
+  //
+  // EVIDENCE, NOT A VERDICT. It is what split_cigar and assign_cigar_taxonomy are
+  // argued FROM, never applied automatically — an ambiguous row is ambiguous
+  // precisely because the parse did not settle it.
+  //
+  // Absent on rows written before 0027 and on rows whose parse resolved cleanly.
+  suggestedParse?: SuggestedParse;
 }
 
 // One page of the worklist. Exactly one of the payload arrays is populated per
 // `kind`; `nextCursor` is null on the last page.
 export interface CurationWorklistResult {
   kind: CurationWorklistKind;
-  cigars?: WorklistCigar[]; // unverified | unbranded | untyped | missing_photos
+  cigars?: WorklistCigar[]; // unverified | unbranded | unlined | unblended | untyped | missing_photos
   duplicates?: DuplicateCandidatePair[]; // duplicates
   matches?: WorklistMatch[]; // match_triage
   nextCursor: string | null;

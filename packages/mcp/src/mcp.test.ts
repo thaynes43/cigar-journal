@@ -27,9 +27,14 @@ import {
   productPhotos,
   auditLog,
   cigars,
+  brands,
+  lines,
+  blends,
+  blenders,
 } from "@cj/db";
 import { buildApp } from "./app.js";
 import { INSTRUCTIONS, TOOL_SCOPES } from "./constants.js";
+import { splitCigarSchema } from "./schemas.js";
 
 // End-to-end over the real HTTP surface: an embedded Postgres (domain harness),
 // the app's own OAuth authorization server to mint genuine audience-bound tokens,
@@ -278,7 +283,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the twenty-six tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
+  it("lists exactly the thirty tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -313,6 +318,11 @@ describe("@cj/mcp adapter", () => {
           "set_product_photo_rights",
           "rename_cigar",
           "queue_enrichment_backlog",
+          // taxonomy curation (ADR-012 Wave 3, issue #196)
+          "register_taxonomy",
+          "update_registry_aliases",
+          "assign_cigar_taxonomy",
+          "split_cigar",
         ].sort(),
       );
 
@@ -2806,6 +2816,609 @@ describe("@cj/mcp adapter", () => {
       expect(res.canonicalName).toBe("Padrón 1926 No. 9 Maduro");
     });
     expect((await cigarById(cigarId))!.canonicalName).toBe("Padrón 1926 No. 9 Maduro");
+  });
+
+  // ---- taxonomy curation tools (ADR-012 Wave 3, issue #196) -----------------
+  //
+  // The four registry verbs over the real wire: find-or-mint a brand → line →
+  // blend path, edit the spellings a registry row answers to, place a leaf in
+  // that structure, and split an entry that has been standing for several
+  // products. Same admin gate, same `actor: agent` stamp and same idempotency
+  // envelope as the rest of the curation surface, so the tests below are shaped
+  // like the ones above them.
+
+  describe("taxonomy curation tools", () => {
+    interface RegisteredEntity {
+      id: string;
+      name: string;
+      slug: string;
+      aliases: string[];
+      created: boolean;
+    }
+    interface RegisterPayload {
+      brand: RegisteredEntity;
+      line: RegisteredEntity | null;
+      blend: RegisteredEntity | null;
+      blenders: { id: string; name: string; created: boolean; credited: boolean }[];
+      replayed: boolean;
+    }
+    interface AliasesPayload {
+      level: string;
+      id: string;
+      name: string;
+      aliases: string[];
+      added: string[];
+      removed: string[];
+      replayed: boolean;
+    }
+    interface AssignPayload {
+      cigarId: string;
+      canonicalName: string;
+      composedName: string;
+      nameSource: string;
+      changedFields: string[];
+      preview: boolean;
+      replayed: boolean;
+    }
+    interface SplitPayload {
+      cigarId: string;
+      splits: { cigarId: string; canonicalName: string; created: boolean; listingIds: string[] }[];
+      remainingListings: number;
+      replayed: boolean;
+    }
+    interface WorklistPayload {
+      kind: string;
+      cigars: { cigarId: string; brandId: string | null; lineId: string | null; blendId: string | null }[];
+      nextCursor: string | null;
+    }
+
+    // Brand slugs and alias keys are globally unique, so every test names its own
+    // marca — a fixed name would make the second test to reach for it a find
+    // rather than a mint, and the `created` flags are what these tests read.
+    function tag(): string {
+      return randomUUID().slice(0, 8);
+    }
+
+    // Registry rows read with a plain select + find in JS, per the same rule
+    // auditFor and cigarById follow (this package has no drizzle-orm dependency).
+    async function brandRow(id: string): Promise<(typeof brands.$inferSelect) | undefined> {
+      return (await h.pg.db.select().from(brands)).find((r) => r.id === id);
+    }
+    async function lineRow(id: string): Promise<(typeof lines.$inferSelect) | undefined> {
+      return (await h.pg.db.select().from(lines)).find((r) => r.id === id);
+    }
+    async function blendRow(id: string): Promise<(typeof blends.$inferSelect) | undefined> {
+      return (await h.pg.db.select().from(blends)).find((r) => r.id === id);
+    }
+    async function listingRow(id: string): Promise<(typeof listingMatches.$inferSelect) | undefined> {
+      return (await h.pg.db.select().from(listingMatches)).find((r) => r.id === id);
+    }
+
+    // A crawler-guessed listing on an EXISTING cigar — the only state split_cigar
+    // will re-point (`decided_by` defaults to crawler; a curator/agent verdict is
+    // refused). Unlike seedAutoMatch above, the cigar is supplied.
+    async function seedCrawlerListing(cigarId: string, vendorId: string): Promise<string> {
+      const [match] = await h.pg.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `sku-${randomUUID().slice(0, 8)}`, cigarId, status: "auto" })
+        .returning({ id: listingMatches.id });
+      return match!.id;
+    }
+
+    async function register(args: Record<string, unknown>): Promise<RegisterPayload> {
+      return withClient(
+        adminCuration,
+        async (client) =>
+          payloadOf(
+            await call(client, "register_taxonomy", { clientRequestId: randomUUID(), runId: randomUUID(), ...args }),
+          ) as RegisterPayload,
+      );
+    }
+
+    it("register_taxonomy mints a brand → line → blend path in one call, then FINDS the same path on the next", async () => {
+      const t = tag();
+      const brandName = `Dunbarton Trading ${t}`;
+      const runId = randomUUID();
+
+      const ids = await withClient(adminCuration, async (client) => {
+        const res = payloadOf(
+          await call(client, "register_taxonomy", {
+            clientRequestId: randomUUID(),
+            brand: { name: brandName, country: "Nicaragua" },
+            line: { name: "Sobremesa" },
+            blend: { name: "Brulee", wrapper: "Ecuadorian Habano" },
+            runId,
+            confidence: 0.92,
+          }),
+        ) as RegisterPayload;
+
+        expect(res.replayed).toBe(false);
+        expect(res.brand.created).toBe(true);
+        expect(res.line!.created).toBe(true);
+        expect(res.blend!.created).toBe(true);
+        expect(res.brand.name).toBe(brandName);
+        expect(res.line!.name).toBe("Sobremesa");
+        expect(res.blend!.name).toBe("Brulee");
+        // The brand's own name is a matching key from the moment it is minted.
+        expect(res.brand.aliases).toContain(`dunbarton-trading-${t}`);
+        return { brandId: res.brand.id, lineId: res.line!.id, blendId: res.blend!.id };
+      });
+
+      // The rows are really there, and each hangs off the level above it.
+      const brand = await brandRow(ids.brandId);
+      expect(brand?.name).toBe(brandName);
+      expect(brand?.country).toBe("Nicaragua");
+      const line = await lineRow(ids.lineId);
+      expect(line?.name).toBe("Sobremesa");
+      expect(line?.brandId).toBe(ids.brandId);
+      const blend = await blendRow(ids.blendId);
+      expect(blend?.name).toBe("Brulee");
+      expect(blend?.lineId).toBe(ids.lineId);
+      expect(blend?.wrapper).toBe("Ecuadorian Habano");
+
+      const audit = await auditFor("line.create", runId);
+      expect(audit?.actor).toBe("agent");
+      expect(audit?.runId).toBe(runId);
+      expect((audit?.after as Record<string, unknown>).brandId).toBe(ids.brandId);
+
+      // GET-or-create: a fresh intent over the same path mints nothing. This is
+      // the property the lane depends on — structuring a brand's fiftieth row
+      // costs no more than its first, and reports `created: false` rather than
+      // an "already exists" error the lane would have to learn to ignore.
+      await withClient(adminCuration, async (client) => {
+        const again = payloadOf(
+          await call(client, "register_taxonomy", {
+            clientRequestId: randomUUID(),
+            brand: { name: brandName },
+            line: { name: "Sobremesa" },
+            blend: { name: "Brulee" },
+            runId,
+          }),
+        ) as RegisterPayload;
+        expect(again.brand.created).toBe(false);
+        expect(again.line!.created).toBe(false);
+        expect(again.blend!.created).toBe(false);
+        expect(again.brand.id).toBe(ids.brandId);
+        expect(again.line!.id).toBe(ids.lineId);
+        expect(again.blend!.id).toBe(ids.blendId);
+      });
+    });
+
+    it("register_taxonomy replays the same clientRequestId instead of minting a second time", async () => {
+      const t = tag();
+      const lineName = `Replay Line ${t}`;
+      const args = {
+        clientRequestId: randomUUID(),
+        brand: { name: `Replay Marca ${t}` },
+        line: { name: lineName },
+        runId: randomUUID(),
+        confidence: 0.5,
+      };
+
+      await withClient(adminCuration, async (client) => {
+        const first = payloadOf(await call(client, "register_taxonomy", args)) as RegisterPayload;
+        expect(first.replayed).toBe(false);
+        expect(first.line!.created).toBe(true);
+
+        const second = payloadOf(await call(client, "register_taxonomy", args)) as RegisterPayload;
+        expect(second.replayed).toBe(true);
+        expect(second.brand.id).toBe(first.brand.id);
+        expect(second.line!.id).toBe(first.line!.id);
+        // A replay reports the ORIGINAL verdict verbatim, not a fresh "found".
+        expect(second.line!.created).toBe(true);
+      });
+
+      expect((await h.pg.db.select().from(lines)).filter((r) => r.name === lineName)).toHaveLength(1);
+    });
+
+    it("register_taxonomy mints a named blender and credits it on the blend", async () => {
+      const t = tag();
+      const res = await register({
+        brand: { name: `Saka Trading ${t}` },
+        line: { name: "Sobremesa" },
+        blend: { name: "Brulee", blenders: ["Steve Saka"] },
+      });
+
+      expect(res.blenders).toHaveLength(1);
+      expect(res.blenders[0]!.name).toBe("Steve Saka");
+      expect(res.blenders[0]!.created).toBe(true);
+      expect(res.blenders[0]!.credited).toBe(true);
+
+      const person = (await h.pg.db.select().from(blenders)).find((r) => r.id === res.blenders[0]!.id);
+      expect(person?.name).toBe("Steve Saka");
+      expect(person?.slug).toBe("steve-saka");
+    });
+
+    it("update_registry_aliases folds an added spelling into the brand's matching keys, and drops it again", async () => {
+      const t = tag();
+      const spelling = `RYJ${t}`;
+      const key = spelling.toLowerCase();
+      const registered = await register({ brand: { name: `Romeo y Julieta ${t}` } });
+      expect(registered.line).toBeNull();
+      expect(registered.blend).toBeNull();
+      const brandId = registered.brand.id;
+
+      await withClient(adminCuration, async (client) => {
+        const added = payloadOf(
+          await call(client, "update_registry_aliases", {
+            clientRequestId: randomUUID(),
+            level: "brand",
+            id: brandId,
+            add: [spelling],
+            runId: randomUUID(),
+            confidence: 0.99,
+          }),
+        ) as AliasesPayload;
+
+        // A display SPELLING went in; the folded matching KEY came back. That
+        // asymmetry is the contract — a caller passing a pre-folded slug would
+        // be guessing at a normalization the server owns.
+        expect(added.added).toEqual([key]);
+        expect(added.removed).toEqual([]);
+        expect(added.aliases).toContain(key);
+        expect(added.level).toBe("brand");
+        expect(added.id).toBe(brandId);
+      });
+      expect((await brandRow(brandId))?.aliases).toContain(key);
+
+      await withClient(adminCuration, async (client) => {
+        const removed = payloadOf(
+          await call(client, "update_registry_aliases", {
+            clientRequestId: randomUUID(),
+            level: "brand",
+            id: brandId,
+            remove: [spelling],
+            runId: randomUUID(),
+          }),
+        ) as AliasesPayload;
+        expect(removed.removed).toEqual([key]);
+        expect(removed.added).toEqual([]);
+        expect(removed.aliases).not.toContain(key);
+      });
+      expect((await brandRow(brandId))?.aliases).not.toContain(key);
+    });
+
+    it("update_registry_aliases refuses to remove the key derived from the entity's own name", async () => {
+      const t = tag();
+      const brandName = `Protected Marca ${t}`;
+      const ownKey = `protected-marca-${t}`;
+      const brandId = (await register({ brand: { name: brandName } })).brand.id;
+
+      await withClient(adminCuration, async (client) => {
+        const refused = await call(client, "update_registry_aliases", {
+          clientRequestId: randomUUID(),
+          level: "brand",
+          id: brandId,
+          remove: [brandName],
+          runId: randomUUID(),
+        });
+        expect(errorOf(refused).code).toBe("validation_error");
+      });
+
+      // Still reachable by its own name — the refusal is what keeps it findable.
+      expect((await brandRow(brandId))?.aliases).toContain(ownKey);
+    });
+
+    it("assign_cigar_taxonomy attaches a line and recomposes the canonical name from the parts", async () => {
+      const t = tag();
+      const brandName = `Tatuaje ${t}`;
+      const lineName = "Havana Cazadores";
+      const path = await register({ brand: { name: brandName }, line: { name: lineName } });
+      const cigarId = await h.seedCigar({
+        canonicalName: `Freeform Leftover ${t}`,
+        brand: brandName,
+        brandId: path.brand.id,
+        verification: "unverified",
+      });
+      const runId = randomUUID();
+      const composed = `${brandName} ${lineName} Robusto`;
+
+      await withClient(adminCuration, async (client) => {
+        const res = payloadOf(
+          await call(client, "assign_cigar_taxonomy", {
+            clientRequestId: randomUUID(),
+            cigarId,
+            lineId: path.line!.id,
+            vitolaName: "Robusto",
+            nameSource: "composed",
+            runId,
+            confidence: 0.88,
+          }),
+        ) as AssignPayload;
+
+        expect(res.preview).toBe(false);
+        expect(res.nameSource).toBe("composed");
+        expect(res.canonicalName).toBe(composed);
+        expect(res.composedName).toBe(composed);
+        expect([...res.changedFields].sort()).toEqual(["lineId", "nameSource", "vitolaName"]);
+      });
+
+      const row = await cigarById(cigarId);
+      expect(row!.canonicalName).toBe(composed);
+      expect(row!.lineId).toBe(path.line!.id);
+      expect(row!.vitolaName).toBe("Robusto");
+      expect(row!.nameSource).toBe("composed");
+
+      const audit = await auditFor("cigar.assign_parts", runId);
+      expect(audit?.actor).toBe("agent");
+      expect(audit?.runId).toBe(runId);
+      expect((audit?.after as Record<string, unknown>).canonicalName).toBe(composed);
+    });
+
+    it("assign_cigar_taxonomy preview reports the composed name and writes nothing", async () => {
+      const t = tag();
+      const brandName = `Illusione ${t}`;
+      const lineName = "Epernay";
+      const path = await register({ brand: { name: brandName }, line: { name: lineName } });
+      const original = `Preview Untouched ${t}`;
+      const cigarId = await h.seedCigar({
+        canonicalName: original,
+        brand: brandName,
+        brandId: path.brand.id,
+        verification: "unverified",
+      });
+      const runId = randomUUID();
+
+      await withClient(adminCuration, async (client) => {
+        const res = payloadOf(
+          await call(client, "assign_cigar_taxonomy", {
+            clientRequestId: randomUUID(),
+            cigarId,
+            lineId: path.line!.id,
+            vitolaName: "Le Ferme",
+            nameSource: "composed",
+            preview: true,
+            runId,
+            confidence: 0.4,
+          }),
+        ) as AssignPayload;
+
+        expect(res.preview).toBe(true);
+        expect(res.composedName).toBe(`${brandName} ${lineName} Le Ferme`);
+        expect([...res.changedFields].sort()).toEqual(["lineId", "nameSource", "vitolaName"]);
+      });
+
+      // The whole point: the same validation ran and nothing moved.
+      const row = await cigarById(cigarId);
+      expect(row!.canonicalName).toBe(original);
+      expect(row!.lineId).toBeNull();
+      expect(row!.vitolaName).toBeNull();
+      expect(row!.nameSource).toBe("freeform");
+      expect(await auditFor("cigar.assign_parts", runId)).toBeUndefined();
+    });
+
+    it("assign_cigar_taxonomy refuses a line belonging to a different brand", async () => {
+      const t = tag();
+      const mine = await register({ brand: { name: `Ancestry Mine ${t}` } });
+      const theirs = await register({ brand: { name: `Ancestry Theirs ${t}` }, line: { name: "Foreign Line" } });
+      const cigarId = await h.seedCigar({
+        canonicalName: `Ancestry Probe ${t}`,
+        brandId: mine.brand.id,
+        verification: "unverified",
+      });
+
+      await withClient(adminCuration, async (client) => {
+        const refused = await call(client, "assign_cigar_taxonomy", {
+          clientRequestId: randomUUID(),
+          cigarId,
+          lineId: theirs.line!.id,
+          runId: randomUUID(),
+        });
+        expect(errorOf(refused).code).toBe("validation_error");
+      });
+
+      expect((await cigarById(cigarId))!.lineId).toBeNull();
+    });
+
+    it("split_cigar mints a leaf, moves one listing onto it as confirmed, and leaves the rest on the bucket", async () => {
+      const t = tag();
+      const brandName = `Warped ${t}`;
+      const path = await register({ brand: { name: brandName } });
+      const bucketId = await h.seedCigar({
+        canonicalName: `${brandName} Assorted`,
+        brand: brandName,
+        brandId: path.brand.id,
+        type: "NC",
+        verification: "unverified",
+      });
+      const [vendor] = await h.pg.db
+        .insert(vendors)
+        .values({ name: `Split Vendor ${t}` })
+        .returning({ id: vendors.id });
+      const moving = await seedCrawlerListing(bucketId, vendor!.id);
+      const staying = await seedCrawlerListing(bucketId, vendor!.id);
+      const runId = randomUUID();
+
+      const outcome = await withClient(adminCuration, async (client) =>
+        payloadOf(
+          await call(client, "split_cigar", {
+            clientRequestId: randomUUID(),
+            cigarId: bucketId,
+            splits: [{ listingIds: [moving], vitolaName: "Robusto" }],
+            runId,
+            confidence: 0.93,
+          }),
+        ) as SplitPayload,
+      );
+
+      expect(outcome.cigarId).toBe(bucketId);
+      expect(outcome.splits).toHaveLength(1);
+      expect(outcome.splits[0]!.created).toBe(true);
+      expect(outcome.splits[0]!.canonicalName).toBe(`${brandName} Robusto`);
+      expect(outcome.splits[0]!.listingIds).toEqual([moving]);
+      // A partial split is the expected outcome: listings nobody named stay put.
+      expect(outcome.remainingListings).toBe(1);
+
+      const leafId = outcome.splits[0]!.cigarId;
+      const moved = await listingRow(moving);
+      expect(moved?.cigarId).toBe(leafId);
+      expect(moved?.status).toBe("confirmed");
+      expect(moved?.decidedBy).toBe("agent");
+      const kept = await listingRow(staying);
+      expect(kept?.cigarId).toBe(bucketId);
+      expect(kept?.status).toBe("auto");
+
+      // The minted leaf inherits the bucket's identity facts and takes the parts
+      // the split established; it is unverified because only STRUCTURE was asserted.
+      const leaf = await cigarById(leafId);
+      expect(leaf!.brandId).toBe(path.brand.id);
+      expect(leaf!.type).toBe("NC");
+      expect(leaf!.vitolaName).toBe("Robusto");
+      expect(leaf!.nameSource).toBe("composed");
+      expect(leaf!.verification).toBe("unverified");
+
+      const audit = await auditFor("cigar.split", runId);
+      expect(audit?.actor).toBe("agent");
+      expect(audit?.runId).toBe(runId);
+      expect((audit?.after as Record<string, unknown>).remainingListings).toBe(1);
+    });
+
+    // BOTH-OR-NEITHER, on the schema rather than in the handler, because the
+    // handler cannot see the mistake: it drops the mint parts whenever a target
+    // is present, so a model that hedged its mint with a half-remembered sibling
+    // id gets its listings on the wrong cigar and a success payload. Asserted
+    // against the schema directly — the point is that these args never reach the
+    // wire, so there is no tool call to make.
+    it("splitCigarSchema refuses a split arm carrying BOTH targetCigarId and mint parts", () => {
+      const arm = (half: Record<string, unknown>) =>
+        splitCigarSchema.safeParse({
+          clientRequestId: randomUUID(),
+          cigarId: randomUUID(),
+          splits: [{ listingIds: [randomUUID()], ...half }],
+        });
+
+      const both = arm({ targetCigarId: randomUUID(), vitolaName: "Robusto" });
+      expect(both.success).toBe(false);
+      // The issue lands on `targetCigarId` and names the part that would have been
+      // dropped: the model has to be told which half of its own call it lost.
+      expect(both.error?.issues[0]?.path.at(-1)).toBe("targetCigarId");
+      expect(both.error?.issues[0]?.message).toContain("vitolaName");
+
+      // Either half ALONE is a complete instruction — the rule refuses the
+      // contradiction, it does not make parts mandatory or targets suspect.
+      expect(arm({ targetCigarId: randomUUID() }).success).toBe(true);
+      expect(arm({ lineId: randomUUID(), vitolaName: "Robusto" }).success).toBe(true);
+
+      // An EXPLICIT null is a supplied part, not an omission. `lineId: null` is a
+      // model asserting "this leaf has no line" — meaningful only while minting
+      // one, so alongside a target it is the same contradiction as any other part.
+      const nulled = arm({ targetCigarId: randomUUID(), lineId: null });
+      expect(nulled.success).toBe(false);
+      expect(nulled.error?.issues[0]?.path.at(-1)).toBe("targetCigarId");
+      expect(nulled.error?.issues[0]?.message).toContain("lineId");
+    });
+
+    it("refuses all four taxonomy tools for a journal token without curation:write: 403", async () => {
+      const names = ["register_taxonomy", "update_registry_aliases", "assign_cigar_taxonomy", "split_cigar"] as const;
+
+      for (const name of names) {
+        // ownerFull holds every journal/catalog scope and no curation scope: the
+        // curate agent's token reaches these verbs and no journal token ever can.
+        expect(TOOL_SCOPES[name]).toEqual(["curation:write"]);
+        const res = await fetch(`${baseUrl}/mcp`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${ownerFull}` },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name, arguments: { clientRequestId: randomUUID() } },
+          }),
+        });
+        expect(res.status, name).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+      }
+    });
+
+    it("rejects all four taxonomy tools for a curation-scoped NON-admin principal: unauthorized", async () => {
+      const t = tag();
+      const brandName = `Gate Marca ${t}`;
+      const cigarId = await h.seedCigar({ canonicalName: `Taxonomy Gate ${t}`, verification: "unverified" });
+
+      await withClient(ownerCuration, async (client) => {
+        const registered = await call(client, "register_taxonomy", {
+          clientRequestId: randomUUID(),
+          brand: { name: brandName },
+        });
+        expect(errorOf(registered).code).toBe("unauthorized");
+
+        const aliased = await call(client, "update_registry_aliases", {
+          clientRequestId: randomUUID(),
+          level: "brand",
+          id: randomUUID(),
+          add: ["Anything"],
+        });
+        expect(errorOf(aliased).code).toBe("unauthorized");
+
+        const assigned = await call(client, "assign_cigar_taxonomy", {
+          clientRequestId: randomUUID(),
+          cigarId,
+          vitolaName: "Robusto",
+        });
+        expect(errorOf(assigned).code).toBe("unauthorized");
+
+        const split = await call(client, "split_cigar", {
+          clientRequestId: randomUUID(),
+          cigarId,
+          splits: [{ listingIds: [randomUUID()], vitolaName: "Robusto" }],
+        });
+        expect(errorOf(split).code).toBe("unauthorized");
+      });
+
+      // Scope without the role writes nothing at all.
+      expect((await h.pg.db.select().from(brands)).filter((r) => r.name === brandName)).toHaveLength(0);
+      expect((await cigarById(cigarId))!.vitolaName).toBeNull();
+    });
+
+    it("get_curation_queue serves the unlined and unblended rungs, each row carrying brandId/lineId/blendId", async () => {
+      const t = tag();
+      const path = await register({
+        brand: { name: `Ladder ${t}` },
+        line: { name: "Rung" },
+        blend: { name: "Deep" },
+      });
+      const unlinedId = await h.seedCigar({
+        canonicalName: `Ladder Unlined ${t}`,
+        brandId: path.brand.id,
+        verification: "unverified",
+      });
+      const unblendedId = await h.seedCigar({
+        canonicalName: `Ladder Unblended ${t}`,
+        brandId: path.brand.id,
+        lineId: path.line!.id,
+        verification: "unverified",
+      });
+
+      await withClient(adminCuration, async (client) => {
+        const unlined = payloadOf(
+          await call(client, "get_curation_queue", { kind: "unlined", limit: 200 }),
+        ) as WorklistPayload;
+        expect(Array.isArray(unlined.cigars)).toBe(true);
+        const onBrand = unlined.cigars.find((c) => c.cigarId === unlinedId);
+        expect(onBrand).toBeTruthy();
+        expect(onBrand!.brandId).toBe(path.brand.id);
+        expect(onBrand!.lineId).toBeNull();
+        // The ladder is worked in order: a row that HAS a line has left this rung.
+        expect(unlined.cigars.some((c) => c.cigarId === unblendedId)).toBe(false);
+
+        const unblended = payloadOf(
+          await call(client, "get_curation_queue", { kind: "unblended", limit: 200 }),
+        ) as WorklistPayload;
+        expect(Array.isArray(unblended.cigars)).toBe(true);
+        const onLine = unblended.cigars.find((c) => c.cigarId === unblendedId);
+        expect(onLine).toBeTruthy();
+        expect(onLine!.brandId).toBe(path.brand.id);
+        expect(onLine!.lineId).toBe(path.line!.id);
+        expect(onLine!.blendId).toBeNull();
+        expect(unblended.cigars.some((c) => c.cigarId === unlinedId)).toBe(false);
+
+        // `unbranded` keys on brand_id, so a row carrying the FK is out of it.
+        const unbranded = payloadOf(
+          await call(client, "get_curation_queue", { kind: "unbranded", limit: 200 }),
+        ) as WorklistPayload;
+        expect(unbranded.cigars.some((c) => c.cigarId === unlinedId)).toBe(false);
+      });
+    });
   });
 
   // ---- queue_enrichment_backlog (#154) --------------------------------------

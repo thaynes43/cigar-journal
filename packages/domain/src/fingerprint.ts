@@ -8,7 +8,14 @@ import { createHash } from "node:crypto";
 // Not part of the intent: envelope wrappers and fields the adapter injects
 // rather than the model supplying (a retry may vary them without changing what
 // is being saved).
-const NON_INTENT_KEYS = new Set(["clientRequestId", "expectedVersion", "correlationId", "provenance"]);
+//
+// `preview` is here for a different reason, and it is the sharper one. A dry run
+// records no key, so the only fingerprint ever STORED under a request id is the
+// commit's — and a commit sent as `preview: false` then retried with the field
+// omitted is the same intent hashing two ways. That turns the safe retry into an
+// IdempotencyConflictError, which is the one outcome the envelope exists to
+// prevent. The flag selects whether the call writes, never what it writes.
+const NON_INTENT_KEYS = new Set(["clientRequestId", "expectedVersion", "correlationId", "provenance", "preview"]);
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);

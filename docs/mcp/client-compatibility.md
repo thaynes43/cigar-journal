@@ -291,6 +291,26 @@ it only after a **connector refresh AND a new chat**. The conversation in which 
 loss happened keeps the old preamble and can repeat the loss verbatim. Nothing
 server-side can force the refresh.
 
+## 2026-08-31 — additive taxonomy curation verbs (admin only, ADR-012 Wave 3)
+
+The curation surface gained four writes on the existing `curation:write` scope
+(issue #196): `register_taxonomy`, `update_registry_aliases`,
+`assign_cigar_taxonomy`, `split_cigar`. `get_curation_queue` gained two kinds,
+`unlined` and `unblended`, and its `unbranded` kind now keys on the `brandId`
+link rather than the free-text `brand` column — a behavior change for that kind,
+which now surfaces rows that carry a brand spelling but no registry link.
+
+**No new scope.** The four ride `curation:write`, so an already-minted curation
+service token reaches them with no re-consent — unlike the wave-4a surface, which
+introduced the `curation:*` pair. `CURATION_SERVICE_SCOPES` is unchanged.
+
+**Existing clients are unaffected** (R-MCP-4): the seventeen journal/catalog tools
+and their schemas are untouched, and a normal connector token never carries
+`curation:*`. For ChatGPT specifically, the per-conversation schema cache applies
+as always — the two new queue kinds reach an in-flight conversation only after a
+connector refresh and a new chat, and until then `kind: unlined` fails schema
+validation client-side rather than reaching the server.
+
 ## Workflows
 
 **Ideal (design target):** the user talks to ChatGPT normally for the whole

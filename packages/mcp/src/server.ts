@@ -30,6 +30,10 @@ import {
   setProductPhotoRights,
   renameCigar,
   queueEnrichmentBacklog,
+  registerTaxonomy,
+  updateRegistryAliases,
+  assignCigarTaxonomy,
+  splitCigar,
   UnauthenticatedError,
   UnauthorizedError,
   UnavailableError,
@@ -93,6 +97,14 @@ import {
   renameCigarSchema,
   renameCigarOutput,
   queueEnrichmentBacklogSchema,
+  registerTaxonomySchema,
+  registerTaxonomyOutput,
+  updateRegistryAliasesSchema,
+  updateRegistryAliasesOutput,
+  assignCigarTaxonomySchema,
+  assignCigarTaxonomyOutput,
+  splitCigarSchema,
+  splitCigarOutput,
   queueEnrichmentBacklogOutput,
   searchCigarsOutput,
   getCigarOutput,
@@ -125,7 +137,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl, uploadUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The twenty-six-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The thirty-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -1262,7 +1274,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Get curation queue",
       description:
-        "Page the catalog curation backlog by kind: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only, no tool here), match_triage (vendor listings the crawler has not settled — `status` auto is a proposed link, carrying the matched cigar's facts so a confirm/unmatch is judgeable in one read; `status` unmatched is a listing it produced no link for, with `reason` market_refusal when it found a candidate and declined it because the vendor's market contradicts the cigar's, no_match when nothing matched, no_anchor when the title named no brand the registry knows — a registry gap, closed by adding a brand alias in curation, not by loosening the matcher — or ambiguous when a brand anchored but no single catalog entry under it settled: several fit, or the listing is an assortment naming none (the parse says which). Neither no_anchor nor ambiguous is a matcher fault; both wait on a human to add the brand alias, choose between the candidates, or split a catalog entry that has collapsed several products into one. Report unmatched rows; there is no tool to resolve one yet), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo). Drain a kind with the returned nextCursor. Admin only.",
+        "Page the catalog curation backlog by kind: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only, no tool here), match_triage (vendor listings the crawler has not settled — `status` auto is a proposed link, carrying the matched cigar's facts so a confirm/unmatch is judgeable in one read; `status` unmatched is a listing it produced no link for, with `reason` market_refusal when it found a candidate and declined it because the vendor's market contradicts the cigar's, no_match when nothing matched, no_anchor when the title named no brand the registry knows — a registry gap, closed with update_registry_aliases, not by loosening the matcher — or ambiguous when a brand anchored but no single catalog entry under it settled: several fit, or the listing is an assortment naming none (the parse says which). Neither no_anchor nor ambiguous is a matcher fault: an ambiguous row whose candidates are one entry standing for several products is split_cigar's case, an assortment is nobody's and is reported), unbranded (no brand linked), unlined (on a brand, no line), unblended (on a line, no blend), untyped (null NC/CC), missing_photos (no product photo). The three structural kinds are one ladder worked in order — register_taxonomy mints what is missing, assign_cigar_taxonomy attaches it, and a row leaving unbranded appears in unlined. Every cigar row carries brandId/lineId/blendId, which is what those verbs take. Drain a kind with the returned nextCursor. Admin only.",
       inputSchema: getCurationQueueSchema,
       outputSchema: getCurationQueueOutput,
       annotations: { readOnlyHint: true, title: "Get curation queue" },
@@ -1466,6 +1478,134 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           clientRequestId: args.clientRequestId,
           limit: args.limit ?? undefined,
           retryExhausted: args.retryExhausted ?? undefined,
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  // The taxonomy verbs (ADR-012 Wave 3, issue #196). Same gate, same envelope,
+  // same server-side `actor: agent` stamp as the rest of the curation surface.
+
+  server.registerTool(
+    "register_taxonomy",
+    {
+      title: "Register taxonomy",
+      description:
+        "Find or mint the registry path a catalog entry needs: a brand, the line under it, the blend under that. Finding and minting are the same call — `created` on each level says which happened — so structuring a brand's fiftieth row costs no more than its first. Name the marca exactly once: `brandId` when a queue row already carries one, or `brand` to resolve it by name and mint it only if it is genuinely new. A blend requires its line. `aliases` are other SPELLINGS the level answers to (Padron, RYJ); they become matching keys server-side, so pass the spelling, never a slug. A key another entity at the same level already claims is refused and the holder is named — that refusal is a near-duplicate caught, so use the entity it names rather than working around it. `blend.blenders` credits people by name and mints them as needed; Cuban blends credit no individual, so omit it rather than guess. Never invent a level: an entry whose line is unknown belongs to its brand and stops there. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
+      inputSchema: registerTaxonomySchema,
+      outputSchema: registerTaxonomyOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Register taxonomy" },
+    },
+    (args, extra) =>
+      run("register_taxonomy", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await registerTaxonomy(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          ...(args.brandId != null ? { brandId: args.brandId } : {}),
+          ...(args.brand != null ? { brand: args.brand } : {}),
+          ...(args.line != null ? { line: args.line } : {}),
+          ...(args.blend != null ? { blend: args.blend } : {}),
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "update_registry_aliases",
+    {
+      title: "Update registry aliases",
+      description:
+        "Add or drop the spellings a brand, line, blend or blender answers to. This is what closes a match_triage row reported no_anchor: the vendor's title named the marca in a spelling the registry does not know, and the fix is a key here — never a looser matcher. Pass display spellings (Padrón, RYJ, H. Upmann); they are folded to matching keys server-side, so case and accents do not matter on either list. `add` is refused when another entity at the same level already claims the key, naming the holder. `remove` is refused for a key derived from the entity's own name — rename it instead — and refused if it would leave the entity with no keys at all; either would make it unreachable. Adding a key it already has, or removing one it lacks, is a no-op: `added` and `removed` report what actually moved. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
+      inputSchema: updateRegistryAliasesSchema,
+      outputSchema: updateRegistryAliasesOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Update registry aliases",
+      },
+    },
+    (args, extra) =>
+      run("update_registry_aliases", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await updateRegistryAliases(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          level: args.level,
+          id: args.id,
+          ...(args.add != null ? { add: args.add } : {}),
+          ...(args.remove != null ? { remove: args.remove } : {}),
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "assign_cigar_taxonomy",
+    {
+      title: "Assign cigar taxonomy",
+      description:
+        "Place a catalog entry in the taxonomy — brand, line, blend — and set its vitola and edition. A field present is written (null clears it); an omitted field is untouched. Set the marca by `brand` (the spelling, from which brandId is re-derived) or by `brandId`, never both. The levels must agree: a line belongs to the brand and a blend to the line, and an inconsistent set is refused naming the level at fault. Never invent a level — leave an unknown one out, and an entry whose line is unknown hangs off its brand. `nameSource` composed hands the canonical name over to the parts, recomposing it now and on every later part change; freeform keeps the stored string and leaves the name to rename_cigar. Send `preview: true` first to see `composedName` and the fields that would change while writing nothing — the same validation runs, so a refusal shows up on the preview too, and the same clientRequestId then commits it. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
+      inputSchema: assignCigarTaxonomySchema,
+      outputSchema: assignCigarTaxonomyOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Assign cigar taxonomy",
+      },
+    },
+    (args, extra) =>
+      run("assign_cigar_taxonomy", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await assignCigarTaxonomy(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          cigarId: args.cigarId,
+          ...(args.brand === undefined ? {} : { brand: args.brand }),
+          ...(args.brandId === undefined ? {} : { brandId: args.brandId }),
+          ...(args.lineId === undefined ? {} : { lineId: args.lineId }),
+          ...(args.blendId === undefined ? {} : { blendId: args.blendId }),
+          ...(args.vitolaName === undefined ? {} : { vitolaName: args.vitolaName }),
+          ...(args.edition === undefined ? {} : { edition: args.edition }),
+          ...(args.nameSource === undefined ? {} : { nameSource: args.nameSource }),
+          ...(args.preview === undefined ? {} : { preview: args.preview }),
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "split_cigar",
+    {
+      title: "Split cigar",
+      description:
+        "Split a catalog entry that has been standing for several products into the leaves it should have been, moving each product's vendor listings onto its own. Reach for it on a match_triage row reported ambiguous, or on an entry whose listings name blends or vitolas it does not distinguish. Each entry in `splits` takes some of this cigar's listings and either an existing sibling (`targetCigarId`) or the parts for a new leaf minted under the same brand, never both — a new leaf needs a line, blend, vitola or edition of its own, or it would be the same product under a second id. A minted leaf inherits the line and blend you omit from the entry being split, so splitting by vitola keeps the structure the entry already had; send an explicit null to say this one has no line. Minting is get-or-create: an arm whose parts already name a live entry re-points onto it and reports `created: false`, and two arms naming the same product collapse onto one leaf. `targetCigarId` must be under the same marca — the destination is a sibling, not any cigar. Split only on unambiguous listing evidence: listings you do not name stay where they are, and a partial split is the expected outcome, not a failure. Every listing named must currently point at this entry and must still be the crawler's own guess — one a curator or agent already ruled on is refused, naming who decided it. All of it applies or none does. Each re-point is individually reversible from the review console, and a leaf minted in error is merged back into the entry it came from. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
+      inputSchema: splitCigarSchema,
+      outputSchema: splitCigarOutput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Split cigar" },
+    },
+    (args, extra) =>
+      run("split_cigar", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await splitCigar(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          cigarId: args.cigarId,
+          splits: args.splits.map((split) => ({
+            listingIds: split.listingIds,
+            ...(split.targetCigarId != null ? { targetCigarId: split.targetCigarId } : {}),
+            ...(split.lineId === undefined ? {} : { lineId: split.lineId }),
+            ...(split.blendId === undefined ? {} : { blendId: split.blendId }),
+            ...(split.vitolaName === undefined ? {} : { vitolaName: split.vitolaName }),
+            ...(split.edition === undefined ? {} : { edition: split.edition }),
+            ...(split.canonicalName === undefined ? {} : { canonicalName: split.canonicalName }),
+          })),
           attribution: curationAttribution(args),
           correlationId,
         });
