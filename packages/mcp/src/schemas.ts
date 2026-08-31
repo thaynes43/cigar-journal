@@ -66,7 +66,9 @@ const describedCigar = z
       .describe(
         "The cigar's full name as the user knows it, e.g. 'Padron 1964 Anniversary Maduro'. Required.",
       ),
-    brand: z.string().nullish().describe("Brand/marque, e.g. Padron. Omit if unknown."),
+    // Bounded: brand feeds brands.slug (migration 0026), whose btree index
+    // rejects keys over ~2704 bytes.
+    brand: z.string().max(200).nullish().describe("Brand/marque, e.g. Padron. Omit if unknown."),
     line: z
       .string()
       .nullish()
@@ -681,7 +683,7 @@ export type RequestCigarEnrichmentArgs = z.infer<typeof requestCigarEnrichmentSc
 // verified entry is never overwritten. canonicalName is identity and not fillable.
 const updateCigarFields = z
   .object({
-    brand: z.string().nullish().describe("Brand/marque, e.g. Padron. Only if known and currently blank."),
+    brand: z.string().max(200).nullish().describe("Brand/marque, e.g. Padron. Only if known and currently blank."),
     line: z.string().nullish().describe("Product line, e.g. '1964 Anniversary'."),
     edition: z.string().nullish().describe("Limited/special edition designation."),
     vitola: vitola.nullish().describe("Size/shape; name and dimensions fill independently."),
@@ -1089,7 +1091,7 @@ export const setCigarFactsSchema = z
     cigarId: z.string().describe("Catalog id of the cigar to correct, from a get_curation_queue row."),
     fields: z
       .object({
-        brand: z.string().nullish().describe("Brand/marque, e.g. Padron. null clears a wrong value; omit to leave untouched."),
+        brand: z.string().max(200).nullish().describe("Brand/marque, e.g. Padron. null clears a wrong value; omit to leave untouched."),
         line: z.string().nullish().describe("Product line, e.g. '1964 Anniversary'. null clears; omit to leave untouched."),
         type: cigarType.nullish().describe("NC (non-Cuban) or CC (Cuban). null clears; omit to leave untouched. Never guess — leave null if uncertain."),
         manufacturer: z.string().nullish().describe("Manufacturer, if distinct from brand. null clears; omit to leave untouched."),

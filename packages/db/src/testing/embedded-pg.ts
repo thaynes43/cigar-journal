@@ -60,9 +60,11 @@ export async function startRawTestPostgres(): Promise<TestPostgres> {
       // lower()/length() degrade to per-byte operations on multibyte text. That
       // divergence made migration 0026's accent folding — which runs fine in
       // production — fail in the suite that is supposed to prove it applies.
-      // Encoding only: the locale stays C, so collation and ordering are
-      // unchanged for every existing test.
-      initdbFlags: ["--encoding=UTF8"],
+      // The locale is pinned rather than inherited: an unset LANG here yields C,
+      // but CI runners export C.UTF-8, and the two disagree on ordering and on
+      // lower(). Pinning gives every machine production's encoding with C
+      // collation and ctype — the semantics 0026's slug derivation assumes.
+      initdbFlags: ["--encoding=UTF8", "--locale=C"],
       onLog: () => {},
       onError: () => {},
     });

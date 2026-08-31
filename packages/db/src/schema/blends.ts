@@ -13,13 +13,17 @@ import { lines } from "./lines.js";
 // There is no photo column here: blend-level imagery is a later wave. Vitola is
 // not a column either — a vitola is a size label within a blend, carried on the
 // leaf `cigars` row, not an entity (ADR-012 rejects a global vitolas table).
+//
+// `lineId` is ON DELETE NO ACTION for the same reason as `lines.brandId`: a line
+// that still has blends cannot be deleted by accident, while a deliberate
+// single-statement curation move that clears both still works. See lines.ts.
 export const blends = pgTable(
   "blends",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     lineId: uuid("line_id")
       .notNull()
-      .references(() => lines.id, { onDelete: "cascade" }),
+      .references(() => lines.id, { onDelete: "no action" }),
     name: text("name").notNull(),
     slug: text("slug").notNull(),
     aliases: text("aliases")
@@ -41,6 +45,7 @@ export const blends = pgTable(
   },
   (table) => [
     unique("blends_line_id_slug_key").on(table.lineId, table.slug),
+    unique("blends_id_line_id_key").on(table.id, table.lineId),
     index("blends_aliases_gin").using("gin", table.aliases),
   ],
 );

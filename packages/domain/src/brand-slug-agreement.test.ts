@@ -11,8 +11,9 @@ import { brandSlug } from "./catalog-browse.js";
 // this function without a dependency cycle; it asserts these slugs literally
 // instead. This file pins the same pairs against the real implementation, so
 // drift on either side fails a suite rather than silently splitting the key.
-// The pairs below are exactly those asserted in
-// packages/db/src/schema/taxonomy-backfill.test.ts.
+// The first ten pairs below are exactly those asserted in
+// packages/db/src/schema/taxonomy-backfill.test.ts; the last two record where
+// the two implementations part company.
 
 describe("brandSlug agreement with the 0026 backfill", () => {
   it.each([
@@ -33,6 +34,12 @@ describe("brandSlug agreement with the 0026 backfill", () => {
     // A brand string with nothing sluggable is not addressable, so the backfill
     // skips it rather than minting a row no URL could ever reach.
     ["!!!", ""],
+    // The two known divergences: JS toLowerCase() applies the full Unicode mapping,
+    // while Postgres lower() under C ctype maps only ASCII A-Z, so both characters
+    // survive the SQL fold as non-ASCII and reduce to a dash — the migration slugs
+    // each to "". No catalog brand contains either: documented, not load-bearing.
+    ["İ", "i"],
+    ["K", "k"],
   ])("slugs %j to %j", (input, expected) => {
     expect(brandSlug(input.trim())).toBe(expected);
   });

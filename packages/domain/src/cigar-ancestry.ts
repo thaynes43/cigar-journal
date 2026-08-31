@@ -5,13 +5,25 @@ import { ValidationError, type FieldError } from "./errors.js";
 // A `cigars` row carries three nullable FKs — `brandId`, `lineId`, `blendId`.
 // The database enforces that each points at a real row, but NOT that they agree
 // with each other: nothing at the SQL level stops a cigar from claiming Drew
-// Estate's brand and Padrón's line. That rule lives here, and every write path
-// that sets these columns calls it before the write.
+// Estate's brand and Padrón's line. That rule lives here.
 //
-// Deliberately not a trigger and not a composite FK. A field-level error is what
-// the callers need — the MCP and curation surfaces report WHICH level disagrees
-// so the caller can correct it — and the Wave 3 curation paths re-parent brand,
-// line and blend in a single statement, which a per-row trigger would fight.
+// NOT YET CALLED FROM ANYWHERE. Wave 1 defines and tests the invariant; Wave 2
+// wires it into the identity write paths that set these columns. That is safe
+// only because Wave 1 writes no `lineId` or `blendId` at all — the 0026 backfill
+// sets `brandId` and nothing above it, and a brand alone is always consistent.
+//
+// Deliberately not a composite FK, for a reason about ON DELETE SET NULL rather
+// than about timing: a composite FK is checked at the END of the statement, so
+// it would not fight a single-statement re-parent. What it would do is
+// `FOREIGN KEY (brandId, lineId) REFERENCES lines (brandId, id) ON DELETE SET
+// NULL`, which nulls the whole column pair when a line is retired — discarding a
+// brand link that is still true — while the default MATCH SIMPLE skips the check
+// outright whenever either column is NULL, the common shape here.
+//
+// Not a trigger either: a field-level error is what the callers need — the MCP
+// and curation surfaces report WHICH level disagrees so the caller can correct
+// it — and the Wave 3 curation paths re-parent brand, line and blend in a single
+// statement, which a per-row trigger would fight.
 //
 // The rules, in full:
 //   - All null is valid. Unknown ancestry stays NULL and is never invented.

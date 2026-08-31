@@ -93,20 +93,65 @@ init container at startup (ADR-003).
   `name_source` (`freeform`|`composed`), the switch that makes `canonical_name` a
   maintained projection in Wave 2. `brand_images` gains a nullable `brand_id`;
   `brand_slug` keeps working untouched until Wave 5 retires it.
+  The registry's own hierarchy (`lines.brand_id`, `blends.line_id`) is
+  **ON DELETE NO ACTION**, not CASCADE: deleting a brand that still has lines is
+  refused, because emptying a marca is a curation decision with an audit trail,
+  not a side effect of one stray DELETE. NO ACTION rather than RESTRICT so the
+  check lands at the end of the statement — same protection, but a deliberate
+  single-statement curation move that clears the lines and the brand together
+  still works. `blend_blenders` keeps CASCADE (a credit edge carries no facts of
+  its own), and the `cigars` FKs keep SET NULL.
   **Ancestry consistency is NOT enforced in SQL.** A cigar's line must belong to
-  its brand and its blend to its line, but that rule lives in `@cj/domain`
-  (`assertCigarAncestry`, `packages/domain/src/cigar-ancestry.ts`) — it has to
-  report which level disagrees as a field-level error, and Wave 3 curation
-  re-parents all three columns in one statement.
+  its brand and its blend to its line; that rule lives in `@cj/domain`
+  (`assertCigarAncestry`, `packages/domain/src/cigar-ancestry.ts`), because it
+  has to report which level disagrees as a field-level error. It is **defined and
+  tested in Wave 1 and called from nothing** — Wave 2 wires it into the identity
+  write paths, which is safe only because Wave 1 writes no `line_id` or
+  `blend_id` at all. It is not a composite FK for a reason about ON DELETE SET
+  NULL rather than about statement timing: such an FK would null the whole
+  `(brand_id, line_id)` pair when a line is retired, discarding a brand link that
+  is still true, and MATCH SIMPLE would skip the check entirely whenever either
+  column is NULL. The support keys it would need (`lines (id, brand_id)`,
+  `blends (id, line_id)`) are minted now anyway — free on an empty table.
   The backfill is **mechanical only**: one `brands` row per distinct non-blank
   trimmed `cigars.brand` (36 in production), slugged with the SAME rule as
   `brandSlug()` so the result equals the key existing brand URLs and
   `brand_images.brand_slug` already resolve through — which is why `Padrón`
-  slugs to `padr-n` and the accent-folded `Padron` is seeded as an *alias*
-  instead (the stored key never folds; folding is for matching, as `fold()` in
-  the crawler already establishes). Spellings that collapse onto one slug
-  (`Davidoff`/`davidoff`, `H Upmann`/`H. Upmann`) become one brand: the most-used
-  spelling wins the name, the rest become aliases. It mints no lines, no blends
-  and no blenders, attaches none of the 565 unbranded rows, and edits no names —
-  all of that is Wave 3 curation, which needs evidence and an audit trail. Both
-  statements are idempotent.
+  slugs to `padr-n`. That transcription is exact for every character whose
+  lowercase lands in ASCII, with two documented exceptions pinned in
+  `packages/domain/src/brand-slug-agreement.test.ts`: `İ` (U+0130) and `K`
+  (U+212A) slug to `i`/`k` in JS and to the empty string in SQL, because
+  Postgres `lower()` under C ctype maps only A-Z. No catalog brand contains
+  either.
+  **`aliases` holds matching keys, not display text.** Every entry is fold() then
+  brandSlug() — the same normalization matching v2 will run over an incoming
+  vendor string — so the GIN `array_ops` probe is an exact match that can
+  actually hit; a source-case spelling stored there would never be found. A
+  brand's own slug is included, so one probe resolves any spelling it answers to.
+  After the insert, a cleanup pass guarantees each key resolves to exactly one
+  brand: where two brands claim the same key (`Padrón` folds onto a separate
+  `Padron` brand's slug) the brand that owns it as its slug keeps it, and a key
+  nobody owns but several claim is dropped from all of them.
+  Spellings that collapse onto one slug (`Davidoff`/`davidoff`,
+  `H Upmann`/`H. Upmann`) become one brand: the most-used spelling wins the name.
+  Brand strings that slug to the empty string (pure punctuation) are skipped, and
+  so are those whose slug exceeds 2000 bytes — an over-long slug does not produce
+  a bad row, it **aborts the migration** on the `brands_slug_key` btree
+  (max ~2704 bytes) and rolls the deploy back. The MCP schemas cap agent-written
+  `brand` at 200 characters as the matching guard on the way in.
+  It mints no lines, no blends and no blenders, attaches none of the 565
+  unbranded rows, and edits no names — all of that is Wave 3 curation, which
+  needs evidence and an audit trail.
+  **Every statement is re-runnable**, and Wave 2 depends on it. The insert paths
+  (`cigar-resolution.ts`, the crawler's `match.ts`) stay unwired in Wave 1, so
+  cigars created after this migration land with `brand_id` NULL; Wave 2 wires
+  them and **re-runs the two backfill UPDATEs** to sweep up the gap. Both fill
+  only rows whose link is still NULL, so a re-run adds links and can never
+  overwrite one a curator has corrected. The `brand_images` UPDATE is a **no-op
+  today** — that table holds no rows — and runs anyway for exactly that reason.
+  The alias cleanup reads the pre-statement snapshot, so it is order-independent
+  and finds nothing left to strip on a second run.
+  On the curation side, `setCigarFacts` (and its undo) **re-derives `brand_id`
+  whenever it rewrites the free-text `brand`**, clearing the link when no brand
+  answers to the new spelling. `brand_id` is a projection of `brand`, and the two
+  must never be allowed to drift apart.

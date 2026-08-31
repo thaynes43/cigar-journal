@@ -14,13 +14,19 @@ import { pgTable, uuid, text, timestamp, index } from "drizzle-orm/pg-core";
 // 0026 for why agreement outranks prettiness here.
 //
 // `aliases` is the anchor of matching v2 (Wave 2): a vendor listing resolves to
-// a brand by alias before line, blend or vitola are considered at all.
+// a brand by alias before line, blend or vitola are considered at all. It holds
+// MATCHING KEYS, NOT DISPLAY TEXT — every entry is already folded and slugged
+// (`padron`, `h-upmann`), the exact output of the normalization the matcher runs
+// over an incoming string, so the anchor step is one exact-match probe against
+// the GIN index. The display spelling lives in `name`; a source-case string
+// stored here would never be probed for. Each key resolves to exactly one brand.
 export const brands = pgTable(
   "brands",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     name: text("name").notNull(),
     slug: text("slug").notNull().unique(),
+    // Matching keys, not display spellings — see the note above.
     aliases: text("aliases")
       .array()
       .notNull()

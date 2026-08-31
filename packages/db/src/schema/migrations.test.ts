@@ -261,10 +261,13 @@ describe("migrations", () => {
     await expect(credit()).rejects.toThrow();
   });
 
-  // Retiring a registry row must never delete a cigar — and therefore never a
-  // smoke, a purchase, or anything else hanging off the leaf. The ancestry FKs
-  // null out; the registry's own hierarchy cascades.
-  it("0026 nulls a cigar's ancestry when a registry row is deleted, never the cigar", async () => {
+  // Two different protections, and they point in opposite directions. Below the
+  // registry, a cigar must survive its taxonomy being retired: the leaf FKs are
+  // SET NULL, so a smoke or a purchase can never be deleted by a curation edit.
+  // Inside the registry, a parent must NOT be retired while it still has
+  // children: those FKs are NO ACTION, so an accidental DELETE is refused rather
+  // than quietly taking a brand's whole line-and-blend tree with it.
+  it("0026 refuses to delete a brand that still has lines, and nulls the leaf when it finally goes", async () => {
     const brand = await pg.db.execute(
       sql`INSERT INTO brands (name, slug) VALUES ('Doomed Brand', 'doomed-brand') RETURNING id`,
     );
@@ -283,20 +286,49 @@ describe("migrations", () => {
     `);
     const cigarId = (cigar.rows[0] as { id: string }).id;
 
-    // Deleting the brand cascades through line and blend (a line cannot outlive
-    // its brand) while the cigar survives with a fully null ancestry.
+    // The hierarchy refuses. A brand with lines is not deletable, and neither is
+    // a line that still has blends — retiring a marca is a curation decision, not
+    // something one stray DELETE performs on the whole tree.
+    await expect(pg.db.execute(sql`DELETE FROM brands WHERE id = ${brandId}`)).rejects.toThrow();
+    await expect(pg.db.execute(sql`DELETE FROM lines WHERE id = ${lineId}`)).rejects.toThrow();
+
+    // Unlinked from the bottom up, each delete now succeeds — and the cigar
+    // survives every one of them, ending with a fully null ancestry rather than
+    // being deleted along with the taxonomy that described it.
+    await pg.db.execute(sql`DELETE FROM blends WHERE id = ${blendId}`);
+    await pg.db.execute(sql`DELETE FROM lines WHERE id = ${lineId}`);
     await pg.db.execute(sql`DELETE FROM brands WHERE id = ${brandId}`);
+
     const after = await pg.db.execute(
       sql`SELECT brand_id, line_id, blend_id FROM cigars WHERE id = ${cigarId}`,
     );
     expect(after.rows).toHaveLength(1);
     expect(after.rows[0]).toMatchObject({ brand_id: null, line_id: null, blend_id: null });
+  });
 
-    const orphans = await pg.db.execute(sql`
-      SELECT (SELECT count(*)::int FROM lines WHERE id = ${lineId}) AS lines,
-             (SELECT count(*)::int FROM blends WHERE id = ${blendId}) AS blends
+  // Why NO ACTION and not RESTRICT: both refuse the accidental delete, but
+  // RESTRICT is checked per row while NO ACTION is checked at the end of the
+  // statement. Only NO ACTION lets a deliberate curation move retire a brand and
+  // its lines together in one statement — the shape Wave 3 needs.
+  it("0026 still allows a brand and its lines to be retired in a single statement", async () => {
+    const brand = await pg.db.execute(
+      sql`INSERT INTO brands (name, slug) VALUES ('Retired Brand', 'retired-brand') RETURNING id`,
+    );
+    const brandId = (brand.rows[0] as { id: string }).id;
+    await pg.db.execute(
+      sql`INSERT INTO lines (brand_id, name, slug) VALUES (${brandId}, 'Retired Line', 'retired-line')`,
+    );
+
+    await pg.db.execute(sql`
+      WITH dropped AS (DELETE FROM lines WHERE brand_id = ${brandId} RETURNING id)
+      DELETE FROM brands WHERE id = ${brandId}
     `);
-    expect(orphans.rows[0]).toMatchObject({ lines: 0, blends: 0 });
+
+    const left = await pg.db.execute(sql`
+      SELECT (SELECT count(*)::int FROM brands WHERE id = ${brandId}) AS brands,
+             (SELECT count(*)::int FROM lines WHERE brand_id = ${brandId}) AS lines
+    `);
+    expect(left.rows[0]).toMatchObject({ brands: 0, lines: 0 });
   });
 
   // `name_source` is the switch Wave 2 flips to make canonical_name a
