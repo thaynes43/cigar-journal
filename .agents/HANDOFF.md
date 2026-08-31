@@ -160,8 +160,10 @@ selector must not touch anything the owner holds a lot for).
   free is **0025**. #178 and #181 both took 0023.
 - A red CI `test` job is now a REAL failure (#180 fixed the flake). Do not
   retrigger past one.
-- On any image bump, check ALL FIVE pins — the HelmRelease anchor and the four
-  CronJobs. Renovate bumps only the HelmRelease (#2689).
+- On any image bump there is now ONE pin: the `&mainImage` anchor in
+  `helmrelease.yaml`. The four crawl CronJobs became app-template controllers on
+  that same HelmRelease and resolve the anchor, so Renovate's one-line edit moves
+  all six containers (#159; haynes-ops#2693 + haynes-ops#2694).
 
 ## Blocked on the owner — ONE thing
 
@@ -224,9 +226,11 @@ the MCP Gatus probe (haynes-ops#2628).
 - **The CI `test` flake is fixed** (#174/#180): `pool.end()` then `pg.stop()`
   raised an unhandled pool `error` (pg 57P01), failing runs where every test
   passed. A red `test` job now means a real problem — do not retrigger past one.
-- **Renovate splits the image pins.** It bumps `helmrelease.yaml` only, leaving
-  the four CronJob pins stale (happened 2026-08-30, fixed haynes-ops#2689).
-  Check all five on every bump until #159 lands.
+- **Renovate used to split the image pins** — it bumps `helmrelease.yaml` only,
+  which left the four raw CronJob pins stale (2026-08-30, fixed haynes-ops#2689).
+  #159 removed the split rather than documenting it: the CronJobs are controllers
+  on the HelmRelease now, sharing `&mainImage`, so one edit moves everything.
+  `haynes-ops/scripts/crawl-cronjob-invariants.sh` asserts the six stay in step.
 - **Concurrent lanes collide on migration numbers** — #178 and #181 both took
   0023. Pre-assign a number per lane and say so in the prompt.
 - **Loki has everything**; the pod's Actions-log egress is blocked but
