@@ -6,6 +6,7 @@ import { validateSaveInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
 import { normalizeDescriptors, verbatimDescriptors } from "./descriptors.js";
 import { resolveCigar } from "./cigar-resolution.js";
+import { queueEnrichmentSafely } from "./enrichment.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
 import { applyConsumptionOnSave } from "./consumption.js";
@@ -117,6 +118,32 @@ async function saveWithinTx(
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 
+  // Gap-fill enrichment (#177). add_cigar → save_smoke is the documented path
+  // (owner ruling on #177); a described save is the SAFETY NET for a client that
+  // skipped the prelude. When that net catches — the save creates the catalog
+  // entry itself — it queues what add_cigar would have queued, specs and a
+  // product photo. Three gates, each load-bearing:
+  //   * cigar.created — a save that LINKED to an existing row filled no gap.
+  //     Queueing there would file a request for any of the ~96% of catalog rows
+  //     that fail assessEnrichmentFields.complete, against exactly the unverified
+  //     and untyped rows the #154 curation press refuses without an override —
+  //     and would make enrichmentQueued:true reachable with cigarCreated:false,
+  //     which all four surfaces documenting the field say cannot happen.
+  //   * described refs only — a cigarId save never creates, so the common path
+  //     takes no enrichment reads at all.
+  //   * llm-conversation provenance only — the legacy importer saves per review
+  //     with described cigars ("legacy-import"), and an ungated queue would file
+  //     one request per distinct cigar on the next archive import. The web form
+  //     ("manual") is excluded for the same reason; it has its own repair
+  //     surfaces. record_purchase queues under every provenance — this is
+  //     deliberately narrower than that, not parity with it.
+  // Ordered last on purpose: everything the user actually asked for is already
+  // written above.
+  const enrichmentQueued =
+    cigar.created && "described" in input.cigar && provenanceSource === "llm-conversation"
+      ? await queueEnrichmentSafely(tx, cigar.cigarId, principal.userId)
+      : false;
+
   // When the save carried a consumption block (ADR-008 / DESIGN-002 ask-once
   // flow), report the derived stock picture AFTER the smoke so the caller reads
   // back the new remaining without a follow-up read (mirrors record_purchase's
@@ -134,6 +161,7 @@ async function saveWithinTx(
       cigar: { cigarId: cigar.cigarId, canonicalName: cigar.canonicalName, verification: cigar.verification },
     },
     cigarCreated: cigar.created,
+    enrichmentQueued,
     ...(holdingAfter ? { holdingAfter } : {}),
     replayed: false,
   };

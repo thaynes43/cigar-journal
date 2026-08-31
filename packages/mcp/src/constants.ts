@@ -6,7 +6,7 @@
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
 // The tool surface. The first seventeen are the conversational journal contract
-// (reads annotated readOnlyHint). The final eight are the admin catalog-curation
+// (reads annotated readOnlyHint). The final nine are the admin catalog-curation
 // surface (DESIGN-003 wave 4a/4b, issue #126): the ops-agent tools, gated on
 // `curation:*` scope AND an admin-role principal — additive, existing tools and
 // scopes untouched (R-MCP-4).
@@ -135,7 +135,7 @@ Resolving vs browsing. search_cigars resolves one named cigar ("I'm smoking an
 Alma Fuego") — act on its guidance: single_match (an exact catalog-name hit —
 proceed), multiple_matches (candidates but no exact hit — confirm the exact one
 before saving), brand_match (only a brand was named — ask for the line/vitola),
-no_match (nothing matched — a described save_smoke creates it; if the mention was
+no_match (nothing matched — fill the gap below, then save; if the mention was
 partial, ask for the fuller name first to avoid a duplicate). browse_catalog
 answers browsing, filtering, and shopping questions ("what do I want that's in
 stock", "my top-rated maduros", "cheapest per stick") — it pages the catalog with
@@ -145,17 +145,23 @@ overlay and price-at-a-glance. get_cigar is full detail on one cigar; get_offers
 is its current vendor offers and price history (kept out of get_cigar to protect
 its budget) — reach for it when the user asks about price or where to buy.
 
-Gap-fill. When the user smokes or acquires something search_cigars does not match,
-fill the gap first: add_cigar creates an unverified entry from their words and
-queues enrichment (specs + a product photo) so the later save_smoke links to a
-real cigar; record_purchase logs an acquisition and auto-creates the described
-cigar the same way. If add_cigar errors cigar_ambiguous, show the search_cigars
-candidates and ask; only when the user confirms none is theirs, retry add_cigar
-with confirmedDistinct:true to create the distinct product. record_purchase is
-also how the humidor count is corrected —
-the ledger is append-only and holdings are derived, so a miscount is fixed with a
-negative-quantity row (say why in notes), never an edit. Record only what the user
-stated: never invent a price, date, or vendor.
+Gap-fill. When you are about to log a smoke or a purchase and search_cigars
+matched nothing, fill the gap first: add_cigar creates an unverified entry from
+their words and queues enrichment (specs + a product photo) so the save_smoke
+that follows links to a real cigar; record_purchase logs an acquisition and
+auto-creates the described cigar the same way. Gap-fill is a prelude, never the
+answer. add_cigar writes NO journal entry — its result says so,
+journalEntryCreated:false — so the request is not complete until the save_smoke
+or record_purchase that motivated it has run in the same turn, against the
+cigarId add_cigar returned. A catalog row with no journal entry is worse than
+no row at all: it looks like success and drops what the user actually said. If
+add_cigar errors cigar_ambiguous, show the search_cigars candidates and ask;
+only when the user confirms none is theirs, retry add_cigar with
+confirmedDistinct:true to create the distinct product. record_purchase is also
+how the humidor count is corrected — the ledger is append-only and holdings are
+derived, so a miscount is fixed with a negative-quantity row (say why in notes),
+never an edit. Record only what the user stated: never invent a price, date, or
+vendor.
 
 Humidor deduction. A saved smoke deducts one stick from the humidor only when the
 user says so. When the resolved cigar shows holdings, ask once at finish, "From

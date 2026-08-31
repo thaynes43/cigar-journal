@@ -435,7 +435,11 @@ function toCigarMatch(row: CigarMatchRow): CigarMatch {
 //   brand_match     — the query is only a brand name; ask the user for the line
 //                     or vitola. matches are that brand's catalogued cigars.
 //   multiple_matches— several fuzzy hits and no clean brand/exact winner; ask.
-//   no_match        — nothing plausible; a described save creates the cigar.
+//   no_match        — nothing plausible; add_cigar, then save against the
+//                     cigarId it returns, in the same turn. A described save
+//                     still creates the cigar, but that is the safety net for a
+//                     client that skipped the prelude, not the documented
+//                     action (#177).
 // Only active catalog rows are candidates (DESIGN-003 §Curation): excluded
 // pollution and merged tombstones never resolve here (the picker never offers a
 // hidden row), so a smoke can never re-link to one.

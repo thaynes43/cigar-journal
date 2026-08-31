@@ -134,6 +134,14 @@ export interface SaveSmokeResult {
     cigar: SavedCigar;
   };
   cigarCreated: boolean;
+  // Whether this save also queued a background enrichment (specs + a product
+  // photo) for the cigar. True only when the save CREATED the entry — a
+  // DESCRIBED ref, under `llm-conversation` provenance, that resolved to no
+  // existing row (#177). So `enrichmentQueued` implies `cigarCreated`; a save
+  // that linked to an existing cigar filled no gap and queues nothing. Optional
+  // because an idempotent replay returns the ORIGINAL stored result, and
+  // envelopes written before this field existed do not carry it.
+  enrichmentQueued?: boolean;
   // The derived stock picture AFTER this smoke, present ONLY when the save
   // carried a `consumption` block (ADR-008 / DESIGN-002 ask-once flow). Additive
   // and mirrors record_purchase's `holdingAfter`, so an agent that just recorded

@@ -125,7 +125,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl, uploadUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The seventeen-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The twenty-six-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -546,7 +546,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Search cigars",
       description:
-        "Resolve a conversational cigar mention to catalog entries by fuzzy (trigram) name match. Use when a cigar is named or asked about, not for the user's own history. Prefer the fullest name the user gave — a bare word or a single product token may not match. Read `guidance`: single_match (an exact catalog-name hit — proceed with it), brand_match (only a brand was named — ask for the line/vitola), multiple_matches (candidates but no exact hit — confirm the exact one with the user before saving), no_match (nothing matched — a described save_smoke creates the cigar; if the mention was partial/abbreviated, ask for the fuller name first so you don't create a duplicate).",
+        "Resolve a conversational cigar mention to catalog entries by fuzzy (trigram) name match. Use when a cigar is named or asked about, not for the user's own history. Prefer the fullest name the user gave — a bare word or a single product token may not match. Read `guidance`: single_match (an exact catalog-name hit — proceed with it), brand_match (only a brand was named — ask for the line/vitola), multiple_matches (candidates but no exact hit — confirm the exact one with the user before saving), no_match (nothing matched — call add_cigar, then save against the cigarId it returns, in the same turn; a described save_smoke still creates the cigar, but that is the safety net, not the action to take here; if the mention was partial/abbreviated, ask for the fuller name first so you don't create a duplicate).",
       inputSchema: searchCigarsSchema,
       outputSchema: searchCigarsOutput,
       annotations: { readOnlyHint: true, title: "Search cigars" },
@@ -818,6 +818,11 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
             },
           },
           cigarCreated: result.cigarCreated,
+          // True when this save CREATED the catalog entry and queued its background
+          // enrichment (#177) — so it implies cigarCreated, and a save that linked
+          // to an existing cigar reports false. Undefined (and so absent) on a
+          // replay of an envelope stored before the field existed.
+          enrichmentQueued: result.enrichmentQueued,
           // Present only when a consumption block was supplied (ADR-008): the
           // derived stock after the deduction, mirroring record_purchase's
           // holdingAfter. Additive — undefined serializes away when absent.
@@ -832,7 +837,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Add cigar",
       description:
-        "The user names a cigar missing from the catalog. Confirm the fullest name first (search_cigars guidance applies); the entry is created unverified from their words and a background enrichment request is queued to fill specs and a product photo. Use before save_smoke or record_purchase when nothing matches. If it errors cigar_ambiguous or you fear a silent link to a near-match (a number/packaging variant), show the user search_cigars candidates; when they confirm none is theirs, retry with confirmedDistinct:true. `guidance` is 'created' for a new entry or 'already_existed' when the name linked to an existing one.",
+        "The user names a cigar missing from the catalog. Confirm the fullest name first (search_cigars guidance applies); the entry is created unverified from their words and a background enrichment request is queued to fill specs and a product photo. Use before save_smoke or record_purchase when nothing matches — and it is a prelude, never the answer: it writes NO journal entry and no purchase (journalEntryCreated is always false), so the save_smoke or record_purchase that motivated it still has to run in the same turn, against the cigarId returned. A catalog row with no journal entry is worse than no row at all, because it looks like success and drops what the user actually said. If it errors cigar_ambiguous or you fear a silent link to a near-match (a number/packaging variant), show the user search_cigars candidates; when they confirm none is theirs, retry with confirmedDistinct:true. `guidance` is 'created' for a new entry or 'already_existed' when the name linked to an existing one.",
       inputSchema: addCigarSchema,
       outputSchema: addCigarOutput,
       annotations: {
@@ -849,6 +854,12 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           cigar: result.cigar,
           created: result.created,
           enrichmentQueued: result.enrichmentQueued,
+          // The point-of-use restatement of the gap-fill invariant (#177): this tool
+          // catalogs, it does not journal. A constant, and deliberately emitted HERE
+          // rather than from the domain result — the domain result is what
+          // recordIdempotency persists, so an adapter constant rides identically on a
+          // first call and on a replay, and no stored envelope can be missing it.
+          journalEntryCreated: false,
           guidance: result.created ? "created" : "already_existed",
           replayed: result.replayed,
         });

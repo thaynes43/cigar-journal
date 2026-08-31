@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Seventeen tools over the application services, client-neutral: any MCP client
+Twenty-six tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -76,7 +76,7 @@ Resolving vs browsing. search_cigars resolves one named cigar ("I'm smoking an
 Alma Fuego") — act on its guidance: single_match (an exact catalog-name hit —
 proceed), multiple_matches (candidates but no exact hit — confirm the exact one
 before saving), brand_match (only a brand was named — ask for the line/vitola),
-no_match (nothing matched — a described save_smoke creates it; if the mention was
+no_match (nothing matched — fill the gap below, then save; if the mention was
 partial, ask for the fuller name first to avoid a duplicate). browse_catalog
 answers browsing, filtering, and shopping questions ("what do I want that's in
 stock", "my top-rated maduros", "cheapest per stick") — it pages the catalog with
@@ -86,17 +86,23 @@ overlay and price-at-a-glance. get_cigar is full detail on one cigar; get_offers
 is its current vendor offers and price history (kept out of get_cigar to protect
 its budget) — reach for it when the user asks about price or where to buy.
 
-Gap-fill. When the user smokes or acquires something search_cigars does not match,
-fill the gap first: add_cigar creates an unverified entry from their words and
-queues enrichment (specs + a product photo) so the later save_smoke links to a
-real cigar; record_purchase logs an acquisition and auto-creates the described
-cigar the same way. If add_cigar errors cigar_ambiguous, show the search_cigars
-candidates and ask; only when the user confirms none is theirs, retry add_cigar
-with confirmedDistinct:true to create the distinct product. record_purchase is
-also how the humidor count is corrected —
-the ledger is append-only and holdings are derived, so a miscount is fixed with a
-negative-quantity row (say why in notes), never an edit. Record only what the user
-stated: never invent a price, date, or vendor.
+Gap-fill. When you are about to log a smoke or a purchase and search_cigars
+matched nothing, fill the gap first: add_cigar creates an unverified entry from
+their words and queues enrichment (specs + a product photo) so the save_smoke
+that follows links to a real cigar; record_purchase logs an acquisition and
+auto-creates the described cigar the same way. Gap-fill is a prelude, never the
+answer. add_cigar writes NO journal entry — its result says so,
+journalEntryCreated:false — so the request is not complete until the save_smoke
+or record_purchase that motivated it has run in the same turn, against the
+cigarId add_cigar returned. A catalog row with no journal entry is worse than
+no row at all: it looks like success and drops what the user actually said. If
+add_cigar errors cigar_ambiguous, show the search_cigars candidates and ask;
+only when the user confirms none is theirs, retry add_cigar with
+confirmedDistinct:true to create the distinct product. record_purchase is also
+how the humidor count is corrected — the ledger is append-only and holdings are
+derived, so a miscount is fixed with a negative-quantity row (say why in notes),
+never an edit. Record only what the user stated: never invent a price, date, or
+vendor.
 
 Humidor deduction. A saved smoke deducts one stick from the humidor only when the
 user says so. When the resolved cigar shows holdings, ask once at finish, "From
@@ -157,7 +163,11 @@ verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
 non-cigar pollution, restore_cigar to undo; set_product_photo_rights
 approved/suppressed); low-confidence cases are skipped and
 reported, never guessed — leave an uncertain brand or type null rather than invent
-one. queue_enrichment_backlog is the operator's bulk enqueue of the photoless
+one. exclude_cigar never applies to a cigar anybody holds: a worklist row whose
+heldLots is above zero has purchase lots pointing at it, and the server refuses the
+exclude outright — enforced, not advised, and there is no override. Skip such a row
+or rename it; a sampler someone bought is a catalog entry, not pollution.
+queue_enrichment_backlog is the operator's bulk enqueue of the photoless
 holdings, NOT part of a curation run: do not call it on your own initiative — report
 the worklist and leave the press to the operator. It queues a cigar only once its
 canonical name is verified and a crawl-enabled vendor covering that market has
@@ -272,8 +282,12 @@ Guidance is the client's instruction for what to do next:
 - `brand_match`: the query names only a known brand, not a specific product.
   `matches` are that brand's catalogued cigars; ask the user for the line or
   vitola before resolving.
-- `no_match`: proceed — `save_smoke` creates the cigar from described
-  attributes; do not retry search with invented details.
+- `no_match`: nothing matched — call `add_cigar`, then save against the `cigarId`
+  it returns, in the same turn. A described `save_smoke` still creates the cigar,
+  but that is the safety net for a client that skipped the prelude, not the
+  documented action (#177). Do not retry search with invented details; when the
+  mention was partial, ask for the fuller name first so the gap-fill does not
+  create a duplicate.
 
 ## get_cigar — read
 
@@ -624,6 +638,8 @@ result:
     url: https://cigars.haynesnetwork.com/smokes/sm_01jc8x
     cigar: { cigarId: cg_01j9x2, verification: verified }
   cigarCreated: false            # true when `described` created an unverified entry
+  enrichmentQueued: false        # true only alongside cigarCreated — the new entry's specs + photo lookup
+                                 #   ABSENT on an idempotent replay of an envelope recorded before this field
   holdingAfter:                  # PRESENT ONLY when a `consumption` block was supplied
     totalAcquired: 7             #   (additive; mirrors record_purchase's holdingAfter)
     remaining: 6                 #   max(0, totalAcquired − count(consumptions)) (ADR-008)
@@ -651,14 +667,48 @@ alone does not satisfy this minimum** (a title-only save is rejected as a
 strongly matches an existing cigar the server links instead of creating
 (`cigar_ambiguous` if it can't decide).
 
+**The described save is the safety net, not the documented path (#177).**
+`add_cigar` → `save_smoke` is what the server instructions tell a client to do; a
+`described` ref still resolves-or-creates inside the save transaction, so a client
+that skips the prelude never loses the entry. When such a save *creates* the
+entry, and only on the conversational path, its background enrichment is queued
+too and reported as `enrichmentQueued`. Three gates, each load-bearing:
+
+- `cigar.created` — a save that linked to an *existing* row filled no gap.
+  Queueing there files requests against the unverified/untyped rows the curation
+  press refuses by design, and would make `enrichmentQueued: true` reachable with
+  `cigarCreated: false`, which this contract says is impossible.
+- `described` refs only — a `cigarId` save never creates, and takes no extra reads.
+- `provenance.source: llm-conversation` — the legacy importer saves per review with
+  `described` cigars under `legacy-import`, and an ungated queue would file one
+  enrichment request per distinct cigar on the next archive import. The web form
+  (`manual`) is excluded for the same reason; it has its own repair surfaces.
+
+The enrichment is never bought with the entry: the queue attempt runs in a
+savepoint, and any failure returns `enrichmentQueued: false` with the smoke saved.
+`record_purchase` guards its ledger row the same way.
+
+**`enrichmentQueued` is absent, not false, on an idempotent replay of an envelope
+recorded before the field existed** — a replay returns the stored result verbatim,
+so read it as optional and treat its absence as "not reported", never as `false`.
+
 ## add_cigar — write, idempotent
 
 Create an unverified catalog entry from the user's own naming when search_cigars
 matched nothing, and queue background enrichment so the crawler fills the specs
 and a product photo. Use before `save_smoke`/`record_purchase` when the cigar is
 missing. Resolve-or-create is the exact path `save_smoke` uses for a described
-cigar (exact-name link, `cigar_ambiguous` when it can't decide, unverified
-create otherwise); this tool adds only the enrichment queue.
+cigar (exact-name link, `cigar_ambiguous` when it can't decide, unverified create
+otherwise); this tool adds the enrichment queue and the `confirmedDistinct`
+escape hatch.
+
+**It is a prelude, never the answer** (#177). It writes no journal entry and no
+purchase — `journalEntryCreated` is always `false` — so it never satisfies "log
+this smoke" or "I bought these": the `save_smoke` or `record_purchase` that
+motivated it still has to run in the same turn, against the `cigarId` returned. A
+catalog row with no journal entry is worse than no row at all, because it looks
+like success and drops what the user said — a live loss on 2026-08-30, when
+`add_cigar` ran, no `save_smoke` followed, and the turn reported success.
 
 ```yaml
 arguments:
@@ -673,7 +723,8 @@ arguments:
 result:
   cigar: { cigarId: cg_01k9, canonicalName: Quasar Comet 7 Toro, verification: unverified }
   created: true                  # false when the name linked to an existing entry
-  enrichmentQueued: true         # a request was enqueued (or reused if already pending)
+  enrichmentQueued: true         # a request was FILED — false when one is already open, or nothing is missing
+  journalEntryCreated: false     # ALWAYS false — cataloguing is not journaling
   guidance: created              # created | already_existed
   replayed: false
 ```
@@ -688,8 +739,10 @@ catalog rows returns `cigar_ambiguous` with candidates, exactly as `save_smoke`.
 Append an acquisition to the humidor ledger — or correct the count. Everything
 is a purchase row: the ledger is append-only and holdings stay derived, so a
 miscount is fixed with a negative-quantity row, never an edit. A described cigar
-with no catalog match is auto-created and its enrichment queued (the `add_cigar`
-path); a resolved id links directly.
+with no catalog match is auto-created through the same resolver `add_cigar` uses,
+and its enrichment queued; a described name that *links* to an existing row filled
+no gap and queues nothing, and a resolved id links directly. The queue runs after
+the ledger row, in a savepoint — a failed enrichment never costs the purchase.
 
 ```yaml
 arguments:
