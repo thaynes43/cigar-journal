@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.0](https://github.com/thaynes43/cigar-journal/compare/v0.30.0...v0.31.0) (2026-08-31)
+
+
+### Features
+
+* **mcp:** taxonomy curation verbs — registry minting, assignment, worklists (ADR-012 Wave 3) ([#214](https://github.com/thaynes43/cigar-journal/issues/214)) ([1d77916](https://github.com/thaynes43/cigar-journal/commit/1d77916339fba38a81c8f0f16adabfdaeb4dd8e5))
+* **web:** catalog hierarchy and slicing (DESIGN-004, ADR-012 Wave 4) ([#215](https://github.com/thaynes43/cigar-journal/issues/215)) ([acddde5](https://github.com/thaynes43/cigar-journal/commit/acddde5531bdb57373bccdcfec1942909295a023))
+
 ## [0.30.0](https://github.com/thaynes43/cigar-journal/compare/v0.29.0...v0.30.0) (2026-08-31)
 
 
