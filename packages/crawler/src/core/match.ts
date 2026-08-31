@@ -112,7 +112,7 @@ export interface UpsertMatchInput {
   cigarId: string | null;
   status: "auto" | "unmatched";
   now: Date;
-  // WHY this row is unmatched, when the resolver is the one saying so (0026).
+  // WHY this row is unmatched, when the resolver is the one saying so (0025).
   // Always written — including as null on an `auto` upsert — so a row that
   // becomes a link again cannot carry a stale reason from when it was not one.
   unmatchedReason?: "market_refusal" | "no_match" | null;

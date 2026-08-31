@@ -58,7 +58,7 @@ const FAR_FUTURE = new Date(8_640_000_000_000_000);
 
 // How one vendor's look at one ask ended. The first three are verdicts about a
 // CATALOGUE; `photo_refused` is a verdict about an ARTIFACT and behaves unlike all
-// of them — see recordEnrichmentAttempt and migration 0026.
+// of them — see recordEnrichmentAttempt and migration 0025.
 export type EnrichmentOutcome = "match" | "miss" | "error" | "photo_refused";
 
 export interface VendorBrief {

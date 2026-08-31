@@ -1992,7 +1992,7 @@ async function cigarWorklistPage(
 // WHAT IS ADMITTED, and each exclusion is load-bearing:
 //   * `status='auto'` — the proposed links, as before.
 //   * `status='unmatched'` with `decided_by='crawler'` AND a reason set — the
-//     resolver's own non-links (0026). The reason column is what distinguishes
+//     resolver's own non-links (0025). The reason column is what distinguishes
 //     them from the excludeCigar cascade (#126), which also leaves
 //     crawler-decided `unmatched` rows behind and whose whole point was to remove
 //     20 gift-card listings from this queue FOR GOOD. Keying on `decided_by`

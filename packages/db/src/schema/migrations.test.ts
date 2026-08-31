@@ -312,9 +312,10 @@ describe("migrations", () => {
     expect(await remaining(elsewhere)).toBe(1);
   });
 
-  // 0026: the two columns that make a crawler refusal legible. Both replace a state
+  // 0025 parts 2 and 3: the two schema changes that make a crawler refusal
+  // legible. Both replace a state
   // in which a refusal was byte-identical to an ordinary negative.
-  it("0026 admits the crawler's unmatched reasons and rejects anything else", async () => {
+  it("0025 admits the crawler's unmatched reasons and rejects anything else", async () => {
     const [vendor] = await pg.db.insert(vendors).values({ name: "Reason Vendor" }).returning({ id: vendors.id });
     const insert = (reason: string | null) =>
       pg.db.insert(listingMatches).values({
@@ -336,7 +337,7 @@ describe("migrations", () => {
   // triage at deploy rather than after the next crawl rewrites them, and it must
   // reach nothing else — an agent's verdict is settled, and a cascade row has no
   // reason by construction.
-  it("0026's backfill claims only crawler-decided unmatched rows", async () => {
+  it("0025's backfill claims only crawler-decided unmatched rows", async () => {
     const stmt = sql`
       UPDATE listing_matches SET unmatched_reason = 'no_match'
        WHERE status = 'unmatched' AND decided_by = 'crawler' AND unmatched_reason IS NULL
@@ -364,7 +365,7 @@ describe("migrations", () => {
     expect(await reasonOf(crawlerAuto)).toBeNull();
   });
 
-  it("0026 admits photo_refused as an attempt outcome", async () => {
+  it("0025 admits photo_refused as an attempt outcome", async () => {
     const check = await pg.db.execute(sql`
       SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
        WHERE conrelid = 'enrichment_attempts'::regclass

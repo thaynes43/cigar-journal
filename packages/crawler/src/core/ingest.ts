@@ -434,7 +434,7 @@ async function ingestListing(
       // revisable and re-written next crawl; a duplicate catalogue row is none of
       // those. So: leave the listing UNMATCHED, with no cigar, for the triage
       // queue a curator already works — the same landing place `offers` mode uses.
-      // The reason rides the row (0026): without it the refusal is byte-identical
+      // The reason rides the row (0025): without it the refusal is byte-identical
       // to an ordinary no-match, and the queue could not show one without showing
       // every cascade leftover too.
       status = "unmatched";

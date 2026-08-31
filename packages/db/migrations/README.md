@@ -85,11 +85,17 @@ init container at startup (ADR-003).
   writes stamp it from the server-derived `Principal`; the web console has no
   OAuth client and stays null. No FK: the audit log is append-only history that
   must outlive the client row it names.
-- `0025_enrichment_market_evidence.sql` — two read-path indexes,
-  `listing_matches (cigar_id) WHERE cigar_id IS NOT NULL` and
-  `crawl_runs (vendor_id, kind, status, started_at DESC)`, plus **two
-  corrections**: `vendors.focus` for Cuban Lou's, `'CC'` → `'both'`, and the
-  deletion of the one wrong-market product photo the defect actually wrote.
+- `0025_enrichment_market_evidence.sql` — the whole evidenced-market lane, in
+  five parts: two read-path indexes
+  (`listing_matches (cigar_id) WHERE cigar_id IS NOT NULL` and
+  `crawl_runs (vendor_id, kind, status, started_at DESC)`);
+  `listing_matches.unmatched_reason` plus its backfill; a widened
+  `enrichment_attempts.last_outcome` CHECK; and **two corrections** —
+  `vendors.focus` for Cuban Lou's, `'CC'` → `'both'`, and the deletion of the one
+  wrong-market product photo the defect actually wrote. The two schema changes
+  were briefly a separate `0026`, which collided with the number ADR-012's
+  taxonomy wave holds; 0025 is the number this lane owns in the ledger
+  (`.agents/HANDOFF.md`) and none of it has deployed, so it absorbed them.
   Schema-neutral (no column, no constraint, no catalogue backfill) but **not
   write-free**. The shop was recorded `'CC'` on the strength of its name; measured
   against the live catalogue on 2026-08-31 it stocks Perdomo, Gurkha, CAO, Rocky
@@ -133,11 +139,11 @@ init container at startup (ADR-003).
   Guarded on `source_url` rather than on the cigar id, so the predicate asserts
   the very fact that makes the photo wrong and cannot delete a correct photo
   uploaded before the migration runs.
-- `0026_refusal_visibility.sql` — `listing_matches.unmatched_reason` (nullable
-  text, `'market_refusal' | 'no_match'`) and a widened
-  `enrichment_attempts.last_outcome` CHECK admitting `'photo_refused'`. Both make
-  a crawler refusal legible where it was previously indistinguishable from an
-  ordinary negative. A refused listing used to write byte-for-byte the row an
+  The **two schema changes** make a crawler refusal legible where it was
+  previously indistinguishable from an ordinary negative.
+  `listing_matches.unmatched_reason` is nullable text,
+  `'market_refusal' | 'no_match'`; `enrichment_attempts.last_outcome` gains
+  `'photo_refused'`. A refused listing used to write byte-for-byte the row an
   ordinary no-match writes — and the row the `excludeCigar` cascade leaves behind
   — so the triage queue could not show refusals without also resurrecting the
   gift-card listings #126 removed; keying the read on this column separates them.

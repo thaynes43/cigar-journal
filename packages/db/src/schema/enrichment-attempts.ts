@@ -37,7 +37,7 @@ export const enrichmentAttempts = pgTable(
     // pin a request open forever, and reset by any completed look.
     errors: integer("errors").notNull().default(0),
     // The three verdicts a LOOK can reach, plus one that is not a look at all:
-    // `photo_refused` (migration 0026) is a completed look whose catalogue-photo
+    // `photo_refused` (migration 0025) is a completed look whose catalogue-photo
     // write was refused by the write-authority guard. It burns neither counter
     // above — see recordEnrichmentAttempt.
     lastOutcome: text("last_outcome").$type<"miss" | "match" | "error" | "photo_refused">().notNull(),
