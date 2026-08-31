@@ -11,8 +11,10 @@ import { provenanceToActor } from "./mapping.js";
 // The conversational gap-fill path (owner, 2026-08-28): resolve-or-create the
 // described cigar through the SAME logic save_smoke uses (resolveCigar — the
 // single catalog-invariant resolver, ADR-002), then queue background enrichment
-// so the crawler can fill the missing specs and a product photo. add_cigar and
-// record_purchase both go through here; the resolve step never forks. ADR-009's
+// so the crawler can fill the missing specs and a product photo. add_cigar
+// resolves and queues in one step (resolveAndEnrich); save_smoke and
+// record_purchase resolve first and queue after their own write, through
+// queueEnrichmentSafely. The resolve step never forks. ADR-009's
 // request_cigar_enrichment repairs an EXISTING sparse cigar through the same
 // queue and the same completeness gate.
 
@@ -87,11 +89,44 @@ export async function maybeQueueEnrichment(
   return true;
 }
 
-// Resolve (or lazily create) the cigar, then optionally queue enrichment. The
-// enrichment gate is evaluated on both create AND resolve, so a described name
-// that links to an existing but under-documented catalog row still gets filled.
-// `confirmedDistinct` is add_cigar's escape hatch, forwarded to the resolver (the
-// record_purchase path never sets it — its resolve keeps default behavior).
+// Queue the gap-fill enrichment WITHOUT putting the caller's own write at risk
+// (#177, #188). maybeQueueEnrichment runs six reads and an insert (the cigar, its
+// photos, the request history, the vendor fleet, the attempt ledger); unguarded,
+// any error among them aborts the whole transaction, so the fix against dropping
+// an entry had quietly added a new way to drop it.
+//
+// The attempt runs in a SAVEPOINT rather than a bare try/catch, because a bare
+// try/catch cannot help here: a failed statement puts Postgres into an aborted
+// transaction, where every later statement — and, if the queue ran first, every
+// earlier one — fails too. Rolling back to the savepoint is what clears that
+// state. The caller then commits, with a false return and a logged reason.
+//
+// Priority order, if the two ever conflict: an un-enriched cigar is recoverable
+// (it lands in the curate lane's unverified and missing_photos worklists, and
+// request_cigar_enrichment repairs it later); a missing journal entry or ledger
+// row lands in no worklist and is unrecoverable without the user. Never trade the
+// user's own record for the enrichment.
+export async function queueEnrichmentSafely(tx: Tx, cigarId: string, requestedBy: string): Promise<boolean> {
+  try {
+    return await tx.transaction((savepoint) => maybeQueueEnrichment(savepoint, cigarId, requestedBy));
+  } catch (error) {
+    // Structured and prose-free, matching the [mcp] event log: ids and a reason,
+    // never journal content.
+    console.warn(
+      `${new Date().toISOString()} [domain] enrichment_queue_failed`,
+      JSON.stringify({ cigarId, reason: error instanceof Error ? error.message : String(error) }),
+    );
+    return false;
+  }
+}
+
+// Resolve (or lazily create) the cigar, then optionally queue enrichment —
+// add_cigar's path, where the queue IS the point of the call. The enrichment gate
+// is evaluated on both create AND resolve, so a described name that links to an
+// existing but under-documented catalog row still gets filled, and
+// `confirmedDistinct` is add_cigar's escape hatch, forwarded to the resolver.
+// save_smoke and record_purchase do not come through here: they resolve first,
+// write their entry, and only then queue via queueEnrichmentSafely.
 export async function resolveAndEnrich(
   tx: Tx,
   ref: CigarRef,

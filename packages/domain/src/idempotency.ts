@@ -46,6 +46,18 @@ export async function recordIdempotency(
 }
 
 // Postgres unique_violation — the concurrent-first-writer backstop for the key.
+// Walked over the cause chain rather than read off the top-level error because
+// drizzle wraps every driver error in a DrizzleQueryError, so the pg error that
+// carries the code is one (or more) `cause` hops down. Depth-capped so a
+// self-referencing chain cannot spin.
+const MAX_CAUSE_DEPTH = 8;
+
 export function isUniqueViolation(error: unknown): boolean {
-  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "23505";
+  let current: unknown = error;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth++) {
+    if (typeof current !== "object" || current === null) return false;
+    if ((current as { code?: unknown }).code === "23505") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }

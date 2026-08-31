@@ -41,6 +41,13 @@ sequenceDiagram
 - A *different* key with near-identical content is a new Smoke by design —
   the same cigar smoked twice in an evening is legitimate. No content-based
   dedup heuristics.
+- Two gates decide a replay, not one. A retry that arrives *after* the first
+  call committed is caught by the in-transaction read of the key (the ordinary
+  case, and what the diagram above shows). A retry genuinely *in flight
+  alongside* the first is caught by the unique violation on
+  `(user_id, client_request_id)`, which the caller converts into the same
+  replay. Both return the stored result with `replayed: true`; the second gate
+  is the reason a race cannot surface a raw constraint error to the model.
 
 ## Failure modes
 

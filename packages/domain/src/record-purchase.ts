@@ -5,7 +5,7 @@ import { auditActor } from "./audit-attribution.js";
 import type { CigarRef, RecordPurchaseInput, RecordPurchaseResult } from "./types.js";
 import { validateRecordPurchaseInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
-import { resolveAndEnrich } from "./enrichment.js";
+import { queueEnrichmentSafely } from "./enrichment.js";
 import { deriveHoldingSummary } from "./inventory.js";
 import { isWanted } from "./wants.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
@@ -15,7 +15,8 @@ import { resolveCigar } from "./cigar-resolution.js";
 
 // Append one acquisition — or a correction — to the purchases ledger (owner,
 // 2026-08-28: everything is a purchase row, holdings stay derived). A described
-// cigar auto-creates + enqueues enrichment through the SAME path add_cigar uses;
+// cigar auto-creates + enqueues enrichment through the SAME resolver and queue
+// add_cigar uses — queued after the ledger row, never ahead of it (#188);
 // an unknown vendor name is folded into notes rather than minting a registry row
 // (the vendor registry is admin data). Ledger write + audit + idempotency key in
 // one transaction.
@@ -72,14 +73,12 @@ async function recordWithinTx(
     return { ...(existing.result as RecordPurchaseResult), replayed: true };
   }
 
-  // A described cigar takes the add_cigar path (create + enqueue enrichment); a
-  // resolved id links directly with no enrichment.
-  let cigar: ResolvedCigar;
-  if ("described" in input.cigar) {
-    ({ cigar } = await resolveAndEnrich(tx, input.cigar as CigarRef, principal.userId, true));
-  } else {
-    cigar = await resolveCigar(tx, input.cigar as CigarRef);
-  }
+  // Resolve-or-create through the single catalog-invariant resolver (ADR-002) —
+  // the same one add_cigar and save_smoke use. A described ref may create the
+  // cigar; a resolved id only ever links. Enrichment is queued after the ledger
+  // write, below.
+  const describedRef = "described" in input.cigar;
+  const cigar: ResolvedCigar = await resolveCigar(tx, input.cigar as CigarRef);
 
   const { vendorId, unknownVendor } = await resolveVendor(tx, input.vendorName);
   // Fold an unknown vendor into notes; keep the user's own notes ahead of it.
@@ -122,6 +121,22 @@ async function recordWithinTx(
     },
     correlationId: input.correlationId ?? input.clientRequestId,
   });
+
+  // Gap-fill enrichment for a cigar this purchase just created — the specs and
+  // product photo add_cigar would have queued. Ordered AFTER the ledger row and
+  // its audit, and wrapped in the savepoint guard (#188): the queue runs six
+  // reads and an insert, and a failure among them aborts the transaction, so
+  // running it first traded the purchase for it. Two gates:
+  //   * cigar.created — a purchase that LINKED to an existing row filled no gap.
+  //     Queueing there would file a request against exactly the unverified and
+  //     untyped rows the #154 curation press refuses without an override.
+  //   * described refs only — a cigarId ref never creates, so the common path
+  //     takes no enrichment reads at all.
+  // Unlike save_smoke there is no provenance gate: record_purchase queues under
+  // every provenance, deliberately — no legacy importer writes purchases.
+  if (cigar.created && describedRef) {
+    await queueEnrichmentSafely(tx, cigar.cigarId, principal.userId);
+  }
 
   // Derived stock picture AFTER this row lands (same formula as getMyInventory).
   const holdingAfter = await deriveHoldingSummary(tx, principal.userId, cigar.cigarId);

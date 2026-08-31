@@ -264,14 +264,25 @@ carries `journalEntryCreated: false` so a client that never reads the preamble
 still meets the invariant at the point of use, and `save_smoke`'s result gains
 `enrichmentQueued`.
 
-**One behaviour change, not purely additive.** A conversational `save_smoke` that
-*creates* a described cigar now also files an `enrichment_requests` row — a new DB
-write on a path that previously made none. It is gated to exactly that case
-(created + `described` + `llm-conversation` provenance), so the legacy importer
-and the web form are untouched, and it can never cost the entry: the queue attempt
-runs in a savepoint, and a failure returns `enrichmentQueued: false` with the
-smoke saved. The schema changes themselves are additive — one new output field on
-`add_cigar`, one optional field on `save_smoke` — and no behaviour is removed.
+**Two behaviour changes, neither purely additive.** First, a conversational
+`save_smoke` that *creates* a described cigar now also files an
+`enrichment_requests` row — a new DB write on a path that previously made none. It
+is gated to exactly that case (created + `described` + `llm-conversation`
+provenance), so the legacy importer and the web form are untouched, and it can
+never cost the entry: the queue attempt runs in a savepoint, and a failure returns
+`enrichmentQueued: false` with the smoke saved.
+
+Second — and this one *removes* a write — `record_purchase` now queues enrichment
+only when the described name **created** the catalog row. A described purchase that
+linked to an existing row used to file a request; it filled no gap, so it no longer
+does, matching `save_smoke`'s gate. That queue also moved to *after* the ledger
+insert and into the same savepoint: it previously ran first and unguarded, so a
+failing enrichment aborted the transaction and the purchase was lost with it (zero
+purchase rows, zero cigar rows). No response field changes — `record_purchase` does
+not report `enrichmentQueued` — so a client sees only the durability improvement.
+
+The schema changes themselves are additive: one new output field on `add_cigar`,
+one optional field on `save_smoke`.
 
 **This is inert on the surface where it failed until the owner acts.** Per the
 manifest-cache section above, ChatGPT caches tool descriptions globally and input

@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { eq } from "drizzle-orm";
-import { purchases, vendors, enrichmentRequests, auditLog } from "@cj/db";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { eq, sql } from "drizzle-orm";
+import { purchases, vendors, cigars, enrichmentRequests, auditLog } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { recordPurchase } from "./record-purchase.js";
 import { getMyInventory } from "./inventory.js";
@@ -54,6 +54,26 @@ describe("recordPurchase", () => {
     expect(rec!.actor).toBe("mcp");
     expect(rec!.smokeId).toBeNull();
     expect(rec!.clientId).toBeNull(); // no credential on this principal (#183)
+  });
+
+  it("queues nothing when a described purchase LINKS to an existing catalog row", async () => {
+    // The created gate: the queue exists to fill a gap this purchase opened. A
+    // described name that resolves to a row already in the catalog filled no gap,
+    // and queueing there would file a request against exactly the unverified and
+    // untyped rows the #154 curation press refuses without an override.
+    const canonicalName = "Ambergris Tide Purchase";
+    const cigarId = await h.seedCigar({ canonicalName, brand: "Ambergris", verification: "unverified" });
+
+    const result = await recordPurchase(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName, brand: "Ambergris" } },
+      quantity: 2,
+    });
+
+    expect(result.cigar.cigarId).toBe(cigarId);
+    expect(
+      await h.deps.db.select().from(enrichmentRequests).where(eq(enrichmentRequests.cigarId, cigarId)),
+    ).toHaveLength(0);
   });
 
   it("stamps the calling credential's client on the purchase audit row", async () => {
@@ -223,5 +243,49 @@ describe("recordPurchase", () => {
     });
     const intruderInv = await getMyInventory(h.deps, intruder);
     expect(intruderInv.holdings.some((hh) => hh.cigar.cigarId === cigarId)).toBe(false);
+  });
+
+  it("records the purchase even when the enrichment queue fails", async () => {
+    // Never trade the ledger row for the enrichment (#188). Driven with a REAL
+    // Postgres error rather than a stubbed throw, because the hazard is
+    // server-side: a failed statement aborts the transaction, so every other
+    // statement — the purchase, its audit row — fails too. Queueing ahead of the
+    // insert committed nothing at all; ordering the queue last and rolling back to
+    // the savepoint is what survives it.
+    await h.deps.db.execute(sql`
+      create function cj_test_block_enrichment() returns trigger as $$
+      begin raise exception 'enrichment boom'; end;
+      $$ language plpgsql
+    `);
+    await h.deps.db.execute(sql`
+      create trigger cj_test_block_enrichment before insert on enrichment_requests
+      for each row execute function cj_test_block_enrichment()
+    `);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const result = await recordPurchase(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigar: { described: { canonicalName: "Ferrous Cascade Toro", brand: "Ferrous" } },
+        quantity: 4,
+      });
+
+      // The committed rows, not just the returned envelope — the point is that the
+      // transaction survived the failure inside it.
+      const rows = await h.deps.db.select().from(purchases).where(eq(purchases.id, result.purchaseId));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.quantity).toBe(4);
+      expect(await h.deps.db.select().from(cigars).where(eq(cigars.id, result.cigar.cigarId))).toHaveLength(1);
+      expect(
+        await h.deps.db.select().from(enrichmentRequests).where(eq(enrichmentRequests.cigarId, result.cigar.cigarId)),
+      ).toHaveLength(0);
+
+      // And the loss of the enrichment is not silent.
+      expect(warn.mock.calls.flat().join(" ")).toContain("enrichment_queue_failed");
+    } finally {
+      warn.mockRestore();
+      await h.deps.db.execute(sql`drop trigger cj_test_block_enrichment on enrichment_requests`);
+      await h.deps.db.execute(sql`drop function cj_test_block_enrichment()`);
+    }
   });
 });

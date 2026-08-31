@@ -6,7 +6,7 @@ import { validateSaveInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
 import { normalizeDescriptors, verbatimDescriptors } from "./descriptors.js";
 import { resolveCigar } from "./cigar-resolution.js";
-import { maybeQueueEnrichment } from "./enrichment.js";
+import { queueEnrichmentSafely } from "./enrichment.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
 import { applyConsumptionOnSave } from "./consumption.js";
@@ -35,37 +35,6 @@ export async function saveSmoke(
       }
     }
     throw error;
-  }
-}
-
-// Queue the gap-fill enrichment WITHOUT putting the journal entry at risk (#177).
-// maybeQueueEnrichment runs six reads and an insert (the cigar, its photos, the
-// request history, the vendor fleet, the attempt ledger); before this guard any
-// error among them aborted the whole save, so the fix against dropping the entry
-// had quietly added a new way to drop it.
-//
-// The attempt runs in a SAVEPOINT rather than a bare try/catch, because a bare
-// try/catch cannot help here: a failed statement puts Postgres into an aborted
-// transaction, where every later statement — the smoke, its audit row — fails
-// too. Rolling back to the savepoint is what clears that state. The save then
-// commits with enrichmentQueued:false and a logged reason.
-//
-// Priority order, if the two ever conflict: an un-enriched cigar is recoverable
-// (it lands in the curate lane's unverified and missing_photos worklists, and
-// request_cigar_enrichment repairs it later); a missing journal entry lands in no
-// worklist and is unrecoverable without the user. Never trade the entry for the
-// enrichment.
-async function queueEnrichmentSafely(tx: Tx, cigarId: string, requestedBy: string): Promise<boolean> {
-  try {
-    return await tx.transaction((savepoint) => maybeQueueEnrichment(savepoint, cigarId, requestedBy));
-  } catch (error) {
-    // Structured and prose-free, matching the [mcp] event log: ids and a reason,
-    // never journal content.
-    console.warn(
-      `${new Date().toISOString()} [domain] enrichment_queue_failed`,
-      JSON.stringify({ cigarId, reason: error instanceof Error ? error.message : String(error) }),
-    );
-    return false;
   }
 }
 

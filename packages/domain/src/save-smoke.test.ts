@@ -561,4 +561,67 @@ describe("saveSmoke", () => {
       await h.deps.db.execute(sql`drop function cj_test_block_enrichment()`);
     }
   });
+
+  // Two identical saves genuinely in flight together under one clientRequestId.
+  // The loser can be turned back at either of two gates: the in-transaction
+  // loadIdempotency check, if the winner has already committed, or the unique
+  // violation on (user_id, client_request_id), if it has not. The second is the
+  // one that was dead before isUniqueViolation walked the cause chain — drizzle
+  // wraps the pg error, so the code sat one `cause` hop below where the
+  // predicate looked, the replay never fired, and the loser saw a raw 23505.
+  //
+  // Left to chance that gate is the rarer of the two, so the smokes insert is
+  // slowed to hold both transactions open past each other's loadIdempotency and
+  // make the collision the normal outcome. The assertions still only claim what
+  // BOTH gates owe — neither call rejects, exactly one is the writer, one smoke
+  // row — so a scheduling change cannot turn this into a flake.
+  it("replays instead of rejecting when two identical saves race the same clientRequestId", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Race Condition Robusto", brand: "Race" });
+    const input: SaveSmokeInput = {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["cedar"],
+      journal: { title: "Raced", narrative: "Two callers, one request id." },
+    };
+
+    await h.deps.db.execute(sql`
+      create function cj_test_slow_smoke() returns trigger as $$
+      begin perform pg_sleep(0.25); return new; end;
+      $$ language plpgsql
+    `);
+    await h.deps.db.execute(sql`
+      create trigger cj_test_slow_smoke before insert on smokes
+      for each row execute function cj_test_slow_smoke()
+    `);
+
+    try {
+      const settled = await Promise.allSettled([
+        saveSmoke(h.deps, user, input),
+        saveSmoke(h.deps, user, input),
+      ]);
+
+      // Carried as reason strings so a regression names the error it threw.
+      const rejected = settled.flatMap((s) => (s.status === "rejected" ? [String(s.reason)] : []));
+      expect(rejected).toEqual([]);
+
+      const results = settled.flatMap((s) => (s.status === "fulfilled" ? [s.value] : []));
+      expect(results.filter((r) => !r.replayed)).toHaveLength(1);
+      expect(results.filter((r) => r.replayed)).toHaveLength(1);
+      expect(new Set(results.map((r) => r.smoke.smokeId)).size).toBe(1);
+
+      // The loser's rolled-back smoke insert must leave nothing behind.
+      const rows = await h.deps.db.select().from(smokes).where(eq(smokes.cigarId, cigarId));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.id).toBe(results[0]!.smoke.smokeId);
+
+      const keys = await h.deps.db
+        .select()
+        .from(idempotencyKeys)
+        .where(eq(idempotencyKeys.clientRequestId, input.clientRequestId));
+      expect(keys).toHaveLength(1);
+    } finally {
+      await h.deps.db.execute(sql`drop trigger cj_test_slow_smoke on smokes`);
+      await h.deps.db.execute(sql`drop function cj_test_slow_smoke()`);
+    }
+  });
 });
