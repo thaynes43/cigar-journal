@@ -72,8 +72,8 @@ usage:
                   not), the elevation is recorded on the audit row and shown in the
                   plan, and the TTL is capped at ${CURATION_SERVICE_TOKEN_TTL_DAYS}
                   days — the widest credential is not also the longest-lived.
-  --ttl-days      default and maximum ${DEFAULT_SERVICE_TOKEN_TTL_DAYS}, or ${CURATION_SERVICE_TOKEN_TTL_DAYS} with --allow-curation
-                  (it can only shorten)
+  --ttl-days      default and maximum ${DEFAULT_SERVICE_TOKEN_TTL_DAYS}, or ${CURATION_SERVICE_TOKEN_TTL_DAYS} when a curation
+                  scope is granted (it can only shorten)
   --resource      assert the audience; must equal this server's own /mcp resource
   --reason        why this credential exists (recorded in the audit row); required on mint
   --yes           apply. Without it mint/revoke print the plan and write nothing.

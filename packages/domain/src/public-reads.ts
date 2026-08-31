@@ -41,8 +41,9 @@ function clampLimit(value: number | undefined): number {
 }
 
 // Public summary text is narrative-only. The private deriveSummary prefers the
-// impression, but the impression is a private assessment field withheld from the
-// public surface, so it must not seed a public summary either.
+// impression, but the impression is excluded from the public list summary, so it
+// must not seed a public summary either. The detail view still renders it —
+// toPublicSmokeView publishes the impression on the assessment.
 function deriveNarrativeSummary(narrative: string | null): string | null {
   if (narrative && narrative.trim().length > 0) {
     const text = narrative.trim();
