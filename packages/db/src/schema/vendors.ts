@@ -1,11 +1,26 @@
 import { pgTable, uuid, text, boolean, timestamp } from "drizzle-orm/pg-core";
 
-// Admin-managed shop registry (Market context). Cuban vendors carry an approval
+// Admin-managed source registry (Market context). Cuban vendors carry an approval
 // status synced from the r/cubancigars wiki; unapproved sources stay labeled.
+//
+// Since migration 0028 it registers more than shops: `kind` distinguishes a
+// vendor from a reviewer or a reference source (ADR-013 §4). One registry with a
+// discriminator rather than two tables, because `crawl_enabled`, the approval
+// posture and the six tables that hang off `vendors.id` — `crawl_runs` and
+// `enrichment_attempts` in particular — are the crawl mechanics of ANY source,
+// and a parallel table would fork every one of them.
 export const vendors = pgTable("vendors", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
   url: text("url"),
+  // What this source IS (migration 0028, ADR-013 §4). Defaults to 'vendor', so
+  // every pre-0028 row keeps meaning exactly what it meant.
+  //
+  // A CHECK in the migration makes a non-vendor source's `focus` NULL and its
+  // `purchase_linkout` false: a reviewer stocks nothing, so any market focus it
+  // carried would be a stocking claim from a site with no inventory — and
+  // `evidencedMarketSql` infers a cigar's market from exactly that claim.
+  kind: text("kind").$type<"vendor" | "reviewer" | "reference">().notNull().default("vendor"),
   focus: text("focus").$type<"NC" | "CC" | "both">(),
   crawlEnabled: boolean("crawl_enabled").notNull().default(false),
   displayEnabled: boolean("display_enabled").notNull().default(false),

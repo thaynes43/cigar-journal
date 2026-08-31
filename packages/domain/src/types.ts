@@ -1217,6 +1217,12 @@ export interface MergeCigarsResult {
     // crawler offers re-point through their listing match, so they are not counted
     // here. Re-pointed rather than cascade-dropped so merge keeps price history.
     offers: number;
+    // External review scores (ADR-013) whose cigar_id pointed at the source.
+    // Blend-linked observations are not counted: a cigar merge does not move
+    // them. Re-pointed rather than cascade-dropped because the evidence is about
+    // the product, and every aggregate resolves ancestry through active cigars
+    // only — left on the tombstone it would silently disappear.
+    reviewObservations: number;
     productPhotos: number; // 0 or 1 — the target keeps its own when it has one
     enrichmentRequests: number;
     // Want marks moved to the target. When the same user wanted BOTH sides, the
@@ -1279,6 +1285,7 @@ export interface UnmergeCigarsResult {
     purchases: number;
     listingMatches: number;
     offers: number;
+    reviewObservations: number;
     productPhotos: number;
     enrichmentRequests: number;
     wants: number;

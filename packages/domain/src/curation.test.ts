@@ -10,6 +10,7 @@ import {
   offers,
   productPhotos,
   enrichmentRequests,
+  reviewObservations,
   vendors,
   enrichmentAttempts,
   wants,
@@ -39,6 +40,7 @@ import {
   undoCurationAction,
 } from "./curation.js";
 import { assignCigarParts, createBlend, createLine } from "./taxonomy-writes.js";
+import { recordReviewObservation } from "./review-observations.js";
 import { enrichmentCoverageForCigar, recordEnrichmentAttempt } from "./enrichment-coverage.js";
 import { getProductPhoto } from "./product-photos.js";
 import { getMyInventory } from "./inventory.js";
@@ -124,6 +126,23 @@ describe("curation", () => {
     return row!.id;
   }
 
+  // One external review score (ADR-013), pinned to a cigar or a blend. `source`
+  // and `url` are the idempotency key, so every call gets its own pair.
+  async function addReviewObservation(
+    target: { cigarId: string } | { blendId: string },
+  ): Promise<string> {
+    const tag = newRequestId();
+    const result = await recordReviewObservation(h.deps.db, {
+      source: `curation-test-${tag}`,
+      url: `https://reviews.example/${tag}`,
+      nativeScale: "0-100",
+      nativeScore: 91,
+      seenAt: new Date("2026-08-30T12:00:00.000Z"),
+      ...target,
+    });
+    return result.observationId;
+  }
+
   // --- mergeCigars ----------------------------------------------------------
 
   describe("mergeCigars", () => {
@@ -164,6 +183,7 @@ describe("curation", () => {
         purchases: 1,
         listingMatches: 1,
         offers: 0, // the seeded offer links via its listing match, not offers.cigar_id
+        reviewObservations: 0,
         productPhotos: 1,
         enrichmentRequests: 1,
         wants: 0,
@@ -280,6 +300,55 @@ describe("curation", () => {
 
       const [row] = await h.deps.db.select().from(offers).where(eq(offers.id, offer!.id));
       expect(row!.cigarId).toBe(target); // survived + re-pointed, not cascade-deleted
+    });
+
+    // A merge asserts the two rows are the same product, so external evidence
+    // about that product follows the survivor. Left on the tombstone the score
+    // would leave every ADR-013 aggregate at once — `cigar_ancestry` resolves
+    // through active cigars only — and buying it back costs a crawl.
+    it("re-points a cigar-linked review observation so the survivor keeps the evidence", async () => {
+      const source = await seedUnverified("Review Obs Source");
+      const target = await seedUnverified("Review Obs Target");
+      const observationId = await addReviewObservation({ cigarId: source });
+
+      const result = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+      expect(result.repointed.reviewObservations).toBe(1);
+
+      const [row] = await h.deps.db
+        .select()
+        .from(reviewObservations)
+        .where(eq(reviewObservations.id, observationId));
+      expect(row!.cigarId).toBe(target);
+    });
+
+    it("leaves a blend-linked review observation alone — a cigar merge did not move its target", async () => {
+      const [brand] = await h.deps.db
+        .insert(brands)
+        .values({ name: "Review Obs Brand", slug: "review-obs-brand" })
+        .returning();
+      const line = await createLine(h.deps, admin, { brandId: brand!.id, name: "Review Obs Line" });
+      const blend = await createBlend(h.deps, admin, { lineId: line.lineId, name: "Review Obs" });
+      const observationId = await addReviewObservation({ blendId: blend.blendId });
+
+      const source = await seedUnverified("Blend Obs Source");
+      const target = await seedUnverified("Blend Obs Target");
+      const result = await mergeCigars(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        sourceCigarId: source,
+        targetCigarId: target,
+      });
+      expect(result.repointed.reviewObservations).toBe(0);
+
+      const [row] = await h.deps.db
+        .select()
+        .from(reviewObservations)
+        .where(eq(reviewObservations.id, observationId));
+      expect(row!.cigarId).toBeNull();
+      expect(row!.blendId).toBe(blend.blendId);
     });
 
     it("keeps the target's own photo when it already has one (source photo discarded)", async () => {
@@ -653,6 +722,7 @@ describe("curation", () => {
         .insert(offers)
         .values({ cigarId: source, sourceName: "Chat Shop", price: "11.00", currency: "USD" })
         .returning({ id: offers.id });
+      const observationId = await addReviewObservation({ cigarId: source });
       await setWant(h.deps, user, { cigarId: source, wanted: true });
       await setFavorite(h.deps, user, { cigarId: source, favorited: true });
 
@@ -670,6 +740,7 @@ describe("curation", () => {
         purchases: 1,
         listingMatches: 1,
         offers: 1,
+        reviewObservations: 1,
         productPhotos: 1,
         enrichmentRequests: 1,
         wants: 1,
@@ -686,6 +757,11 @@ describe("curation", () => {
       expect(matchRow!.cigarId).toBe(source);
       const [offerRow] = await h.deps.db.select().from(offers).where(eq(offers.id, adHoc!.id));
       expect(offerRow!.cigarId).toBe(source);
+      const [observationRow] = await h.deps.db
+        .select()
+        .from(reviewObservations)
+        .where(eq(reviewObservations.id, observationId));
+      expect(observationRow!.cigarId).toBe(source);
       const [enrichment] = await h.deps.db
         .select()
         .from(enrichmentRequests)

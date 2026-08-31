@@ -3,7 +3,46 @@
 // cigars vs accessories. The generic core (fetch/sitemap/jsonld/normalize/match/
 // ingest) is driven entirely by these fields, so a new vendor is a new adapter
 // object plus a registry entry — no core changes.
-export interface VendorAdapterBase {
+// --- source kind (ADR-013 §4, migration 0028) --------------------------------
+// WHAT THE REGISTRY ROW THIS ADAPTER SEEDS *IS*. The same rule the database
+// holds as `vendors_non_vendor_source_chk`, stated a compile earlier: a non-shop
+// source has no market and is not a purchase destination.
+//
+// Both statements are needed and neither is redundant. The CHECK can only refuse
+// a row some registration path was able to build, and `resolveVendor` builds its
+// row from an adapter — so an adapter that could name a reviewer AND a focus
+// would carry the mistake all the way to an INSERT that fails at runtime, in a
+// crawl, in the cluster. Encoded as a discriminated union, the same mistake is a
+// type error on the adapter line where it is actually made.
+
+// A shop. `focus` is REQUIRED, because it is the market claim `evidencedMarketSql`
+// infers a cigar's market from: a stockist whose inventory declares no market is
+// a stockist whose inventory says nothing.
+export interface VendorSourceKind {
+  kind: "vendor";
+  // NC vs CC vs both — drives focus and, for CC, the approved-list posture.
+  focus: "NC" | "CC" | "both";
+  // Is this vendor a place to buy? false = offers/photos ingested and shown, but
+  // never as a purchase destination — no listing link-out (seeds purchase_linkout,
+  // owner ruling 2026-08-29). Cuban Lou's is the sole false today.
+  purchaseLinkout: boolean;
+}
+
+// A reviewer (halfwheel) or a reference (a spec database). It stocks nothing, so
+// `focus` is FORBIDDEN — any focus it carried would be a stocking claim from a
+// site with no inventory, which is the exact mechanism of the #170 defect — and
+// it is never a purchase destination, so `purchaseLinkout` narrows to `false`
+// rather than merely defaulting there (the column default is `true`).
+export interface NonVendorSourceKind {
+  kind: "reviewer" | "reference";
+  focus?: never;
+  purchaseLinkout: false;
+}
+
+export type SourceKind = VendorSourceKind | NonVendorSourceKind;
+
+// Everything that is true of an adapter whatever kind of source it points at.
+export interface VendorAdapterShape {
   // Registry key, used on the CLI (`--vendor <slug>`) and as the adapter id.
   slug: string;
   // The vendors.name this adapter resolves/creates its registry row by.
@@ -17,8 +56,6 @@ export interface VendorAdapterBase {
   // existing admin-owned row is never overwritten). Encoded here so a new vendor
   // is one adapter object, not a hand-written INSERT.
   //
-  // NC vs CC vs both — drives focus and, for CC, the approved-list posture.
-  focus: "NC" | "CC" | "both";
   // Has a live robots/ToS read + probe PASSED for this vendor? The dev pod cannot
   // reach these domains, so a new adapter ships false; the coordinator flips it
   // true (or an admin enables the row) once the in-cluster probe verifies robots,
@@ -30,10 +67,6 @@ export interface VendorAdapterBase {
   approvalStatus: "owner-added" | "approved" | "unapproved";
   // Whether this vendor's offers may be displayed at all (seeds display_enabled).
   displayEnabled: boolean;
-  // Is this vendor a place to buy? false = offers/photos ingested and shown, but
-  // never as a purchase destination — no listing link-out (seeds purchase_linkout,
-  // owner ruling 2026-08-29). Cuban Lou's is the sole false today.
-  purchaseLinkout: boolean;
   // --- crawl shape ---------------------------------------------------------
   // A breadcrumb path (joined) matching this is a cigar category…
   cigarCategoryPattern: RegExp;
@@ -54,6 +87,11 @@ export interface VendorAdapterBase {
   minIntervalMs?: number;
   maxPages?: number;
 }
+
+// The adapter's registry posture, kind included. A union rather than one
+// interface with a nullable `focus`, so `kind: "reviewer"` and a `focus` cannot
+// be written together at all.
+export type VendorAdapterBase = VendorAdapterShape & SourceKind;
 
 export interface SitemapSampling {
   // Root fetches to take. Clamped to [1, MAX_SITEMAP_SAMPLES] by the core so a

@@ -123,6 +123,65 @@ describe("diffApproved / applyApproved (embedded Postgres)", () => {
     expect(audits.every((a) => a.clientId === null)).toBe(true);
   });
 
+  // A REVIEWER IS NOT A SHOP THE WIKI CAN APPROVE (ADR-013 §4). The wiki lists
+  // places to buy Cuban cigars, so the registry rows it can have an opinion about
+  // are `kind = 'vendor'`. Nothing else catches this: the migration's CHECK
+  // constrains `focus` and `purchase_linkout`, and `approval_status` is neither —
+  // so an unscoped diff would flip a reviewer whose host matched a wiki entry to
+  // an approved Cuban vendor while it kept saying `kind = 'reviewer'`, and the
+  // console would show halfwheel as a store the owner may buy from.
+  it("never flips a reviewer row into an approved shop", async () => {
+    // Registered as ADR-013 requires: no market, no purchase link-out. Its host
+    // is the one the wiki's `NewCC Store` entry carries.
+    await pg.db.insert(vendors).values({
+      name: "NewCC Store",
+      url: "https://newccstore.example",
+      kind: "reviewer",
+      focus: null,
+      purchaseLinkout: false,
+      approvalStatus: "unapproved",
+    });
+
+    const diff = await diffApproved(pg.db, parseApprovedWiki(WIKI));
+    // The wiki entry becomes an ADD — a new shop row — rather than an APPROVE of
+    // the reviewer that happens to share its host. A duplicate is visible and
+    // mergeable; a silently re-labelled reviewer is neither.
+    const newcc = diff.changes.filter((c) => c.store === "NewCC Store");
+    expect(newcc).toHaveLength(1);
+    expect(newcc[0]!.kind).toBe("add");
+    expect(newcc[0]!.vendorId).toBeNull();
+
+    await applyApproved(pg.db, diff);
+
+    const rows = await pg.db.select().from(vendors).where(eq(vendors.name, "NewCC Store"));
+    const reviewer = rows.find((r) => r.kind === "reviewer");
+    const shop = rows.find((r) => r.kind === "vendor");
+    // Untouched, in every column the sync would have written.
+    expect(reviewer!.approvalStatus).toBe("unapproved");
+    expect(reviewer!.approvalNote).toBeNull();
+    expect(reviewer!.focus).toBeNull();
+    expect(reviewer!.purchaseLinkout).toBe(false);
+    // The shop the wiki actually listed exists beside it.
+    expect(shop!.approvalStatus).toBe("approved");
+    expect(shop!.focus).toBe("CC");
+  });
+
+  // The revocation half of the same rule. A reviewer cannot be dropped from a
+  // list it was never on, and the sweep must not reach it to try.
+  it("never revokes a reviewer row absent from the wiki", async () => {
+    await pg.db.insert(vendors).values({
+      name: "Retired Reviewer",
+      url: "https://retiredreviewer.example",
+      kind: "reviewer",
+      focus: null,
+      purchaseLinkout: false,
+      approvalStatus: "approved",
+    });
+
+    const diff = await diffApproved(pg.db, parseApprovedWiki(WIKI));
+    expect(diff.changes.some((c) => c.store === "Retired Reviewer")).toBe(false);
+  });
+
   it("applyApproved on an empty diff writes nothing", async () => {
     // A snapshot listing exactly the two already-approved CC shops → no adds, no
     // revocations, no promotions: an empty diff.

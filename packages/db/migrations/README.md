@@ -251,3 +251,76 @@ init container at startup (ADR-003).
   every subquery reads the pre-statement snapshot); the DDL carries
   `IF NOT EXISTS`/`IF EXISTS` so the suite can replay the file and observe that a
   second application changes nothing.
+- `0028_review_observations.sql` — external review scores, the source kinds they
+  arrive through, and the two-population aggregate spine (ADR-013, issue #199
+  slice 1). Three parts.
+  **`vendors.kind`** (`vendor` | `reviewer` | `reference`, default `vendor`)
+  makes the crawl registry able to say what a source IS — one registry with a
+  discriminator rather than a parallel `review_sources` table, because
+  `crawl_enabled`, the approval posture and the six tables hanging off
+  `vendors.id` (`crawl_runs` and `enrichment_attempts` above all) are the crawl
+  mechanics of ANY source, and a second table would fork every one of them.
+  A CHECK forbids a non-vendor source from carrying a `focus` or a
+  `purchase_linkout` — a reviewer stocks nothing, so a market focus on it would
+  be a stocking claim from a site with no inventory, which is exactly the
+  mechanism of the #170 seal. That closes `evidencedMarketSql` and
+  `focusedStockistSql` structurally; `enrichVendorFleet` is the single predicate
+  that still had to read `kind` explicitly, because its market filter is the
+  liberal one that admits a NULL focus.
+  **`review_observations`** is the ADR-009 price-observation pattern applied to
+  reviews, differing in one deliberate way: `offers` is an append-only series
+  with a 24h dedupe window because the same vendor pricing the same cigar next
+  week is a new fact, while one reviewer publishes one verdict at one URL — so
+  the key is a real `UNIQUE (source, url)` and a re-crawl updates in place.
+  Native scale and native score are stored beside the 0-100 `normalized_score`,
+  which is what makes the normalization convention in `@cj/domain`'s
+  `review-scores.ts` restatable later without a re-crawl. Target linkage is
+  exactly one of `cigar_id` / `blend_id` (the most specific level the SOURCE
+  states); a cigar-linked row's blend is derived through `cigars.blend_id`,
+  never stored twice, because curation re-parents leaves and a stored copy would
+  go stale invisibly. There is deliberately NO FK to `vendors`: `source` + `url`
+  are the evidence, and an unconstrained registry link that can disagree with
+  `source` is worse than none (a constrained one can return in slice 2 if a
+  console needs it). The delete rules are deliberately asymmetric — `cigar_id`
+  CASCADEs like every other cigar-linked observation table, `blend_id` is NO
+  ACTION like the 0026 hierarchy, so retiring a blend that still carries
+  BLEND-TARGETED evidence has to re-point it first; evidence that only resolves
+  through the blend's leaves is not covered by that FK, and needs its own
+  pre-check when blend deletion becomes a real curation move. Byte bounds
+  (`octet_length`, matched by `Buffer.byteLength` in the domain writer) on
+  `source`/`url` keep an oversized value from failing on the btree unique index
+  instead of in validation — a character count would let a 2000-character
+  multibyte URL through; the 400-character bound on `excerpt` is ADR-013's
+  copyright rule as a constraint (the domain writer REFUSES an over-long excerpt
+  rather than truncating it — truncation would accept a full review body forever
+  and quietly store its first 400 characters).
+  **Four views** are the aggregate spine: `cigar_ancestry` (the leaf's effective
+  ancestry, per-level COALESCE because ancestry is partial by design, and the
+  single place `catalog_status = 'active'` is DEFINED — the blend-linked branch
+  of `review_observation_scope` reaches no leaf, so it probes that view with an
+  EXISTS rather than inheriting nothing, and an emptied blend goes quiet on both
+  sides together), `review_observation_scope`, `smoke_rating_scope`, and
+  `blend_market_type`. `smoke_rating_scope` carries `users.journal_visibility`
+  rather than filtering on it: a journal rating is PRIVATE by default (migration
+  0001), so a community score that averaged every rating would publish the
+  entries their authors marked private — and at a sample count of one it would
+  print that one private rating on a catalogue page. The domain read picks the
+  population explicitly (`JournalPopulation`, defaulting to public-only), which
+  filtering in the view would have foreclosed: "my own score for this blend" is a
+  legitimate private read the same flag must not block. It also carries
+  `user_id`, because the journal aggregate is ONE VOICE PER JOURNAL (ADR-013 §3
+  as amended 2026-08-31): each author's ratings collapse to their own mean before
+  the level averages, so a prolific logger counts once. That grouping lives in
+  `score-aggregates.ts` rather than here, since the level it groups at is the
+  caller's question. The last derives Cuban-ness at the blend from its leaves'
+  `cigars.type`, fail-closed and transcribed from the cigar detail page's blender
+  gate: a positive `= 'NC'` test, because `type` is nullable and mostly NULL, so
+  the negative form would credit a blender on every row nobody has established
+  anything about. `review_observation_scope` is a UNION ALL of its two cases
+  rather than one shape with COALESCEd levels — the COALESCE made `blend_id` an
+  expression the planner could not join on, which turned the blender roll-up into
+  a 65,000-row nested loop filtered down to 162 (20.7ms against 2-3ms elsewhere);
+  split, it is 3.9ms — 5.4ms since the one-voice grouping, which costs about half
+  a millisecond at every level. Views rather than maintained tables, benchmarked at ten
+  times production volume — see the migration header and
+  `pnpm --filter @cj/domain bench:scores`.

@@ -10,6 +10,7 @@ import {
   segmentCount,
 } from "./product-url.js";
 import { adapters } from "../adapters/index.js";
+import type { VendorAdapter } from "../adapters/types.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
 import { cubanLous } from "../adapters/cuban-lous.js";
 import { smallBatchCigar } from "../adapters/small-batch-cigar.js";
@@ -324,5 +325,63 @@ describe("registry invariant", () => {
       expect(pattern.global, slug).toBe(false);
       expect(pattern.sticky, slug).toBe(false);
     }
+  });
+
+  // THE SOURCE KIND (ADR-013 §4, migration 0028). Every adapter here is a shop,
+  // and every one says so — the seed path passes `kind` straight into the
+  // `vendors` row, so a missing one would be a silent default rather than a
+  // statement.
+  it("every registered adapter declares itself a vendor, with a market", () => {
+    for (const [slug, adapter] of Object.entries(adapters)) {
+      expect(adapter.kind, slug).toBe("vendor");
+      // A shop's `focus` is required, and it is the claim `evidencedMarketSql`
+      // reads to infer a cigar's market.
+      expect(["NC", "CC", "both"], slug).toContain(adapter.focus);
+    }
+  });
+
+  // A TYPE-LEVEL TEST, and it runs under `pnpm typecheck` rather than at runtime.
+  //
+  // `vendors_non_vendor_source_chk` refuses a non-shop source that carries a
+  // market focus — but a CHECK only fires on a row some code was able to build,
+  // and by then the failure is a crawl aborting in the cluster. The adapter type
+  // is a union discriminated on `kind`, so the same mistake cannot be written
+  // down. Each `@ts-expect-error` below asserts that: if the union ever stops
+  // refusing these shapes, the suppression becomes unused and typecheck fails on
+  // this line — which is the whole mechanism.
+  it("refuses a reviewer that claims a market, at the type level", () => {
+    const reviewerBase = {
+      slug: "halfwheel",
+      name: "halfwheel",
+      url: "https://halfwheel.example",
+      sitemapUrl: "https://halfwheel.example/sitemap.xml",
+      crawlEnabled: false,
+      approvalStatus: "owner-added",
+      displayEnabled: false,
+      cigarCategoryPattern: /^$/,
+      excludePattern: /^$/,
+      productPathPrefix: "/review/",
+    } as const;
+
+    // A reviewer stocks nothing, so a focus on it is a stocking claim from a site
+    // with no inventory.
+    // @ts-expect-error `focus` is forbidden on a non-vendor source kind.
+    const withFocus: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: false, focus: "NC" };
+
+    // And it is never a purchase destination — `false`, not merely defaulted,
+    // because the COLUMN defaults to true.
+    // @ts-expect-error `purchaseLinkout` narrows to `false` on a non-vendor kind.
+    const asDestination: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: true };
+
+    // A shop, conversely, must state its market.
+    // @ts-expect-error `focus` is required on the vendor kind.
+    const marketless: VendorAdapter = { ...reviewerBase, kind: "vendor", purchaseLinkout: true };
+
+    // The legal shape, for contrast — no suppression needed.
+    const halfwheel: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: false };
+    expect(halfwheel.kind).toBe("reviewer");
+    expect(halfwheel.focus).toBeUndefined();
+    // Referenced so the bindings above are not dead code the linter strips.
+    expect([withFocus, asDestination, marketless]).toHaveLength(3);
   });
 });

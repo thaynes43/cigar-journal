@@ -35,6 +35,9 @@ export * from "./cigar-merges.js";
 export * from "./product-photos.js";
 export * from "./brand-images.js";
 export * from "./crawl-runs.js";
+// External review scores (ADR-013, migration 0028). After ./cigars.js, ./blends.js
+// and ./vendors.js, which it points at.
+export * from "./review-observations.js";
 export * from "./enrichment-requests.js";
 export * from "./enrichment-attempts.js";
 export * from "./oauth-client.js";

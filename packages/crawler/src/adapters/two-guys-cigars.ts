@@ -40,6 +40,7 @@ export const twoGuysCigars: PrefixVendorAdapter = {
   name: "2 Guys Cigars",
   url: "https://www.2guyscigars.com",
   sitemapUrl: "https://www.2guyscigars.com/sitemap.xml",
+  kind: "vendor",
   focus: "NC",
   crawlEnabled: false,
   approvalStatus: "owner-added",

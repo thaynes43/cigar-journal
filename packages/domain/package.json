@@ -8,7 +8,8 @@
     "./testing": "./src/testing/harness.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bench:scores": "tsx src/scripts/bench-score-aggregates.ts"
   },
   "dependencies": {
     "@cj/db": "workspace:*",

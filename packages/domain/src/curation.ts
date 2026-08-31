@@ -8,6 +8,7 @@ import {
   purchases,
   listingMatches,
   offers,
+  reviewObservations,
   productPhotos,
   enrichmentRequests,
   wants,
@@ -248,6 +249,7 @@ export const MERGE_LEDGER_TABLES = [
   { key: "purchases", table: "purchases" },
   { key: "listingMatches", table: "listing_matches" },
   { key: "offers", table: "offers" },
+  { key: "reviewObservations", table: "review_observations" },
   { key: "enrichmentRequests", table: "enrichment_requests" },
   { key: "productPhotos", table: "product_photos" },
   { key: "wants", table: "wants" },
@@ -395,6 +397,29 @@ async function mergeWithinTx(
     .where(eq(offers.cigarId, source.id))
     .returning({ id: offers.id });
 
+  // External review scores (ADR-013) re-point too. A review observation is
+  // externally-sourced evidence ABOUT THE PRODUCT, and a merge asserts the two
+  // rows are the same product — so the evidence belongs to the survivor. Leaving
+  // it on the source would make it vanish from every aggregate: the source is now
+  // a catalog_status='merged' tombstone, and the ADR-013 aggregate views resolve
+  // ancestry only through active cigars (`cigar_ancestry`, migration 0028, filters
+  // catalog_status = 'active'). That is silent loss of evidence a re-crawl would
+  // have to buy back.
+  //
+  // Only cigar-linked observations carry a non-null cigar_id; a BLEND-linked one
+  // (the reviewer scored the blend at large) is untouched by a cigar merge and
+  // must stay exactly as it is — its target did not move.
+  //
+  // No de-dupe step and no restore guard, deliberately: unlike wants/favorites,
+  // `review_observations` has no UNIQUE constraint involving cigar_id — its only
+  // one is (source, url) — so a re-point can never collide and the unmerge needs
+  // no case in `restoreGuard`.
+  const reviewObservationRows = await tx
+    .update(reviewObservations)
+    .set({ cigarId: target.id })
+    .where(eq(reviewObservations.cigarId, source.id))
+    .returning({ id: reviewObservations.id });
+
   // Want marks re-point, closing the #45-noted gap where a merge orphaned the
   // source's wants. The UNIQUE(user_id, cigar_id) pair forbids a user holding two
   // marks, so a user who wanted BOTH sides is de-duped: drop the source's mark
@@ -456,6 +481,7 @@ async function mergeWithinTx(
     purchases: purchaseRows.length,
     listingMatches: listingRows.length,
     offers: offerRows.length,
+    reviewObservations: reviewObservationRows.length,
     productPhotos: movedPhotoIds.length,
     enrichmentRequests: enrichmentRows.length,
     wants: wantRows.length,
@@ -499,6 +525,7 @@ async function mergeWithinTx(
       purchases: purchaseRows.map((r) => r.id),
       listingMatches: listingRows.map((r) => r.id),
       offers: offerRows.map((r) => r.id),
+      reviewObservations: reviewObservationRows.map((r) => r.id),
       enrichmentRequests: enrichmentRows.map((r) => r.id),
       productPhotos: movedPhotoIds,
       wants: wantRows.map((r) => r.id),
@@ -782,6 +809,7 @@ async function unmergeWithinTx(
     purchases: 0,
     listingMatches: 0,
     offers: 0,
+    reviewObservations: 0,
     productPhotos: 0,
     enrichmentRequests: 0,
     wants: 0,
@@ -2746,6 +2774,28 @@ function summarizeAudit(action: string, before: Record<string, unknown>, after: 
     }
     case "cigar.split_leaf":
       return `${fmtValue(before.canonicalName)} → ${fmtValue(after.canonicalName)}`;
+    // External review scores (ADR-013, migration 0028). `recordReviewObservation`
+    // writes these itself — it has no caller that would — so without a case here
+    // every review an enrichment agent brought back would render as a blank row
+    // in the run it was brought back by, which is the same defect the taxonomy
+    // actions had above.
+    case "review.record":
+      return `${fmtValue(after.source)} · ${fmtValue(after.nativeScore)} (${fmtValue(after.nativeScale)}) → ${fmtValue(after.normalizedScore)}`;
+    // What the source CHANGED — the whole reason an amendment is a separate
+    // action. Field by field, and only the fields that moved: a reviewer who
+    // swapped the pull quote under an unchanged score should read as exactly
+    // that. `before` and `after` carry the same key set, which is what makes the
+    // comparison total rather than a guess about which half is authoritative.
+    case "review.amend": {
+      const moved = ["normalizedScore", "nativeScore", "nativeScale", "reviewedAt", "excerpt", "reviewer"]
+        .filter((k) => fmtValue(before[k]) !== fmtValue(after[k]))
+        .map((k) => `${k}: ${fmtValue(before[k])} → ${fmtValue(after[k])}`);
+      // Only the target moved (a re-point), or the writer amended nothing it
+      // records — say so rather than rendering an empty line.
+      return moved.length > 0
+        ? `${fmtValue(after.source)} · ${moved.join("; ")}`
+        : `${fmtValue(after.source)} · re-pointed`;
+    }
     default:
       return null;
   }
@@ -2848,6 +2898,12 @@ export async function agentRunRows(
         -- target lives in after. Without this branch a bulk press (#154) renders as
         -- N identically-titled rows and the run review is unreadable.
         WHEN a.action = 'cigar.enrichment_request'
+          THEN nullif(a.after->>'cigarId', '')
+        -- A review ingest has no before-image on the cigar either, and its target
+        -- is the leaf the reviewer named. Null for a BLEND-linked observation:
+        -- that row is about the blend, and naming one of its vitolas here would
+        -- invent the specificity ADR-013 §1 exists to refuse.
+        WHEN a.action IN ('review.record', 'review.amend')
           THEN nullif(a.after->>'cigarId', '')
       END
     )::uuid

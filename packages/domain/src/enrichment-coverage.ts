@@ -389,6 +389,16 @@ export function vendorNotRetiredSql(attempts: SQL, errors: SQL): SQL {
 // The fleet for one cigar's market, with liveness in the SAME read — one query,
 // not two, because the classifier runs this per candidate row and a bulk press
 // considers up to ENRICHMENT_BACKLOG_MAX of them.
+//
+// `v.kind = 'vendor'` is the one place the ADR-013 source-kind discriminator has
+// to be read explicitly (migration 0028). Everywhere else a non-vendor source is
+// already excluded structurally, because the CHECK there forces its `focus` to
+// NULL and every other market predicate demands `focus IN ('NC','CC')`. This one
+// does the opposite: `coversMarketSql` is the LIBERAL negative filter, and a NULL
+// focus is INCLUDED by it — so without this line the first reviewer registered
+// with `crawl_enabled` would join the enrichment fleet and be asked for catalogue
+// specs it has no catalogue to answer from. Eligibility asks "who may be asked
+// about this cigar?", and the answer can only ever be a shop.
 export async function enrichVendorFleet(q: Queryer, market: CigarType | null): Promise<FleetVendor[]> {
   const result = await q.execute(sql`
     SELECT v.id, v.name,
@@ -398,6 +408,7 @@ export async function enrichVendorFleet(q: Queryer, market: CigarType | null): P
            ) AS last_enrich_started_at
     FROM vendors v
     WHERE v.crawl_enabled
+      AND v.kind = 'vendor'
       AND ${coversMarketSql(sql`v.focus`, sql`${market}::text`)}
     ORDER BY v.name
   `);

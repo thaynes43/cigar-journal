@@ -397,7 +397,7 @@ operator nothing they can act on.
 | Invite page | `Email` (read-only) · `Display name` · `Password` · `Create account` |
 | Journal visibility control | `Public` / `Private` |
 | Admin page | `Catalog review` |
-| Merge section | `Recent merges`; action `Unmerge`; states `Unmerged` · `Blocked by a later merge`; moved-row chips `Smokes` · `Purchases` · `Listing matches` · `Offers` · `Photos` · `Gap-fill requests` · `Wants` · `Favorites` |
+| Merge section | `Recent merges`; action `Unmerge`; states `Unmerged` · `Blocked by a later merge`; moved-row chips `Smokes` · `Purchases` · `Listing matches` · `Offers` · `Review scores` · `Photos` · `Gap-fill requests` · `Wants` · `Favorites` |
 | Review lists | `Proposals` · `Recent agent runs`; actions `Approve` · `Reject` · `Undo` |
 | Brand imagery (review) | `Brand imagery`; actions `Choose` · `Approve` · `Suppress` |
 | Paddle buttons | `aria-label` = `Scroll left` / `Scroll right` |

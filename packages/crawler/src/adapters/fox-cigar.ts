@@ -18,6 +18,7 @@ export const foxCigar: PrefixVendorAdapter = {
   sitemapUrl: "https://foxcigar.com/sitemap.xml",
   // Registry posture: NC vendor the owner buys from, probe-verified live
   // 2026-08-28, offers shown and linked out normally.
+  kind: "vendor",
   focus: "NC",
   crawlEnabled: true,
   approvalStatus: "owner-added",

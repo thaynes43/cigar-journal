@@ -50,6 +50,7 @@ describe("migrations", () => {
         "enrichment_attempts",
         "enrichment_requests",
         "product_photos",
+        "review_observations",
         "smoke_consumptions",
         "smoke_photos",
         "smoke_progression",
@@ -633,5 +634,665 @@ describe("migrations", () => {
         sql`INSERT INTO cigars (canonical_name, name_source) VALUES ('Composed Row', 'composed')`,
       ),
     ).resolves.toBeDefined();
+  });
+
+  // 0028 part 1: the crawl registry learns that not every source is a shop
+  // (ADR-013 §4). One registry with a discriminator, not two — `crawl_enabled`,
+  // the approval posture and the six tables hanging off `vendors.id` are the
+  // crawl mechanics of ANY source. The default is what keeps every pre-0028 row
+  // meaning exactly what it meant.
+  it("0028 defaults vendors.kind to 'vendor' and admits only the three source kinds", async () => {
+    const [plain] = await pg.db
+      .insert(vendors)
+      .values({ name: "Kind Default Shop" })
+      .returning({ kind: vendors.kind });
+    expect(plain!.kind).toBe("vendor");
+
+    await expect(
+      pg.db
+        .insert(vendors)
+        .values({ name: "Kind Reviewer", kind: "reviewer", purchaseLinkout: false }),
+    ).resolves.toBeDefined();
+    await expect(
+      pg.db
+        .insert(vendors)
+        .values({ name: "Kind Reference", kind: "reference", purchaseLinkout: false }),
+    ).resolves.toBeDefined();
+
+    // A fourth kind is not a kind. Raw so an arbitrary string reaches the
+    // DATABASE's CHECK, which is the thing under test.
+    await expect(
+      pg.db.execute(sql`
+        INSERT INTO vendors (name, kind, purchase_linkout)
+        VALUES ('Kind Aggregator', 'aggregator', false)
+      `),
+    ).rejects.toThrow();
+  });
+
+  // The discriminator arrives as a CHECK rather than as documentation: a source
+  // that is not a shop has no market and is not a purchase destination. It bites
+  // at INSERT precisely because `purchase_linkout` DEFAULTS to true — registering
+  // halfwheel means writing `false` explicitly, and that loud failure beats a
+  // silent "buy at halfwheel" link or a reviewer quietly seeding market evidence.
+  it("0028 refuses a non-vendor source that claims a market or a purchase link", async () => {
+    const insert = (columns: string, values: string) =>
+      pg.db.execute(sql.raw(`INSERT INTO vendors (${columns}) VALUES (${values})`));
+
+    // `focus` on a reviewer is a stocking claim from a site with no inventory —
+    // the very predicate `evidencedMarketSql` reads to infer a cigar's market.
+    const focused = await insert(
+      "name, kind, focus, purchase_linkout",
+      "'Focused Reviewer', 'reviewer', 'NC', false",
+    ).catch((e: unknown) => e);
+    expect((focused as { cause?: { constraint?: string } })?.cause?.constraint).toBe(
+      "vendors_non_vendor_source_chk",
+    );
+
+    // Omitting purchase_linkout takes the column DEFAULT of true, so the plain
+    // registration a caller writes first is exactly the one that fails.
+    const defaulted = await insert("name, kind", "'Linkout Reviewer', 'reviewer'").catch(
+      (e: unknown) => e,
+    );
+    expect((defaulted as { cause?: { constraint?: string } })?.cause?.constraint).toBe(
+      "vendors_non_vendor_source_chk",
+    );
+
+    // Said explicitly on both columns, halfwheel registers.
+    await expect(
+      insert("name, kind, purchase_linkout", "'Registered Reviewer', 'reviewer', false"),
+    ).resolves.toBeDefined();
+    // And a shop is untouched: a market focus and a link-out are what it is for.
+    await expect(insert("name, focus", "'Untouched Shop', 'CC'")).resolves.toBeDefined();
+  });
+
+  // 0028 part 2. A review is not a series: one reviewer publishes one verdict at
+  // one URL, so the idempotency key is a real UNIQUE (source, url) and a re-crawl
+  // updates the row it already wrote rather than appending a second data point.
+  it("0028 keys a review observation on (source, url)", async () => {
+    const cigar = await pg.db.execute(
+      sql`INSERT INTO cigars (canonical_name) VALUES ('Review Idempotency Subject') RETURNING id`,
+    );
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+    const add = (source: string, url: string) =>
+      pg.db.execute(sql`
+        INSERT INTO review_observations
+          (source, url, native_scale, native_score, normalized_score, cigar_id)
+        VALUES (${source}, ${url}, '0-100', '90', 90, ${cigarId})
+      `);
+
+    const url = "https://reviews.example/idempotency";
+    await add("halfwheel", url);
+    await expect(add("halfwheel", url)).rejects.toThrow();
+    // The key is the PAIR: two sources may each review the same address...
+    await expect(add("cigardojo", url)).resolves.toBeDefined();
+    // ...and one source has many reviews.
+    await expect(add("halfwheel", `${url}-2`)).resolves.toBeDefined();
+  });
+
+  // Linkage at the most specific level the SOURCE states: the leaf cigar when the
+  // reviewer named a vitola, the blend when they reviewed the blend at large.
+  // Neither zero nor both is a thing a reviewer can have said.
+  it("0028 requires a review observation to name exactly one target", async () => {
+    const chain = await pg.db.execute(sql`
+      WITH b AS (
+        INSERT INTO brands (name, slug) VALUES ('RO Target Brand', 'ro-target-brand') RETURNING id
+      ), l AS (
+        INSERT INTO lines (brand_id, name, slug)
+        SELECT id, 'RO Target Line', 'ro-target-line' FROM b RETURNING id
+      ), bl AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Target Blend', 'ro-target-blend' FROM l RETURNING id
+      )
+      SELECT bl.id AS blend_id FROM b, l, bl
+    `);
+    const blendId = (chain.rows[0] as { blend_id: string }).blend_id;
+    const cigar = await pg.db.execute(
+      sql`INSERT INTO cigars (canonical_name) VALUES ('Review Target Subject') RETURNING id`,
+    );
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+
+    const add = (url: string, onCigar: string | null, onBlend: string | null) =>
+      pg.db.execute(sql`
+        INSERT INTO review_observations
+          (source, url, native_scale, native_score, normalized_score, cigar_id, blend_id)
+        VALUES ('halfwheel', ${url}, '0-100', '90', 90, ${onCigar}, ${onBlend})
+      `);
+
+    // A score about nothing, and a score claiming both levels at once. Pinned on
+    // the constraint name so neither refusal can pass for some other reason.
+    const constraintOf = async (url: string, onCigar: string | null, onBlend: string | null) =>
+      (
+        (await add(url, onCigar, onBlend).catch((e: unknown) => e)) as {
+          cause?: { constraint?: string };
+        }
+      )?.cause?.constraint;
+    expect(await constraintOf("https://reviews.example/target-none", null, null)).toBe(
+      "review_observations_target_chk",
+    );
+    expect(await constraintOf("https://reviews.example/target-both", cigarId, blendId)).toBe(
+      "review_observations_target_chk",
+    );
+    await expect(add("https://reviews.example/target-cigar", cigarId, null)).resolves.toBeDefined();
+    await expect(add("https://reviews.example/target-blend", null, blendId)).resolves.toBeDefined();
+  });
+
+  // The single axis every aggregate averages, and the scales it can be computed
+  // from. The CHECK list is REVIEW_SCALES in @cj/domain's review-scores.ts: a
+  // scale the code cannot normalize is a row the database will not hold.
+  it("0028 bounds normalized_score to 0..100 and admits only the four native scales", async () => {
+    const cigar = await pg.db.execute(
+      sql`INSERT INTO cigars (canonical_name) VALUES ('Review Scale Subject') RETURNING id`,
+    );
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+    const add = (url: string, scale: string, native: string, normalized: string) =>
+      pg.db.execute(sql`
+        INSERT INTO review_observations
+          (source, url, native_scale, native_score, normalized_score, cigar_id)
+        VALUES ('halfwheel', ${url}, ${scale}, ${native}, ${normalized}, ${cigarId})
+      `);
+
+    await expect(add("https://reviews.example/score-below", "0-100", "-1", "-1")).rejects.toThrow();
+    await expect(
+      add("https://reviews.example/score-above", "0-100", "101", "101"),
+    ).rejects.toThrow();
+    // Both ends of the axis are legal values, not off-by-one rejections.
+    await expect(
+      add("https://reviews.example/score-floor", "0-100", "0", "0"),
+    ).resolves.toBeDefined();
+    await expect(
+      add("https://reviews.example/score-ceiling", "0-100", "100", "100"),
+    ).resolves.toBeDefined();
+
+    for (const scale of ["0-100", "0-10", "0-5-stars", "letter"]) {
+      await expect(
+        add(`https://reviews.example/scale-${scale}`, scale, "88", "88"),
+      ).resolves.toBeDefined();
+    }
+    await expect(
+      add("https://reviews.example/scale-unknown", "5-cigars", "4", "80"),
+    ).rejects.toThrow();
+  });
+
+  // The excerpt bound is a licence rule expressed as a constraint, not a
+  // formatting preference — which is why the domain writer REFUSES an over-long
+  // excerpt rather than truncating it. 400 characters is a pull quote; 401 is the
+  // start of storing somebody else's review.
+  it("0028 caps a review excerpt at 400 characters and refuses an empty native score", async () => {
+    const cigar = await pg.db.execute(
+      sql`INSERT INTO cigars (canonical_name) VALUES ('Review Excerpt Subject') RETURNING id`,
+    );
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+    const add = (url: string, native: string, excerpt: string | null) =>
+      pg.db.execute(sql`
+        INSERT INTO review_observations
+          (source, url, native_scale, native_score, normalized_score, cigar_id, excerpt)
+        VALUES ('halfwheel', ${url}, '0-100', ${native}, 90, ${cigarId}, ${excerpt})
+      `);
+
+    await expect(
+      add("https://reviews.example/excerpt-long", "90", "x".repeat(401)),
+    ).rejects.toThrow();
+    await expect(
+      add("https://reviews.example/excerpt-max", "90", "x".repeat(400)),
+    ).resolves.toBeDefined();
+    // NULL is the ordinary shape — a score with no pull quote.
+    await expect(add("https://reviews.example/excerpt-none", "90", null)).resolves.toBeDefined();
+
+    // The score as the source wrote it is what makes the normalization safe to be
+    // wrong about, so an empty one is not a score.
+    await expect(add("https://reviews.example/native-empty", "", null)).rejects.toThrow();
+  });
+
+  // The bounds on `source` and `url` are denominated in BYTES, because what they
+  // protect is a btree entry behind `review_observations_source_url_key` and a
+  // btree entry's ~2704-byte ceiling is counted in bytes. `char_length` would let
+  // a 2000-CHARACTER multibyte URL through to an opaque index failure at INSERT,
+  // which is a storage-layer error where a validation error belongs.
+  it("0028 bounds source and url in bytes, not characters", async () => {
+    const cigar = await pg.db.execute(
+      sql`INSERT INTO cigars (canonical_name) VALUES ('Review Bytes Subject') RETURNING id`,
+    );
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+    const add = (source: string, url: string) =>
+      pg.db.execute(sql`
+        INSERT INTO review_observations
+          (source, url, native_scale, native_score, normalized_score, cigar_id)
+        VALUES (${source}, ${url}, '0-100', '90', 90, ${cigarId})
+      `);
+
+    const prefix = "https://bytes.example/";
+    // 2000 characters and 2001 bytes: on the bound by a character count, over it
+    // by the count that matters.
+    const overByOne = `${prefix}é${"a".repeat(2000 - prefix.length - 1)}`;
+    expect(overByOne).toHaveLength(2000);
+    expect(Buffer.byteLength(overByOne, "utf8")).toBe(2001);
+    await expect(add("halfwheel", overByOne)).rejects.toThrow();
+
+    // Exactly 2000 bytes, multibyte included, is accepted — the bound is
+    // inclusive and counts what the index counts.
+    const exact = `${prefix}é${"a".repeat(2000 - prefix.length - 2)}`;
+    expect(Buffer.byteLength(exact, "utf8")).toBe(2000);
+    await expect(add("halfwheel", exact)).resolves.toBeDefined();
+
+    // The same rule on the slug half of the key: 100 bytes, not 100 characters.
+    const overSource = `${"é".repeat(50)}x`;
+    expect(Buffer.byteLength(overSource, "utf8")).toBe(101);
+    await expect(add(overSource, "https://bytes.example/source-over")).rejects.toThrow();
+    await expect(
+      add("é".repeat(50), "https://bytes.example/source-exact"),
+    ).resolves.toBeDefined();
+  });
+
+  // The two delete rules differ, and the asymmetry is the point. `cigar_id`
+  // CASCADEs, matching every other cigar-linked observation table — cigars are
+  // never hard-deleted (0013 tombstones), so it is a guarantee that never fires.
+  // `blend_id` is NO ACTION: retiring a blend that still carries externally
+  // sourced evidence must re-point the observations first, not lose data that
+  // costs a crawl to reacquire.
+  it("0028 cascades observations off a deleted cigar and refuses to retire a reviewed blend", async () => {
+    const chain = await pg.db.execute(sql`
+      WITH b AS (
+        INSERT INTO brands (name, slug) VALUES ('RO Delete Brand', 'ro-delete-brand') RETURNING id
+      ), l AS (
+        INSERT INTO lines (brand_id, name, slug)
+        SELECT id, 'RO Delete Line', 'ro-delete-line' FROM b RETURNING id
+      ), bl AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Delete Blend', 'ro-delete-blend' FROM l RETURNING id
+      )
+      SELECT bl.id AS blend_id FROM b, l, bl
+    `);
+    const blendId = (chain.rows[0] as { blend_id: string }).blend_id;
+    const cigar = await pg.db.execute(sql`
+      INSERT INTO cigars (canonical_name, blend_id)
+      VALUES ('Review Delete Subject', ${blendId}) RETURNING id
+    `);
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+
+    await pg.db.execute(sql`
+      INSERT INTO review_observations
+        (source, url, native_scale, native_score, normalized_score, cigar_id)
+      VALUES ('halfwheel', 'https://reviews.example/delete-cigar', '0-100', '90', 90, ${cigarId})
+    `);
+    await pg.db.execute(sql`
+      INSERT INTO review_observations
+        (source, url, native_scale, native_score, normalized_score, blend_id)
+      VALUES ('halfwheel', 'https://reviews.example/delete-blend', '0-100', '92', 92, ${blendId})
+    `);
+
+    await pg.db.execute(sql`DELETE FROM cigars WHERE id = ${cigarId}`);
+    const afterCigar = await pg.db.execute(
+      sql`SELECT count(*)::int AS n FROM review_observations WHERE cigar_id = ${cigarId}`,
+    );
+    expect((afterCigar.rows[0] as { n: number }).n).toBe(0);
+
+    // The blend keeps its evidence, and the evidence keeps the blend.
+    await expect(pg.db.execute(sql`DELETE FROM blends WHERE id = ${blendId}`)).rejects.toThrow();
+    await pg.db.execute(
+      sql`DELETE FROM review_observations WHERE url = 'https://reviews.example/delete-blend'`,
+    );
+    await expect(
+      pg.db.execute(sql`DELETE FROM blends WHERE id = ${blendId}`),
+    ).resolves.toBeDefined();
+  });
+
+  // 0028 part 3. `cigar_ancestry` is the ONE definition of what sits under a
+  // level, shared by both populations so a critic count and a journal count
+  // rendered side by side are counts over the same rows. Ancestry is partial by
+  // design (ADR-012), and the `catalog_status = 'active'` filter lives here so
+  // both populations inherit it identically.
+  it("0028's cigar_ancestry resolves a leaf's parents and excludes catalog tombstones", async () => {
+    const chain = await pg.db.execute(sql`
+      WITH b AS (
+        INSERT INTO brands (name, slug) VALUES ('RO Ancestry Brand', 'ro-ancestry-brand') RETURNING id
+      ), l AS (
+        INSERT INTO lines (brand_id, name, slug)
+        SELECT id, 'RO Ancestry Line', 'ro-ancestry-line' FROM b RETURNING id
+      ), bl AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Ancestry Blend', 'ro-ancestry-blend' FROM l RETURNING id
+      )
+      SELECT b.id AS brand_id, l.id AS line_id, bl.id AS blend_id FROM b, l, bl
+    `);
+    const {
+      brand_id: brandId,
+      line_id: lineId,
+      blend_id: blendId,
+    } = chain.rows[0] as {
+      brand_id: string;
+      line_id: string;
+      blend_id: string;
+    };
+    const seed = async (name: string, columns: string, values: string) =>
+      (
+        await pg.db.execute(
+          sql.raw(
+            `INSERT INTO cigars (canonical_name, ${columns}) VALUES ('${name}', ${values}) RETURNING id`,
+          ),
+        )
+      ).rows[0] as { id: string };
+    const ancestry = async (cigarId: string) =>
+      (await pg.db.execute(sql`SELECT * FROM cigar_ancestry WHERE cigar_id = ${cigarId}`)).rows;
+
+    // The leaf carries only its blend; line and brand are derived through the
+    // registry, which is the authority where it has an opinion.
+    const leaf = await seed("Ancestry Full Leaf", "blend_id", `'${blendId}'`);
+    expect((await ancestry(leaf.id))[0]).toMatchObject({
+      blend_id: blendId,
+      line_id: lineId,
+      brand_id: brandId,
+    });
+
+    // Partial is not missing: a cigar with a brand and no blend still belongs to
+    // that brand and must count there, contributing to no blend.
+    const brandOnly = await seed("Ancestry Brand Only", "brand_id", `'${brandId}'`);
+    expect((await ancestry(brandOnly.id))[0]).toMatchObject({
+      blend_id: null,
+      line_id: null,
+      brand_id: brandId,
+    });
+
+    // An excluded row is hidden junk and a merged row is a tombstone whose smokes
+    // already moved to the survivor; either contributing would corrupt the count.
+    const excluded = await seed(
+      "Ancestry Excluded Leaf",
+      "blend_id, catalog_status",
+      `'${blendId}', 'excluded'`,
+    );
+    const merged = await seed(
+      "Ancestry Merged Leaf",
+      "blend_id, catalog_status",
+      `'${blendId}', 'merged'`,
+    );
+    expect(await ancestry(excluded.id)).toHaveLength(0);
+    expect(await ancestry(merged.id)).toHaveLength(0);
+  });
+
+  // `cigar_id` passes through UNCHANGED rather than being widened: a blend-linked
+  // review is about the blend, and presenting it as a particular vitola's score
+  // would invent a specificity the reviewer never claimed.
+  it("0028's review_observation_scope resolves both target shapes to the same levels", async () => {
+    const chain = await pg.db.execute(sql`
+      WITH b AS (
+        INSERT INTO brands (name, slug) VALUES ('RO Scope Brand', 'ro-scope-brand') RETURNING id
+      ), l AS (
+        INSERT INTO lines (brand_id, name, slug)
+        SELECT id, 'RO Scope Line', 'ro-scope-line' FROM b RETURNING id
+      ), bl AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Scope Blend', 'ro-scope-blend' FROM l RETURNING id
+      )
+      SELECT b.id AS brand_id, l.id AS line_id, bl.id AS blend_id FROM b, l, bl
+    `);
+    const {
+      brand_id: brandId,
+      line_id: lineId,
+      blend_id: blendId,
+    } = chain.rows[0] as {
+      brand_id: string;
+      line_id: string;
+      blend_id: string;
+    };
+    const cigar = await pg.db.execute(sql`
+      INSERT INTO cigars (canonical_name, blend_id)
+      VALUES ('Review Scope Subject', ${blendId}) RETURNING id
+    `);
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+
+    const onCigar = await pg.db.execute(sql`
+      INSERT INTO review_observations
+        (source, url, native_scale, native_score, normalized_score, cigar_id)
+      VALUES ('halfwheel', 'https://reviews.example/scope-cigar', '0-100', '88.5', 88.5, ${cigarId})
+      RETURNING id
+    `);
+    const onBlend = await pg.db.execute(sql`
+      INSERT INTO review_observations
+        (source, url, native_scale, native_score, normalized_score, blend_id)
+      VALUES ('halfwheel', 'https://reviews.example/scope-blend', '0-100', '91', 91, ${blendId})
+      RETURNING id
+    `);
+    const scope = async (observationId: string) =>
+      (
+        await pg.db.execute(
+          sql`SELECT * FROM review_observation_scope WHERE observation_id = ${observationId}`,
+        )
+      ).rows;
+
+    // A vitola review counts at every level above the leaf, its blend derived
+    // through `cigars.blend_id` rather than stored a second time.
+    expect((await scope((onCigar.rows[0] as { id: string }).id))[0]).toMatchObject({
+      cigar_id: cigarId,
+      blend_id: blendId,
+      line_id: lineId,
+      brand_id: brandId,
+      normalized_score: "88.50",
+    });
+
+    // A blend review counts at the blend and above, and names no vitola.
+    expect((await scope((onBlend.rows[0] as { id: string }).id))[0]).toMatchObject({
+      cigar_id: null,
+      blend_id: blendId,
+      line_id: lineId,
+      brand_id: brandId,
+    });
+  });
+
+  // POPULATION PARITY AT THE BLEND. `catalog_status` is applied once, in
+  // `cigar_ancestry`, so that both populations inherit it identically — but the
+  // blend-linked branch of `review_observation_scope` walks `blends → lines` and
+  // never reaches a leaf, so it inherits nothing unless it asks. Without the
+  // EXISTS probe a blend whose every leaf has been merged away keeps publishing
+  // its critic score while its journal score has already gone silent, and the two
+  // numbers rendered side by side are counts over different populations — the one
+  // thing a shared ancestry definition exists to prevent.
+  it("0028's review_observation_scope drops a blend whose leaves are all merged away", async () => {
+    const chain = await pg.db.execute(sql`
+      WITH b AS (
+        INSERT INTO brands (name, slug) VALUES ('RO Empty Brand', 'ro-empty-brand') RETURNING id
+      ), l AS (
+        INSERT INTO lines (brand_id, name, slug)
+        SELECT id, 'RO Empty Line', 'ro-empty-line' FROM b RETURNING id
+      ), bl AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Empty Blend', 'ro-empty-blend' FROM l RETURNING id
+      )
+      SELECT bl.id AS blend_id FROM b, l, bl
+    `);
+    const blendId = (chain.rows[0] as { blend_id: string }).blend_id;
+    const cigar = await pg.db.execute(sql`
+      INSERT INTO cigars (canonical_name, blend_id)
+      VALUES ('Review Empty Subject', ${blendId}) RETURNING id
+    `);
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+    await pg.db.execute(sql`
+      INSERT INTO review_observations
+        (source, url, native_scale, native_score, normalized_score, blend_id)
+      VALUES ('halfwheel', 'https://reviews.example/scope-empty', '0-100', '93', 93, ${blendId})
+    `);
+
+    const inScope = async () =>
+      (
+        (
+          await pg.db.execute(
+            sql`SELECT count(*)::int AS n FROM review_observation_scope WHERE blend_id = ${blendId}`,
+          )
+        ).rows[0] as { n: number }
+      ).n;
+
+    // While the blend has an active leaf, the blend-linked review reports.
+    expect(await inScope()).toBe(1);
+
+    // The leaf is merged into a survivor elsewhere — a tombstone, whose smokes
+    // and offers have already moved. The blend is now empty of anything the
+    // catalogue recognizes.
+    await pg.db.execute(
+      sql`UPDATE cigars SET catalog_status = 'merged' WHERE id = ${cigarId}`,
+    );
+    expect(await inScope()).toBe(0);
+
+    // Restoring the leaf restores the reporting: the probe is about the blend's
+    // live population, not about the observation, which was never touched.
+    await pg.db.execute(
+      sql`UPDATE cigars SET catalog_status = 'active' WHERE id = ${cigarId}`,
+    );
+    expect(await inScope()).toBe(1);
+  });
+
+  // The unrated smokes are excluded in the view rather than in each aggregate
+  // query, so a journal count is always a count of RATINGS: a blend with forty
+  // logged smokes and two ratings has a sample count of two, and says so.
+  it("0028's smoke_rating_scope counts ratings, not smokes", async () => {
+    const chain = await pg.db.execute(sql`
+      WITH b AS (
+        INSERT INTO brands (name, slug) VALUES ('RO Smoke Brand', 'ro-smoke-brand') RETURNING id
+      ), l AS (
+        INSERT INTO lines (brand_id, name, slug)
+        SELECT id, 'RO Smoke Line', 'ro-smoke-line' FROM b RETURNING id
+      ), bl AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Smoke Blend', 'ro-smoke-blend' FROM l RETURNING id
+      )
+      SELECT b.id AS brand_id, l.id AS line_id, bl.id AS blend_id FROM b, l, bl
+    `);
+    const {
+      brand_id: brandId,
+      line_id: lineId,
+      blend_id: blendId,
+    } = chain.rows[0] as {
+      brand_id: string;
+      line_id: string;
+      blend_id: string;
+    };
+    const cigar = await pg.db.execute(sql`
+      INSERT INTO cigars (canonical_name, blend_id)
+      VALUES ('Smoke Scope Subject', ${blendId}) RETURNING id
+    `);
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+    const user = await pg.db.execute(
+      sql`INSERT INTO users (email) VALUES ('smoke-scope@example.com') RETURNING id`,
+    );
+    const userId = (user.rows[0] as { id: string }).id;
+    const smoke = async (rating: number | null) =>
+      (
+        await pg.db.execute(sql`
+          INSERT INTO smokes (user_id, cigar_id, rating, provenance_source)
+          VALUES (${userId}, ${cigarId}, ${rating}, 'manual') RETURNING id
+        `)
+      ).rows[0] as { id: string };
+
+    const rated = await smoke(90);
+    const unrated = await smoke(null);
+
+    const rows = (
+      await pg.db.execute(sql`SELECT * FROM smoke_rating_scope WHERE cigar_id = ${cigarId}`)
+    ).rows as { smoke_id: string }[];
+    expect(rows.map((r) => r.smoke_id)).toEqual([rated.id]);
+    expect(rows.map((r) => r.smoke_id)).not.toContain(unrated.id);
+    expect(rows[0]).toMatchObject({
+      user_id: userId,
+      rating: 90,
+      blend_id: blendId,
+      line_id: lineId,
+      brand_id: brandId,
+    });
+  });
+
+  // The blender gate, fail-closed. `blends` has no market column and inventing
+  // one would be a fact nobody established, so Cuban-ness is derived from the
+  // leaf's `cigars.type` — the same signal every other CC/NC rule reads. A blend
+  // has many leaves and nothing makes them agree, so a CC leaf disqualifies the
+  // blend outright and an NC leaf qualifies it only when no leaf contradicts.
+  it("0028's blend_market_type lets a CC leaf outrank the NC leaf beside it", async () => {
+    const chain = await pg.db.execute(sql`
+      WITH b AS (
+        INSERT INTO brands (name, slug) VALUES ('RO Market Brand', 'ro-market-brand') RETURNING id
+      ), l AS (
+        INSERT INTO lines (brand_id, name, slug)
+        SELECT id, 'RO Market Line', 'ro-market-line' FROM b RETURNING id
+      ), nc AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Market NC', 'ro-market-nc' FROM l RETURNING id
+      ), mixed AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Market Mixed', 'ro-market-mixed' FROM l RETURNING id
+      )
+      SELECT nc.id AS nc_id, mixed.id AS mixed_id FROM b, l, nc, mixed
+    `);
+    const { nc_id: ncId, mixed_id: mixedId } = chain.rows[0] as {
+      nc_id: string;
+      mixed_id: string;
+    };
+    const leaf = (name: string, blendId: string, type: string | null) =>
+      pg.db.execute(sql`
+        INSERT INTO cigars (canonical_name, blend_id, type) VALUES (${name}, ${blendId}, ${type})
+      `);
+    const marketType = async (blendId: string) =>
+      (await pg.db.execute(sql`SELECT type FROM blend_market_type WHERE blend_id = ${blendId}`))
+        .rows[0] as { type: string | null } | undefined;
+
+    await leaf("Market NC Leaf", ncId, "NC");
+    expect(await marketType(ncId)).toMatchObject({ type: "NC" });
+
+    await leaf("Market Mixed NC Leaf", mixedId, "NC");
+    await leaf("Market Mixed CC Leaf", mixedId, "CC");
+    // Only 'NC' contributes to blender roll-ups; 'CC' stops at the marca.
+    expect(await marketType(mixedId)).toMatchObject({ type: "CC" });
+  });
+
+  // The negative form (`!== 'CC'`) credited a blender on every row nobody had
+  // established anything about — 890 of 977 leaves carry a NULL type. So an
+  // untyped blend is unknown, not Nicaraguan, and an excluded leaf speaks for
+  // nothing at all.
+  it("0028's blend_market_type stays NULL for a blend no active leaf types", async () => {
+    const chain = await pg.db.execute(sql`
+      WITH b AS (
+        INSERT INTO brands (name, slug) VALUES ('RO Untyped Brand', 'ro-untyped-brand') RETURNING id
+      ), l AS (
+        INSERT INTO lines (brand_id, name, slug)
+        SELECT id, 'RO Untyped Line', 'ro-untyped-line' FROM b RETURNING id
+      ), untyped AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Untyped', 'ro-untyped' FROM l RETURNING id
+      ), bare AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Leafless', 'ro-leafless' FROM l RETURNING id
+      ), hidden AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Hidden NC', 'ro-hidden-nc' FROM l RETURNING id
+      )
+      SELECT untyped.id AS untyped_id, bare.id AS bare_id, hidden.id AS hidden_id
+      FROM b, l, untyped, bare, hidden
+    `);
+    const {
+      untyped_id: untypedId,
+      bare_id: bareId,
+      hidden_id: hiddenId,
+    } = chain.rows[0] as {
+      untyped_id: string;
+      bare_id: string;
+      hidden_id: string;
+    };
+    const marketType = async (blendId: string) =>
+      (await pg.db.execute(sql`SELECT type FROM blend_market_type WHERE blend_id = ${blendId}`))
+        .rows[0] as { type: string | null } | undefined;
+
+    await pg.db.execute(sql`
+      INSERT INTO cigars (canonical_name, blend_id) VALUES ('Untyped Leaf A', ${untypedId})
+    `);
+    await pg.db.execute(sql`
+      INSERT INTO cigars (canonical_name, blend_id) VALUES ('Untyped Leaf B', ${untypedId})
+    `);
+    expect(await marketType(untypedId)).toMatchObject({ type: null });
+
+    // A blend with no leaves at all is still a row in the view, and still unknown.
+    expect(await marketType(bareId)).toMatchObject({ type: null });
+
+    // An excluded leaf is hidden junk or an entry a curator hid; it may not
+    // qualify the blend its NC type would otherwise credit.
+    await pg.db.execute(sql`
+      INSERT INTO cigars (canonical_name, blend_id, type, catalog_status)
+      VALUES ('Hidden NC Leaf', ${hiddenId}, 'NC', 'excluded')
+    `);
+    expect(await marketType(hiddenId)).toMatchObject({ type: null });
   });
 });
