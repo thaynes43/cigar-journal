@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
-import type { CigarView, GetCigarResult, Tobacco } from "@cj/domain";
+import type { CigarHierarchy, CigarView, GetCigarResult, Tobacco } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
 import { requireAuth } from "@/lib/require-auth";
 import { formatPrice, formatSeenAt } from "@/lib/format";
@@ -53,6 +53,112 @@ function blendLines(tobacco: Tobacco): { label: string; value: string }[] {
   return lines;
 }
 
+// The blend facts table (DESIGN-004 D-08). Filler/binder/wrapper and strength
+// come from the LINKED BLEND ROW, which is where ADR-012 homes them — one home
+// instead of the same three facts duplicated across every vitola of a blend. The
+// cigar's own structured `tobacco` still answers for rows the blend has not been
+// enriched with yet, so a freeform row loses nothing while the backfill runs.
+//
+// Absent-when-empty throughout: a fact nobody has established renders no row at
+// all, never a placeholder or an "Unknown".
+function blendFacts(
+  cigar: CigarView,
+  hierarchy: CigarHierarchy,
+): { label: string; value: string }[] {
+  const blend = hierarchy.blend;
+  const fromBlend = [
+    blend?.wrapper ? { label: "Wrapper", value: blend.wrapper } : null,
+    blend?.binder ? { label: "Binder", value: blend.binder } : null,
+    blend?.filler ? { label: "Filler", value: blend.filler } : null,
+  ].filter((row): row is { label: string; value: string } => row !== null);
+
+  // Fall back per-row, not all-or-nothing: a blend that names only its wrapper
+  // must not hide a binder the leaf already knows.
+  const named = new Set(fromBlend.map((row) => row.label));
+  const fromLeaf = (cigar.tobacco ? blendLines(cigar.tobacco) : []).filter(
+    (row) => !named.has(row.label),
+  );
+  const rows = [...fromBlend, ...fromLeaf];
+
+  if (blend?.strength) rows.push({ label: "Strength", value: blend.strength });
+
+  // No blender row EVER renders for a Cuban blend (ADR-013): Habanos credits the
+  // marca, not a person, so a blender line there would be an invented fact rather
+  // than a missing one. The blend carries no Cuban flag of its own, so the leaf's
+  // `type` is the gate — the same signal every other CC/NC rule in the app reads.
+  //
+  // The gate is POSITIVE (`=== "NC"`), not `!== "CC"`, and the difference is the
+  // whole rule: `type` is nullable and the overwhelming majority of production
+  // rows are NULL (890 of 977 as this shipped), so `!== "CC"` credited a blender
+  // on every untyped row — precisely the rows nobody has established anything
+  // about. Absent-when-empty means an unknown type suppresses the row; only a row
+  // known to be New World earns it.
+  if (cigar.type === "NC" && hierarchy.blenders.length > 0) {
+    rows.push({ label: "Blender", value: hierarchy.blenders.map((b) => b.name).join(", ") });
+  }
+  return rows;
+}
+
+// The breadcrumb (DESIGN-004 D-08): the cigar's ancestry, each level linking to
+// its drill on the one catalog surface. A level the row does not have is simply
+// absent — nothing renders as `Unknown`.
+//
+// Ancestor links carry the WHOLE chain above them (`?brand=x&line=y`), not just
+// their own param. A line slug is unique per brand, not globally, so a bare
+// `?line=reserva` can address several marcas' lines at once; a breadcrumb is a
+// precise statement about THIS cigar's ancestry and must not widen into that.
+function Breadcrumb({ hierarchy }: { hierarchy: CigarHierarchy }) {
+  const crumbs: { label: string; href: string }[] = [];
+  const chain = new URLSearchParams();
+  if (hierarchy.brand) {
+    chain.set("brand", hierarchy.brand.slug);
+    crumbs.push({ label: hierarchy.brand.name, href: `/cigars?${chain.toString()}` });
+  }
+  if (hierarchy.line) {
+    chain.set("line", hierarchy.line.slug);
+    crumbs.push({ label: hierarchy.line.name, href: `/cigars?${chain.toString()}` });
+  }
+  // The leaf's own crumb, unlinked — it is this page. It reads as the parts the
+  // ancestors above have not already said, the same elision the tiles use inside
+  // a drill (D-07).
+  const leaf = [hierarchy.blend?.name, hierarchy.vitola?.name].filter(Boolean).join(" · ");
+  if (crumbs.length === 0 && !leaf) return null;
+
+  return (
+    <nav aria-label="Breadcrumb" className="flex flex-wrap items-center gap-1.5 text-sm text-muted">
+      {crumbs.map((crumb, i) => (
+        <span key={crumb.href} className="flex items-center gap-1.5">
+          {i > 0 ? <span aria-hidden>›</span> : null}
+          <Link href={crumb.href} className="transition-colors hover:text-ink">
+            {crumb.label}
+          </Link>
+        </span>
+      ))}
+      {leaf ? (
+        <span className="flex items-center gap-1.5">
+          {crumbs.length > 0 ? <span aria-hidden>›</span> : null}
+          <span className="text-ink">{leaf}</span>
+        </span>
+      ) : null}
+    </nav>
+  );
+}
+
+// The reserved score slot (DESIGN-004 D-08). It lands with ADR-013 as TWO
+// labelled aggregates carrying their sample counts — `Critics 91 · 12 reviews`
+// and `Journal 8.6 · 3 smokes` — never one blended number, and never a bare
+// score without the population it came from.
+//
+// Until those observations exist it renders NOTHING. The slot is reserved here
+// rather than left to be rediscovered, because the rule it protects is the one
+// ADR-013 is strictest about: a single smoke's rating must never be presented as
+// a blend-, line- or brand-level number. The tile's rating seal stays exactly
+// what it is — the viewer's own per-cigar rating — and this is the only place a
+// higher-level score may ever appear.
+function ScoreSlot() {
+  return null;
+}
+
 export default async function CigarDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const principal = await requireAuth();
   const isAdmin = principal.role === "admin";
@@ -67,7 +173,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
     throw error;
   }
 
-  const { cigar, personalProfile, hasProductPhoto, productPhotoId, wanted, wantNote, favorited, favoriteNote } =
+  const { cigar, personalProfile, hasProductPhoto, productPhotoId, wanted, wantNote, favorited, favoriteNote, hierarchy } =
     data;
   const [{ smokes }, offers, priceHistory, holding] = await Promise.all([
     caller.smokes.list({ cigarId: id, limit: 50 }),
@@ -78,7 +184,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
   // Admin-only: the photo's current rights (or null), so the detail page can offer
   // Add/Upload-link vs Replace/Suppress vs Approve without a client round trip.
   const photoState = isAdmin ? await caller.curation.photoState({ cigarId: id }) : null;
-  const blend = cigar.tobacco ? blendLines(cigar.tobacco) : [];
+  const blend = blendFacts(cigar, hierarchy);
 
   // Offer staleness (DESIGN-002 §Price, 30d window): the row and its date stay,
   // but the whole row drops to muted. Price history gate: a spark past ≥3
@@ -111,6 +217,8 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
             <h1 className="font-display text-2xl leading-tight font-semibold text-ink">
               {cigar.canonicalName}
             </h1>
+            <Breadcrumb hierarchy={hierarchy} />
+            <ScoreSlot />
             {cigar.verification === "unverified" ? (
               <span className={`${ui.chipOutline} self-start`}>unverified</span>
             ) : null}

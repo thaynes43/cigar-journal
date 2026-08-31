@@ -45,9 +45,11 @@ test("a chip filter narrows the grid in place — URL updates", async ({ page })
 });
 
 test("the Brands and Ledger presentations render", async ({ page }) => {
+  // `?view=brands` is the `?by=brand` grouped view now (DESIGN-004 D-02); the
+  // legacy link canonicalizes onto it server-side, spending no history entry.
   await page.goto("/cigars?view=brands");
-  await expect(page).toHaveURL(/view=brands/);
-  await expect(page.getByText(h.brand).first()).toBeVisible(); // a brand poster
+  await expect(page).toHaveURL(/[?&]by=brand/);
+  await expect(page.getByText(h.brand).first()).toBeVisible(); // a brand group card
 
   await page.goto("/cigars?view=ledger");
   await expect(page).toHaveURL(/view=ledger/);

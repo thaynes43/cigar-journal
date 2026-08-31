@@ -7,16 +7,34 @@ import type {
   CatalogCigarTile,
   CatalogTilePrice,
   CigarType,
+  CigarNameSource,
   GetBrandResult,
   LineGroup,
   BrowseCatalogArgs,
   BrowseCatalogResult,
+  BrowseCatalogGroupsArgs,
+  BrowseCatalogGroupsResult,
+  CatalogGroupCard,
+  CatalogUnfiledGroup,
+  CatalogFacetOption,
+  CatalogFacetOptionsArgs,
+  CatalogFacetOptionsResult,
+  CatalogHierarchyFilter,
   OwnershipFacet,
   Verification,
   CatalogSort,
+  CatalogSortDir,
 } from "./types.js";
+import { HIERARCHY_UNFILED } from "./types.js";
 import { CigarNotFoundError } from "./errors.js";
 import { loadBrandCovers } from "./brand-images.js";
+import {
+  HIERARCHY_JOINS,
+  dimensionSpec,
+  hierarchyActive,
+  hierarchyConditions,
+  lookupHierarchyEntity,
+} from "./catalog-hierarchy.js";
 
 // The poster library reads (PRD-002 phase 2 / PRD-003 R-UNI). Browse descends
 // brand → line → cigar; the personal overlay (caller's smoke count + average
@@ -51,11 +69,38 @@ function clampLimit(value: number | undefined): number {
   return Math.min(Math.floor(n), MAX_BROWSE_LIMIT);
 }
 
-// A keyset cursor carries the active sort plus the last row's ordering key and
-// id. Encoding the sort lets a cursor minted under one ordering be rejected when
-// the sort changes (the page then restarts cleanly) rather than paging garbage.
+// The direction a sort runs in when the caller does not say (DESIGN-004 D-04
+// gives every leaf sort a direction; the URL token is `field:dir`).
+//
+// These mirror the web registry's `firstDir` — the direction a pill enters at —
+// with ONE deliberate exception. `price` defaults ASC here where the registry
+// enters DESC, because the web ALWAYS resolves a direction client-side (a bare
+// `?sort=price` parses to that key's firstDir before it ever reaches this
+// function), so the only callers who omit `sortDir` are the MCP surface and
+// stored links, and `browse_catalog`'s published contract says price means
+// "cheapest current per-stick first". Defaulting to DESC would silently reverse
+// a documented tool result. The web's desc-first pill is unaffected: it sends
+// `sortDir` explicitly.
+const DEFAULT_SORT_DIR: Record<CatalogSort, CatalogSortDir> = {
+  name: "asc",
+  "my-rating": "desc",
+  "recently-added": "desc",
+  price: "asc",
+};
+
+// The cursor's stored sort IDENTITY: the field AND its direction. A direction
+// flip is as incompatible with an in-flight keyset as a field change is — the
+// comparison operator inverts — so both must invalidate a cursor.
+function sortIdentity(sort: CatalogSort, dir: CatalogSortDir): string {
+  return `${sort}:${dir}`;
+}
+
+// A keyset cursor carries the active sort identity plus the last row's ordering
+// key and id. Encoding the identity lets a cursor minted under one ordering be
+// rejected when the sort or its direction changes (the page then restarts
+// cleanly) rather than paging garbage.
 interface Cursor {
-  sort: CatalogSort;
+  sort: string; // `${field}:${dir}`
   key: string; // the primary sort value of the last row, serialized to a string
   id: string;
 }
@@ -64,10 +109,11 @@ function encodeCursor(c: Cursor): string {
   return Buffer.from(JSON.stringify([c.sort, c.key, c.id]), "utf8").toString("base64url");
 }
 
-// Decode a keyset cursor for a given active sort; a malformed value, or one from
-// a different sort, is treated as absent (start of the list) rather than an error
-// — a stale share link or a sort switch degrades to the first page.
-function decodeCursor(raw: string | null | undefined, sort: CatalogSort): Cursor | null {
+// Decode a keyset cursor for a given active sort identity; a malformed value, or
+// one from a different field or direction, is treated as absent (start of the
+// list) rather than an error — a stale share link, a sort switch or a direction
+// flip degrades to the first page.
+function decodeCursor(raw: string | null | undefined, identity: string): Cursor | null {
   if (!raw) return null;
   try {
     const parsed: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
@@ -76,9 +122,9 @@ function decodeCursor(raw: string | null | undefined, sort: CatalogSort): Cursor
       typeof parsed[0] === "string" &&
       typeof parsed[1] === "string" &&
       typeof parsed[2] === "string" &&
-      parsed[0] === sort
+      parsed[0] === identity
     ) {
-      return { sort, key: parsed[1], id: parsed[2] };
+      return { sort: identity, key: parsed[1], id: parsed[2] };
     }
     return null;
   } catch {
@@ -224,7 +270,14 @@ function ownershipCondition(own: OwnershipFacet | undefined): SQL | null {
 // in WHERE, and none leak another user's state. Callers must ensure the
 // referenced joins are present (tileSelect always carries them; the count query
 // adds them per filter — the EXISTS-form filters are self-contained, needing none).
-function overlayFilters(principal: Principal, args: BrowseCatalogArgs): SQL[] {
+// The filter-bearing subset of BrowseCatalogArgs — everything the leaf grid, the
+// grouped views and the chip options apply IDENTICALLY, minus the paging and
+// ordering that only the leaf grid has. Typing the shared helpers against this
+// is what lets browseCatalogGroups / catalogFacetOptions reuse them verbatim
+// instead of re-deriving membership and drifting from the grid they describe.
+type CatalogFilterArgs = Omit<BrowseCatalogArgs, "sort" | "sortDir" | "cursor" | "limit">;
+
+function overlayFilters(principal: Principal, args: CatalogFilterArgs): SQL[] {
   const conds: SQL[] = [];
   if (args.inHumidor === true) conds.push(sql`${REMAINING} > 0`);
   if (args.inHumidor === false) conds.push(sql`${REMAINING} <= 0`);
@@ -253,13 +306,47 @@ function overlayFilters(principal: Principal, args: BrowseCatalogArgs): SQL[] {
 
 // Which joins the COUNT query needs for the active filters (the page query's
 // tileSelect always carries all of them). `own`/inHumidor/wanted need the
-// ownershipJoins; inStock needs the OFFER_JOIN; brand/type/q/smoked/favorited
-// need neither (plain columns or a self-contained EXISTS).
-function countJoinsFor(principal: Principal, args: BrowseCatalogArgs, facet: SQL | null): SQL {
+// ownershipJoins; inStock needs the OFFER_JOIN; a hierarchy filter needs
+// HIERARCHY_JOINS only where it pins a real slug at brand/line/blend — the
+// `unfiled` forms and both vitola forms read straight off `cigars`
+// (hierarchyActive). brand/type/q/smoked/favorited need nothing (plain columns
+// or a self-contained EXISTS).
+function countJoinsFor(principal: Principal, args: CatalogFilterArgs, facet: SQL | null): SQL {
   const needsOwnership =
     facet != null || args.inHumidor !== undefined || args.wanted !== undefined;
   const needsOffers = args.inStock !== undefined;
-  return sql`${needsOwnership ? ownershipJoins(principal) : sql``}${needsOffers ? OFFER_JOIN : sql``}`;
+  const needsHierarchy = hierarchyActive(args.hierarchy);
+  return sql`${needsHierarchy ? HIERARCHY_JOINS : sql``}${needsOwnership ? ownershipJoins(principal) : sql``}${needsOffers ? OFFER_JOIN : sql``}`;
+}
+
+// The one membership definition every catalog read shares (DESIGN-004 D-01: a
+// drill is just another filter, so the grid, the group cards and the chip counts
+// must all AND the same set). `hierarchy` is passed separately rather than read
+// off `args` because catalogFacetOptions deliberately drops ONE level from it
+// (D-06) — everything else about the filter set is identical.
+function catalogFilters(
+  principal: Principal,
+  args: CatalogFilterArgs,
+  hierarchy: CatalogHierarchyFilter | undefined,
+): SQL[] {
+  const filters: SQL[] = [];
+  // Only active rows are ever visible (DESIGN-003 §Curation): excluded pollution
+  // and merged tombstones never appear in a grid, a count, a card or a chip.
+  filters.push(sql`c.catalog_status = 'active'`);
+  const q = args.q?.trim();
+  if (q) {
+    const pattern = likePattern(q);
+    filters.push(
+      sql`(c.canonical_name ILIKE ${pattern} OR c.brand ILIKE ${pattern} OR c.line ILIKE ${pattern})`,
+    );
+  }
+  if (args.brand) filters.push(sql`lower(btrim(c.brand)) = lower(btrim(${args.brand}))`);
+  if (args.type) filters.push(sql`c.type = ${args.type}`);
+  const facet = ownershipCondition(args.own);
+  if (facet) filters.push(facet);
+  filters.push(...overlayFilters(principal, args));
+  filters.push(...hierarchyConditions(hierarchy));
+  return filters;
 }
 
 // The caller's rounded average rating as a NON-NULL sort key: unrated cigars
@@ -281,53 +368,79 @@ interface SortSpec {
   having: ((c: Cursor) => SQL) | null;
 }
 
-function sortSpec(sort: CatalogSort): SortSpec {
+// Every sort runs in BOTH directions (DESIGN-004 D-04), and each direction needs
+// its own keyset: reversing the ORDER BY reverses the comparison operator, so a
+// cursor is only ever valid for the exact `field:dir` it was minted under
+// (sortIdentity, above).
+function sortSpec(sort: CatalogSort, dir: CatalogSortDir): SortSpec {
+  const asc = dir === "asc";
   switch (sort) {
     case "my-rating":
-      // rating DESC (best first), id ASC to break ties. The cursor compares the
-      // aggregate, so it must be a HAVING clause.
+      // The caller's rounded average. DESC is best-first with unrated (-1) last;
+      // ASC is worst-first with unrated FIRST, because the key is a non-null
+      // sentinel rather than a NULL — unrated genuinely is the bottom of this
+      // scale, so it belongs at whichever end the direction puts it. id ASC breaks
+      // ties either way. The cursor compares the aggregate, so it must be HAVING.
       return {
-        orderBy: sql`${RATING_KEY} DESC, c.id ASC`,
+        orderBy: asc ? sql`${RATING_KEY} ASC, c.id ASC` : sql`${RATING_KEY} DESC, c.id ASC`,
         cursorKey: (row) => String(row.user_rating != null ? Number(row.user_rating) : -1),
         where: null,
         having: (cur) =>
-          sql`(${RATING_KEY} < ${Number(cur.key)} OR (${RATING_KEY} = ${Number(cur.key)} AND c.id > ${cur.id}::uuid))`,
+          asc
+            ? sql`(${RATING_KEY} > ${Number(cur.key)} OR (${RATING_KEY} = ${Number(cur.key)} AND c.id > ${cur.id}::uuid))`
+            : sql`(${RATING_KEY} < ${Number(cur.key)} OR (${RATING_KEY} = ${Number(cur.key)} AND c.id > ${cur.id}::uuid))`,
       };
     case "price":
-      // best current per-stick offer ASC (cheapest first), NULLS LAST so unpriced
-      // cigars group after priced ones (R-UNI-3), id ASC to break ties. The key is
-      // a per-cigar column of the OFFER_JOIN, available pre-group, so the cursor
-      // continues the page in WHERE (not HAVING); the null tail is walked via the
-      // NULL_PRICE_KEY sentinel. ORDER BY reads the aggregated max() form (the page
-      // groups by c.id), which equals the 1:1 join's value.
+      // Best current per-stick offer. NULLS LAST in BOTH directions — unpriced
+      // cigars always group at the END (R-UNI-3): the unpriced break is a
+      // rendering boundary, not a value, so flipping the direction must not
+      // teleport it to the top and make the first screen empty of prices. id ASC
+      // breaks ties. The key is a per-cigar column of the OFFER_JOIN, available
+      // pre-group, so the cursor continues the page in WHERE (not HAVING); the
+      // null tail is walked via the NULL_PRICE_KEY sentinel, unchanged in both
+      // directions since the tail is in the same place. ORDER BY reads the
+      // aggregated max() form (the page groups by c.id), which equals the 1:1
+      // join's value.
       return {
-        orderBy: sql`max(co.best_pps_cents) ASC NULLS LAST, c.id ASC`,
+        orderBy: asc
+          ? sql`max(co.best_pps_cents) ASC NULLS LAST, c.id ASC`
+          : sql`max(co.best_pps_cents) DESC NULLS LAST, c.id ASC`,
         cursorKey: (row) =>
           row.best_pps_cents != null ? String(Number(row.best_pps_cents)) : NULL_PRICE_KEY,
         where: (cur) =>
           cur.key === NULL_PRICE_KEY
             ? sql`(co.best_pps_cents IS NULL AND c.id > ${cur.id}::uuid)`
-            : sql`(co.best_pps_cents > ${Number(cur.key)} OR (co.best_pps_cents = ${Number(cur.key)} AND c.id > ${cur.id}::uuid) OR co.best_pps_cents IS NULL)`,
+            : asc
+              ? sql`(co.best_pps_cents > ${Number(cur.key)} OR (co.best_pps_cents = ${Number(cur.key)} AND c.id > ${cur.id}::uuid) OR co.best_pps_cents IS NULL)`
+              : sql`(co.best_pps_cents < ${Number(cur.key)} OR (co.best_pps_cents = ${Number(cur.key)} AND c.id > ${cur.id}::uuid) OR co.best_pps_cents IS NULL)`,
         having: null,
       };
     case "recently-added":
-      // created_at DESC (newest first), id DESC to break ties — a plain-column
-      // keyset, so a single row-value comparison in WHERE continues the page.
-      // The key is the DB's own full-precision ::text rendering (tileSelect emits
+      // created_at, newest first under DESC and oldest first under ASC — a
+      // plain-column keyset, so a single row-value comparison in WHERE continues
+      // the page. Both members of the row value must run the same way for the
+      // comparison to be a valid continuation, hence id DESC under DESC. The key
+      // is the DB's own full-precision ::text rendering (tileSelect emits
       // created_at cast to text) so the cursor round-trips losslessly — a JS Date
       // would truncate to milliseconds and could skip rows sharing a millisecond.
       return {
-        orderBy: sql`c.created_at DESC, c.id DESC`,
+        orderBy: asc ? sql`c.created_at ASC, c.id ASC` : sql`c.created_at DESC, c.id DESC`,
         cursorKey: (row) => String(row.created_at),
-        where: (cur) => sql`(c.created_at, c.id) < (${cur.key}::timestamptz, ${cur.id}::uuid)`,
+        where: (cur) =>
+          asc
+            ? sql`(c.created_at, c.id) > (${cur.key}::timestamptz, ${cur.id}::uuid)`
+            : sql`(c.created_at, c.id) < (${cur.key}::timestamptz, ${cur.id}::uuid)`,
         having: null,
       };
     case "name":
     default:
       return {
-        orderBy: sql`c.canonical_name ASC, c.id ASC`,
+        orderBy: asc ? sql`c.canonical_name ASC, c.id ASC` : sql`c.canonical_name DESC, c.id DESC`,
         cursorKey: (row) => row.canonical_name,
-        where: (cur) => sql`(c.canonical_name, c.id) > (${cur.key}, ${cur.id}::uuid)`,
+        where: (cur) =>
+          asc
+            ? sql`(c.canonical_name, c.id) > (${cur.key}, ${cur.id}::uuid)`
+            : sql`(c.canonical_name, c.id) < (${cur.key}, ${cur.id}::uuid)`,
         having: null,
       };
   }
@@ -446,6 +559,14 @@ interface CatalogTileRow {
   // Ordering-only column for the "recently added" keyset cursor; not surfaced on
   // the public tile (CatalogCigarTile stays personal-overlay-only).
   created_at: string | Date;
+  // The structural ancestry behind the name (ADR-012, DESIGN-004 D-07). The three
+  // names come off the joined registry rows, so they are aggregated (the page
+  // groups by c.id); `name_source` is a `cigars` column and rides the GROUP BY on
+  // the primary key like the rest.
+  name_source: CigarNameSource;
+  structural_brand: string | null;
+  structural_line: string | null;
+  structural_blend: string | null;
 }
 
 // The tile's price-at-a-glance from the best-offer columns (ADR-009). A per-stick
@@ -487,6 +608,10 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
     wanted: row.wanted === true,
     favorited: row.favorited === true,
     price: toTilePrice(row),
+    nameSource: row.name_source,
+    structuralBrand: row.structural_brand ?? null,
+    structuralLine: row.structural_line ?? null,
+    structuralBlend: row.structural_blend ?? null,
   };
 }
 
@@ -504,10 +629,17 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
 // recently-added keyset cursor. One more LEFT JOIN to the caller's favorites
 // (1:1 by the UNIQUE (user_id, cigar_id) pair) folds in the favorite mark the
 // same way (PRD-003, DESIGN-002) — the second cigar-level mark, mirroring want.
+// Finally HIERARCHY_JOINS folds in the leaf's structural ancestry (ADR-012):
+// three more 1:1 joins that neither fan out the GROUP BY nor cost anything when
+// the FKs are null, feeding both the D-07 caption elision and hierarchy filters.
 function tileSelect(principal: Principal): SQL {
   return sql`
     SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches,
       c.ring_gauge, c.type, c.verification, c.created_at::text AS created_at,
+      c.name_source,
+      max(br.name) AS structural_brand,
+      max(ln.name) AS structural_line,
+      max(bl.name) AS structural_blend,
       count(s.id)::int AS user_smoke_count,
       round(avg(s.rating))::int AS user_rating,
       ${REMAINING_AGG}::int AS remaining,
@@ -527,6 +659,7 @@ function tileSelect(principal: Principal): SQL {
     ${ownershipJoins(principal)}
     LEFT JOIN favorites f ON f.cigar_id = c.id AND f.user_id = ${principal.userId}
     ${OFFER_JOIN}
+    ${HIERARCHY_JOINS}
   `;
 }
 
@@ -605,42 +738,31 @@ export async function getBrand(
 
 // The All-cigars browse: q/brand/type/ownership filtered (the web's exclusive
 // `own` facet or the independent inHumidor/wanted/smoked/favorited/inStock
-// booleans), sorted (name | my-rating | recently-added | price), keyset-paginated
-// per sort so pages never dup or gap. Fetches one extra row to decide whether a
-// next cursor exists. The filters and cursor thread through WHERE for plain-column
-// / per-cigar-join sorts and HAVING for the aggregate `my-rating` sort (sortSpec).
+// booleans), scoped by the structural hierarchy (DESIGN-004 D-01 — a drill is
+// just another filter), sorted (name | my-rating | recently-added | price) in
+// either direction, keyset-paginated per `field:dir` so pages never dup or gap.
+// Fetches one extra row to decide whether a next cursor exists. The filters and
+// cursor thread through WHERE for plain-column / per-cigar-join sorts and HAVING
+// for the aggregate `my-rating` sort (sortSpec).
 export async function browseCatalog(
   deps: Deps,
   principal: Principal,
   args: BrowseCatalogArgs = {},
 ): Promise<BrowseCatalogResult> {
   const limit = clampLimit(args.limit);
-  const q = args.q?.trim();
   const sort: CatalogSort = args.sort ?? "name";
-  const spec = sortSpec(sort);
-  const cursor = decodeCursor(args.cursor, sort);
+  const dir: CatalogSortDir = args.sortDir ?? DEFAULT_SORT_DIR[sort];
+  const spec = sortSpec(sort, dir);
+  const cursor = decodeCursor(args.cursor, sortIdentity(sort, dir));
 
-  // q/brand/type filters, the exclusive ownership facet, and the independent
-  // overlay booleans — shared by the page and the count query (both must apply
-  // the same membership). The overlay conditions reference the ownershipJoins /
-  // OFFER_JOIN columns, which tileSelect always carries; the count query adds
-  // only the joins its active filters need (countJoinsFor).
+  // q/brand/type filters, the exclusive ownership facet, the independent overlay
+  // booleans and the hierarchy scope — shared by the page and the count query
+  // (both must apply the same membership). The overlay conditions reference the
+  // ownershipJoins / OFFER_JOIN columns and the hierarchy slugs the registry
+  // joins, all of which tileSelect always carries; the count query adds only the
+  // joins its active filters need (countJoinsFor).
   const facet = ownershipCondition(args.own);
-  const filters: SQL[] = [];
-  // The unified grid shows only active rows (DESIGN-003 §Curation): excluded
-  // pollution and merged tombstones never appear in browse or its total. Applied
-  // to both the page and the count query (both derive from `filters`).
-  filters.push(sql`c.catalog_status = 'active'`);
-  if (q) {
-    const pattern = likePattern(q);
-    filters.push(
-      sql`(c.canonical_name ILIKE ${pattern} OR c.brand ILIKE ${pattern} OR c.line ILIKE ${pattern})`,
-    );
-  }
-  if (args.brand) filters.push(sql`lower(btrim(c.brand)) = lower(btrim(${args.brand}))`);
-  if (args.type) filters.push(sql`c.type = ${args.type}`);
-  if (facet) filters.push(facet);
-  filters.push(...overlayFilters(principal, args));
+  const filters = catalogFilters(principal, args, args.hierarchy);
 
   // The page WHERE adds the plain-column cursor condition; an aggregate-sort
   // cursor goes to HAVING instead (referenced below).
@@ -665,10 +787,11 @@ export async function browseCatalog(
   const lastRow = pageRows[pageRows.length - 1];
   const nextCursor =
     hasMore && lastRow
-      ? encodeCursor({ sort, key: spec.cursorKey(lastRow), id: lastRow.id })
+      ? encodeCursor({ sort: sortIdentity(sort, dir), key: spec.cursorKey(lastRow), id: lastRow.id })
       : null;
 
-  // Total matching the filters (q/brand/type/facet/overlay), ignoring the cursor.
+  // Total matching the filters (q/brand/type/facet/overlay/hierarchy), ignoring
+  // the cursor.
   // The count query carries only the joins its active filters reference.
   const filterWhere = filters.length > 0 ? sql`WHERE ${sql.join(filters, sql` AND `)}` : sql``;
   const countJoins = countJoinsFor(principal, args, facet);
@@ -678,4 +801,300 @@ export async function browseCatalog(
   const totalCount = Number((totals.rows as unknown as { total: number }[])[0]?.total ?? 0);
 
   return { cigars: page, nextCursor, totalCount };
+}
+
+// ---- Grouped views (DESIGN-004 D-03/D-05) ---------------------------------
+
+const DEFAULT_FACET_LIMIT = 200;
+const MAX_FACET_LIMIT = 500;
+
+function clampFacetLimit(value: number | undefined): number {
+  const n = value ?? DEFAULT_FACET_LIMIT;
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_FACET_LIMIT;
+  return Math.min(Math.floor(n), MAX_FACET_LIMIT);
+}
+
+// One aggregated row per group key. `group_key` is null exactly for the Unfiled
+// population (D-05); the cover arrays are null when no member had a servable
+// photo, since `array_agg(...) FILTER (...)` over an empty filter yields NULL.
+interface CatalogGroupRow {
+  group_key: string | null;
+  slug: string | null;
+  name: string | null;
+  parent_name: string | null;
+  parent_slug: string | null;
+  cigar_count: number | string;
+  in_humidor_count: number | string;
+  wanted_count: number | string;
+  cover_cigar_ids: string[] | null;
+  cover_photo_ids: string[] | null;
+}
+
+// Group cards sort by the two facts they carry, not by the leaf set (D-04). The
+// key expression closes the order deterministically: line and blend names
+// legitimately repeat across parents, so name alone is not a total order and the
+// grid would shuffle between identical requests.
+function groupOrderBy(
+  spec: ReturnType<typeof dimensionSpec>,
+  sort: BrowseCatalogGroupsArgs["groupSort"],
+): SQL {
+  const field = sort?.field ?? "name";
+  const dir = sort?.dir ?? "asc";
+  if (field === "count") {
+    // Count with a stable name tiebreak, so equal-sized groups stay alphabetical
+    // rather than falling out in scan order.
+    return dir === "asc"
+      ? sql`count(*) ASC, ${spec.name} ASC, ${spec.keyText} ASC`
+      : sql`count(*) DESC, ${spec.name} ASC, ${spec.keyText} ASC`;
+  }
+  return dir === "asc"
+    ? sql`${spec.name} ASC, ${spec.keyText} ASC`
+    : sql`${spec.name} DESC, ${spec.keyText} ASC`;
+}
+
+// The grouped catalog view (DESIGN-004 D-03): one aggregate card per member of
+// `args.by`, under EXACTLY the filter set browseCatalog would apply — q, brand,
+// type, the ownership facet, the overlay booleans and the hierarchy ancestors.
+// That identity is the contract: a card's count is the number of tiles the drill
+// it opens will show, so the two reads share `catalogFilters` rather than each
+// spelling out membership.
+//
+// The null-key rows are NOT dropped the way haynesnetwork drops them
+// (books-query.ts) — they become the trailing `unfiled` bucket (D-05), which is
+// the honest divergence: ported as-is that rule would hide most of this catalog
+// while the Wave 3 backfill runs. It is returned as null (not a zero row) when
+// empty, because the card must not render at zero.
+//
+// `args.by` naming a level the hierarchy already pins is not an error: the
+// filters simply collapse the view to the single card that level selected. The
+// web registry never offers that combination, but a hand-written URL can, and a
+// throw there would be a 500 where a degenerate-but-correct page will do.
+export async function browseCatalogGroups(
+  deps: Deps,
+  principal: Principal,
+  args: BrowseCatalogGroupsArgs,
+): Promise<BrowseCatalogGroupsResult> {
+  const spec = dimensionSpec(args.by);
+  const filters = catalogFilters(principal, args, args.hierarchy);
+  const where = sql`WHERE ${sql.join(filters, sql` AND `)}`;
+  // ownershipJoins are UNCONDITIONAL here, unlike in the count query: the badge
+  // counts read them even when no ownership filter is active. The offer join is
+  // still conditional — only the inStock filter touches it.
+  const offerJoin = args.inStock !== undefined ? OFFER_JOIN : sql``;
+
+  const result = await deps.db.execute(sql`
+    SELECT
+      ${spec.keyText} AS group_key,
+      ${spec.slug} AS slug,
+      ${spec.name} AS name,
+      ${spec.parent ?? sql`NULL::text`} AS parent_name,
+      ${spec.parentSlug ?? sql`NULL::text`} AS parent_slug,
+      count(*)::int AS cigar_count,
+      count(*) FILTER (WHERE ${REMAINING} > 0)::int AS in_humidor_count,
+      count(*) FILTER (WHERE w.id IS NOT NULL)::int AS wanted_count,
+      (array_agg(c.id ORDER BY c.canonical_name ASC, c.id ASC)
+        FILTER (WHERE pp.id IS NOT NULL))[1:3] AS cover_cigar_ids,
+      (array_agg(pp.id::text ORDER BY c.canonical_name ASC, c.id ASC)
+        FILTER (WHERE pp.id IS NOT NULL))[1:3] AS cover_photo_ids
+    FROM cigars c
+    ${HIERARCHY_JOINS}
+    ${spec.joins}
+    LEFT JOIN product_photos pp ON pp.cigar_id = c.id AND pp.rights <> 'suppressed'
+    ${ownershipJoins(principal)}
+    ${offerJoin}
+    ${where}
+    GROUP BY ${spec.key}
+    ORDER BY ${groupOrderBy(spec, args.groupSort)}
+  `);
+
+  // The sub-label exists because line and blend names collide across parents
+  // (D-03). Inside a drill the parent is already in the header, so repeating it
+  // on every card is noise — hence null when the parent level is pinned.
+  const parentPinned =
+    spec.parentDimension != null && args.hierarchy?.[spec.parentDimension] != null;
+
+  const groups: CatalogGroupCard[] = [];
+  let unfiled: CatalogUnfiledGroup | null = null;
+
+  for (const row of result.rows as unknown as CatalogGroupRow[]) {
+    const cigarCount = Number(row.cigar_count);
+    const inHumidorCount = Number(row.in_humidor_count);
+    const wantedCount = Number(row.wanted_count);
+    if (row.group_key == null || row.slug == null) {
+      // The null-key population. Rendered last regardless of sort and never at
+      // zero, so it leaves `groups` entirely rather than sorting among them.
+      unfiled = { cigarCount, inHumidorCount, wantedCount };
+      continue;
+    }
+    const coverIds = row.cover_cigar_ids ?? [];
+    const coverPhotoIds = row.cover_photo_ids ?? [];
+    const covers: CatalogGroupCard["covers"] = [];
+    // Vitolas get NO art, ever (D-03, the hnet WallGroupingArt rule): the
+    // dimension is an abstract size label, so a member's photo would stand in for
+    // something it is not. The card renders its themed glyph instead.
+    if (args.by !== "vitola") {
+      for (const [i, cigarId] of coverIds.entries()) {
+        const productPhotoId = coverPhotoIds[i];
+        if (productPhotoId != null) covers.push({ cigarId, productPhotoId });
+      }
+    }
+    groups.push({
+      dimension: args.by,
+      // The registry row's id (the derived key, for vitola). The UI keys cards by
+      // it: `Reserva` is a slug two brands can both own, so a slug-keyed list
+      // collapses them onto one card.
+      id: row.group_key,
+      slug: row.slug,
+      name: row.name ?? row.slug,
+      parentName: parentPinned ? null : (row.parent_name ?? null),
+      // Never suppressed the way `parentName` is: the sub-label is display and
+      // hides once the header says it, but the drill still has to SCOPE itself.
+      parentSlug: row.parent_slug ?? null,
+      cigarCount,
+      inHumidorCount,
+      wantedCount,
+      covers,
+    });
+  }
+
+  return { groups, unfiled };
+}
+
+// ---- Facet options (DESIGN-004 D-06) --------------------------------------
+
+interface CatalogFacetRow {
+  id: string | null;
+  slug: string | null;
+  name: string | null;
+  parent_name: string | null;
+  parent_slug: string | null;
+  option_count: number | string;
+}
+
+// The options behind one hierarchy chip, with the counts a picker is actually
+// asked for.
+//
+// THE ONE DIVERGENCE FROM browseCatalogGroups: the dimension's OWN current value
+// is dropped from the filter set before the query is built (D-06). A chip whose
+// options were counted under its own selection would report `1` next to every
+// unselected value and its own full count next to the selected one — it would
+// answer "what did I already pick", not "what would I get if I picked this".
+// Ancestors and every other facet stay applied, so the options remain scoped
+// (the Line chip under `brand=drew-estate` offers only Drew Estate lines).
+//
+// No covers (a chip row has no art) and no Unfiled option: Unfiled is a
+// group-card affordance, and a chip offering it would put a filter and a
+// navigation target in the same control. An EMPTY `options` array is the signal
+// the chip HIDES at this scope, which is why nothing is fabricated to fill it.
+export async function catalogFacetOptions(
+  deps: Deps,
+  principal: Principal,
+  args: CatalogFacetOptionsArgs,
+): Promise<CatalogFacetOptionsResult> {
+  const spec = dimensionSpec(args.dimension);
+  const scoped: CatalogHierarchyFilter = { ...(args.hierarchy ?? {}) };
+  delete scoped[args.dimension];
+
+  const filters = catalogFilters(principal, args, scoped);
+  // Keyed rows only — the null-key population is the group view's Unfiled card,
+  // never a chip option.
+  filters.push(spec.keyed);
+  const where = sql`WHERE ${sql.join(filters, sql` AND `)}`;
+
+  const facet = ownershipCondition(args.own);
+  const needsOwnership =
+    facet != null || args.inHumidor !== undefined || args.wanted !== undefined;
+  const limit = clampFacetLimit(args.limit);
+
+  const result = await deps.db.execute(sql`
+    SELECT
+      ${spec.keyText} AS id,
+      ${spec.slug} AS slug,
+      ${spec.name} AS name,
+      ${spec.parent ?? sql`NULL::text`} AS parent_name,
+      ${spec.parentSlug ?? sql`NULL::text`} AS parent_slug,
+      count(*)::int AS option_count
+    FROM cigars c
+    ${HIERARCHY_JOINS}
+    ${spec.joins}
+    ${needsOwnership ? ownershipJoins(principal) : sql``}
+    ${args.inStock !== undefined ? OFFER_JOIN : sql``}
+    ${where}
+    GROUP BY ${spec.key}
+    ORDER BY ${spec.name} ASC, ${spec.keyText} ASC
+    LIMIT ${limit}
+  `);
+
+  const parentPinned =
+    spec.parentDimension != null && scoped[spec.parentDimension] != null;
+
+  const options: CatalogFacetOption[] = [];
+  for (const row of result.rows as unknown as CatalogFacetRow[]) {
+    if (row.slug == null || row.id == null) continue; // defensive: `keyed` already excluded these
+    options.push({
+      id: row.id,
+      slug: row.slug,
+      name: row.name ?? row.slug,
+      parentName: parentPinned ? null : (row.parent_name ?? null),
+      parentSlug: row.parent_slug ?? null,
+      count: Number(row.option_count),
+    });
+  }
+
+  // Union the ACTIVE value's own row in, whatever its count.
+  //
+  // The aggregation above can legitimately omit it in two ways: its count under
+  // the OTHER active facets is zero (nothing is grouped, so no row is produced),
+  // or the option list was truncated by `limit`. Either way the chip is then
+  // holding a value it has no row for, and the pill falls back to rendering the
+  // raw slug — `Vitola · petit-corona` — which is the URL's vocabulary leaking
+  // onto a display surface. Worse, it happens exactly when a filter has narrowed
+  // things far enough to be worth reading.
+  //
+  // So the row is looked up directly (unfaceted, like the drill header's) and
+  // counted for real under the full filter set. A count of 0 is the honest
+  // answer and is shown as such: it says this value is why the grid is empty.
+  //
+  // Two guards, and both are load-bearing. The slug pre-check is the fast path:
+  // when the aggregation already returned the value there is nothing to look up.
+  // The identity re-check is what makes the union safe for a param that is NOT a
+  // canonical slug — a pre-wave `?brand=Padrón` link resolves through the fold,
+  // so the aggregation's row and the looked-up row wear different `slug` strings
+  // while being the same brand. Deduping on the registry id is the only test that
+  // sees that, and without it the chip would list the brand twice.
+  const active = args.hierarchy?.[args.dimension];
+  if (active != null && active !== HIERARCHY_UNFILED && !options.some((o) => o.slug === active)) {
+    const entity = await lookupHierarchyEntity(deps, args.dimension, active, scoped);
+    if (entity && !options.some((o) => o.id === entity.id)) {
+      const activeFilters = catalogFilters(principal, args, {
+        ...scoped,
+        [args.dimension]: active,
+      });
+      const counted = await deps.db.execute(sql`
+        SELECT count(*)::int AS n
+        FROM cigars c
+        ${HIERARCHY_JOINS}
+        ${spec.joins}
+        ${needsOwnership ? ownershipJoins(principal) : sql``}
+        ${args.inStock !== undefined ? OFFER_JOIN : sql``}
+        WHERE ${sql.join(activeFilters, sql` AND `)}
+      `);
+      const option: CatalogFacetOption = {
+        id: entity.id,
+        slug: entity.slug,
+        name: entity.name,
+        parentName: parentPinned ? null : entity.parentName,
+        parentSlug: entity.parentSlug,
+        count: Number((counted.rows[0] as { n: number | string } | undefined)?.n ?? 0),
+      };
+      // Placed by the same key the query ordered on (name, then identity) so the
+      // unioned row sits where a counted one would have, not at the end.
+      const at = options.findIndex(
+        (o) => o.name > option.name || (o.name === option.name && o.id > option.id),
+      );
+      options.splice(at === -1 ? options.length : at, 0, option);
+    }
+  }
+
+  return { options };
 }

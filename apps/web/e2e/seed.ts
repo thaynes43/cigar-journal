@@ -1,11 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { createDatabase, cigars, crawlRuns, purchases, users, vendors, type NewCigarRow } from "@cj/db";
+import {
+  createDatabase,
+  blendBlenders,
+  blenders,
+  blends,
+  brands,
+  cigars,
+  crawlRuns,
+  lines,
+  offers,
+  purchases,
+  users,
+  vendors,
+  type NewCigarRow,
+} from "@cj/db";
 import {
   claimInvite,
   createInvite,
   reserveInvite,
   revokeInvite,
   saveSmoke,
+  setFavorite,
   setWant,
   type Deps,
   type Principal,
@@ -73,12 +88,39 @@ export interface Handoff {
     // A held cigar with no product photo — the "Missing photos" worklist row the
     // admin console's Queue enrichment button acts on (#154).
     heldPhotoless: { id: string; name: string };
+    // Smoked, favorited AND priced in stock — the one row that survives every
+    // leaf toggle at once, so a grouped screen carrying all three still has a
+    // card to drill through. `brandSlug` is the param that drill lands on.
+    everyToggle: { id: string; name: string; brandSlug: string; brandName: string };
   };
   // A deterministic near-duplicate pair for the admin console's merge/unmerge
   // round trip. Distinct from every other seeded name so the pair is the only one
   // the Duplicates section surfaces for these two rows.
   duplicatePair: { survivor: { id: string; name: string }; duplicate: { id: string; name: string } };
   brand: string;
+  // The structured Brand → Line → Blend → Vitola tree (ADR-012), so the DESIGN-004
+  // drill paths are exercised against real registry rows rather than the free-text
+  // columns. Production is mostly unfiled until the Wave 3 backfill runs, and the
+  // fixture deliberately carries BOTH shapes: a fully structured branch and a
+  // brand-only row that lands in the Unfiled bucket at the line level.
+  taxonomy: {
+    brand: { slug: string; name: string };
+    line: { slug: string; name: string };
+    blend: { slug: string; name: string };
+    // A second blend under the same line, so a line drill has more than one card
+    // to group and the Blend chip has something to choose between.
+    siblingBlend: { slug: string; name: string };
+    vitola: { slug: string; name: string };
+    blender: string;
+    // A composed row: inside a line drill its caption elides to `No. 9 · Toro`
+    // (D-07) while its canonical name stays the full string.
+    composed: { id: string; canonicalName: string; elidedInLine: string };
+    // The same blend, `type` unknown — production's dominant shape, and the row
+    // that shows an unestablished type credits no blender.
+    untyped: { id: string; canonicalName: string };
+    // Structured down to the brand only — the row the `line=unfiled` card drills to.
+    unfiled: { id: string; canonicalName: string };
+  };
   publicSmoke: { id: string; cigarName: string; narrativeSnippet: string };
   privateSmokeId: string;
   // Journal entries with no title, so the smoke-detail h1 falls back to the
@@ -237,6 +279,119 @@ export async function seed(opts: {
       ringGauge: 49,
     });
 
+    // --- The structured taxonomy branch (ADR-012 / DESIGN-004) -------------
+    // Registry rows, then leaves that actually point at them. Migration 0026's
+    // mechanical backfill only ever mints BRANDS from the free-text column, so a
+    // line/blend/vitola drill has nothing to walk unless the fixture builds one.
+    //
+    // `aliases` holds matching keys, not display text (the 0026 convention), and
+    // the slugs are what the URL drills on.
+    const [drewEstate] = await deps.db
+      .insert(brands)
+      .values({ name: "Drew Estate", slug: "drew-estate", aliases: ["drew-estate"] })
+      .returning({ id: brands.id });
+    const [ligaPrivada] = await deps.db
+      .insert(lines)
+      .values({
+        brandId: drewEstate!.id,
+        name: "Liga Privada",
+        slug: "liga-privada",
+        aliases: ["liga-privada"],
+      })
+      .returning({ id: lines.id });
+    // The blend carries the level facts DESIGN-004 D-08 renders as facts rows —
+    // filler/binder/wrapper and strength live here, not on each vitola.
+    const [noNine] = await deps.db
+      .insert(blends)
+      .values({
+        lineId: ligaPrivada!.id,
+        name: "No. 9",
+        slug: "no-9",
+        aliases: ["no-9"],
+        wrapper: "Connecticut Broadleaf",
+        binder: "Brazilian Mata Fina",
+        filler: "Nicaraguan and Honduran",
+        strength: "full",
+      })
+      .returning({ id: blends.id });
+    // A sibling blend so a line drill groups more than one card.
+    const [t52] = await deps.db
+      .insert(blends)
+      .values({ lineId: ligaPrivada!.id, name: "T52", slug: "t52", aliases: ["t52"] })
+      .returning({ id: blends.id });
+    // A credited blender, so the Blender facts row has something to render. The
+    // cigars below are NC — a Cuban blend would credit the marca and render no
+    // blender row at all (ADR-013).
+    const [herrera] = await deps.db
+      .insert(blenders)
+      .values({ name: "Willy Herrera", slug: "willy-herrera", aliases: ["willy-herrera"] })
+      .returning({ id: blenders.id });
+    await deps.db.insert(blendBlenders).values({ blendId: noNine!.id, blenderId: herrera!.id });
+
+    const structured = {
+      brandId: drewEstate!.id,
+      lineId: ligaPrivada!.id,
+      type: "NC" as const,
+      // `composed` is what licenses the caption elision (D-07); a freeform row
+      // always renders its canonical name raw.
+      nameSource: "composed" as const,
+    };
+    const ligaNo9Toro = await insertCigar(deps, {
+      ...structured,
+      blendId: noNine!.id,
+      canonicalName: "Drew Estate Liga Privada No. 9 Toro",
+      brand: "Drew Estate",
+      line: "Liga Privada",
+      vitolaName: "Toro",
+      lengthInches: "6",
+      ringGauge: 52,
+    });
+    await insertCigar(deps, {
+      ...structured,
+      blendId: noNine!.id,
+      canonicalName: "Drew Estate Liga Privada No. 9 Robusto",
+      brand: "Drew Estate",
+      line: "Liga Privada",
+      vitolaName: "Robusto",
+      lengthInches: "5",
+      ringGauge: 54,
+    });
+    await insertCigar(deps, {
+      ...structured,
+      blendId: t52!.id,
+      canonicalName: "Drew Estate Liga Privada T52 Toro",
+      brand: "Drew Estate",
+      line: "Liga Privada",
+      vitolaName: "Toro",
+      lengthInches: "6",
+      ringGauge: 52,
+    });
+    // The same blend with its `type` unknown — the shape the overwhelming
+    // majority of production rows are in. It is what makes the blender credit
+    // testable: the gate is a POSITIVE `type === "NC"`, so a row nobody has
+    // established anything about credits nobody (ADR-013).
+    const ligaNo9CoronaDoble = await insertCigar(deps, {
+      ...structured,
+      type: null,
+      blendId: noNine!.id,
+      canonicalName: "Drew Estate Liga Privada No. 9 Corona Doble",
+      brand: "Drew Estate",
+      line: "Liga Privada",
+      vitolaName: "Corona Doble",
+      lengthInches: "7",
+      ringGauge: 54,
+    });
+    // Brand known, line unknown — exactly the shape 97% of production is in
+    // until Wave 3 curates. This is what the trailing `Unfiled` card counts, and
+    // what `?brand=drew-estate&line=unfiled` drills to.
+    const undercrown = await insertCigar(deps, {
+      canonicalName: "Drew Estate Undercrown Gordito",
+      brand: "Drew Estate",
+      brandId: drewEstate!.id,
+      vitolaName: "Gordito",
+      type: "NC",
+    });
+
     // Deliberately sparse — no dimensions, no photo — so it is genuinely
     // enrichable rather than reported `not_needed`. Verified, because the enqueue
     // refuses a canonical name nobody has reviewed (#154).
@@ -278,6 +433,36 @@ export async function seed(opts: {
       finishedAt: new Date(),
     });
 
+    // --- Mechanical brand backfill, mirroring migration 0026 ---------------
+    // The migration mints one `brands` row per distinct free-text brand and links
+    // the cigars carrying it — but it runs BEFORE this fixture inserts anything,
+    // so without replaying it every seeded row would have `brand_id` NULL and the
+    // whole brand grouping would collapse into Unfiled. Production does not look
+    // like that, so neither should the fixture.
+    //
+    // The slug rule is 0026's verbatim character class (deliberately not `a-z`,
+    // which collation can widen), so `Padrón` slugs to `padr-n` here exactly as it
+    // does in production — the ugly-but-stable key that keeps existing brand URLs
+    // and `brand_images` joins working. Guarded on `brand_id IS NULL`, so the
+    // structured branch seeded above keeps the links it was given.
+    const BRAND_SLUG = `btrim(regexp_replace(lower(btrim(c.brand)), '[^abcdefghijklmnopqrstuvwxyz0123456789]+', '-', 'g'), '-')`;
+    await pool.query(`
+      INSERT INTO brands (name, slug)
+      SELECT DISTINCT ON (slug) name, slug FROM (
+        SELECT btrim(c.brand) AS name, ${BRAND_SLUG} AS slug, count(*) AS n
+        FROM cigars c WHERE nullif(btrim(c.brand), '') IS NOT NULL
+        GROUP BY btrim(c.brand)
+      ) s WHERE slug <> ''
+      ORDER BY slug, n DESC, name ASC
+      ON CONFLICT (slug) DO NOTHING
+    `);
+    await pool.query(`
+      UPDATE cigars c SET brand_id = b.id FROM brands b
+      WHERE c.brand_id IS NULL
+        AND nullif(btrim(c.brand), '') IS NOT NULL
+        AND b.slug = ${BRAND_SLUG}
+    `);
+
     // --- Admin account (first-run bootstrap -> admin) ----------------------
     // Must be first: the allowlist only opens registration while `users` is empty.
     await auth.api.signUpEmail({
@@ -314,6 +499,24 @@ export async function seed(opts: {
       overallDescriptors: ["dark chocolate", "white pepper"],
       assessment: { rating: 100, liked: true, strength: "full", body: "full", impression: null },
       journal: { narrative: "No title on this one — the cigar name has to carry the page." },
+    });
+
+    // The Montecristo carries the other two leaf marks as well, so exactly ONE
+    // row in the catalog survives `instock=1&smoked=1&favorites=1` at once.
+    // Without it that combination empties every grouped screen, and the drill
+    // round trip that has to hold all three on the URL has no card to descend
+    // through. The offer takes the ad-hoc path (no listing match), which is all
+    // `has_in_stock` reads.
+    await setFavorite(deps, admin, { cigarId: monte2, favorited: true });
+    await deps.db.insert(offers).values({
+      vendorId: vendorRows[0]!.id,
+      cigarId: monte2,
+      inStock: true,
+      price: "24.00",
+      currency: "USD",
+      packaging: "single",
+      sticksPerPackage: 1,
+      pricePerStickCents: 2400,
     });
 
     // A holding with no product photo, so /admin/catalog renders the "Missing
@@ -433,12 +636,36 @@ export async function seed(opts: {
         wanted: { id: hemingway, name: "Arturo Fuente Hemingway Short Story" },
         sampleNC: { id: padron64, name: "Padrón 1964 Anniversary Maduro" },
         heldPhotoless: { id: photoless, name: "Tatuaje Black Label Corona Gorda" },
+        everyToggle: {
+          id: monte2,
+          name: "Montecristo No. 2",
+          brandSlug: "montecristo",
+          brandName: "Montecristo",
+        },
       },
       duplicatePair: {
         survivor: { id: dupePlain, name: "Ramon Allones Especialmente Seleccionados" },
         duplicate: { id: dupeAccented, name: "Ramón Allones Especialmente Seleccionados" },
       },
       brand: "Padrón",
+      taxonomy: {
+        brand: { slug: "drew-estate", name: "Drew Estate" },
+        line: { slug: "liga-privada", name: "Liga Privada" },
+        blend: { slug: "no-9", name: "No. 9" },
+        siblingBlend: { slug: "t52", name: "T52" },
+        vitola: { slug: "toro", name: "Toro" },
+        blender: "Willy Herrera",
+        composed: {
+          id: ligaNo9Toro,
+          canonicalName: "Drew Estate Liga Privada No. 9 Toro",
+          elidedInLine: "No. 9 · Toro",
+        },
+        untyped: {
+          id: ligaNo9CoronaDoble,
+          canonicalName: "Drew Estate Liga Privada No. 9 Corona Doble",
+        },
+        unfiled: { id: undercrown, canonicalName: "Drew Estate Undercrown Gordito" },
+      },
       publicSmoke: {
         id: publicSave.smoke.smokeId,
         cigarName: "Cohiba Siglo VI",

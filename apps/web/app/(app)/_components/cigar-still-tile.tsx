@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { CatalogCigarTile } from "@cj/domain";
 import { ui } from "@/lib/ui";
+import { tileCaption, type CatalogLevel } from "./catalog-registry";
 import { BandTile } from "./band-tile";
 import { RatingSeal } from "./rating-seal";
 import { WantBadge } from "./want-badge";
@@ -19,10 +20,17 @@ import { FavoriteBadge } from "./favorite-badge";
 export function CigarStillTile({
   cigar,
   imageUrl,
+  level = "root",
 }: {
   cigar: CatalogCigarTile;
   imageUrl?: string | null;
+  // The hierarchy level this tile is being shown inside. Drives caption elision
+  // only (DESIGN-004 D-07) — a composed name drops the parts the drill header
+  // above it already states. Defaults to the root, where nothing is elided, so
+  // every existing call site keeps its current caption.
+  level?: CatalogLevel;
 }) {
+  const caption = tileCaption(cigar, level);
   const subtitle = [cigar.vitola.name, cigar.type].filter(Boolean).join(" · ");
   // Fingerprint the immutable thumb URL with the photo id so a Replace is seen at
   // once instead of the cached prior image (issue 127), mirroring the detail hero's fix.
@@ -76,7 +84,7 @@ export function CigarStillTile({
         {cigar.favorited ? <FavoriteBadge /> : null}
       </div>
       <div className="flex min-w-0 flex-col gap-1">
-        <span className="truncate font-display font-semibold text-ink">{cigar.canonicalName}</span>
+        <span className="truncate font-display font-semibold text-ink">{caption}</span>
         {subtitle ? <span className="label-caps truncate">{subtitle}</span> : null}
         {perStickPrice ? (
           <span className="text-xs tabular-nums text-muted">{perStickPrice}</span>
