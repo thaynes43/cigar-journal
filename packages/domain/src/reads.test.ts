@@ -53,6 +53,24 @@ describe("read services", () => {
     expect(error).toBeInstanceOf(SmokeNotFoundError);
   });
 
+  it("getSmoke answers a malformed id exactly as it answers an unknown one", async () => {
+    // A non-uuid string used to reach the `uuid` column and raise Postgres 22P02 —
+    // untyped, so it escaped this error path and surfaced as a 500 wherever the id
+    // is not validated a layer up (the MCP `get_smoke` tool). The two cases are
+    // indistinguishable to a caller and must stay so.
+    const malformed = await getSmoke(h.deps, userA, { smokeId: "not-a-uuid" }).catch(
+      (e: unknown) => e,
+    );
+    const unknown = await getSmoke(h.deps, userA, { smokeId: newRequestId() }).catch(
+      (e: unknown) => e,
+    );
+    expect(malformed).toBeInstanceOf(SmokeNotFoundError);
+    expect(unknown).toBeInstanceOf(SmokeNotFoundError);
+    expect((malformed as SmokeNotFoundError).toPayload()).toEqual(
+      (unknown as SmokeNotFoundError).toPayload(),
+    );
+  });
+
   it("queryMySmokes filters by descriptor and full-text, newest first, scoped to the caller", async () => {
     const cigarId = await h.seedCigar({
       canonicalName: "Liga Privada No. 9",

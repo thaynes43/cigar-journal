@@ -382,14 +382,14 @@ describe("@cj/mcp adapter", () => {
   });
 
   it("tools/list publishes the exact add_smoke_photo `image` schema (manifest stability)", async () => {
-    // A PIN, not a nicety. schemas.ts wraps `image` in a `z.preprocess` so an
-    // unparsable delivery reaches the handler and gets LOGGED instead of being
-    // rejected before any record exists — and that wrapper is only safe because it
-    // emits a byte-identical published schema. A zod/SDK upgrade that changes how a
-    // pipe is emitted would silently rewrite the file-input declaration ChatGPT
-    // reads; this test fails first. (Related: `.catch()` cannot be used here at all
-    // — it throws "Dynamic catch values are not supported in JSON Schema" at
-    // emission time and would break tools/list for the WHOLE server.)
+    // A PIN, not a nicety, and after issue #202 experiment 1 it is the experiment's
+    // own assertion: the published shape IS the change. Integrations that reportedly
+    // receive files from ChatGPT declare a strict four-property file object, and
+    // host-side hydration may key on the emitted schema rather than on the
+    // `openai/fileParams` declaration alone — so the whole object is compared
+    // WHOLE. A zod/SDK upgrade that adds a key, drops a description, or flips
+    // `additionalProperties` back to `{}` silently rewrites the file-input
+    // declaration ChatGPT reads; this fails first.
     await withClient(ownerFull, async (client) => {
       const { tools } = await client.listTools();
       const photo = tools.find((t) => t.name === "add_smoke_photo")!;
@@ -398,33 +398,37 @@ describe("@cj/mcp adapter", () => {
         required?: string[];
       };
 
-      const image = inputSchema.properties.image as Record<string, unknown>;
-      expect(image.type).toBe("object");
-      expect(image.additionalProperties).toEqual({});
-      const properties = image.properties as Record<string, { type: string }>;
-      expect(Object.keys(properties).sort()).toEqual([
-        "download_url",
-        "file_id",
-        "file_name",
-        "mime_type",
-      ]);
-      for (const [name, schema] of Object.entries(properties)) {
-        expect(schema.type, `image.${name} must stay a plain string`).toBe("string");
-      }
-      // The DESCRIPTION is pinned too, and it is the field most at risk: it is the
-      // only model-facing text on the file input, and it is the one part of the
-      // schema the `z.preprocess` wrapper could plausibly drop (a pipe's emitted
-      // metadata comes from the inner type, not the wrapper). A silent drop would
-      // leave ChatGPT reading an undescribed object property and telling the model
-      // nothing about who fills it.
-      expect(image.description).toBe(
-        "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. Omit it and the tool returns a one-time upload link instead.",
-      );
-      expect((properties.download_url as { description?: string }).description).toBe(
-        "Host-provided signed download URL for the file. Set by the client, never by you.",
-      );
-      // No sub-field is required, and `image` itself stays out of `required`.
-      expect(image.required).toBeUndefined();
+      expect(inputSchema.properties.image).toEqual({
+        type: "object",
+        properties: {
+          download_url: {
+            type: "string",
+            description:
+              "Host-provided signed download URL for the file. Set by the client, never by you.",
+          },
+          file_id: {
+            type: "string",
+            description: "Host-provided file id. Set by the client, never by you.",
+          },
+          mime_type: {
+            type: "string",
+            description: "File MIME type, if the host provided one.",
+          },
+          file_name: {
+            type: "string",
+            description: "Original file name, if the host provided one.",
+          },
+        },
+        additionalProperties: false,
+        description:
+          "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. Omit it and the tool returns a one-time upload link instead.",
+      });
+
+      // Restated outside the whole-object compare because they are the two
+      // properties a well-meaning edit is most likely to break: no sub-field is
+      // required, and `image` itself stays out of `required` — a partial or missing
+      // file must never block the call.
+      expect((inputSchema.properties.image as { required?: string[] }).required).toBeUndefined();
       expect(inputSchema.required ?? []).not.toContain("image");
       expect((photo._meta as Record<string, unknown> | undefined)?.["openai/fileParams"]).toEqual([
         "image",
@@ -930,6 +934,19 @@ describe("@cj/mcp adapter", () => {
     await withClient(otherFull, async (client) => {
       const result = await call(client, "get_smoke", { smokeId });
       expect(errorOf(result).code).toBe("smoke_not_found");
+    });
+  });
+
+  it("smoke_not_found: a malformed get_smoke id is answered, not thrown", async () => {
+    // `smokeId` is a bare `z.string()` here, as every id input in this adapter is,
+    // so a non-uuid used to reach the uuid column and raise Postgres 22P02 — an
+    // untyped error that escaped the contract and surfaced as a bare failure. The
+    // domain read now treats it as the unknown id it is indistinguishable from.
+    await withClient(ownerFull, async (client) => {
+      const malformed = await call(client, "get_smoke", { smokeId: "not-a-uuid" });
+      const unknown = await call(client, "get_smoke", { smokeId: randomUUID() });
+      expect(errorOf(malformed).code).toBe("smoke_not_found");
+      expect(errorOf(unknown)).toEqual(errorOf(malformed));
     });
   });
 
@@ -1932,40 +1949,54 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
-  it("survives an `image` the schema cannot parse and records its shape", async () => {
-    // Every one of these FAILED input validation before this change — raised by the
-    // SDK before the handler ran, so they left zero lines in Loki and returned a
-    // bare error string to the model. `image: null` is a plausible "no file
-    // attached" host shape, and it hard-errored the whole call.
-    const cases: { image: unknown; outcome: string; type: string }[] = [
-      { image: "https://chatgpt.com/c/file-abc", outcome: "not_an_object", type: "string" },
-      { image: null, outcome: "not_an_object", type: "null" },
-      { image: 5, outcome: "not_an_object", type: "number" },
-      // An object with a wrongly-typed URL is an object — it is `no_url`, not
-      // `not_an_object`, and the record names the key that arrived.
-      { image: { download_url: 12 }, outcome: "no_url", type: "object" },
+  it("refuses an `image` the strict schema rejects, and the probe still records its shape", async () => {
+    // The trade issue #202 experiment 1 accepts, pinned so it cannot drift silently.
+    // These shapes previously reached the handler through a preprocess wrapper and
+    // fell back to a mode-B link; against the strict published schema the SDK now
+    // refuses them before `run()`. That is the POINT — the published shape is the
+    // experiment — and it costs no observability, which is the half this test
+    // exists to prove: the raw-body probe describes every one of them from the
+    // unparsed JSON-RPC body, before validation.
+    //
+    // `image: null` is the case worth naming: a plausible "no file attached" host
+    // shape that is now a hard error on the argument channel. The request-`_meta`
+    // channel is unvalidated and unaffected, and the probe sees both.
+    const cases: { image: unknown; type: string; keys: string[]; filled: string[] }[] = [
+      { image: "https://chatgpt.com/c/file-abc", type: "string", keys: [], filled: [] },
+      { image: null, type: "null", keys: [], filled: [] },
+      { image: 5, type: "number", keys: [], filled: [] },
+      // An object whose declared key carries the wrong type.
+      { image: { download_url: 12 }, type: "object", keys: ["download_url"], filled: [] },
+      // An undeclared key — newly refused, and the class most likely to be a real
+      // host sending a URL under a name we do not publish. `additionalProperties:
+      // false` is what makes this a rejection, and the probe names the key so a
+      // live host doing exactly this is still diagnosable from Loki.
+      { image: { url: "https://cdn.example/x.png" }, type: "object", keys: ["url"], filled: ["url"] },
     ];
 
     await withClient(ownerFull, async (client) => {
       for (const testCase of cases) {
-        const smokeId = await saveBareSmoke(client, "intake-unparsable");
+        const smokeId = await saveBareSmoke(client, "intake-rejected");
         const { value, lines } = await captureMcpLog(() =>
           call(client, "add_smoke_photo", { smokeId, image: testCase.image }),
         );
 
-        expect(value.isError, `image=${JSON.stringify(testCase.image)} must not error`).not.toBe(
-          true,
-        );
-        const data = payloadOf(value) as { mode: string; delivery: { status: string } };
-        expect(data.mode).toBe("upload_url");
-        expect(data.delivery.status).toBe("image_reference_unusable");
+        expect(value.isError, `image=${JSON.stringify(testCase.image)} must be refused`).toBe(true);
 
-        const record = eventPayload(lines, "photo_intake");
-        expect(record.outcome).toBe(testCase.outcome);
-        expect((record.argument as { type: string }).type).toBe(testCase.type);
-        // The internal leniency marker never reaches the record or the result.
-        expect(JSON.stringify(record)).not.toContain("__cj_unparsed_image");
-        expect(JSON.stringify(data)).not.toContain("__cj_unparsed_image");
+        const probe = eventPayload(lines, "photo_intake_request");
+        expect(probe.tool).toBe("add_smoke_photo");
+        expect(probe.argKeys).toEqual(["image", "smokeId"]);
+        expect(probe.argImage).toEqual({
+          type: testCase.type,
+          keys: testCase.keys,
+          filled: testCase.filled,
+        });
+        // The handler never ran, so there is no `photo_intake` line — the probe is
+        // the whole record, exactly as the strict-schema trade assumes.
+        expect(lines.some((l) => l.includes("[mcp] photo_intake {"))).toBe(false);
+        // Key names only: the probe never copies a handle's values.
+        expect(lines.join("\n")).not.toContain("cdn.example");
+        expect(lines.join("\n")).not.toContain("chatgpt.com/c/file-abc");
       }
     });
   });
@@ -2081,11 +2112,18 @@ describe("@cj/mcp adapter", () => {
       async (fixtureUrl) => {
         await withClient(ownerFull, async (client) => {
           const smokeId = await saveBareSmoke(client, "intake-sniffed");
-          const { value, lines } = await captureMcpLog(() =>
-            call(client, "add_smoke_photo", {
-              smokeId,
-              image: { url: fixtureUrl, file_id: "file_sniff" },
-            }),
+          // Delivered on the request-`_meta` channel, which is where alternate URL
+          // keys live now: the published `image` schema is strict (issue #202
+          // experiment 1) and admits only `download_url`, while `_meta` is not
+          // schema-validated at all, so `url`/`uri`/`href`/`file_url` are still
+          // accepted there — the naming-drift coverage this test carries.
+          const { value, lines } = await captureMcpLog(
+            () =>
+              client.callTool({
+                name: "add_smoke_photo",
+                arguments: { smokeId },
+                _meta: { "openai/fileParams": [{ url: fixtureUrl, file_id: "file_sniff" }] },
+              }) as Promise<CallToolResult>,
           );
 
           const data = payloadOf(value) as { mode: string; photo: { photoId: string } };
@@ -2095,6 +2133,7 @@ describe("@cj/mcp adapter", () => {
           const record = eventPayload(lines, "photo_intake");
           expect(record.outcome).toBe("attached");
           expect(record.mode).toBe("attached");
+          expect(record.channel).toBe("request_meta");
           // The alternate URL key was accepted, and the record says which one hit.
           expect(record.urlKey).toBe("url");
           const fetched = record.fetch as { declaredType: string; sniffedType: string };

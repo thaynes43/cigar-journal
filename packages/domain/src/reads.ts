@@ -118,12 +118,24 @@ function toSmokeView(
   };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // The canonical, complete representation of one Smoke — owner-only.
+//
+// A malformed id is answered as NOT-FOUND, not as a validation error, because to
+// the caller it is indistinguishable from an id that names nothing: both mean
+// "there is no such smoke", and the read already refuses to confirm existence to
+// a non-owner. Without the guard the raw string reaches a `uuid` column and
+// Postgres raises 22P02 — untyped, so it escapes the SmokeNotFoundError path and
+// becomes a 500 in every adapter (the MCP `get_smoke` tool passes its id straight
+// through; web rejects it a layer earlier with `.uuid()` on the procedure input).
 export async function getSmoke(
   deps: Deps,
   principal: Principal,
   args: { smokeId: string },
 ): Promise<SmokeView> {
+  if (!UUID_RE.test(args.smokeId)) throw new SmokeNotFoundError();
+
   const rows = await deps.db
     .select({
       smoke: smokes,

@@ -55,7 +55,9 @@ export const smokesRouter = router({
     .input(updateSmokeSchema)
     .mutation(({ ctx, input }) => updateSmoke(ctx.deps, ctx.principal, { ...input, provenance: { source: "manual" } })),
 
+  // Same uuid guard, same reason as `get` above — authenticated, but a malformed
+  // id reaches the same uuid column and 500s just as readily.
   delete: authedProcedure
-    .input(z.object({ smokeId: z.string() }))
+    .input(z.object({ smokeId: z.string().uuid() }))
     .mutation(({ ctx, input }) => deleteSmoke(ctx.deps, ctx.principal, { smokeId: input.smokeId })),
 });
