@@ -85,3 +85,28 @@ init container at startup (ADR-003).
   writes stamp it from the server-derived `Principal`; the web console has no
   OAuth client and stays null. No FK: the audit log is append-only history that
   must outlive the client row it names.
+- `0026_taxonomy_registries.sql` — the reference entities above the leaf
+  (ADR-012, issue #196 Wave 1): `brands` → `lines` → `blends`, plus `blenders`
+  and the `blend_blenders` credit join, each with a canonical name, a stable
+  slug and an alias list. `cigars` gains nullable `brand_id`/`line_id`/`blend_id`
+  (ON DELETE SET NULL — retiring a registry row must never delete a cigar) and
+  `name_source` (`freeform`|`composed`), the switch that makes `canonical_name` a
+  maintained projection in Wave 2. `brand_images` gains a nullable `brand_id`;
+  `brand_slug` keeps working untouched until Wave 5 retires it.
+  **Ancestry consistency is NOT enforced in SQL.** A cigar's line must belong to
+  its brand and its blend to its line, but that rule lives in `@cj/domain`
+  (`assertCigarAncestry`, `packages/domain/src/cigar-ancestry.ts`) — it has to
+  report which level disagrees as a field-level error, and Wave 3 curation
+  re-parents all three columns in one statement.
+  The backfill is **mechanical only**: one `brands` row per distinct non-blank
+  trimmed `cigars.brand` (36 in production), slugged with the SAME rule as
+  `brandSlug()` so the result equals the key existing brand URLs and
+  `brand_images.brand_slug` already resolve through — which is why `Padrón`
+  slugs to `padr-n` and the accent-folded `Padron` is seeded as an *alias*
+  instead (the stored key never folds; folding is for matching, as `fold()` in
+  the crawler already establishes). Spellings that collapse onto one slug
+  (`Davidoff`/`davidoff`, `H Upmann`/`H. Upmann`) become one brand: the most-used
+  spelling wins the name, the rest become aliases. It mints no lines, no blends
+  and no blenders, attaches none of the 565 unbranded rows, and edits no names —
+  all of that is Wave 3 curation, which needs evidence and an audit trail. Both
+  statements are idempotent.

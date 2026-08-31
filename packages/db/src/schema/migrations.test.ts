@@ -24,9 +24,14 @@ describe("migrations", () => {
     expect(names).toEqual(
       expect.arrayContaining([
         "audit_log",
+        "blend_blenders",
+        "blenders",
+        "blends",
         "brand_images",
+        "brands",
         "cigar_merges",
         "cigars",
+        "lines",
         "duplicate_dismissals",
         "favorites",
         "idempotency_keys",
@@ -201,5 +206,116 @@ describe("migrations", () => {
 
     // And an outcome-only row (no bytes) is unconstrained — the negative cache.
     await insert("brand_slug, brand_name, status", "'gate-c', 'Gate C', 'no_match'");
+  });
+
+  // 0026: the taxonomy registries (ADR-012). These are the shapes the rest of
+  // the waves build on — slug uniqueness at the right scope, and a leaf that
+  // survives its registry.
+  it("0026 scopes slug uniqueness per parent and keeps blend credit a set", async () => {
+    const brandA = await pg.db.execute(
+      sql`INSERT INTO brands (name, slug) VALUES ('Taxonomy Brand A', 'taxonomy-brand-a') RETURNING id`,
+    );
+    const brandAId = (brandA.rows[0] as { id: string }).id;
+    const brandB = await pg.db.execute(
+      sql`INSERT INTO brands (name, slug) VALUES ('Taxonomy Brand B', 'taxonomy-brand-b') RETURNING id`,
+    );
+    const brandBId = (brandB.rows[0] as { id: string }).id;
+
+    // A brand slug is global — it is the URL key.
+    await expect(
+      pg.db.execute(sql`INSERT INTO brands (name, slug) VALUES ('Clash', 'taxonomy-brand-a')`),
+    ).rejects.toThrow();
+
+    // A line slug is unique WITHIN a brand only: two brands may each have a
+    // `reserva` and neither has to yield the name.
+    const line = await pg.db.execute(
+      sql`INSERT INTO lines (brand_id, name, slug) VALUES (${brandAId}, 'Reserva', 'reserva') RETURNING id`,
+    );
+    const lineId = (line.rows[0] as { id: string }).id;
+    await expect(
+      pg.db.execute(sql`INSERT INTO lines (brand_id, name, slug) VALUES (${brandBId}, 'Reserva', 'reserva')`),
+    ).resolves.toBeDefined();
+    await expect(
+      pg.db.execute(sql`INSERT INTO lines (brand_id, name, slug) VALUES (${brandAId}, 'Reserva', 'reserva')`),
+    ).rejects.toThrow();
+
+    // Same rule one level down, scoped to the line.
+    const blend = await pg.db.execute(
+      sql`INSERT INTO blends (line_id, name, slug) VALUES (${lineId}, 'No. 9', 'no-9') RETURNING id`,
+    );
+    const blendId = (blend.rows[0] as { id: string }).id;
+    await expect(
+      pg.db.execute(sql`INSERT INTO blends (line_id, name, slug) VALUES (${lineId}, 'No. 9', 'no-9')`),
+    ).rejects.toThrow();
+
+    // Credit is a set: one blender cannot be credited twice on one blend.
+    const blender = await pg.db.execute(
+      sql`INSERT INTO blenders (name, slug) VALUES ('Taxonomy Blender', 'taxonomy-blender') RETURNING id`,
+    );
+    const blenderId = (blender.rows[0] as { id: string }).id;
+    const credit = () =>
+      pg.db.execute(
+        sql`INSERT INTO blend_blenders (blend_id, blender_id) VALUES (${blendId}, ${blenderId})`,
+      );
+    await credit();
+    await expect(credit()).rejects.toThrow();
+  });
+
+  // Retiring a registry row must never delete a cigar — and therefore never a
+  // smoke, a purchase, or anything else hanging off the leaf. The ancestry FKs
+  // null out; the registry's own hierarchy cascades.
+  it("0026 nulls a cigar's ancestry when a registry row is deleted, never the cigar", async () => {
+    const brand = await pg.db.execute(
+      sql`INSERT INTO brands (name, slug) VALUES ('Doomed Brand', 'doomed-brand') RETURNING id`,
+    );
+    const brandId = (brand.rows[0] as { id: string }).id;
+    const line = await pg.db.execute(
+      sql`INSERT INTO lines (brand_id, name, slug) VALUES (${brandId}, 'Doomed Line', 'doomed-line') RETURNING id`,
+    );
+    const lineId = (line.rows[0] as { id: string }).id;
+    const blend = await pg.db.execute(
+      sql`INSERT INTO blends (line_id, name, slug) VALUES (${lineId}, 'Doomed Blend', 'doomed-blend') RETURNING id`,
+    );
+    const blendId = (blend.rows[0] as { id: string }).id;
+    const cigar = await pg.db.execute(sql`
+      INSERT INTO cigars (canonical_name, brand_id, line_id, blend_id)
+      VALUES ('Doomed Ancestry Subject', ${brandId}, ${lineId}, ${blendId}) RETURNING id
+    `);
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+
+    // Deleting the brand cascades through line and blend (a line cannot outlive
+    // its brand) while the cigar survives with a fully null ancestry.
+    await pg.db.execute(sql`DELETE FROM brands WHERE id = ${brandId}`);
+    const after = await pg.db.execute(
+      sql`SELECT brand_id, line_id, blend_id FROM cigars WHERE id = ${cigarId}`,
+    );
+    expect(after.rows).toHaveLength(1);
+    expect(after.rows[0]).toMatchObject({ brand_id: null, line_id: null, blend_id: null });
+
+    const orphans = await pg.db.execute(sql`
+      SELECT (SELECT count(*)::int FROM lines WHERE id = ${lineId}) AS lines,
+             (SELECT count(*)::int FROM blends WHERE id = ${blendId}) AS blends
+    `);
+    expect(orphans.rows[0]).toMatchObject({ lines: 0, blends: 0 });
+  });
+
+  // `name_source` is the switch Wave 2 flips to make canonical_name a
+  // projection. Only the two states exist, and every existing row is freeform.
+  it("0026 defaults name_source to freeform and admits no third state", async () => {
+    const row = await pg.db.execute(
+      sql`INSERT INTO cigars (canonical_name) VALUES ('Name Source Default') RETURNING name_source`,
+    );
+    expect((row.rows[0] as { name_source: string }).name_source).toBe("freeform");
+
+    await expect(
+      pg.db.execute(
+        sql`INSERT INTO cigars (canonical_name, name_source) VALUES ('Bad Source', 'derived')`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      pg.db.execute(
+        sql`INSERT INTO cigars (canonical_name, name_source) VALUES ('Composed Row', 'composed')`,
+      ),
+    ).resolves.toBeDefined();
   });
 });

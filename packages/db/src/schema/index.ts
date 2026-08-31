@@ -8,6 +8,13 @@ export * from "./session.js";
 export * from "./account.js";
 export * from "./verification.js";
 export * from "./rate-limit.js";
+// The catalog taxonomy above the leaf (ADR-012): brands → lines → blends, plus
+// blenders and the credit join. Exported before ./cigars.js, which points at them.
+export * from "./brands.js";
+export * from "./lines.js";
+export * from "./blends.js";
+export * from "./blenders.js";
+export * from "./blend-blenders.js";
 export * from "./cigars.js";
 export * from "./duplicate-dismissals.js";
 export * from "./smokes.js";
