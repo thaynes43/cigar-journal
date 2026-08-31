@@ -73,6 +73,7 @@ export {
   getScoreAggregates,
   type ScoreLevel,
   type ScoreAggregate,
+  type JournalAggregate,
   type ScorePair,
   type JournalPopulation,
 } from "./score-aggregates.js";

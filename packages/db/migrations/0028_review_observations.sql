@@ -58,16 +58,29 @@ ALTER TABLE vendors
   ADD COLUMN kind text NOT NULL DEFAULT 'vendor'
     CHECK (kind IN ('vendor', 'reviewer', 'reference'));
 
--- A non-shop source has no market and sells nothing. Stated once, here, so it
--- cannot be forgotten at an insert site — including the two that exist today
--- (the crawler CLI's `resolveVendor`, and `approved-import`, which mints every
--- row it adds with focus='CC' and would otherwise hand a reviewer a Cuban
--- market on its first sync).
+-- A non-shop source has no market and sells nothing.
 --
--- It bites at INSERT: registering halfwheel means writing
--- `purchase_linkout = false` explicitly, because the column default is true.
--- That is the intended friction — a loud failure at registration beats a silent
--- "buy at halfwheel" link, and beats a reviewer quietly seeding market evidence.
+-- WHAT THIS CHECK IS FOR, STATED HONESTLY. It is the backstop, not the guard.
+-- The two registration paths that exist today are where a reviewer is actually
+-- registered, and each now refuses the bad shape before the database is asked:
+--
+--   * the crawler CLI's `resolveVendor` seeds its row from an adapter, and the
+--     adapter type is a union discriminated on `kind` — a `reviewer` adapter
+--     that also named a `focus` does not compile. It passes `kind` through, so
+--     this constraint is now reachable from that path at all; before, no code
+--     could construct a non-vendor row and the CHECK guarded nothing.
+--   * `approved-import` reads and writes `kind = 'vendor'` rows only. The
+--     r/cubancigars wiki lists SHOPS, and its sync would otherwise flip a
+--     reviewer whose host matched a wiki entry to `approval_status='approved'`
+--     — a state this CHECK does not constrain, because it says nothing about
+--     approval. A constraint cannot be the answer to that; scoping the read is.
+--
+-- What the CHECK does own is the case neither path can see: a hand-written
+-- INSERT, a psql session, a future admin UI. It bites there — registering
+-- halfwheel means writing `purchase_linkout = false` explicitly, because the
+-- column default is true. That friction is intended: a loud failure at
+-- registration beats a silent "buy at halfwheel" link, and beats a reviewer
+-- quietly seeding market evidence.
 ALTER TABLE vendors
   ADD CONSTRAINT vendors_non_vendor_source_chk
     CHECK (kind = 'vendor' OR (focus IS NULL AND purchase_linkout = false));
@@ -99,31 +112,40 @@ CREATE TABLE review_observations (
 
   -- WHO SAID IT ------------------------------------------------------------
   -- The stable ingestion key: the crawler's ADAPTER SLUG ('halfwheel'), folded
-  -- to lowercase by the writer. Deliberately not `vendors.name` and not
-  -- `source_id`, even though both identify the same source, because this column
-  -- is half of the idempotency key and therefore has to outlive registry churn:
+  -- to lowercase by the writer. `source` and `url` are the WHOLE of the
+  -- provenance, and that is a decision, not an omission.
+  --
+  -- THERE IS NO `source_id` FK TO `vendors`. One was drafted and removed. The
+  -- slug is deliberately not `vendors.name` and not a registry id, because it is
+  -- half of the idempotency key and therefore has to outlive registry churn:
   -- renaming a registry row, or deleting and re-adding it, must not make every
   -- review it ever produced re-ingest as a new row. The slug is the key the
   -- adapter registry is already keyed by (`adapters` in @cj/crawler), so it is
-  -- the one identifier that is stable by construction.
+  -- the one identifier stable by construction. A nullable, unconstrained link
+  -- alongside it buys nothing and costs a contradiction: nothing would have tied
+  -- the FK to the slug, so a row could say `source = 'halfwheel'` and point at
+  -- the Fox Cigar registry row, and no reader could tell which half was wrong.
+  -- ADR-013 also expects agents to bring scores from sites the registry does not
+  -- carry at all, so the link is absent for those rows anyway. `source` + `url`
+  -- are what a human would use to check the claim, which is the definition of
+  -- the evidence. A CONSTRAINED link — one that must agree with `source` — can
+  -- return in slice 2 if a reviewer console needs to join on it.
   --
-  -- The length bound is not cosmetic. `review_observations_source_url_key` is a
-  -- btree, and a btree entry cannot exceed roughly 2704 bytes — an unbounded
-  -- source+url pair does not store badly, it fails the INSERT on the index.
-  -- Bounding both halves turns that into a domain validation error the caller
-  -- can act on. 2000 is the practical URL ceiling every browser and CDN already
-  -- enforces; 100 is generous for a slug.
+  -- The length bound is not cosmetic, and it is denominated in BYTES.
+  -- `review_observations_source_url_key` is a btree, and a btree entry cannot
+  -- exceed roughly 2704 BYTES — an unbounded source+url pair does not store
+  -- badly, it fails the INSERT on the index. `char_length` would not have
+  -- prevented that: a 2000-character URL of percent-decoded multibyte text is
+  -- 6000 bytes and passes a character count on its way to an opaque index error.
+  -- `octet_length` counts what the index counts, and the domain writer measures
+  -- the same way (`Buffer.byteLength`), so a caller gets a validation error it
+  -- can act on instead of a constraint violation from the storage layer. 2000 is
+  -- the practical URL ceiling every browser and CDN already enforces; 100 is
+  -- generous for a slug.
   source text NOT NULL
-    CHECK (char_length(source) > 0 AND char_length(source) <= 100),
-  -- The registry link, when the source is registered. NULLABLE and ON DELETE
-  -- SET NULL on purpose: ADR-013 expects agents to bring review scores they find
-  -- during enrichment, from sites the crawl registry does not carry, exactly as
-  -- ADR-009 opened `offers` to named ad-hoc sources. Losing the registry row
-  -- must cost the join, never the observation — the evidence is in `source` and
-  -- `url`, which are what a human would use to check the claim.
-  source_id uuid REFERENCES vendors (id) ON DELETE SET NULL,
+    CHECK (octet_length(source) > 0 AND octet_length(source) <= 100),
   url text NOT NULL
-    CHECK (char_length(url) > 0 AND char_length(url) <= 2000),
+    CHECK (octet_length(url) > 0 AND octet_length(url) <= 2000),
   -- The byline, when the source states one. Bounded because an extractor that
   -- picks up a paragraph here has a bug, and an unbounded column would store it.
   reviewer text CHECK (reviewer IS NULL OR char_length(reviewer) <= 200),
@@ -160,6 +182,12 @@ CREATE TABLE review_observations (
   reviewed_at date,
   -- The pull quote. 400 characters is one or two sentences — enough to show what
   -- the score meant, nowhere near enough to substitute for reading the review.
+  --
+  -- CHARACTERS here, deliberately, where `source` and `url` count bytes. Those
+  -- two are bounded by a btree entry's byte ceiling; this one is a licence rule
+  -- about how much of someone's writing we hold, and "how much writing" is
+  -- counted in characters — a sentence of Spanish is not two-thirds of a
+  -- sentence because its accents cost an extra byte each.
   excerpt text CHECK (excerpt IS NULL OR char_length(excerpt) <= 400),
 
   -- WHAT IT IS ABOUT -------------------------------------------------------
@@ -184,11 +212,23 @@ CREATE TABLE review_observations (
   -- predates this table), so the evidence follows the survivor and comes back on
   -- unmerge. Blend-linked rows are untouched by a cigar merge.
   -- `blend_id` is NO ACTION, matching the registry hierarchy in 0026: retiring a
-  -- blend that still carries externally-sourced evidence must be a deliberate
-  -- curation move that re-points the observations first, not a silent loss of
+  -- blend that still carries BLEND-TARGETED evidence must be a deliberate
+  -- curation move that re-points those observations first, not a silent loss of
   -- data that costs a crawl to reacquire. NO ACTION rather than RESTRICT for
   -- 0026's reason — it is checked at end of statement, so a single-statement
   -- curation move that clears both still succeeds.
+  --
+  -- IT PROTECTS THE ROWS THAT NAME THE BLEND, AND ONLY THOSE. A cigar-linked
+  -- observation on a leaf of that blend does not reference `blends` at all, so
+  -- this constraint never sees it: `cigars.blend_id` is ON DELETE SET NULL
+  -- (0026), and deleting the blend would quietly un-parent every leaf and drop
+  -- their reviews out of every roll-up above the leaf while leaving the rows
+  -- themselves intact. That state is unreachable today only because no code path
+  -- deletes a blend — there is no curation move for it, and the registry has no
+  -- retire operation — so the guard is DEFERRED, not present. When blend
+  -- deletion becomes a real move (slice 2), it needs a pre-check over the
+  -- leaves' observations of its own: the FK graph cannot express "no evidence
+  -- resolves through this blend", only "no row names it".
   cigar_id uuid REFERENCES cigars (id) ON DELETE CASCADE,
   blend_id uuid REFERENCES blends (id) ON DELETE NO ACTION,
   CONSTRAINT review_observations_target_chk
@@ -238,11 +278,16 @@ CREATE INDEX review_observations_source_idx ON review_observations (source, last
 -- 5,000 rated smokes — on the same embedded Postgres 16 the test suite runs,
 -- median of 200 calls:
 --
---   one entity, both populations   cigar 1.1ms · blend 1.2ms · line 2.1ms
---                                  brand 2.5ms · blender 4.3ms
---   fifty entities, one round trip blend 3.7ms · line 4.4ms · brand 6.0ms
---                                  blender 27.2ms
---   materialized table, best case  read 0.1ms · full refresh 10.5ms
+--   one entity, both populations   cigar 1.5ms · blend 1.6ms · line 3.0ms
+--                                  brand 3.4ms · blender 5.4ms
+--   fifty entities, one round trip blend 4.6ms · line 5.5ms · brand 7.2ms
+--                                  blender 29.2ms
+--   materialized table, best case  read 0.1ms · full refresh 14.6ms
+--
+-- (Re-measured 2026-08-31 after the one-voice-per-journal amendment. Grouping
+-- the journal population by author before averaging costs roughly half a
+-- millisecond per level — a second aggregation over a set the first one already
+-- reduced — and changes none of the conclusions below.)
 --
 -- (Run-to-run variance is roughly a tenth of each figure; the conclusions below
 -- turn on the orders of magnitude, not the digits.)
@@ -258,7 +303,7 @@ CREATE INDEX review_observations_source_idx ON review_observations (source, last
 -- observations, and a view IS that recomputation: it cannot drift, because there
 -- is nothing for it to drift from.
 --
--- The one number that is not comfortable is the fifty-blender batch at 25.9ms,
+-- The one number that is not comfortable is the fifty-blender batch at 29.2ms,
 -- and it is honest rather than pathological: with 30 blenders seeded, asking for
 -- fifty asks for ALL of them, which is a full aggregation of the whole corpus by
 -- definition. Revisit materialization at a hundred times this volume, or when a
@@ -285,8 +330,11 @@ CREATE INDEX review_observations_source_idx ON review_observations (source, last
 -- consistent on the write paths, and where they ever disagree the structural
 -- parent is the one curation set deliberately.
 --
--- `catalog_status = 'active'` is the only filter, and it is applied HERE so both
--- populations inherit it identically. An excluded row is non-cigar pollution or
+-- `catalog_status = 'active'` is the only filter, and it is DEFINED here so both
+-- populations inherit it identically — every branch of every scope view either
+-- joins this view or probes it with an EXISTS (the blend-linked branch of
+-- `review_observation_scope`, which reaches no leaf and would otherwise miss it
+-- entirely). One definition, no branch exempt. An excluded row is non-cigar pollution or
 -- an entry a curator hid; a merged row is a tombstone whose smokes and offers
 -- already moved to the survivor. Either contributing would double-count the
 -- survivor or let hidden junk score a blend. The consequence is deliberate and
@@ -333,6 +381,22 @@ WHERE c.catalog_status = 'active';
 -- doing its work — an observation whose cigar is excluded or merged has no
 -- active ancestry and drops out, which is the same answer the LEFT-JOIN form
 -- reached by producing a row of all-NULL levels that no aggregate could match.
+--
+-- THE BLEND BRANCH CARRIES THE SAME FILTER, AS AN EXISTS. It has to be added
+-- explicitly, because that branch never touches `cigar_ancestry` — it walks
+-- `blends → lines` directly, so `catalog_status` has no way to reach it. Without
+-- the probe the claim above (that applying the filter in one place makes both
+-- populations inherit it identically) is false at exactly the blend level: a
+-- blend whose every leaf has been merged into another blend, or excluded as
+-- pollution, keeps reporting its critic score while its journal score — which
+-- resolves through `cigar_ancestry` on both branches — has already gone to null.
+-- The pair rendered side by side would then be counts over different
+-- populations, which is the one thing the shared ancestry definition exists to
+-- prevent. So an emptied blend stops reporting on both sides, together.
+--
+-- A SEMI-JOIN, NOT A JOIN TO THE LEAVES: the observation is about the blend, and
+-- fanning it out over N active leaves would multiply one reviewer's verdict into
+-- N rows and inflate every count above it.
 CREATE VIEW review_observation_scope AS
 SELECT
   ro.id AS observation_id,
@@ -353,12 +417,21 @@ SELECT
   ln.brand_id
 FROM review_observations ro
 JOIN blends bl ON bl.id = ro.blend_id
-JOIN lines ln ON ln.id = bl.line_id;
+JOIN lines ln ON ln.id = bl.line_id
+WHERE EXISTS (SELECT 1 FROM cigar_ancestry ca WHERE ca.blend_id = ro.blend_id);
 
 -- Every rated smoke, resolved to the same levels. The unrated ones are excluded
--- here rather than in each aggregate query, so a journal count is always a count
--- of ratings and never of smokes — a blend with forty logged smokes and two
--- ratings has a sample count of two, and says so.
+-- here rather than in each aggregate query, so nothing downstream has to
+-- remember to: a blend with forty logged smokes and two ratings has two rows
+-- here, not forty.
+--
+-- ONE ROW PER RATING, NOT PER VOICE. `user_id` rides along because the domain
+-- read collapses each author's ratings to that author's mean before the level
+-- averages anything (ADR-013 §3 as amended 2026-08-31: one voice per journal, so
+-- a prolific logger counts once). That grouping cannot happen here, because the
+-- level it groups at is the caller's question — the same rows are one voice per
+-- blend and a different one voice per brand. The view supplies the population;
+-- `score-aggregates.ts` decides what a voice is.
 --
 -- `visibility` RIDES ALONG BECAUSE THE JOURNAL POPULATION IS A PRIVACY QUESTION,
 -- and it is one the Rotten Tomatoes analogy hides. An audience score is built

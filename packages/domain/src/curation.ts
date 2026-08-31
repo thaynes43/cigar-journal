@@ -2774,6 +2774,28 @@ function summarizeAudit(action: string, before: Record<string, unknown>, after: 
     }
     case "cigar.split_leaf":
       return `${fmtValue(before.canonicalName)} → ${fmtValue(after.canonicalName)}`;
+    // External review scores (ADR-013, migration 0028). `recordReviewObservation`
+    // writes these itself — it has no caller that would — so without a case here
+    // every review an enrichment agent brought back would render as a blank row
+    // in the run it was brought back by, which is the same defect the taxonomy
+    // actions had above.
+    case "review.record":
+      return `${fmtValue(after.source)} · ${fmtValue(after.nativeScore)} (${fmtValue(after.nativeScale)}) → ${fmtValue(after.normalizedScore)}`;
+    // What the source CHANGED — the whole reason an amendment is a separate
+    // action. Field by field, and only the fields that moved: a reviewer who
+    // swapped the pull quote under an unchanged score should read as exactly
+    // that. `before` and `after` carry the same key set, which is what makes the
+    // comparison total rather than a guess about which half is authoritative.
+    case "review.amend": {
+      const moved = ["normalizedScore", "nativeScore", "nativeScale", "reviewedAt", "excerpt", "reviewer"]
+        .filter((k) => fmtValue(before[k]) !== fmtValue(after[k]))
+        .map((k) => `${k}: ${fmtValue(before[k])} → ${fmtValue(after[k])}`);
+      // Only the target moved (a re-point), or the writer amended nothing it
+      // records — say so rather than rendering an empty line.
+      return moved.length > 0
+        ? `${fmtValue(after.source)} · ${moved.join("; ")}`
+        : `${fmtValue(after.source)} · re-pointed`;
+    }
     default:
       return null;
   }
@@ -2876,6 +2898,12 @@ export async function agentRunRows(
         -- target lives in after. Without this branch a bulk press (#154) renders as
         -- N identically-titled rows and the run review is unreadable.
         WHEN a.action = 'cigar.enrichment_request'
+          THEN nullif(a.after->>'cigarId', '')
+        -- A review ingest has no before-image on the cigar either, and its target
+        -- is the leaf the reviewer named. Null for a BLEND-linked observation:
+        -- that row is about the blend, and naming one of its vitolas here would
+        -- invent the specificity ADR-013 §1 exists to refuse.
+        WHEN a.action IN ('review.record', 'review.amend')
           THEN nullif(a.after->>'cigarId', '')
       END
     )::uuid

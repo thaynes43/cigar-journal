@@ -31,6 +31,7 @@ export const smallBatchCigar: ExclusionVendorAdapter = {
   name: "Small Batch Cigar",
   url: "https://www.smallbatchcigar.com",
   sitemapUrl: "https://www.smallbatchcigar.com/sitemap.xml",
+  kind: "vendor",
   focus: "NC",
   crawlEnabled: false,
   approvalStatus: "owner-added",

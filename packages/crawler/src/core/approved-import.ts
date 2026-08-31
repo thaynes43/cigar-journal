@@ -108,8 +108,21 @@ export interface ApprovalDiff {
 //   revoke  — a currently-'approved' CC/both row absent from the wiki →
 //             'unapproved' (dropped from the list). NC/owner-added rows are never
 //             touched — only previously wiki-approved Cuban vendors can be revoked.
+//
+// SCOPED TO `kind = 'vendor'` (ADR-013 §4, migration 0028). The r/cubancigars
+// wiki is a list of SHOPS, so the only rows it can have an opinion about are
+// shops. Without the filter a reviewer or reference row whose host or name
+// happened to match a wiki entry would be flipped to an approved Cuban vendor —
+// and nothing would catch it, because `vendors_non_vendor_source_chk` constrains
+// `focus` and `purchase_linkout`, not `approval_status`. The row would keep
+// `kind = 'reviewer'` and start reading as a store the owner may buy from.
+//
+// The cost is a hypothetical duplicate: a wiki store sharing a host with a
+// registered reviewer is now an `add` rather than an `approve`. That is the
+// right way round — a second row is visible and mergeable, a silently
+// re-labelled reviewer is neither.
 export async function diffApproved(db: Database, stores: ParsedStore[]): Promise<ApprovalDiff> {
-  const rows = await db.select().from(vendors);
+  const rows = await db.select().from(vendors).where(eq(vendors.kind, "vendor"));
   const byHost = new Map<string, VendorRow>();
   const byName = new Map<string, VendorRow>();
   for (const row of rows) {
@@ -188,6 +201,10 @@ export async function applyApproved(
           .values({
             name: change.store,
             url: change.url,
+            // The wiki lists shops; `diffApproved` reads only shops. Stated
+            // rather than left to the column default so the row this path mints
+            // says what it is (ADR-013 §4).
+            kind: "vendor",
             focus: "CC",
             crawlEnabled: false,
             displayEnabled: false,

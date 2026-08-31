@@ -27,6 +27,7 @@ export const cubanLous: PrefixVendorAdapter = {
   name: "Cuban Lou's",
   url: "https://www.cubanlous.com",
   sitemapUrl: "https://www.cubanlous.com/product-sitemap.xml",  // live-probed: Yoast product-only child (985 locs)
+  kind: "vendor",
   // NOT 'CC', despite the name. Measured against the live catalogue 2026-08-31:
   // of the 57 untyped cigars this shop is the sole stockist of, the clear
   // majority are not Cuban — Perdomo, Gurkha, CAO, Rocky Patel, Quorum, Bahia,

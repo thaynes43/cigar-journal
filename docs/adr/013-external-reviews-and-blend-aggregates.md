@@ -42,6 +42,11 @@ aggregating the underlying observations — no averages of averages. Roll-ups
 render only with their sample counts; a blend with two data points looks like
 what it is.
 
+Amended 2026-08-31 (owner ruling): the journal population aggregates one voice
+per journal — each user's ratings of the target average first, and the sample
+count is journals, not smokes. A prolific logger counts once; every individual
+smoke review remains fully visible on its own surfaces.
+
 **4. Sources get a kind.** The crawl registry distinguishes `vendor`
 (listings + offers), `reviewer` (review observations — halfwheel first), and
 `reference` (specs and imagery — Habanos S.A. materials, Wikidata). Reviewer

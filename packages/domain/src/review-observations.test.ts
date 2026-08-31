@@ -45,7 +45,7 @@ describe("review observations", () => {
 
   async function loadRow(observationId: string) {
     const rows = await h.deps.db.execute(sql`
-      SELECT source, source_id, url, reviewer, native_scale, native_score, normalized_score,
+      SELECT source, url, reviewer, native_scale, native_score, normalized_score,
              reviewed_at::text AS reviewed_at, excerpt, cigar_id, blend_id, raw,
              last_seen_at, created_at, updated_at
       FROM review_observations WHERE id = ${observationId}
@@ -147,26 +147,34 @@ describe("review observations", () => {
     expect(row.cigar_id).toBeNull();
   });
 
-  it("records the registry link when the source is registered", async () => {
+  // The provenance is `source` + `url` and nothing else — there is no FK to
+  // `vendors` on this table (ruling, verify round 2). Registering the reviewer in
+  // the crawl registry is a separate fact about crawling it, and it neither adds
+  // to nor is required by an observation: the same slug ingests identically
+  // whether or not a registry row exists, which is what lets an enrichment agent
+  // bring a score from a site the registry has never heard of.
+  it("carries its provenance in source and url, independent of the crawl registry", async () => {
     // A reviewer registers with no market focus and as no purchase destination —
     // the migration's CHECK forbids anything else.
-    const vendorRows = await h.deps.db
+    await h.deps.db
       .insert(vendors)
-      .values({ name: `Halfwheel ${tag}`, kind: "reviewer", focus: null, purchaseLinkout: false })
-      .returning({ id: vendors.id });
-    const sourceId = vendorRows[0]!.id;
+      .values({ name: `Halfwheel ${tag}`, kind: "reviewer", focus: null, purchaseLinkout: false });
     const cigarId = await h.seedCigar({ canonicalName: `Registered ${tag}`, type: "NC" });
 
     const result = await recordReviewObservation(h.deps.db, {
       source: `halfwheel-registered-${tag}`,
-      sourceId,
       url: "https://halfwheel.example/review/registered",
       nativeScale: "0-100",
       nativeScore: 88,
       cigarId,
       seenAt: new Date("2026-08-31T09:00:00.000Z"),
     });
-    expect((await loadRow(result.observationId)).source_id).toBe(sourceId);
+    const row = await loadRow(result.observationId);
+    expect(row.source).toBe(`halfwheel-registered-${tag}`);
+    expect(row.url).toBe("https://halfwheel.example/review/registered");
+    // The column a reader would join on does not exist, so nothing can disagree
+    // with `source` about who said this.
+    expect(row).not.toHaveProperty("source_id");
   });
 
   describe("idempotency on (source, url)", () => {
@@ -224,11 +232,15 @@ describe("review observations", () => {
       const first = await recordReviewObservation(h.deps.db, {
         ...base,
         nativeScore: 88,
+        reviewedAt: "2026-03-14",
+        excerpt: "Promising, if uneven.",
         seenAt: new Date("2026-08-31T09:00:00.000Z"),
       });
       const second = await recordReviewObservation(h.deps.db, {
         ...base,
         nativeScore: 92,
+        reviewedAt: "2026-04-02",
+        excerpt: "Revisited: it settled down.",
         seenAt: new Date("2026-09-05T09:00:00.000Z"),
       });
 
@@ -253,8 +265,22 @@ describe("review observations", () => {
 
       const amend = await auditRows("review.amend", `amend-${tag}`);
       expect(amend).toHaveLength(1);
-      expect((amend[0]!.before as Record<string, unknown>).normalizedScore).toBe(88);
-      expect((amend[0]!.after as Record<string, unknown>).normalizedScore).toBe(92);
+      const amendBefore = amend[0]!.before as Record<string, unknown>;
+      const amendAfter = amend[0]!.after as Record<string, unknown>;
+      expect(amendBefore.normalizedScore).toBe(88);
+      expect(amendAfter.normalizedScore).toBe(92);
+
+      // THE TWO HALVES CARRY THE SAME FIELDS. `after` used to omit the excerpt
+      // and the publication date that `before` recorded, so the console could
+      // show that a pull quote had changed but never to what — which is most of
+      // the reason to distinguish an amendment from a record at all.
+      expect(amendBefore.reviewedAt).toBe("2026-03-14");
+      expect(amendAfter.reviewedAt).toBe("2026-04-02");
+      expect(amendBefore.excerpt).toBe("Promising, if uneven.");
+      expect(amendAfter.excerpt).toBe("Revisited: it settled down.");
+      expect(Object.keys(amendAfter).sort()).toEqual(
+        expect.arrayContaining(Object.keys(amendBefore).sort()),
+      );
     });
 
     it("keys on the source too — the same url under two sources is two observations", async () => {
@@ -297,10 +323,109 @@ describe("review observations", () => {
       expect(second.observationId).toBe(first.observationId);
       expect(second.inserted).toBe(false);
     });
+
+    // THE REGRESSION THE CANONICAL DATE FORM EXISTS FOR. `reviewed_at` is a
+    // `date`, so whatever an adapter sends is narrowed by the `::date` cast on
+    // the way in and comes back as a bare day. If the writer accepted a wider
+    // form, the value it compares against on the NEXT crawl would never equal
+    // the value it stored — every nightly re-crawl would "amend" the row, write
+    // an audit row, and move `updated_at`, which is precisely the distinction
+    // between liveness and change this table is shaped around. Refusing anything
+    // but the stored form makes the round trip exact.
+    it("a re-crawl of a dated review still finds nothing changed", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Dated ${tag}`, type: "NC" });
+      const input = {
+        source: `dated-${tag}`,
+        url: "https://dated.example/review/one",
+        nativeScale: "0-100",
+        nativeScore: 90,
+        reviewedAt: "2026-03-14",
+        excerpt: "Cedar and cream.",
+        cigarId,
+        seenAt: new Date("2026-08-31T09:00:00.000Z"),
+      } as const;
+
+      const first = await recordReviewObservation(h.deps.db, input);
+      expect(first.changed).toBe(true);
+
+      const second = await recordReviewObservation(h.deps.db, {
+        ...input,
+        seenAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+      expect(second.observationId).toBe(first.observationId);
+      expect(second.changed).toBe(false);
+
+      const row = await loadRow(first.observationId);
+      expect(row.reviewed_at).toBe("2026-03-14");
+      // Untouched: a night of no news does not edit the row or audit it.
+      expect(new Date(row.updated_at as string).toISOString()).toBe("2026-08-31T09:00:00.000Z");
+      expect(await auditRows("review.amend", `dated-${tag}`)).toHaveLength(0);
+    });
   });
 
   describe("refusals", () => {
     const seenAt = new Date("2026-08-31T09:00:00.000Z");
+
+    // Everything but the stored form is refused, including forms `Date.parse`
+    // would have accepted. A timestamp is silently narrowed by the column; a
+    // locale date is parsed under a timezone nobody stated, so the stored day can
+    // be the day before the one printed on the page. Both are the extractor
+    // saying something it did not read.
+    it.each([
+      ["a full timestamp", "2026-03-14T12:00:00.000Z"],
+      ["a locale date", "03/14/2026"],
+      ["a month precision", "2026-03"],
+      ["a padded-out year", "26-03-14"],
+      ["a calendar date that does not exist", "2026-02-31"],
+      ["prose", "March 14, 2026"],
+    ])("refuses %s as a publication date", async (_label, reviewedAt) => {
+      const cigarId = await h.seedCigar({
+        canonicalName: `Dateform ${reviewedAt} ${tag}`,
+        type: "NC",
+      });
+      await expect(
+        recordReviewObservation(h.deps.db, {
+          source: `dateform-${tag}`,
+          url: `https://dateform.example/review/${encodeURIComponent(reviewedAt)}`,
+          nativeScale: "0-100",
+          nativeScore: 90,
+          reviewedAt,
+          cigarId,
+          seenAt,
+        }),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    // The bound on `url` is denominated in BYTES, because what it protects is a
+    // btree entry and a btree entry's ceiling is bytes. A character count would
+    // pass this URL — 1999 characters — straight through to an opaque index
+    // error, since each `é` costs two bytes.
+    it("measures the url bound in bytes, not characters", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Multibyte ${tag}`, type: "NC" });
+      const base = {
+        source: `bytes-${tag}`,
+        nativeScale: "0-100",
+        nativeScore: 90,
+        cigarId,
+        seenAt,
+      } as const;
+
+      const prefix = "https://bytes.example/";
+      // 2000 CHARACTERS — on the bound by a character count — and 2001 bytes.
+      const overByOne = `${prefix}é${"a".repeat(2000 - prefix.length - 1)}`;
+      expect(overByOne).toHaveLength(2000);
+      expect(Buffer.byteLength(overByOne, "utf8")).toBe(2001);
+      await expect(
+        recordReviewObservation(h.deps.db, { ...base, url: overByOne }),
+      ).rejects.toThrow(ValidationError);
+
+      // Exactly on the bound, multibyte included, is accepted and stored whole —
+      // the bound is inclusive and the writer does not trim.
+      const exact = `${prefix}é${"a".repeat(2000 - prefix.length - 2)}`;
+      expect(Buffer.byteLength(exact, "utf8")).toBe(2000);
+      const ok = await recordReviewObservation(h.deps.db, { ...base, url: exact });
+      expect((await loadRow(ok.observationId)).url).toBe(exact);
+    });
 
     it("requires exactly one target — never zero, never both", async () => {
       const cigarId = await h.seedCigar({ canonicalName: `Targeted ${tag}`, type: "NC" });

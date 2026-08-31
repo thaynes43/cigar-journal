@@ -843,6 +843,46 @@ describe("migrations", () => {
     await expect(add("https://reviews.example/native-empty", "", null)).rejects.toThrow();
   });
 
+  // The bounds on `source` and `url` are denominated in BYTES, because what they
+  // protect is a btree entry behind `review_observations_source_url_key` and a
+  // btree entry's ~2704-byte ceiling is counted in bytes. `char_length` would let
+  // a 2000-CHARACTER multibyte URL through to an opaque index failure at INSERT,
+  // which is a storage-layer error where a validation error belongs.
+  it("0028 bounds source and url in bytes, not characters", async () => {
+    const cigar = await pg.db.execute(
+      sql`INSERT INTO cigars (canonical_name) VALUES ('Review Bytes Subject') RETURNING id`,
+    );
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+    const add = (source: string, url: string) =>
+      pg.db.execute(sql`
+        INSERT INTO review_observations
+          (source, url, native_scale, native_score, normalized_score, cigar_id)
+        VALUES (${source}, ${url}, '0-100', '90', 90, ${cigarId})
+      `);
+
+    const prefix = "https://bytes.example/";
+    // 2000 characters and 2001 bytes: on the bound by a character count, over it
+    // by the count that matters.
+    const overByOne = `${prefix}é${"a".repeat(2000 - prefix.length - 1)}`;
+    expect(overByOne).toHaveLength(2000);
+    expect(Buffer.byteLength(overByOne, "utf8")).toBe(2001);
+    await expect(add("halfwheel", overByOne)).rejects.toThrow();
+
+    // Exactly 2000 bytes, multibyte included, is accepted — the bound is
+    // inclusive and counts what the index counts.
+    const exact = `${prefix}é${"a".repeat(2000 - prefix.length - 2)}`;
+    expect(Buffer.byteLength(exact, "utf8")).toBe(2000);
+    await expect(add("halfwheel", exact)).resolves.toBeDefined();
+
+    // The same rule on the slug half of the key: 100 bytes, not 100 characters.
+    const overSource = `${"é".repeat(50)}x`;
+    expect(Buffer.byteLength(overSource, "utf8")).toBe(101);
+    await expect(add(overSource, "https://bytes.example/source-over")).rejects.toThrow();
+    await expect(
+      add("é".repeat(50), "https://bytes.example/source-exact"),
+    ).resolves.toBeDefined();
+  });
+
   // The two delete rules differ, and the asymmetry is the point. `cigar_id`
   // CASCADEs, matching every other cigar-linked observation table — cigars are
   // never hard-deleted (0013 tombstones), so it is a guarantee that never fires.
@@ -1035,6 +1075,67 @@ describe("migrations", () => {
       line_id: lineId,
       brand_id: brandId,
     });
+  });
+
+  // POPULATION PARITY AT THE BLEND. `catalog_status` is applied once, in
+  // `cigar_ancestry`, so that both populations inherit it identically — but the
+  // blend-linked branch of `review_observation_scope` walks `blends → lines` and
+  // never reaches a leaf, so it inherits nothing unless it asks. Without the
+  // EXISTS probe a blend whose every leaf has been merged away keeps publishing
+  // its critic score while its journal score has already gone silent, and the two
+  // numbers rendered side by side are counts over different populations — the one
+  // thing a shared ancestry definition exists to prevent.
+  it("0028's review_observation_scope drops a blend whose leaves are all merged away", async () => {
+    const chain = await pg.db.execute(sql`
+      WITH b AS (
+        INSERT INTO brands (name, slug) VALUES ('RO Empty Brand', 'ro-empty-brand') RETURNING id
+      ), l AS (
+        INSERT INTO lines (brand_id, name, slug)
+        SELECT id, 'RO Empty Line', 'ro-empty-line' FROM b RETURNING id
+      ), bl AS (
+        INSERT INTO blends (line_id, name, slug)
+        SELECT id, 'RO Empty Blend', 'ro-empty-blend' FROM l RETURNING id
+      )
+      SELECT bl.id AS blend_id FROM b, l, bl
+    `);
+    const blendId = (chain.rows[0] as { blend_id: string }).blend_id;
+    const cigar = await pg.db.execute(sql`
+      INSERT INTO cigars (canonical_name, blend_id)
+      VALUES ('Review Empty Subject', ${blendId}) RETURNING id
+    `);
+    const cigarId = (cigar.rows[0] as { id: string }).id;
+    await pg.db.execute(sql`
+      INSERT INTO review_observations
+        (source, url, native_scale, native_score, normalized_score, blend_id)
+      VALUES ('halfwheel', 'https://reviews.example/scope-empty', '0-100', '93', 93, ${blendId})
+    `);
+
+    const inScope = async () =>
+      (
+        (
+          await pg.db.execute(
+            sql`SELECT count(*)::int AS n FROM review_observation_scope WHERE blend_id = ${blendId}`,
+          )
+        ).rows[0] as { n: number }
+      ).n;
+
+    // While the blend has an active leaf, the blend-linked review reports.
+    expect(await inScope()).toBe(1);
+
+    // The leaf is merged into a survivor elsewhere — a tombstone, whose smokes
+    // and offers have already moved. The blend is now empty of anything the
+    // catalogue recognizes.
+    await pg.db.execute(
+      sql`UPDATE cigars SET catalog_status = 'merged' WHERE id = ${cigarId}`,
+    );
+    expect(await inScope()).toBe(0);
+
+    // Restoring the leaf restores the reporting: the probe is about the blend's
+    // live population, not about the observation, which was never touched.
+    await pg.db.execute(
+      sql`UPDATE cigars SET catalog_status = 'active' WHERE id = ${cigarId}`,
+    );
+    expect(await inScope()).toBe(1);
   });
 
   // The unrated smokes are excluded in the view rather than in each aggregate

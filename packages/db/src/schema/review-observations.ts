@@ -12,7 +12,6 @@ import {
 } from "drizzle-orm/pg-core";
 import { cigars } from "./cigars.js";
 import { blends } from "./blends.js";
-import { vendors } from "./vendors.js";
 
 // One external review's score (ADR-013 §2, migration 0028) — the ADR-009
 // price-observation pattern applied to reviews, with one difference in shape:
@@ -35,11 +34,11 @@ export const reviewObservations = pgTable(
     // The stable ingestion key — the crawler's adapter slug, lowercased. Half of
     // the idempotency key, so it deliberately outlives registry churn: a renamed
     // or re-added `vendors` row must not make every review re-ingest as new.
+    //
+    // There is no FK to `vendors` beside it, by ruling: `source` + `url` are the
+    // evidence, and an unconstrained link that can disagree with `source` is
+    // worse than none. A constrained one can return in slice 2 (see 0028).
     source: text("source").notNull(),
-    // The registry link when the source is registered. Nullable because ADR-013
-    // expects agents to bring scores from sites the registry does not carry, the
-    // way ADR-009 opened `offers` to named ad-hoc sources.
-    sourceId: uuid("source_id").references(() => vendors.id, { onDelete: "set null" }),
     url: text("url").notNull(),
     reviewer: text("reviewer"),
     // The native scale and the score as the source wrote it, kept beside the

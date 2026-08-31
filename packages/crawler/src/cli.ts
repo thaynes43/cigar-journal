@@ -174,7 +174,14 @@ async function resolveVendor(db: Database, adapter: VendorAdapter): Promise<stri
     .values({
       name: adapter.name,
       url: adapter.url,
-      focus: adapter.focus,
+      // The ADR-013 source kind, carried through rather than defaulted, so the
+      // seed path can register a reviewer or a reference source at all — and so
+      // `vendors_non_vendor_source_chk` is a constraint some code can actually
+      // reach. The adapter type refuses the bad combination first (a non-vendor
+      // kind cannot name a `focus`); this is the database's backstop for it.
+      kind: adapter.kind,
+      // Undefined on a non-vendor adapter, where the CHECK requires NULL.
+      focus: adapter.focus ?? null,
       crawlEnabled: adapter.crawlEnabled,
       displayEnabled: adapter.displayEnabled,
       approvalStatus: adapter.approvalStatus,

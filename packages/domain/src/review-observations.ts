@@ -34,19 +34,38 @@ import { normalizeReviewScore, nativeScoreText } from "./review-scores.js";
 // meant, nowhere near enough to substitute for reading the review.
 export const REVIEW_EXCERPT_MAX = 400;
 
-const SOURCE_MAX = 100;
-const URL_MAX = 2000;
+// `source` and `url` are bounded in BYTES, not characters, because their bound
+// exists to keep an oversized value from failing on the btree behind
+// `review_observations_source_url_key` — and a btree entry's ~2704-byte ceiling
+// is counted in bytes. A 2000-character URL of percent-decoded CJK is 6000 bytes
+// and would pass a `length` check on its way to an opaque index error. Measured
+// with `Buffer.byteLength` here and `octet_length` in the CHECK, so the two
+// agree on what they are counting.
+const SOURCE_MAX_BYTES = 100;
+const URL_MAX_BYTES = 2000;
 const REVIEWER_MAX = 200;
+
+// Publication date, day precision, in exactly the form the column stores.
+// See `validate` for why nothing else is accepted.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+// The shape AND the calendar. `Date.parse` is not a calendar check: `2026-02-31`
+// is a conforming date-time string, so the spec's MakeDay rolls it forward and
+// it parses cleanly as March 3rd. Postgres would then reject the same value at
+// the column, turning an extractor bug into a storage-layer error instead of a
+// field error the caller can act on. Round-tripping the parsed instant back to
+// its digits is what makes the check total.
+function isCalendarDate(value: string): boolean {
+  if (!ISO_DATE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 
 export interface ReviewObservationInput {
   // The stable ingestion key — the crawler's adapter slug ("halfwheel"). Folded
   // to lowercase here, because it is half of the idempotency key and a source
   // that re-ingested everything over a capitalization change would not be one.
   source: string;
-  // The registry link, when the source is registered. Null for a score an agent
-  // brought from a site the crawl registry does not carry — the same allowance
-  // ADR-009 makes for named ad-hoc price sources.
-  sourceId?: string | null;
   // The review's canonical URL. NORMALIZING IT IS THE ADAPTER'S JOB: only the
   // adapter knows whether a query string on that site is a tracking parameter or
   // part of the address, and guessing here would either merge two reviews or
@@ -118,15 +137,15 @@ function validate(input: ReviewObservationInput, errors: FieldError[]): void {
   const source = trimmed(input.source);
   if (source == null) {
     errors.push({ path: "source", message: "Required." });
-  } else if (source.length > SOURCE_MAX) {
-    errors.push({ path: "source", message: `Must be at most ${SOURCE_MAX} characters.` });
+  } else if (Buffer.byteLength(source, "utf8") > SOURCE_MAX_BYTES) {
+    errors.push({ path: "source", message: `Must be at most ${SOURCE_MAX_BYTES} bytes.` });
   }
 
   const url = trimmed(input.url);
   if (url == null) {
     errors.push({ path: "url", message: "Required." });
-  } else if (url.length > URL_MAX) {
-    errors.push({ path: "url", message: `Must be at most ${URL_MAX} characters.` });
+  } else if (Buffer.byteLength(url, "utf8") > URL_MAX_BYTES) {
+    errors.push({ path: "url", message: `Must be at most ${URL_MAX_BYTES} bytes.` });
   }
 
   const reviewer = trimmed(input.reviewer);
@@ -154,8 +173,25 @@ function validate(input: ReviewObservationInput, errors: FieldError[]): void {
     });
   }
 
-  if (input.reviewedAt != null && Number.isNaN(Date.parse(input.reviewedAt))) {
-    errors.push({ path: "reviewedAt", message: "Must be an ISO-8601 date (YYYY-MM-DD)." });
+  // ONE CANONICAL FORM, REFUSED OTHERWISE — the same refuse-don't-guess posture
+  // the excerpt bound and the scale table take, and for a sharper reason than
+  // tidiness. `reviewed_at` is `date`, so anything wider is silently narrowed by
+  // the `::date` cast on the way in: a full timestamp is accepted, stored as its
+  // day, and then compared on the NEXT crawl against the day Postgres handed
+  // back — which never equals what the adapter sent. The row is "amended" every
+  // night thereafter, writing an audit row each time and making `updated_at`
+  // useless as the answer to "when did this score last move". A locale form
+  // (`03/14/2026`) is worse: `Date.parse` accepts it under a timezone nobody
+  // stated, so the stored day can be the day before the one printed on the page.
+  //
+  // `isCalendarDate` fixes the shape and the calendar together, so the value
+  // that reaches the column is always the value that comes back out of it.
+  const reviewedAt = trimmed(input.reviewedAt);
+  if (reviewedAt != null && !isCalendarDate(reviewedAt)) {
+    errors.push({
+      path: "reviewedAt",
+      message: "Must be a calendar date in YYYY-MM-DD form.",
+    });
   }
 }
 
@@ -165,7 +201,6 @@ function validate(input: ReviewObservationInput, errors: FieldError[]): void {
 // page detail, and a changed payload behind an unchanged score is not news).
 interface PriorRow {
   id: string;
-  source_id: string | null;
   reviewer: string | null;
   native_scale: string;
   native_score: string;
@@ -217,11 +252,10 @@ export async function recordReviewObservation(
   const reviewedAt = trimmed(input.reviewedAt);
   const cigarId = trimmed(input.cigarId);
   const blendId = trimmed(input.blendId);
-  const sourceId = trimmed(input.sourceId);
   const raw = input.raw == null ? null : JSON.stringify(input.raw);
 
   const prior = await db.execute(sql`
-    SELECT id, source_id, reviewer, native_scale, native_score, normalized_score,
+    SELECT id, reviewer, native_scale, native_score, normalized_score,
            reviewed_at::text AS reviewed_at, excerpt, cigar_id, blend_id
     FROM review_observations
     WHERE source = ${source} AND url = ${url}
@@ -236,7 +270,6 @@ export async function recordReviewObservation(
   if (
     existing &&
     !contentDiffers(existing, {
-      sourceId,
       reviewer,
       nativeScale,
       nativeScore,
@@ -260,14 +293,13 @@ export async function recordReviewObservation(
   // claims happened.
   const written = await db.execute(sql`
     INSERT INTO review_observations
-      (source, source_id, url, reviewer, native_scale, native_score, normalized_score,
+      (source, url, reviewer, native_scale, native_score, normalized_score,
        reviewed_at, excerpt, cigar_id, blend_id, raw, last_seen_at, created_at, updated_at)
     VALUES
-      (${source}, ${sourceId}, ${url}, ${reviewer}, ${nativeScale}, ${nativeScore},
+      (${source}, ${url}, ${reviewer}, ${nativeScale}, ${nativeScore},
        ${normalizedScore}, ${reviewedAt}::date, ${excerpt}, ${cigarId}, ${blendId},
        ${raw}::jsonb, ${input.seenAt}, ${input.seenAt}, ${input.seenAt})
     ON CONFLICT (source, url) DO UPDATE SET
-      source_id        = EXCLUDED.source_id,
       reviewer         = EXCLUDED.reviewer,
       native_scale     = EXCLUDED.native_scale,
       native_score     = EXCLUDED.native_score,
@@ -283,6 +315,19 @@ export async function recordReviewObservation(
   `);
   const row = (written.rows as unknown as { id: string; inserted: boolean }[])[0]!;
 
+  // AN AMENDMENT IS A ROW WE CAN DESCRIBE THE BEFORE OF. `row.inserted` and
+  // `existing` normally agree; they come apart in exactly one case, and it is
+  // the case that decides what the audit claims happened. Under a concurrent
+  // first ingest of the same URL, the SELECT above sees nothing and the INSERT
+  // then loses the ON CONFLICT race, so `inserted` is false while `existing` is
+  // null. Trusting `inserted` alone writes `review.amend` with `before: null` —
+  // an amendment to nothing, in the one surface an operator reads to find out
+  // what a source changed. Postgres cannot hand back the row the other
+  // transaction wrote (RETURNING sees the post-update row, and the pre-read is
+  // on this transaction's snapshot), so the honest record is the weaker claim:
+  // this ingest recorded a score, and the writer that raced us recorded its own.
+  const amended = !row.inserted && existing != null;
+
   // Audited HERE, not in a caller, and that is a deliberate departure from
   // `recordPriceObservation` — which writes no audit row because both of its
   // callers already write their own, differently. This writer has no such
@@ -292,9 +337,14 @@ export async function recordReviewObservation(
   await db.insert(auditLog).values({
     userId: attribution.principal?.userId ?? null,
     ...auditActor(attribution.principal, attribution.actor),
-    action: row.inserted ? "review.record" : "review.amend",
+    action: amended ? "review.amend" : "review.record",
     smokeId: null,
     before: existing ? priorSnapshot(existing) : null,
+    // The SAME field set as `priorSnapshot`, so an amendment's two halves can be
+    // diffed key by key. They were asymmetric until the excerpt and the date were
+    // added here: `before` carried both, `after` carried neither, so the console
+    // could show that a pull quote or a publication date had changed but never to
+    // what — which is most of the reason to record an amendment at all.
     after: {
       observationId: row.id,
       source,
@@ -303,6 +353,8 @@ export async function recordReviewObservation(
       nativeScale,
       nativeScore,
       normalizedScore,
+      reviewedAt,
+      excerpt,
       cigarId,
       blendId,
     },
@@ -314,7 +366,6 @@ export async function recordReviewObservation(
 }
 
 interface ObservationContent {
-  sourceId: string | null;
   reviewer: string | null;
   nativeScale: string;
   nativeScore: string;
@@ -330,7 +381,6 @@ interface ObservationContent {
 // `sameNumber`. Everything else is text and compares directly.
 function contentDiffers(prior: PriorRow, next: ObservationContent): boolean {
   return (
-    prior.source_id !== next.sourceId ||
     prior.reviewer !== next.reviewer ||
     prior.native_scale !== next.nativeScale ||
     prior.native_score !== next.nativeScore ||

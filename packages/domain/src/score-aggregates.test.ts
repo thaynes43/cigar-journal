@@ -181,10 +181,12 @@ describe("score aggregates", () => {
       // 90 + 80 (through C1) + 100 (stated on the blend itself) = 270 / 3 = 90.
       const pair = await getScoreAggregate(h.deps.db, "blend", ids.bl1);
       expect(pair.critic).toEqual({ score: 90, count: 3 });
-      // 70 + 90 = 160 / 2 = 80. The third smoke on C1 carries no rating and so is
-      // not in the population — a journal count is a count of ratings, never of
-      // smokes.
-      expect(pair.journal).toEqual({ score: 80, count: 2 });
+      // ONE VOICE (ADR-013 §3 as amended). 70 + 90 = 160 / 2 = 80 is the FIXTURE
+      // AUTHOR's mean, computed before the level aggregates anything, and the
+      // level then has exactly one voice to average. The third smoke on C1
+      // carries no rating and is not in the population at all. So: score 80,
+      // count 1 journal, with the two ratings behind it kept as diagnosis.
+      expect(pair.journal).toEqual({ score: 80, count: 1, journalCount: 1, ratingCount: 2 });
     });
 
     it("excludes everything hanging off an excluded leaf", async () => {
@@ -192,7 +194,7 @@ describe("score aggregates", () => {
       // would drag both populations noticeably if either counted.
       const pair = await getScoreAggregate(h.deps.db, "blend", ids.bl2);
       expect(pair.critic).toEqual({ score: 60, count: 1 });
-      expect(pair.journal).toEqual({ score: 50, count: 1 });
+      expect(pair.journal).toEqual({ score: 50, count: 1, journalCount: 1, ratingCount: 1 });
     });
 
     it("is null, not zero, where nothing has been observed", async () => {
@@ -210,7 +212,7 @@ describe("score aggregates", () => {
       // reviewer never claimed — so the cigar-level count is 2, not 3.
       const pair = await getScoreAggregate(h.deps.db, "cigar", ids.c1);
       expect(pair.critic).toEqual({ score: 85, count: 2 });
-      expect(pair.journal).toEqual({ score: 80, count: 2 });
+      expect(pair.journal).toEqual({ score: 80, count: 1, journalCount: 1, ratingCount: 2 });
     });
   });
 
@@ -239,15 +241,22 @@ describe("score aggregates", () => {
     });
 
     it("rolls the journal population up the same spine", async () => {
-      // L1's ratings are 70, 90 (C1) and 50 (C3) → 210 / 3 = 70.
+      // L1's ratings are 70, 90 (C1) and 50 (C3), ALL ONE AUTHOR's — so they
+      // average once, at the requested level: 210 / 3 = 70, one voice. Note the
+      // roll-up does NOT average that author's per-blend means (80 and 50 → 65);
+      // the voice is computed over everything they rated under L1.
       expect((await getScoreAggregate(h.deps.db, "line", ids.l1)).journal).toEqual({
         score: 70,
-        count: 3,
+        count: 1,
+        journalCount: 1,
+        ratingCount: 3,
       });
-      // The brand adds C4's 100 → 310 / 4 = 77.5.
+      // The brand adds C4's 100 → 310 / 4 = 77.5, still one voice.
       expect((await getScoreAggregate(h.deps.db, "brand", ids.brand)).journal).toEqual({
         score: 77.5,
-        count: 4,
+        count: 1,
+        journalCount: 1,
+        ratingCount: 4,
       });
     });
 
@@ -257,7 +266,7 @@ describe("score aggregates", () => {
       // the product (ADR-013's Rotten Tomatoes model).
       const brand = await getScoreAggregate(h.deps.db, "brand", ids.brand);
       expect(brand.critic).toEqual({ score: 80, count: 5 });
-      expect(brand.journal).toEqual({ score: 77.5, count: 4 });
+      expect(brand.journal).toEqual({ score: 77.5, count: 1, journalCount: 1, ratingCount: 4 });
     });
   });
 
@@ -267,7 +276,7 @@ describe("score aggregates", () => {
       const pair = await getScoreAggregate(h.deps.db, "blender", ids.blenderX);
       expect(pair.critic).toEqual({ score: 82.5, count: 4 });
       // Journal: 70, 90 (BL1) and 50 (BL2) → 210 / 3 = 70.
-      expect(pair.journal).toEqual({ score: 70, count: 3 });
+      expect(pair.journal).toEqual({ score: 70, count: 1, journalCount: 1, ratingCount: 3 });
     });
 
     it("excludes a Cuban blend, so a Cuban credit rolls up to nothing", async () => {
@@ -352,21 +361,30 @@ describe("score aggregates", () => {
   // surface may present a single smoke's score as the score of a blend, line, or
   // brand." The type system carries half of it — there is no shape here that
   // yields a score without a count — and these assertions carry the rest.
-  describe("a single smoke is never a blend's number", () => {
+  //
+  // Under the 2026-08-31 amendment the claim sharpens: what a lone rating is
+  // never presented as is one JOURNAL's opinion standing in for a blend's. A
+  // count of 1 means one voice, and it is always there to be read.
+  describe("a single journal is never a blend's number", () => {
     it("reports its own sample count of one rather than collapsing to the rating", async () => {
-      // BL2's journal population is exactly one smoke, rated 50.
+      // BL2's journal population is exactly one author, with one rating: 50.
       const pair = await getScoreAggregate(h.deps.db, "blend", ids.bl2);
       expect(pair.journal).not.toBeNull();
-      // The count is present, and it says one. A caller cannot obtain the 50
-      // without also being handed the 1.
+      // The count is present, and it says one journal. A caller cannot obtain the
+      // 50 without also being handed the 1.
       expect(pair.journal!.count).toBe(1);
-      expect(Object.keys(pair.journal!).sort()).toEqual(["count", "score"]);
+      expect(Object.keys(pair.journal!).sort()).toEqual([
+        "count",
+        "journalCount",
+        "ratingCount",
+        "score",
+      ]);
     });
 
     it("holds at every level above the leaf, not just at the blend", async () => {
       // The same lone smoke, seen from a blend of its own, a line of its own and a
       // brand of its own — the levels where ADR-013 says a bare rating would be a
-      // misrepresentation. Every one of them carries count 1.
+      // misrepresentation. Every one of them carries count 1: one journal.
       const brandId = await seedBrand("Lonely");
       const lineId = await seedLine(brandId, "Lonely Line");
       const blendId = await seedBlend(lineId, "Lonely Blend");
@@ -391,18 +409,153 @@ describe("score aggregates", () => {
         expect(pair.journal, `${level} must report the lone rating as an aggregate`).toEqual({
           score: 64,
           count: 1,
+          journalCount: 1,
+          ratingCount: 1,
         });
       }
     });
 
-    it("counts ratings, not smokes, so more logging never inflates the sample", async () => {
-      // A second smoke of the same cigar with no rating. If the count tracked
-      // smokes it would now read 2 and the mean would be wrong or undefined.
+    it("counts journals, not smokes, so more logging never inflates the sample", async () => {
+      // A second smoke of the same cigar with no rating. It is not in the
+      // population at all — `smoke_rating_scope` excludes unrated smokes — so
+      // neither the voice count nor the rating count behind it moves.
       const before = await getScoreAggregate(h.deps.db, "blend", ids.bl2);
       await journal(ids.c3, null);
       const after = await getScoreAggregate(h.deps.db, "blend", ids.bl2);
       expect(after.journal).toEqual(before.journal);
       expect(after.journal!.count).toBe(1);
+      expect(after.journal!.ratingCount).toBe(1);
+    });
+
+    // The ruling's own case: the same person rating the same blend again does
+    // not make the blend better-attested. The score moves — it is that person's
+    // opinion, updated — and the SAMPLE COUNT does not, because there is still
+    // one journal behind it.
+    it("a prolific logger is still one journal", async () => {
+      const brandId = await seedBrand("Prolific");
+      const lineId = await seedLine(brandId, "Prolific Line");
+      const blendId = await seedBlend(lineId, "Prolific Blend");
+      const cigarId = await h.seedCigar({
+        canonicalName: `Prolific ${tag}`,
+        brandId,
+        lineId,
+        blendId,
+        type: "NC",
+      });
+
+      await journal(cigarId, 60);
+      expect(await getScoreAggregate(h.deps.db, "blend", blendId).then((p) => p.journal)).toEqual({
+        score: 60,
+        count: 1,
+        journalCount: 1,
+        ratingCount: 1,
+      });
+
+      // Nine more ratings from the SAME journal. Under a rating-count model this
+      // blend would now read as a ten-sample consensus at 100 — one person
+      // deciding a community score outright.
+      for (let i = 0; i < 9; i += 1) await journal(cigarId, 100);
+      expect(await getScoreAggregate(h.deps.db, "blend", blendId).then((p) => p.journal)).toEqual({
+        // (60 + 100 x 9) / 10 = 96, the author's own mean — and the only voice.
+        score: 96,
+        count: 1,
+        journalCount: 1,
+        ratingCount: 10,
+      });
+    });
+  });
+
+  // ONE VOICE PER JOURNAL (ADR-013 §3 as amended 2026-08-31, owner ruling), at
+  // every level including the roll-ups. Every external observation is a
+  // different reviewer, so the critic mean is over rows; one person leaves many
+  // smokes, so the journal mean is over PEOPLE — each author's ratings of the
+  // target collapse to their own mean first. The sample count is journals.
+  // `ratingCount` rides along as the density behind the voices, and is never the
+  // count a surface renders.
+  describe("the journal population is one voice per journal", () => {
+    it("averages each author before the level, at every level", async () => {
+      const brandId = await seedBrand("Two Counts");
+      const lineId = await seedLine(brandId, "Two Counts Line");
+      const blendId = await seedBlend(lineId, "Two Counts Blend");
+      const cigarId = await h.seedCigar({
+        canonicalName: `Two Counts ${tag}`,
+        brandId,
+        lineId,
+        blendId,
+        type: "NC",
+      });
+      const blenderId = await seedBlender("Blender Two Counts", [blendId]);
+
+      // The fixture author smokes it three times and rates every one; a second
+      // public journal rates it once. Four ratings, two journals.
+      await journal(cigarId, 60);
+      await journal(cigarId, 70);
+      await journal(cigarId, 80);
+      const second = await h.createUser(`twocounts-${tag}@example.com`);
+      await h.deps.db.execute(
+        sql`UPDATE users SET journal_visibility = 'public' WHERE id = ${second.userId}`,
+      );
+      await saveSmoke(h.deps, second, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        assessment: { rating: 90, impression: "Mine." },
+      });
+
+      // The author's voice is (60 + 70 + 80) / 3 = 70; the second journal's is 90.
+      // The level averages the two VOICES: (70 + 90) / 2 = 80, over 2 journals.
+      //
+      // Averaging the four RATINGS instead gives 300 / 4 = 75 — the prolific
+      // author outvoting the other three-to-one — which is exactly the reading
+      // the ruling rejects. The fixture is lopsided on purpose so the two answers
+      // differ, and the assertion below is the one that distinguishes them.
+      for (const [level, id] of [
+        ["cigar", cigarId],
+        ["blend", blendId],
+        ["line", lineId],
+        ["brand", brandId],
+        ["blender", blenderId],
+      ] as const) {
+        const pair = await getScoreAggregate(h.deps.db, level, id);
+        expect(pair.journal, `${level} averages voices, not ratings`).toEqual({
+          score: 80,
+          count: 2,
+          journalCount: 2,
+          ratingCount: 4,
+        });
+        expect(pair.journal!.score, `${level} must not average ratings`).not.toBe(75);
+      }
+    });
+
+    it("counts journals over the requested population, not the whole table", async () => {
+      const brandId = await seedBrand("Scoped Counts");
+      const lineId = await seedLine(brandId, "Scoped Counts Line");
+      const blendId = await seedBlend(lineId, "Scoped Counts Blend");
+      const cigarId = await h.seedCigar({
+        canonicalName: `Scoped Counts ${tag}`,
+        brandId,
+        lineId,
+        blendId,
+        type: "NC",
+      });
+
+      await journal(cigarId, 50);
+      const hidden = await h.createUser(`scoped-${tag}@example.com`);
+      await saveSmoke(h.deps, hidden, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        assessment: { rating: 100, impression: "Not published." },
+      });
+
+      // The private journal is outside the community population, so it is outside
+      // BOTH of its counts. A journalCount that saw it would disclose that
+      // somebody else has rated this — which is the thing the population exists
+      // to withhold.
+      expect((await getScoreAggregate(h.deps.db, "blend", blendId)).journal).toEqual({
+        score: 50,
+        count: 1,
+        journalCount: 1,
+        ratingCount: 1,
+      });
     });
   });
 
@@ -442,7 +595,7 @@ describe("score aggregates", () => {
         kind: "user",
         userId: privateUser.userId,
       });
-      expect(own.journal).toEqual({ score: 99, count: 1 });
+      expect(own.journal).toEqual({ score: 99, count: 1, journalCount: 1, ratingCount: 1 });
 
       // And it is not visible to somebody else asking for their own.
       const other = await getScoreAggregate(h.deps.db, "blend", blendId, {
@@ -478,6 +631,8 @@ describe("score aggregates", () => {
       expect((await getScoreAggregate(h.deps.db, "blend", blendId)).journal).toEqual({
         score: 60,
         count: 1,
+        journalCount: 1,
+        ratingCount: 1,
       });
     });
 
@@ -515,6 +670,36 @@ describe("score aggregates", () => {
 
     it("returns an empty map for an empty id list without touching the database", async () => {
       expect((await getScoreAggregates(h.deps.db, "brand", [])).size).toBe(0);
+    });
+
+    // THE MAP IS KEYED BY WHAT THE CALLER PASSED. `uuid::text` prints the
+    // canonical lowercase form whatever case went in, so a caller holding an
+    // upper- or mixed-case id used to get its pre-seeded empty pair back while
+    // the real aggregate landed under a second key it never asked for — and
+    // `getScoreAggregate`, which looks the id up by the string it was given,
+    // returned `{ critic: null, journal: null }` for a blend with three reviews.
+    // A silently empty score is the failure this module is least able to reveal,
+    // because "nothing observed" is a legitimate answer that looks identical.
+    it("answers an upper-case id with its real aggregate, under the caller's own key", async () => {
+      const upper = ids.bl1.toUpperCase();
+      expect(upper).not.toBe(ids.bl1);
+
+      const single = await getScoreAggregate(h.deps.db, "blend", upper);
+      expect(single.critic).toEqual({ score: 90, count: 3 });
+
+      // Both spellings of the same id are answered, each under the spelling that
+      // asked — and the map has exactly one entry per distinct string passed.
+      const map = await getScoreAggregates(h.deps.db, "blend", [ids.bl1, upper, ids.bl3]);
+      expect(map.size).toBe(3);
+      expect(map.get(upper)).toEqual(map.get(ids.bl1));
+      expect(map.get(upper)!.critic).toEqual({ score: 90, count: 3 });
+      expect(map.get(ids.bl3)!.critic).toEqual({ score: 70, count: 1 });
+    });
+
+    it("collapses a repeated id into one entry", async () => {
+      const map = await getScoreAggregates(h.deps.db, "blend", [ids.bl1, ids.bl1, ids.bl3]);
+      expect(map.size).toBe(2);
+      expect(map.get(ids.bl1)!.critic).toEqual({ score: 90, count: 3 });
     });
   });
 

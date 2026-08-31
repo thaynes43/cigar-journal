@@ -278,19 +278,28 @@ init container at startup (ADR-003).
   exactly one of `cigar_id` / `blend_id` (the most specific level the SOURCE
   states); a cigar-linked row's blend is derived through `cigars.blend_id`,
   never stored twice, because curation re-parents leaves and a stored copy would
-  go stale invisibly. The delete rules are deliberately asymmetric — `cigar_id`
+  go stale invisibly. There is deliberately NO FK to `vendors`: `source` + `url`
+  are the evidence, and an unconstrained registry link that can disagree with
+  `source` is worse than none (a constrained one can return in slice 2 if a
+  console needs it). The delete rules are deliberately asymmetric — `cigar_id`
   CASCADEs like every other cigar-linked observation table, `blend_id` is NO
   ACTION like the 0026 hierarchy, so retiring a blend that still carries
-  externally-sourced evidence has to re-point it first. Length bounds on
+  BLEND-TARGETED evidence has to re-point it first; evidence that only resolves
+  through the blend's leaves is not covered by that FK, and needs its own
+  pre-check when blend deletion becomes a real curation move. Byte bounds
+  (`octet_length`, matched by `Buffer.byteLength` in the domain writer) on
   `source`/`url` keep an oversized value from failing on the btree unique index
-  instead of in validation; the 400-character bound on `excerpt` is ADR-013's
+  instead of in validation — a character count would let a 2000-character
+  multibyte URL through; the 400-character bound on `excerpt` is ADR-013's
   copyright rule as a constraint (the domain writer REFUSES an over-long excerpt
   rather than truncating it — truncation would accept a full review body forever
   and quietly store its first 400 characters).
   **Four views** are the aggregate spine: `cigar_ancestry` (the leaf's effective
   ancestry, per-level COALESCE because ancestry is partial by design, and the
-  single place `catalog_status = 'active'` is applied so both populations inherit
-  it identically), `review_observation_scope`, `smoke_rating_scope`, and
+  single place `catalog_status = 'active'` is DEFINED — the blend-linked branch
+  of `review_observation_scope` reaches no leaf, so it probes that view with an
+  EXISTS rather than inheriting nothing, and an emptied blend goes quiet on both
+  sides together), `review_observation_scope`, `smoke_rating_scope`, and
   `blend_market_type`. `smoke_rating_scope` carries `users.journal_visibility`
   rather than filtering on it: a journal rating is PRIVATE by default (migration
   0001), so a community score that averaged every rating would publish the
@@ -298,7 +307,12 @@ init container at startup (ADR-003).
   print that one private rating on a catalogue page. The domain read picks the
   population explicitly (`JournalPopulation`, defaulting to public-only), which
   filtering in the view would have foreclosed: "my own score for this blend" is a
-  legitimate private read the same flag must not block. The last derives Cuban-ness at the blend from its leaves'
+  legitimate private read the same flag must not block. It also carries
+  `user_id`, because the journal aggregate is ONE VOICE PER JOURNAL (ADR-013 §3
+  as amended 2026-08-31): each author's ratings collapse to their own mean before
+  the level averages, so a prolific logger counts once. That grouping lives in
+  `score-aggregates.ts` rather than here, since the level it groups at is the
+  caller's question. The last derives Cuban-ness at the blend from its leaves'
   `cigars.type`, fail-closed and transcribed from the cigar detail page's blender
   gate: a positive `= 'NC'` test, because `type` is nullable and mostly NULL, so
   the negative form would credit a blender on every row nobody has established
@@ -306,6 +320,7 @@ init container at startup (ADR-003).
   rather than one shape with COALESCEd levels — the COALESCE made `blend_id` an
   expression the planner could not join on, which turned the blender roll-up into
   a 65,000-row nested loop filtered down to 162 (20.7ms against 2-3ms elsewhere);
-  split, it is 3.9ms. Views rather than maintained tables, benchmarked at ten
+  split, it is 3.9ms — 5.4ms since the one-voice grouping, which costs about half
+  a millisecond at every level. Views rather than maintained tables, benchmarked at ten
   times production volume — see the migration header and
   `pnpm --filter @cj/domain bench:scores`.
