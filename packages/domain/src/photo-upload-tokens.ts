@@ -6,7 +6,7 @@ import { auditActor } from "./audit-attribution.js";
 import type { SmokePhotoKind } from "./types.js";
 import { CigarNotFoundError, SmokeNotFoundError, UnauthorizedError, UploadTokenInvalidError } from "./errors.js";
 
-// Short-lived, single-use photo upload links (ADR-007, issue #44 part 2; extended
+// Single-use, 24h photo upload links (ADR-007, issue #44 part 2; extended
 // for product photos in DESIGN-003 §Images, issue #127). Two kinds share the
 // table: a `smoke` link (minted by the MCP add_smoke_photo tool when no image was
 // attached) and a `product` link (minted by an admin to attach a catalog cigar's
@@ -15,7 +15,12 @@ import { CigarNotFoundError, SmokeNotFoundError, UnauthorizedError, UploadTokenI
 // hash is ever stored. Handle names track the MCP file-upload drafts SEP-2356/1306
 // so the eventual standard swap is mechanical.
 
-const DEFAULT_TTL_SECONDS = 900; // 15 minutes
+// 24 hours. The link is delivered through a chat turn and opened on a phone —
+// often not in the same sitting — so a 15-minute window expired on the user far
+// more often than it stopped anyone. Single use plus a 256-bit random token
+// carries the security weight here; the TTL only bounds how long an unused link
+// stays live.
+const DEFAULT_TTL_SECONDS = 86_400;
 
 export interface MintPhotoUploadTokenInput {
   smokeId: string;
@@ -161,13 +166,42 @@ export async function mintProductPhotoUploadToken(
   return { token, expiresAt: expiresAt.toISOString() };
 }
 
+// Is this link still usable? A read-only mirror of the consume predicate, used
+// by the upload route to reject a dead link BEFORE it spends CPU decoding an
+// image (the route validates the file first so a rejected file never burns the
+// link, and that ordering must not turn the endpoint into free image-decoding
+// for anyone who can POST). It grants nothing and returns nothing: it is not a
+// reservation, and the consume that follows is still the only thing that makes
+// the use exclusive. Same single UploadTokenInvalidError, same absence of an
+// oracle about which of unknown / used / expired it was.
+export async function assertPhotoUploadTokenUsable(
+  deps: Deps,
+  args: { token: string },
+): Promise<void> {
+  const now = deps.now();
+  const rows = await deps.db
+    .select({ id: photoUploadTokens.id })
+    .from(photoUploadTokens)
+    .where(
+      and(
+        eq(photoUploadTokens.tokenHash, hashToken(args.token)),
+        isNull(photoUploadTokens.usedAt),
+        gt(photoUploadTokens.expiresAt, now),
+      ),
+    )
+    .limit(1);
+  if (!rows[0]) throw new UploadTokenInvalidError();
+}
+
 // Consume a link: a single conditional UPDATE stamps `used_at` iff the token is
 // known, unused, and unexpired — so single use is enforced by the database, not a
 // read-then-write race (two concurrent consumes: exactly one row returns).
 // Unknown / used / expired all collapse to one UploadTokenInvalidError with no
 // oracle about which. The returned binding is discriminated by the token's kind.
-// If the subsequent photo add fails the token stays burned — acceptable: the page
-// shows the error and the model can mint another.
+// Callers consume LAST, immediately before the storage + DB write, so that a
+// rejected file leaves the link usable for the retry; a failure after this point
+// still burns it (the write itself failing — photo_limit, smoke_not_found), which
+// is the intended reading: that link's one use has happened.
 export async function consumePhotoUploadToken(
   deps: Deps,
   args: { token: string },

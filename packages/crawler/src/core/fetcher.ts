@@ -20,10 +20,13 @@ const TIMEOUT_MS = 15_000;
 const RETRY_BACKOFF_MS = 1000;
 
 // Every binary a crawl downloads is an image bound for the photo pipeline, so
-// one cap serves them all. Matches the web's MAX_UPLOAD_BYTES: the pipeline
-// downsamples anything larger than we serve, so this only bounds what we will
-// pull down and decode. Callers pass it to fetchBinary — a request without a
-// `maxBytes` is unbounded, which is why the download paths always name it.
+// one cap serves them all. The pipeline downsamples anything larger than we
+// serve, so this only bounds what we will pull down and decode. Deliberately
+// tighter than the two USER photo paths (20MB, apps/web MAX_UPLOAD_BYTES and
+// @cj/mcp MAX_ATTACHED_BYTES): a vendor product shot the crawler pulls
+// unattended has no business being that large. Callers pass it to fetchBinary —
+// a request without a `maxBytes` is unbounded, which is why the download paths
+// always name it.
 export const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
 export interface FetchTextResult {

@@ -2,6 +2,7 @@ import { addSmokePhoto, type SmokePhotoKind } from "@cj/domain";
 import { processPhoto, UnsupportedImageTypeError } from "@cj/photos";
 import { createContext } from "@/server/context";
 import { photoStorage, MAX_UPLOAD_BYTES } from "@/lib/photos";
+import { MAX_UPLOAD_LABEL } from "@/lib/upload-limits";
 import { domainErrorResponse } from "@/lib/photo-http";
 
 // Smoke-photo upload (ADR-007). Multipart in; the image is run through the shared
@@ -24,7 +25,7 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: "file and smokeId are required." }, { status: 400 });
   }
   if (file.size > MAX_UPLOAD_BYTES) {
-    return Response.json({ error: "Image exceeds the 15MB limit." }, { status: 413 });
+    return Response.json({ error: `Image exceeds the ${MAX_UPLOAD_LABEL} limit.` }, { status: 413 });
   }
 
   const kindRaw = form.get("kind");

@@ -137,6 +137,7 @@ export {
 export {
   mintPhotoUploadToken,
   mintProductPhotoUploadToken,
+  assertPhotoUploadTokenUsable,
   consumePhotoUploadToken,
   type MintPhotoUploadTokenInput,
   type MintProductPhotoUploadTokenInput,

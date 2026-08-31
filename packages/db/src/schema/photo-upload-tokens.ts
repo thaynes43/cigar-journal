@@ -4,7 +4,7 @@ import { users } from "./users.js";
 import { cigars } from "./cigars.js";
 import type { SmokePhotoKind } from "./smoke-photos.js";
 
-// A short-lived, single-use upload link (ADR-007, issue #44 part 2; extended for
+// A single-use, time-boxed upload link (ADR-007, issue #44 part 2; extended for
 // product photos in DESIGN-003 §Images, issue #127). Two kinds share the table:
 // a `smoke` link binds (user, smoke, kind?, caption?) — minted by the MCP
 // add_smoke_photo tool for a phone upload; a `product` link binds (user, cigar) —
