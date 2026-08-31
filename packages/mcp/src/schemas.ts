@@ -1314,7 +1314,7 @@ export const registerTaxonomySchema = z
       })
       .strict()
       .optional()
-      .describe("The marca by name — resolved by slug, minted only if genuinely new. Use this or brandId, never both."),
+      .describe("The marca by name — resolved against the registry, minted only if genuinely new. Use this or brandId, never both."),
     line: z
       .object({
         name: z.string().describe("The family within the brand, e.g. 'Liga Privada', '1964 Anniversary Series'."),

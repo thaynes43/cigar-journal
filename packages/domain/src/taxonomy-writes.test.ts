@@ -16,6 +16,7 @@ import {
   assignCigarParts,
   aliasKeysFor,
   mintRegistrySlug,
+  registrySlugCandidates,
   RESERVED_SLUG_SUFFIX,
   assertSlugMintable,
 } from "./taxonomy-writes.js";
@@ -83,14 +84,50 @@ describe("taxonomy writes", () => {
       }
     });
 
-    it("is brandSlug for every name that does not collide with it", () => {
-      for (const name of ["Padrón", "Liga Privada", "No. 9", "1964 Anniversary Series", "Unfiled Reserva"]) {
+    it("is brandSlug for every ASCII name that does not collide with it", () => {
+      for (const name of ["Liga Privada", "No. 9", "1964 Anniversary Series", "Unfiled Reserva"]) {
         expect(mintRegistrySlug(name)).toBe(brandSlug(name.trim()));
       }
       // Only the exact key is reserved: `Un-Filed!` slugs to `un-filed`, which
       // addresses nothing special, so it is minted untouched.
       expect(mintRegistrySlug("Un-Filed!")).toBe("un-filed");
       expect(mintRegistrySlug("Unfiled Reserva")).toBe("unfiled-reserva");
+    });
+
+    // The Wave 3 change. `brandSlug()` collapses each accented character to a
+    // hyphen, so the ~60 marcas that wave adds would have minted URL keys like
+    // `don-pep-n-garc-a`. Folding first gives them the key a reader would guess.
+    it("folds accents, so a new marca gets a readable key", () => {
+      expect(mintRegistrySlug("Don Pepín García")).toBe("don-pepin-garcia");
+      expect(mintRegistrySlug("Padrón")).toBe("padron");
+      expect(mintRegistrySlug("La Aroma de Cuba Mi Amor Reserva")).toBe("la-aroma-de-cuba-mi-amor-reserva");
+      expect(mintRegistrySlug("  Añejo  ")).toBe("anejo");
+
+      // It is `fold()` doing the work, not a private table of substitutions —
+      // the same function every alias key is derived with.
+      for (const name of ["Don Pepín García", "Padrón", "Añejo", "Fóldy"]) {
+        expect(mintRegistrySlug(name)).toBe(fold(name));
+      }
+    });
+
+    // The reservation guards the FOLDED result, which is the ordering that
+    // matters: fold, then check. A spelling that only reaches the reserved word
+    // by folding still has to be caught.
+    it("still reserves `unfiled` after folding", () => {
+      expect(mintRegistrySlug("Unfiléd")).toBe(`unfiled${RESERVED_SLUG_SUFFIX}`);
+      expect(mintRegistrySlug("Unfiléd")).not.toBe("unfiled");
+    });
+
+    // The legacy transcription is untouched — it is the stored key for every row
+    // minted before this change and for the brand URLs those rows answer on.
+    // Two flavors, and `registrySlugCandidates` is what spans them.
+    it("leaves brandSlug alone and offers both flavors for lookup", () => {
+      expect(brandSlug("Padrón")).toBe("padr-n");
+      expect(registrySlugCandidates("Padrón")).toEqual(["padron", "padr-n"]);
+      // An ASCII name collapses to one candidate, so the common lookup stays a
+      // single-value probe.
+      expect(registrySlugCandidates("Drew Estate")).toEqual(["drew-estate"]);
+      expect(registrySlugCandidates("!!!")).toEqual([]);
     });
   });
 
@@ -129,6 +166,105 @@ describe("taxonomy writes", () => {
       const brand = await createBrand(h.deps, curator, { name: "Unfiled" });
       expect(brand.slug).toBe(`unfiled${RESERVED_SLUG_SUFFIX}`);
       expect(brand.slug).not.toBe("unfiled");
+    });
+  });
+
+  // What the fold buys, on the real write path rather than on the minter alone.
+  describe("minting an accented marca", () => {
+    it("gives a new brand a readable slug that IS its folded alias key", async () => {
+      const name = "Don Pepín García";
+      const result = await createBrand(h.deps, curator, { name });
+
+      expect(result.slug).toBe("don-pepin-garcia");
+      expect(result.aliases).toContain("don-pepin-garcia");
+
+      const row = (await h.deps.db.select().from(brands).where(eq(brands.id, result.brandId)))[0]!;
+      expect(row.name).toBe(name);
+      expect(row.slug).toBe("don-pepin-garcia");
+
+      // SLUG AND FOLDED ALIAS KEY NOW COINCIDE. Before this change the slug was
+      // the `brandSlug()` transcription (`don-pep-n-garc-a`) and the folded key
+      // was something else, so the row's own address was a key the alias array
+      // did not carry. Now the row's slug is one of its alias entries, which is
+      // why ONE GIN containment probe resolves both questions — "which row
+      // answers to this spelling" and "which row lives at this URL key" — with
+      // no second lookup against `slug`. This probe is that claim: it asks the
+      // alias index and reads the slug off what comes back.
+      const probe = await h.deps.db.execute(
+        sql`SELECT slug, name FROM brands WHERE aliases && ARRAY['don-pepin-garcia']::text[]`,
+      );
+      expect(probe.rows).toHaveLength(1);
+      expect((probe.rows as unknown as { slug: string; name: string }[])[0]).toEqual({
+        slug: "don-pepin-garcia",
+        name,
+      });
+      expect(row.slug).toBe(fold(name));
+      expect(row.aliases).toContain(row.slug);
+    });
+
+    // `cigars.brand_id` is a projection of the free-text `brand`, derived by
+    // `deriveBrandId`. That derivation is a slug lookup, so folding the mint
+    // without folding the lookup would leave every cigar whose brand text is
+    // accented unlinked from the marca just minted for it — and unlinked is the
+    // SILENT outcome there, since an unmatched spelling yields null by design.
+    it("links a cigar's accented brand text to the folded row", async () => {
+      const name = "Joya de Nicaragua Antaño";
+      const minted = await createBrand(h.deps, curator, { name });
+      expect(minted.slug).toBe("joya-de-nicaragua-antano");
+
+      const cigarId = await h.seedCigar({ canonicalName: "Antano Gran Consul", verification: "unverified" });
+      await updateCigar(h.deps, user, { clientRequestId: newRequestId(), cigarId, fields: { brand: name } });
+
+      const row = (await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId)))[0]!;
+      expect(row).toMatchObject({ brand: name, brandId: minted.brandId });
+    });
+
+    // The same derivation still reaches a LEGACY-flavor row. `Padrón` is stored
+    // as `padr-n`, and the candidate list carries the transcription too, so the
+    // link the catalog has always made keeps being made.
+    it("still links accented brand text to a legacy padr-n row", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Padron Legacy Probe", verification: "unverified" });
+      await updateCigar(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        fields: { brand: "Padrón" },
+      });
+
+      const row = (await h.deps.db.select().from(cigars).where(eq(cigars.id, cigarId)))[0]!;
+      expect(row).toMatchObject({ brand: "Padrón", brandId: padronId });
+    });
+
+    // The rail that makes minting accented names safe rather than a
+    // duplicate-marca hazard. `Padrón` was seeded the old way: slug `padr-n`,
+    // aliases `['padr-n','padron']`. Minting it again now derives slug `padron`,
+    // which the unique index on `brands.slug` would happily admit alongside
+    // `padr-n` — the two flavors do not collide with each other. The FOLDED KEY
+    // is what collides, and the global alias check is what sees it.
+    //
+    // So: REFUSED, not reused. `createBrand` is a mint, not a get-or-create, and
+    // it names the existing spelling so the curator learns the marca is already
+    // there. (register_taxonomy is the get-or-create; it probes both flavors and
+    // reuses this row instead of reaching here — pinned in taxonomy-curation.test.ts.)
+    it("refuses a second Padrón and leaves the seeded row alone", async () => {
+      const before = await h.deps.db.execute(
+        sql`SELECT id, slug FROM brands WHERE aliases && ARRAY['padron']::text[]`,
+      );
+      expect(before.rows).toHaveLength(1);
+
+      const refusal = await createBrand(h.deps, curator, { name: "Padrón" }).catch((err: unknown) => err);
+      expect(refusal).toBeInstanceOf(ValidationError);
+      // It refuses on the FOLDED key, and names the spelling already holding it.
+      expect((refusal as ValidationError).fields).toEqual([
+        { path: "aliases", message: "The matching key 'padr-n' is already claimed by 'Padrón'." },
+      ]);
+
+      // NO SECOND ROW. Not by folded key, and not by either slug flavor.
+      const after = await h.deps.db.execute(
+        sql`SELECT id, slug FROM brands WHERE aliases && ARRAY['padron']::text[] OR slug IN ('padron','padr-n')`,
+      );
+      expect(after.rows).toHaveLength(1);
+      expect(after.rows).toEqual(before.rows);
+      expect((after.rows as unknown as { slug: string }[])[0]!.slug).toBe("padr-n");
     });
   });
 

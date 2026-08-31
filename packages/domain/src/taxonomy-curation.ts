@@ -5,7 +5,6 @@ import { CigarNotFoundError, ValidationError } from "./errors.js";
 import { fingerprint } from "./fingerprint.js";
 import { assertReplayable, isUniqueViolation, loadIdempotency, recordIdempotency } from "./idempotency.js";
 import { auditActor } from "./audit-attribution.js";
-import { brandSlug } from "./catalog-browse.js";
 import { composeCanonicalName, fold } from "./taxonomy-keys.js";
 import { assertCigarAncestry, type CigarAncestry } from "./cigar-ancestry.js";
 import { deriveBrandId, loadAncestryContext } from "./taxonomy-resolve.js";
@@ -25,6 +24,7 @@ import {
   creditBlenderWithinTx,
   editRegistryAliasesWithinTx,
   recomposeCigarName,
+  registrySlugCandidates,
   type EditAliasesResult,
   type RegistryAttribution,
   type RegistryLevel,
@@ -128,13 +128,24 @@ interface RegistryRow {
   aliases: string[];
 }
 
-async function findBrandBySlug(tx: Tx, slug: string): Promise<RegistryRow | undefined> {
+async function findBrandBySlug(tx: Tx, slugs: readonly string[]): Promise<RegistryRow | undefined> {
   const rows = await tx
     .select({ id: brands.id, name: brands.name, slug: brands.slug, aliases: brands.aliases })
     .from(brands)
-    .where(eq(brands.slug, slug))
-    .limit(1);
-  return rows[0];
+    .where(inArray(brands.slug, [...slugs]));
+  return preferred(rows, slugs);
+}
+
+// Both slug flavors can be live at once (`registrySlugCandidates`), so a lookup
+// can legitimately see two rows. Resolve to the candidate order — the folded key
+// a row minted today wears wins over the legacy transcription — rather than to
+// whatever the planner returns first, so a get-or-create is deterministic.
+function preferred<T extends { slug: string }>(rows: T[], slugs: readonly string[]): T | undefined {
+  for (const slug of slugs) {
+    const hit = rows.find((row) => row.slug === slug);
+    if (hit) return hit;
+  }
+  return undefined;
 }
 
 async function loadBrand(tx: Tx, brandId: string): Promise<RegistryRow> {
@@ -148,15 +159,21 @@ async function loadBrand(tx: Tx, brandId: string): Promise<RegistryRow> {
   return row;
 }
 
-// The slug a name would take, refused early when the name is punctuation only —
-// the same rule `requireSlug` applies inside the primitives, run here so a
-// get-or-create reports the bad name rather than a confusing miss.
-function slugForLookup(name: string, path: string): string {
-  const slug = brandSlug(name.trim());
-  if (slug === "") {
+// The slugs a name could already be stored under, refused early when the name is
+// punctuation only — the same rule `requireSlug` applies inside the primitives,
+// run here so a get-or-create reports the bad name rather than a confusing miss.
+//
+// Plural since mint-time slugs began folding accents: an existing row wears the
+// `brandSlug()` transcription (`padr-n`), a row minted from here wears the folded
+// key (`padron`), and a get-or-create has to find EITHER or it stops being a
+// get-or-create. Probing one flavor breaks a different case each way — see
+// `registrySlugCandidates`.
+function slugsForLookup(name: string, path: string): string[] {
+  const slugs = registrySlugCandidates(name);
+  if (slugs.length === 0) {
     throw new ValidationError([{ path, message: "This name has no addressable slug — it is punctuation only." }]);
   }
-  return slug;
+  return slugs;
 }
 
 async function registerTaxonomyWithinTx(
@@ -191,8 +208,8 @@ async function registerTaxonomyWithinTx(
     brand = { ...row, created: false };
   } else {
     const spec = input.brand!;
-    const slug = slugForLookup(spec.name, "brand.name");
-    const found = await findBrandBySlug(tx, slug);
+    const slugs = slugsForLookup(spec.name, "brand.name");
+    const found = await findBrandBySlug(tx, slugs);
     if (found) {
       brand = { ...found, created: false };
     } else {
@@ -216,14 +233,14 @@ async function registerTaxonomyWithinTx(
   // ---- line --------------------------------------------------------------
   let line: RegisteredEntity | null = null;
   if (input.line != null) {
-    const slug = slugForLookup(input.line.name, "line.name");
+    const slugs = slugsForLookup(input.line.name, "line.name");
     const found = await tx
       .select({ id: lines.id, name: lines.name, slug: lines.slug, aliases: lines.aliases })
       .from(lines)
-      .where(and(eq(lines.brandId, brand.id), eq(lines.slug, slug)))
-      .limit(1);
-    if (found[0]) {
-      line = { ...found[0], created: false };
+      .where(and(eq(lines.brandId, brand.id), inArray(lines.slug, slugs)));
+    const hit = preferred(found, slugs);
+    if (hit) {
+      line = { ...hit, created: false };
     } else {
       const minted = await createLineWithinTx(tx, deps, principal, {
         brandId: brand.id,
@@ -245,14 +262,14 @@ async function registerTaxonomyWithinTx(
   // ---- blend -------------------------------------------------------------
   let blend: RegisteredEntity | null = null;
   if (input.blend != null && line != null) {
-    const slug = slugForLookup(input.blend.name, "blend.name");
+    const slugs = slugsForLookup(input.blend.name, "blend.name");
     const found = await tx
       .select({ id: blends.id, name: blends.name, slug: blends.slug, aliases: blends.aliases })
       .from(blends)
-      .where(and(eq(blends.lineId, line.id), eq(blends.slug, slug)))
-      .limit(1);
-    if (found[0]) {
-      blend = { ...found[0], created: false };
+      .where(and(eq(blends.lineId, line.id), inArray(blends.slug, slugs)));
+    const hit = preferred(found, slugs);
+    if (hit) {
+      blend = { ...hit, created: false };
     } else {
       const minted = await createBlendWithinTx(tx, deps, principal, {
         lineId: line.id,
@@ -285,12 +302,16 @@ async function registerTaxonomyWithinTx(
     for (const rawName of input.blend.blenders) {
       const name = rawName.trim();
       if (name === "") continue;
-      const slug = slugForLookup(name, "blend.blenders");
-      const found = await tx.select({ id: blenders.id, name: blenders.name }).from(blenders).where(eq(blenders.slug, slug)).limit(1);
+      const slugs = slugsForLookup(name, "blend.blenders");
+      const found = await tx
+        .select({ id: blenders.id, name: blenders.name, slug: blenders.slug })
+        .from(blenders)
+        .where(inArray(blenders.slug, slugs));
+      const hit = preferred(found, slugs);
       let blenderId: string;
       let created = false;
-      if (found[0]) {
-        blenderId = found[0].id;
+      if (hit) {
+        blenderId = hit.id;
       } else {
         const minted = await createBlenderWithinTx(tx, deps, principal, { name, attribution });
         blenderId = minted.blenderId;
@@ -301,7 +322,10 @@ async function registerTaxonomyWithinTx(
         blenderId,
         attribution,
       });
-      credited.push({ id: blenderId, name: found[0]?.name ?? name, created, credited: credit.created });
+      // `hit`, not `found[0]`: with two slug flavors live the probe can return
+      // two rows, and the id came from the preferred one. Reading the name off an
+      // arbitrary row would credit the right blender under the wrong spelling.
+      credited.push({ id: blenderId, name: hit?.name ?? name, created, credited: credit.created });
     }
   }
 

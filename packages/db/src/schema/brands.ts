@@ -5,13 +5,19 @@ import { pgTable, uuid, text, timestamp, index } from "drizzle-orm/pg-core";
 // migration 0026). One row per brand, with a stable slug for URLs and facets and
 // an alias list that carries every other spelling the brand answers to.
 //
-// `slug` is brandSlug(name) from @cj/domain catalog-browse.ts, unchanged: the
-// same key today's brand URLs and `brand_images.brand_slug` already resolve
-// through. That rule does not strip accents (`Padrón` → `padr-n`); the folded
-// spelling lives in `aliases`, which is what matching reads. This is the split
-// `fold()` in packages/crawler/src/core/wikidata.ts already codifies — the
-// stored key never folds, the matching key does — applied to the registry. See
-// 0026 for why agreement outranks prettiness here.
+// `slug` COMES IN TWO FLAVORS, and reading it as one rule is the mistake to
+// avoid. Migration 0026 minted every seeded row with brandSlug(name) from
+// @cj/domain catalog-browse.ts — the same key today's brand URLs and
+// `brand_images.brand_slug` resolve through — and that rule does not strip
+// accents, so `Padrón` is stored as `padr-n`. Rows minted from TypeScript since
+// Wave 3 fold first (`mintRegistrySlug`), so a marca registered today is
+// `padron`, not `padr-n`: the accented cohort 0026 transcribed keeps its ugly
+// key until the Wave 5 rename+redirect, and new rows do not inherit it.
+//
+// Consequence for anyone RESOLVING a name to a row: derive both spellings
+// (`registrySlugCandidates`) or probe `aliases`, which carries both regardless
+// of flavor. A lookup hard-coded to either rule finds only half the registry.
+// See 0026 for why agreement outranked prettiness for the seeded rows.
 //
 // `aliases` is the anchor of matching v2 (Wave 2): a vendor listing resolves to
 // a brand by alias before line, blend or vitola are considered at all. It holds

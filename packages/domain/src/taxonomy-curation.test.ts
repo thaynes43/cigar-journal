@@ -159,9 +159,11 @@ describe("taxonomy curation", () => {
       ).rejects.toBeInstanceOf(IdempotencyConflictError);
     });
 
-    // `brands.slug` does not fold accents, so `Padron` and `Padrón` slug apart and
-    // the unique index would happily admit both. The folded alias check is the
-    // rail that keeps a marca from forking under a second spelling.
+    // The seeded `Padrón` row wears the legacy transcription `padr-n`, so an
+    // unaccented `Padron` slugs apart from it under either rule and the unique
+    // index would happily admit both. The folded alias check is the rail that
+    // keeps a marca from forking under a second spelling — and it is the rail
+    // precisely because slug uniqueness cannot see the collision.
     it("refuses a mint whose folded key another spelling of the marca holds", async () => {
       const error = await registerTaxonomy(h.deps, curator, {
         clientRequestId: newRequestId(),
@@ -237,6 +239,62 @@ describe("taxonomy curation", () => {
       await expect(
         registerTaxonomy(h.deps, member, { clientRequestId: newRequestId(), brand: { name: "Denied Marca" } }),
       ).rejects.toBeInstanceOf(UnauthorizedError);
+    });
+
+    // Mint-time slugs fold accents; the rows seeded before that change do not.
+    // Get-or-create has to span both flavors, and it breaks a DIFFERENT case in
+    // each direction if it only probes one — so both directions are pinned.
+    describe("accented names, across both slug flavors", () => {
+      it("mints a readable slug and then FINDS it again", async () => {
+        const name = "Don Pepín García";
+
+        const first = await registerTaxonomy(h.deps, curator, {
+          clientRequestId: newRequestId(),
+          brand: { name },
+          line: { name: "Serie JJ" },
+        });
+        expect(first.brand.created).toBe(true);
+        expect(first.brand.slug).toBe("don-pepin-garcia");
+        expect(first.line!.slug).toBe("serie-jj");
+
+        // The half that a fold-only mint would have broken. The lookup derives
+        // its candidates from the NAME, so if it probed only the legacy
+        // transcription it would miss the row it had just minted, try to mint a
+        // second one, and be refused by the alias rail — turning a get-or-create
+        // into a hard error for exactly the accented marcas this change is for.
+        const second = await registerTaxonomy(h.deps, curator, {
+          clientRequestId: newRequestId(),
+          brand: { name },
+          line: { name: "Serie JJ" },
+        });
+        expect(second.brand).toMatchObject({ id: first.brand.id, slug: "don-pepin-garcia", created: false });
+        expect(second.line).toMatchObject({ id: first.line!.id, created: false });
+
+        const rows = await h.deps.db.select({ id: brands.id }).from(brands).where(eq(brands.name, name));
+        expect(rows).toHaveLength(1);
+      });
+
+      // The other half. `Padrón` was seeded the old way and still wears slug
+      // `padr-n`; the folded key a mint would derive is `padron`. Probing only
+      // the folded key would miss the live row and try to fork the marca.
+      it("reuses the pre-existing padr-n row rather than forking it", async () => {
+        const before = await h.deps.db.select({ id: brands.id }).from(brands).where(eq(brands.id, padronId));
+        expect(before).toHaveLength(1);
+
+        const result = await registerTaxonomy(h.deps, curator, {
+          clientRequestId: newRequestId(),
+          brand: { name: "Padrón" },
+        });
+        expect(result.brand).toMatchObject({ id: padronId, slug: "padr-n", created: false });
+
+        // Untouched: no rename, no second row, and the Wave 5 redirect still has
+        // exactly one slug to move.
+        const padronRows = await h.deps.db
+          .select({ id: brands.id, slug: brands.slug })
+          .from(brands)
+          .where(eq(brands.name, "Padrón"));
+        expect(padronRows).toEqual([{ id: padronId, slug: "padr-n" }]);
+      });
     });
   });
 

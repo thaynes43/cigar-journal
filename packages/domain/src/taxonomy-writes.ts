@@ -5,7 +5,13 @@ import { CigarNotFoundError, UnauthorizedError, ValidationError } from "./errors
 import { auditActor } from "./audit-attribution.js";
 import { HIERARCHY_UNFILED } from "./types.js";
 import { brandSlug } from "./catalog-browse.js";
-import { composeCanonicalName, fold } from "./taxonomy-keys.js";
+import { composeCanonicalName, fold, mintRegistrySlug } from "./taxonomy-keys.js";
+
+// The mint-time slug rule lives with the rest of the key vocabulary in
+// taxonomy-keys.ts — `deriveBrandId` needs it too, and taxonomy-resolve.ts
+// cannot import this module without a cycle. Re-exported so the registry
+// surface still reads as one module.
+export { mintRegistrySlug, registrySlugCandidates, RESERVED_SLUG_SUFFIX } from "./taxonomy-keys.js";
 import { assertCigarAncestry, type CigarAncestry } from "./cigar-ancestry.js";
 import { deriveBrandId, loadAncestryContext } from "./taxonomy-resolve.js";
 
@@ -68,26 +74,6 @@ function requireName(value: string, path: string): string {
   const name = value.trim();
   if (name === "") throw new ValidationError([{ path, message: "A name is required." }]);
   return name;
-}
-
-// `unfiled` is not available as a registry slug (DESIGN-004 D-05). At every
-// level that value means IS NULL — the population with NO row here — so a row
-// wearing it would be permanently unreachable: `?line=unfiled` would select the
-// cigars that have no line, never the line called Unfiled, and the group card
-// for it would link to a screen excluding all of its own members.
-//
-// The suffix, not a refusal: "Unfiled" is a legitimate name and the catalog's
-// internal vocabulary has no business vetoing it. The slug is a derived
-// addressing key, so deriving a different one costs the row nothing — while
-// refusing would put the reserved word in front of a curator who never chose it.
-// `-1` is the conventional disambiguation suffix and cannot itself fold onto the
-// reserved word; a second row that genuinely wants `unfiled-1` still hits the
-// per-parent unique pre-check below, which is where slug collisions belong.
-export const RESERVED_SLUG_SUFFIX = "-1";
-
-export function mintRegistrySlug(name: string): string {
-  const slug = brandSlug(name.trim());
-  return slug === HIERARCHY_UNFILED ? `${slug}${RESERVED_SLUG_SUFFIX}` : slug;
 }
 
 // The refusal that backs the mint. `mintRegistrySlug` never produces the
