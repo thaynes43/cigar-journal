@@ -1014,10 +1014,20 @@ export interface BrowseCatalogResult {
 // group-card.tsx).
 export interface CatalogGroupCard {
   dimension: CatalogDimension;
+  // The group's IDENTITY — the registry row's id, or for `vitola` (which has no
+  // registry table) the derived key itself. Distinct from `slug`, which is only
+  // unique within a parent: two brands can each own a line called `Reserva`, so
+  // the UI keys its cards by this and never by the slug.
+  id: string;
   // The drill key — what the click writes into that level's URL param.
   slug: string;
   // The card's label.
   name: string;
+  // The immediate parent's SLUG, so the drill can scope itself the way the D-08
+  // breadcrumb does (`?brand=<parentSlug>&line=<slug>`). Unlike `parentName`
+  // this is never suppressed — it is navigation, not display — and is null only
+  // when the dimension has no parent level or the row's parent link is null.
+  parentSlug: string | null;
   // The immediate parent's name (line → its brand, blend → its line), for the
   // sub-label line and blend cards carry at root: those names collide across
   // brands, so the label alone is ambiguous (D-03). Null when the parent level is
@@ -1069,11 +1079,18 @@ export interface BrowseCatalogGroupsResult {
 // filter set, so the number answers "how many would I get if I picked this",
 // which is the only question a picker is asked.
 export interface CatalogFacetOption {
+  // The registry row's id (the derived key, for `vitola`). The option list is
+  // keyed by this, because two brands' `Reserva` lines share a slug.
+  id: string;
   slug: string;
   name: string;
   // The parent's name, for the same collision reason as the group card's
   // sub-label; null when the parent level is already pinned.
   parentName: string | null;
+  // The parent's slug, so picking the option writes the same scoped param a
+  // drill writes. Never suppressed; null only when there is no parent level or
+  // the row's parent link is null.
+  parentSlug: string | null;
   count: number;
 }
 

@@ -198,6 +198,13 @@ export {
   recomposeCigarName,
   loadCigarNameParts,
   aliasKeysFor,
+  // The `unfiled` reservation (DESIGN-004 D-05): the minter that cannot produce
+  // the reserved slug, and the refusal every registry create path applies behind
+  // it. Exported together because a caller that mints must also be able to state
+  // the invariant it is minting under.
+  mintRegistrySlug,
+  assertSlugMintable,
+  RESERVED_SLUG_SUFFIX,
   type CreateLineInput,
   type CreateLineResult,
   type CreateBlendInput,

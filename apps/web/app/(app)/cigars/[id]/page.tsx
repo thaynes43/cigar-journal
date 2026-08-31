@@ -86,7 +86,14 @@ function blendFacts(
   // marca, not a person, so a blender line there would be an invented fact rather
   // than a missing one. The blend carries no Cuban flag of its own, so the leaf's
   // `type` is the gate — the same signal every other CC/NC rule in the app reads.
-  if (cigar.type !== "CC" && hierarchy.blenders.length > 0) {
+  //
+  // The gate is POSITIVE (`=== "NC"`), not `!== "CC"`, and the difference is the
+  // whole rule: `type` is nullable and the overwhelming majority of production
+  // rows are NULL (890 of 977 as this shipped), so `!== "CC"` credited a blender
+  // on every untyped row — precisely the rows nobody has established anything
+  // about. Absent-when-empty means an unknown type suppresses the row; only a row
+  // known to be New World earns it.
+  if (cigar.type === "NC" && hierarchy.blenders.length > 0) {
     rows.push({ label: "Blender", value: hierarchy.blenders.map((b) => b.name).join(", ") });
   }
   return rows;

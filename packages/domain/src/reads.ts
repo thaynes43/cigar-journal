@@ -41,6 +41,7 @@ import type {
   PriceType,
   CigarHierarchy,
 } from "./types.js";
+import { HIERARCHY_UNFILED } from "./types.js";
 import { brandSlug } from "./catalog-browse.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
 import { normalizeDescriptor } from "./descriptors.js";
@@ -630,8 +631,15 @@ async function loadCigarHierarchy(deps: Deps, cigar: CigarRow): Promise<CigarHie
   // blank name has no level; so does a punctuation-only one, which slugs to the
   // empty string and would produce an unaddressable `?vitola=` link — the same
   // guard the SQL side applies in VITOLA_SLUG.
+  // `unfiled` is skipped as a key here for the same reason SQL's VITOLA_SLUG
+  // nulls it: at every level that value means IS NULL, so a `?vitola=unfiled`
+  // link built from a cigar whose vitola is literally "Unfiled" would open the
+  // screen of cigars with NO vitola — not this one. No link is the honest
+  // outcome; the breadcrumb simply omits the level, which it already does for
+  // every vitola it cannot address.
   const vitolaName = cigar.vitolaName?.trim() ?? "";
-  const vitolaSlug = vitolaName !== "" ? brandSlug(vitolaName) : "";
+  const derivedVitolaSlug = vitolaName !== "" ? brandSlug(vitolaName) : "";
+  const vitolaSlug = derivedVitolaSlug === HIERARCHY_UNFILED ? "" : derivedVitolaSlug;
 
   return {
     brand:

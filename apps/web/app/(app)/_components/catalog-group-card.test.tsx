@@ -9,9 +9,11 @@ import { CatalogGroupCard, CatalogUnfiledCard } from "./catalog-group-card";
 
 const base: GroupCardData = {
   dimension: "line",
+  id: "11111111-1111-4111-8111-111111111111",
   slug: "liga-privada",
   name: "Liga Privada",
   parentName: "Drew Estate",
+  parentSlug: "drew-estate",
   cigarCount: 12,
   inHumidorCount: 0,
   wantedCount: 0,
@@ -63,8 +65,9 @@ describe("CatalogGroupCard", () => {
     expect(render({ parentName: null })).not.toContain("Drew Estate");
   });
 
-  it("subtitles the member count", () => {
+  it("subtitles the member count, and counts one in the singular", () => {
     expect(render({ cigarCount: 12 })).toContain("12 cigars");
+    expect(render({ cigarCount: 1 })).toContain("1 cigar<");
   });
 
   it("renders each badge only when non-zero, in the leaf tile's tone grammar", () => {
@@ -97,6 +100,7 @@ describe("CatalogUnfiledCard", () => {
     const html = unfiled({ count: 530 });
     expect(html).toContain("Unfiled");
     expect(html).toContain("530 cigars");
+    expect(unfiled({ count: 1 })).toContain("1 cigar<");
   });
 
   it("drills through the reserved unfiled slug", () => {

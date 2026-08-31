@@ -3,6 +3,7 @@ import { auditLog, blendBlenders, blenders, blends, brands, cigars, lines } from
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
 import { CigarNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 import { auditActor } from "./audit-attribution.js";
+import { HIERARCHY_UNFILED } from "./types.js";
 import { brandSlug } from "./catalog-browse.js";
 import { composeCanonicalName, fold } from "./taxonomy-keys.js";
 import { assertCigarAncestry, type CigarAncestry } from "./cigar-ancestry.js";
@@ -66,13 +67,59 @@ function requireName(value: string, path: string): string {
   return name;
 }
 
+// `unfiled` is not available as a registry slug (DESIGN-004 D-05). At every
+// level that value means IS NULL — the population with NO row here — so a row
+// wearing it would be permanently unreachable: `?line=unfiled` would select the
+// cigars that have no line, never the line called Unfiled, and the group card
+// for it would link to a screen excluding all of its own members.
+//
+// The suffix, not a refusal: "Unfiled" is a legitimate name and the catalog's
+// internal vocabulary has no business vetoing it. The slug is a derived
+// addressing key, so deriving a different one costs the row nothing — while
+// refusing would put the reserved word in front of a curator who never chose it.
+// `-1` is the conventional disambiguation suffix and cannot itself fold onto the
+// reserved word; a second row that genuinely wants `unfiled-1` still hits the
+// per-parent unique pre-check below, which is where slug collisions belong.
+export const RESERVED_SLUG_SUFFIX = "-1";
+
+export function mintRegistrySlug(name: string): string {
+  const slug = brandSlug(name.trim());
+  return slug === HIERARCHY_UNFILED ? `${slug}${RESERVED_SLUG_SUFFIX}` : slug;
+}
+
+// The refusal that backs the mint. `mintRegistrySlug` never produces the
+// reserved slug, so on today's paths this is unreachable — deliberately. It is
+// the second line: the create paths refuse the value rather than trusting that
+// every future caller reached them through the minter, and a path that accepts a
+// curator-supplied slug (none does yet) must call it.
+//
+// Exported for that reason and for its own test. An unreachable guard that
+// nothing can exercise is a guard nobody can trust, and this one protects an
+// invariant — a registry row must never wear a slug that means "the rows with no
+// registry row" — whose violation is silent: the row simply becomes unreachable.
+//
+// The database CHECK constraint that would make this true for every writer,
+// including raw SQL, rides the next migration; until then these two functions are
+// the whole enforcement (noted as debt in PR #215).
+export function assertSlugMintable(slug: string, path: string): void {
+  if (slug === HIERARCHY_UNFILED) {
+    throw new ValidationError([
+      {
+        path,
+        message: `The slug '${HIERARCHY_UNFILED}' is reserved for the catalog's unfiled population.`,
+      },
+    ]);
+  }
+}
+
 function requireSlug(name: string, path: string): string {
-  const slug = brandSlug(name);
+  const slug = mintRegistrySlug(name);
   if (slug === "") {
     throw new ValidationError([
       { path, message: "This name has no addressable slug — it is punctuation only." },
     ]);
   }
+  assertSlugMintable(slug, path);
   return slug;
 }
 

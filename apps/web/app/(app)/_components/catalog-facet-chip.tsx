@@ -9,9 +9,11 @@ import { filterChip } from "@/lib/ui";
 import { chipPopoverStyle } from "@/lib/chip-popover";
 import {
   CATALOG_DIMENSION_META,
+  CATALOG_PARENT_DIMENSION,
   UNFILED_SLUG,
   type CatalogDimension,
   type CatalogHierarchy,
+  type HierarchyAncestor,
 } from "./catalog-registry";
 
 // The hierarchy filter chip (DESIGN-004 D-06) — one component for all four of
@@ -56,7 +58,10 @@ export function CatalogFacetChip({
   dimension: CatalogDimension;
   value?: string;
   scope: FacetScope;
-  onSelect: (slug?: string) => void;
+  // The picked option's own parent rides along, so the caller can scope the
+  // param the same way a group card's drill does — `lines.slug` is unique per
+  // brand, not globally.
+  onSelect: (slug?: string, ancestor?: HierarchyAncestor | null) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [style, setStyle] = useState<CSSProperties | null>(null);
@@ -142,15 +147,21 @@ export function CatalogFacetChip({
   }, [open]);
 
   const options = optionsQuery.data?.options ?? [];
+  const parentDimension = CATALOG_PARENT_DIMENSION[dimension];
+  const ancestorOf = (option: { parentSlug: string | null }): HierarchyAncestor | null =>
+    parentDimension && option.parentSlug
+      ? { dimension: parentDimension, slug: option.parentSlug }
+      : null;
 
-  // The empty-facet hide. An ACTIVE chip always survives it: the options read
-  // excludes this dimension's own filter, so a live value is normally in the
-  // list, and on the edge where it is not (a slug that matches nothing) the chip
-  // must still render — it is the only control that can clear it.
+  // The empty-facet hide. An ACTIVE chip always survives it: the domain unions
+  // the active value's own row into the options, so a live value is always in
+  // the list even when its count under the other facets is zero.
   if (options.length === 0 && !active) return null;
 
   // Resolve the pill's display text. The slug is the URL's business; the pill
-  // shows the name, falling back to the raw slug only when nothing resolves it.
+  // shows the name. The raw-slug fallback is now genuinely unreachable — the
+  // union guarantees the row — and stays only so a transport failure degrades to
+  // a readable pill rather than an empty one.
   const selected = options.find((option) => option.slug === value);
   const shown =
     value === UNFILED_SLUG ? "Unfiled" : (selected?.name ?? value);
@@ -206,12 +217,15 @@ export function CatalogFacetChip({
                 const isSelected = option.slug === value;
                 return (
                   <button
-                    key={option.slug}
+                    // Keyed by the registry id, not the slug: two brands can each
+                    // own a line called `Reserva`, and React would collapse the
+                    // two options onto one key.
+                    key={option.id}
                     type="button"
                     role="option"
                     aria-selected={isSelected}
                     onClick={() => {
-                      onSelect(isSelected ? undefined : option.slug);
+                      onSelect(isSelected ? undefined : option.slug, ancestorOf(option));
                       setOpen(false);
                     }}
                     className={`flex w-full items-center justify-between gap-3 rounded-field px-3 py-1.5 text-left text-sm transition-colors hover:bg-raised ${

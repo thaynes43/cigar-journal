@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { CatalogSort, OwnershipFacet } from "@cj/domain";
 import { filterChip, ui } from "@/lib/ui";
 import { useDebounced } from "@/lib/use-debounced";
@@ -11,13 +11,14 @@ import {
   CATALOG_OWNERSHIP_FACETS,
   CATALOG_TYPE_FACETS,
   GROUP_SORTS,
-  activeChipCount,
   catalogUrl,
   chipsFor,
   cleanSwitchWithin,
+  clearVisibleChips,
   groupingsFor,
   isGrouped,
   segmentOf,
+  visibleChipCount,
   CATALOG_LEVELS,
   levelOf,
   type CatalogSegment,
@@ -25,6 +26,7 @@ import {
   type CatalogState,
   type CatalogTypeFacet,
   type GroupSortField,
+  type HierarchyAncestor,
 } from "./catalog-registry";
 import { CatalogFacetChip, type FacetScope } from "./catalog-facet-chip";
 import { CatalogSortRow } from "./catalog-sort-row";
@@ -53,13 +55,20 @@ export function CatalogToolbar({ state }: { state: CatalogState }) {
   const router = useRouter();
   const pathname = usePathname();
 
-  const urlFor = (next: CatalogState): string => catalogUrl(pathname, next);
-  const refine = (next: CatalogState): void => {
-    router.replace(urlFor(next), { scroll: false });
-  };
-
   const [text, setText] = useState(state.q);
   const debounced = useDebounced(text, 250);
+
+  // The last `q` this component put on the URL. It is what separates "the URL
+  // changed because of my own keystrokes" from "the URL changed under me" —
+  // Back/Forward, a drill link, a seg switch — which is the only way the input
+  // can be resynced without also fighting the debounce that is still in flight.
+  const pushedQ = useRef(state.q);
+
+  const urlFor = (next: CatalogState): string => catalogUrl(pathname, next);
+  const refine = (next: CatalogState): void => {
+    pushedQ.current = next.q.trim();
+    router.replace(urlFor(next), { scroll: false });
+  };
 
   // Push the debounced query into the URL when it settles on something new.
   // Only the debounced value drives this effect; the rest comes from URL props.
@@ -67,6 +76,21 @@ export function CatalogToolbar({ state }: { state: CatalogState }) {
     if (debounced.trim() === state.q) return;
     refine({ ...state, q: debounced });
   }, [debounced]);
+
+  // Adopt an externally-driven `q`. The box is local state seeded once at mount,
+  // so without this Back restored the URL and left the stale text sitting in the
+  // input — and because every refinement sends `q: text`, the next chip tap wrote
+  // that stale text straight back into the URL and resurrected a search the user
+  // had already navigated away from.
+  //
+  // The guard is the whole trick: when `state.q` is what we ourselves last
+  // pushed, the round trip is complete and there is nothing to adopt, so an
+  // in-flight debounce is never clobbered by the URL it just produced.
+  useEffect(() => {
+    if (state.q === pushedQ.current) return;
+    pushedQ.current = state.q;
+    setText(state.q);
+  }, [state.q]);
 
   const grouped = isGrouped(state);
   const level = levelOf(state.hierarchy);
@@ -84,8 +108,14 @@ export function CatalogToolbar({ state }: { state: CatalogState }) {
     { value: "ledger", label: "Ledger" },
   ];
 
+  // A seg switch is the CLEAN push, and the search box is part of what it clears.
+  // The push drops `q` from the URL; clearing the input in the same breath is
+  // what stops the old text — still sitting in local state — from riding the next
+  // refinement back onto the URL.
   function switchSegment(next: CatalogSegment): void {
     if (next === segment) return;
+    setText("");
+    pushedQ.current = "";
     router.push(urlFor(cleanSwitchWithin(state.hierarchy, next)));
   }
 
@@ -178,10 +208,19 @@ export function CatalogToolbar({ state }: { state: CatalogState }) {
               dimension={dimension}
               value={state.hierarchy[dimension]}
               scope={scope}
-              onSelect={(slug) => {
+              onSelect={(slug, ancestor?: HierarchyAncestor | null) => {
                 const hierarchy = { ...state.hierarchy };
-                if (slug) hierarchy[dimension] = slug;
-                else delete hierarchy[dimension];
+                if (slug) {
+                  // A chip writes the same param a drill writes, so it also has
+                  // to write the same SCOPE: line and blend slugs are unique only
+                  // within their parent, and an option picked at the root would
+                  // otherwise select every marca's `Reserva` at once — under a
+                  // pill naming just one of them.
+                  if (ancestor && !hierarchy[ancestor.dimension]) {
+                    hierarchy[ancestor.dimension] = ancestor.slug;
+                  }
+                  hierarchy[dimension] = slug;
+                } else delete hierarchy[dimension];
                 refine({ ...state, q: text, hierarchy });
               }}
             />
@@ -201,19 +240,13 @@ export function CatalogToolbar({ state }: { state: CatalogState }) {
             active={state.favorites}
             onToggle={() => refine({ ...state, q: text, favorites: !state.favorites })}
           />
-          {activeChipCount(state) >= 2 ? (
+          {/* Gated and scoped to the chips this row actually renders. A drill's
+              own param is neither counted nor cleared — the drill header's back
+              link is its only exit, and it is a PUSH. */}
+          {visibleChipCount(state) >= 2 ? (
             <button
               type="button"
-              onClick={() =>
-                refine({
-                  ...state,
-                  q: text,
-                  hierarchy: {},
-                  inStock: false,
-                  smoked: false,
-                  favorites: false,
-                })
-              }
+              onClick={() => refine({ ...clearVisibleChips(state), q: text })}
               className="label-caps whitespace-nowrap text-muted transition-colors hover:text-ink"
             >
               {CATALOG_CHIPS.clearAll}

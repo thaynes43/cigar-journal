@@ -13,6 +13,9 @@ import {
   creditBlender,
   assignCigarParts,
   aliasKeysFor,
+  mintRegistrySlug,
+  RESERVED_SLUG_SUFFIX,
+  assertSlugMintable,
 } from "./taxonomy-writes.js";
 import { renameCigar, setCigarFacts } from "./curation.js";
 import { resolveCigar } from "./cigar-resolution.js";
@@ -63,6 +66,54 @@ describe("taxonomy writes", () => {
       expect(aliasKeysFor("Padrón")).toEqual(["padr-n", "padron"]);
       expect(aliasKeysFor("Liga Privada")).toEqual(["liga-privada"]);
       expect(aliasKeysFor("No. 9", ["Number 9"])).toEqual(["no-9", "number-9"]);
+    });
+  });
+
+  // `unfiled` means IS NULL at every hierarchy level (DESIGN-004 D-05), so a
+  // registry row wearing it would be permanently unreachable by URL. The slug is
+  // a DERIVED addressing key, so deriving a different one costs the row nothing —
+  // which is why this suffixes rather than refusing a perfectly legitimate name.
+  describe("mintRegistrySlug", () => {
+    it("never returns the reserved slug, whatever the spelling", () => {
+      for (const name of ["Unfiled", "UNFILED", "unfiled", "  unfiled  ", "Unfiled!", "-unfiled-"]) {
+        expect(mintRegistrySlug(name)).not.toBe("unfiled");
+        expect(mintRegistrySlug(name)).toBe(`unfiled${RESERVED_SLUG_SUFFIX}`);
+      }
+    });
+
+    it("is brandSlug for every name that does not collide with it", () => {
+      for (const name of ["Padrón", "Liga Privada", "No. 9", "1964 Anniversary Series", "Unfiled Reserva"]) {
+        expect(mintRegistrySlug(name)).toBe(brandSlug(name.trim()));
+      }
+      // Only the exact key is reserved: `Un-Filed!` slugs to `un-filed`, which
+      // addresses nothing special, so it is minted untouched.
+      expect(mintRegistrySlug("Un-Filed!")).toBe("un-filed");
+      expect(mintRegistrySlug("Unfiled Reserva")).toBe("unfiled-reserva");
+    });
+  });
+
+  // The second line of defence behind the minter. It cannot fire on today's
+  // paths — `requireSlug` mints through `mintRegistrySlug`, which never yields
+  // the bare slug — and that is the point: the create paths refuse the value
+  // rather than trusting that every future caller reached them through the
+  // minter. A guard nothing can exercise is a guard nobody can trust, so it is
+  // exercised here directly.
+  describe("assertSlugMintable", () => {
+    it("refuses the reserved slug and passes everything else", () => {
+      expect(() => assertSlugMintable("unfiled", "name")).toThrow(ValidationError);
+      try {
+        assertSlugMintable("unfiled", "name");
+      } catch (err) {
+        expect((err as ValidationError).fields).toEqual([
+          {
+            path: "name",
+            message: "The slug 'unfiled' is reserved for the catalog's unfiled population.",
+          },
+        ]);
+      }
+      for (const slug of [`unfiled${RESERVED_SLUG_SUFFIX}`, "unfiled-reserva", "un-filed", "padr-n"]) {
+        expect(() => assertSlugMintable(slug, "name")).not.toThrow();
+      }
     });
   });
 
@@ -120,6 +171,32 @@ describe("taxonomy writes", () => {
       await expect(
         createLine(h.deps, curator, { brandId: padronId, name: "Nineteen Twenty Six", aliases: ["1926"] }),
       ).rejects.toBeInstanceOf(ValidationError);
+    });
+
+    // The name is legitimate and is kept; only the derived key moves. Refusing
+    // would put the catalog's internal vocabulary in front of a curator who never
+    // chose it.
+    it("mints a line named Unfiled onto the suffixed slug, and keeps the row addressable", async () => {
+      const brandId = await seedBrand("Reserved Slug Marca");
+      const line = await createLine(h.deps, curator, { brandId, name: "Unfiled" });
+      expect(line.slug).toBe(`unfiled${RESERVED_SLUG_SUFFIX}`);
+      expect(line.slug).not.toBe("unfiled");
+
+      const row = (await h.deps.db.select().from(lines).where(eq(lines.id, line.lineId)))[0]!;
+      expect(row).toMatchObject({ brandId, name: "Unfiled", slug: "unfiled-1" });
+      // Retrievable by the key it actually wears, scoped to its brand — which is
+      // the whole point of moving the slug rather than the name.
+      const bySlug = await h.deps.db
+        .select({ id: lines.id })
+        .from(lines)
+        .where(and(eq(lines.brandId, brandId), eq(lines.slug, "unfiled-1")));
+      expect(bySlug).toEqual([{ id: line.lineId }]);
+
+      // A second Unfiled under the same marca is an ordinary slug collision, and
+      // is refused where slug collisions belong — not silently re-suffixed.
+      await expect(createLine(h.deps, curator, { brandId, name: "Unfiled" })).rejects.toBeInstanceOf(
+        ValidationError,
+      );
     });
 
     it("refuses a name with no addressable slug", async () => {

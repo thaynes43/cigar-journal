@@ -100,6 +100,11 @@ sort-btn__arrow, app.css:1729-1735; DESIGN-003 already carried this as debt).
 Brand-drill's default flips from `All` to `Lines` by one registry constant
 once Wave 3 backfill makes lines meaningful — revisit then, not before.
 
+Amended 2026-08-31: the drill-link mechanic is ported (card click → hierarchy
+param push); the preserving behavior is this design's deliberate divergence
+from library-client.tsx:1091, which builds its drill link clean. Preserving is
+the point — see D-01's brand-route defect.
+
 ## D-05 Unfiled — the honest divergence
 
 haynesnetwork skips null group keys entirely (books-query.ts:185-230: no
@@ -143,6 +148,14 @@ needs the catalog's first facet-options procedure
 
 Own/Type rails, search debounce, and the three root shelves are unchanged.
 
+Amended 2026-08-31: scoped facet counts are a new mechanic, not a port —
+haynesnetwork deliberately has none so its chip row cannot reflow. Chip
+visibility resolves as: only the drilled dimension's chip hides; ancestor
+dimensions are removed by the level table and replaced by the drill header.
+Consequence: at the root a set vitola renders as the pill (it changes no level
+and owns no header); inside a drill, Vitola is the only chip that renders
+Label · Value.
+
 ## D-07 Names on tiles: composed rows drop what the header already says
 
 Inside a drill, a `name_source='composed'` leaf renders its caption from the
@@ -185,10 +198,16 @@ never written back.** v1 has no stored preferences (DESIGN-003's URL-only
 rule stands); the resolver ships with the stored tier empty so preferences
 can land later without a contract change.
 
+Amended 2026-08-31: explicit-default tokens (by=all, own=all, type=all,
+sort=name:asc) parse to the default and are written only by a future
+stored-preference canonicalizer; a bare URL stays 'no choice'. Group-card
+ordering rides gsort, leaving sort to the leaf.
+
 ## §Strings
 
 Seg: `All · Brands · Lines · Blends · Vitolas · Ledger`. Chips: `Brand`,
-`Line`, `Blend`, `Vitola`, `Clear all`. Group subtitle: `{n} cigars`. Badges:
+`Line`, `Blend`, `Vitola`, `Clear all`. Group subtitle: `{n} cigars · 1 cigar
+singular`. Badges:
 `{n} in humidor`, `{n} wanted`. Unfiled card: `Unfiled` + count subtitle.
 Drill back labels: `All brands`, `All lines`, `All blends`, `All vitolas`,
 else the parent entity's name. Sort labels unchanged; direction is the ▲/▼

@@ -25,6 +25,7 @@ import type {
   CatalogSort,
   CatalogSortDir,
 } from "./types.js";
+import { HIERARCHY_UNFILED } from "./types.js";
 import { CigarNotFoundError } from "./errors.js";
 import { loadBrandCovers } from "./brand-images.js";
 import {
@@ -32,6 +33,7 @@ import {
   dimensionSpec,
   hierarchyActive,
   hierarchyConditions,
+  lookupHierarchyEntity,
 } from "./catalog-hierarchy.js";
 
 // The poster library reads (PRD-002 phase 2 / PRD-003 R-UNI). Browse descends
@@ -820,6 +822,7 @@ interface CatalogGroupRow {
   slug: string | null;
   name: string | null;
   parent_name: string | null;
+  parent_slug: string | null;
   cigar_count: number | string;
   in_humidor_count: number | string;
   wanted_count: number | string;
@@ -885,6 +888,7 @@ export async function browseCatalogGroups(
       ${spec.slug} AS slug,
       ${spec.name} AS name,
       ${spec.parent ?? sql`NULL::text`} AS parent_name,
+      ${spec.parentSlug ?? sql`NULL::text`} AS parent_slug,
       count(*)::int AS cigar_count,
       count(*) FILTER (WHERE ${REMAINING} > 0)::int AS in_humidor_count,
       count(*) FILTER (WHERE w.id IS NOT NULL)::int AS wanted_count,
@@ -936,9 +940,16 @@ export async function browseCatalogGroups(
     }
     groups.push({
       dimension: args.by,
+      // The registry row's id (the derived key, for vitola). The UI keys cards by
+      // it: `Reserva` is a slug two brands can both own, so a slug-keyed list
+      // collapses them onto one card.
+      id: row.group_key,
       slug: row.slug,
       name: row.name ?? row.slug,
       parentName: parentPinned ? null : (row.parent_name ?? null),
+      // Never suppressed the way `parentName` is: the sub-label is display and
+      // hides once the header says it, but the drill still has to SCOPE itself.
+      parentSlug: row.parent_slug ?? null,
       cigarCount,
       inHumidorCount,
       wantedCount,
@@ -952,9 +963,11 @@ export async function browseCatalogGroups(
 // ---- Facet options (DESIGN-004 D-06) --------------------------------------
 
 interface CatalogFacetRow {
+  id: string | null;
   slug: string | null;
   name: string | null;
   parent_name: string | null;
+  parent_slug: string | null;
   option_count: number | string;
 }
 
@@ -995,9 +1008,11 @@ export async function catalogFacetOptions(
 
   const result = await deps.db.execute(sql`
     SELECT
+      ${spec.keyText} AS id,
       ${spec.slug} AS slug,
       ${spec.name} AS name,
       ${spec.parent ?? sql`NULL::text`} AS parent_name,
+      ${spec.parentSlug ?? sql`NULL::text`} AS parent_slug,
       count(*)::int AS option_count
     FROM cigars c
     ${HIERARCHY_JOINS}
@@ -1015,13 +1030,71 @@ export async function catalogFacetOptions(
 
   const options: CatalogFacetOption[] = [];
   for (const row of result.rows as unknown as CatalogFacetRow[]) {
-    if (row.slug == null) continue; // defensive: `keyed` already excluded these
+    if (row.slug == null || row.id == null) continue; // defensive: `keyed` already excluded these
     options.push({
+      id: row.id,
       slug: row.slug,
       name: row.name ?? row.slug,
       parentName: parentPinned ? null : (row.parent_name ?? null),
+      parentSlug: row.parent_slug ?? null,
       count: Number(row.option_count),
     });
   }
+
+  // Union the ACTIVE value's own row in, whatever its count.
+  //
+  // The aggregation above can legitimately omit it in two ways: its count under
+  // the OTHER active facets is zero (nothing is grouped, so no row is produced),
+  // or the option list was truncated by `limit`. Either way the chip is then
+  // holding a value it has no row for, and the pill falls back to rendering the
+  // raw slug — `Vitola · petit-corona` — which is the URL's vocabulary leaking
+  // onto a display surface. Worse, it happens exactly when a filter has narrowed
+  // things far enough to be worth reading.
+  //
+  // So the row is looked up directly (unfaceted, like the drill header's) and
+  // counted for real under the full filter set. A count of 0 is the honest
+  // answer and is shown as such: it says this value is why the grid is empty.
+  //
+  // Two guards, and both are load-bearing. The slug pre-check is the fast path:
+  // when the aggregation already returned the value there is nothing to look up.
+  // The identity re-check is what makes the union safe for a param that is NOT a
+  // canonical slug — a pre-wave `?brand=Padrón` link resolves through the fold,
+  // so the aggregation's row and the looked-up row wear different `slug` strings
+  // while being the same brand. Deduping on the registry id is the only test that
+  // sees that, and without it the chip would list the brand twice.
+  const active = args.hierarchy?.[args.dimension];
+  if (active != null && active !== HIERARCHY_UNFILED && !options.some((o) => o.slug === active)) {
+    const entity = await lookupHierarchyEntity(deps, args.dimension, active, scoped);
+    if (entity && !options.some((o) => o.id === entity.id)) {
+      const activeFilters = catalogFilters(principal, args, {
+        ...scoped,
+        [args.dimension]: active,
+      });
+      const counted = await deps.db.execute(sql`
+        SELECT count(*)::int AS n
+        FROM cigars c
+        ${HIERARCHY_JOINS}
+        ${spec.joins}
+        ${needsOwnership ? ownershipJoins(principal) : sql``}
+        ${args.inStock !== undefined ? OFFER_JOIN : sql``}
+        WHERE ${sql.join(activeFilters, sql` AND `)}
+      `);
+      const option: CatalogFacetOption = {
+        id: entity.id,
+        slug: entity.slug,
+        name: entity.name,
+        parentName: parentPinned ? null : entity.parentName,
+        parentSlug: entity.parentSlug,
+        count: Number((counted.rows[0] as { n: number | string } | undefined)?.n ?? 0),
+      };
+      // Placed by the same key the query ordered on (name, then identity) so the
+      // unioned row sits where a counted one would have, not at the end.
+      const at = options.findIndex(
+        (o) => o.name > option.name || (o.name === option.name && o.id > option.id),
+      );
+      options.splice(at === -1 ? options.length : at, 0, option);
+    }
+  }
+
   return { options };
 }

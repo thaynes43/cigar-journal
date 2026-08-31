@@ -6,11 +6,13 @@ import { CatalogGroupCard, CatalogUnfiledCard } from "./catalog-group-card";
 import { CatalogDrillHeader, type DrillHeaderProps } from "./catalog-drill-header";
 import {
   CATALOG_GRID,
+  CATALOG_PARENT_DIMENSION,
   UNFILED_SLUG,
   catalogUrl,
   drillInto,
   type CatalogDimension,
   type CatalogState,
+  type HierarchyAncestor,
 } from "./catalog-registry";
 import { api } from "@/lib/trpc/react";
 
@@ -51,7 +53,22 @@ export function CatalogGroupGrid({
     { placeholderData: keepPreviousData },
   );
 
-  const href = (slug: string): string => catalogUrl(pathname, drillInto(state, by, slug));
+  // A card's drill carries its own parent when the URL does not already pin one:
+  // at the root, `Reserva` means nothing without the marca it belongs to, and two
+  // cards would otherwise open the same merged screen.
+  const parentDimension = CATALOG_PARENT_DIMENSION[by];
+  const href = (slug: string, parentSlug?: string | null): string =>
+    catalogUrl(
+      pathname,
+      drillInto(
+        state,
+        by,
+        slug,
+        parentDimension && parentSlug
+          ? ({ dimension: parentDimension, slug: parentSlug } satisfies HierarchyAncestor)
+          : null,
+      ),
+    );
 
   if (query.isLoading) {
     return (
@@ -90,8 +107,11 @@ export function CatalogGroupGrid({
         className={`${CATALOG_GRID} transition-opacity ${query.isPlaceholderData ? "opacity-55" : ""}`}
       >
         {groups.map((group) => (
-          <li key={`${group.dimension}:${group.slug}`}>
-            <CatalogGroupCard card={group} href={href(group.slug)} />
+          // Keyed by the registry id. `dimension:slug` collided the moment two
+          // brands each owned a line called `Reserva` — React reused one card's
+          // DOM for the other, so the wall showed one of the two.
+          <li key={group.id}>
+            <CatalogGroupCard card={group} href={href(group.slug, group.parentSlug)} />
           </li>
         ))}
         {/* Unfiled renders LAST regardless of sort — it is not a peer of the

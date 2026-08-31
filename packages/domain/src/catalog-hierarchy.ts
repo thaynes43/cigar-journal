@@ -43,11 +43,50 @@ export const HIERARCHY_JOINS = sql`
 // to the rows that produced it.
 //
 // The inner `nullif(btrim(...), '')` makes a blank vitola NULL before slugging;
-// the OUTER one makes a punctuation-only vitola (`"---"` → `''`) NULL as well,
+// the next one makes a punctuation-only vitola (`"---"` → `''`) NULL as well,
 // so it reads as ABSENT rather than as a real group keyed on the empty string.
 // An empty-string key would be unaddressable by URL — the same reason 0026 skips
 // punctuation-only brand names as unmintable.
-export const VITOLA_SLUG = sql`nullif(btrim(regexp_replace(lower(nullif(btrim(c.vitola_name), '')), '[^abcdefghijklmnopqrstuvwxyz0123456789]+', '-', 'g'), '-'), '')`;
+//
+// The OUTERMOST `nullif(…, 'unfiled')` reserves the D-05 slug at this level. A
+// cigar whose vitola_name is literally "Unfiled" would otherwise key a group on
+// `unfiled`, and `?vitola=unfiled` means IS NULL — so that group's card would
+// link to a screen that excludes every one of its own members, and the card
+// would be unreachable by any URL. Folding it into the null bucket is the
+// resolution that keeps the card's count and its drill's row count equal, which
+// is the invariant this whole module exists to hold. Vitola is the only level
+// that needs this handled at read time: brand, line and blend key off registry
+// rows, where the slug is minted once and can be reserved at the write path.
+export const VITOLA_SLUG = sql`nullif(nullif(btrim(regexp_replace(lower(nullif(btrim(c.vitola_name), '')), '[^abcdefghijklmnopqrstuvwxyz0123456789]+', '-', 'g'), '-'), ''), 'unfiled')`;
+
+// One incoming param value, run through the STORED slug rule in SQL (the
+// `brandSlug()` transcription that migrations 0026/0027 mint slugs with). Bound
+// as a parameter and folded by Postgres, so it cannot drift from what those
+// migrations wrote — the reason it is not the TS `brandSlug()` here.
+//
+// It backs the pre-wave fallback below. Deliberately the STORED rule and not
+// `fold()`: fold strips accents, and probing `aliases` with it would make
+// `?brand=padron` match a `Padrón` stored as `padr-n` *in addition to* a real
+// `Padron` brand that owns the slug outright — widening a correct link into two
+// marcas, which is exactly the inversion 0027's collision pass exists to prevent.
+const slugFold = (value: string): SQL =>
+  sql`btrim(regexp_replace(lower(${value}), '[^abcdefghijklmnopqrstuvwxyz0123456789]+', '-', 'g'), '-')`;
+
+// A level's predicate for a non-reserved value: the slug as given, OR the same
+// value run through the slug rule.
+//
+// The second arm is the pre-wave fallback (issue #215 verify). DESIGN-003's
+// Brand chip wrote the brand's NAME into `?brand=`, and D-01 changed the param
+// to hold a slug — so every link shared before this wave (`?brand=Drew Estate`,
+// `?brand=Padrón`) would land on an empty grid. Folding the value resolves them,
+// including the accented case: the stored slug never folds accents either, so
+// `Padrón` → `padr-n` is exactly the row that link meant.
+//
+// It cannot widen a correct link, because the slug rule is idempotent: for a
+// value that already IS a slug the second arm is the first one restated. That is
+// what lets this be an unconditional OR rather than a second round trip.
+const slugMatch = (column: SQL, value: string): SQL =>
+  sql`(${column} = ${value} OR ${column} = ${slugFold(value)})`;
 
 // One predicate per pinned level (DESIGN-004 D-01: "a drill is nothing but
 // setting one of them"). They AND with q/type/own/overlay by construction, which
@@ -70,21 +109,29 @@ export function hierarchyConditions(filter: CatalogHierarchyFilter | undefined):
 
   const { brand, line, blend, vitola } = filter;
   if (brand) {
-    conds.push(brand === HIERARCHY_UNFILED ? sql`c.brand_id IS NULL` : sql`br.slug = ${brand}`);
+    conds.push(
+      brand === HIERARCHY_UNFILED ? sql`c.brand_id IS NULL` : slugMatch(sql`br.slug`, brand),
+    );
   }
   if (line) {
-    conds.push(line === HIERARCHY_UNFILED ? sql`c.line_id IS NULL` : sql`ln.slug = ${line}`);
+    conds.push(line === HIERARCHY_UNFILED ? sql`c.line_id IS NULL` : slugMatch(sql`ln.slug`, line));
   }
   if (blend) {
-    conds.push(blend === HIERARCHY_UNFILED ? sql`c.blend_id IS NULL` : sql`bl.slug = ${blend}`);
+    conds.push(
+      blend === HIERARCHY_UNFILED ? sql`c.blend_id IS NULL` : slugMatch(sql`bl.slug`, blend),
+    );
   }
   if (vitola) {
     // `VITOLA_SLUG IS NULL` rather than `nullif(btrim(c.vitola_name),'') IS NULL`:
     // the two differ only for a punctuation-only vitola name, and this form is
     // exactly "the group key is null" — so the Unfiled card's count always equals
     // the row count of the drill that card links to. The narrower form would let
-    // a `"---"` row count on the card and vanish from the drill.
-    conds.push(vitola === HIERARCHY_UNFILED ? sql`${VITOLA_SLUG} IS NULL` : sql`${VITOLA_SLUG} = ${vitola}`);
+    // a `"---"` row count on the card and vanish from the drill. Since the key
+    // now also nulls a literal `unfiled`, that spelling lands in the same bucket
+    // from both sides.
+    conds.push(
+      vitola === HIERARCHY_UNFILED ? sql`${VITOLA_SLUG} IS NULL` : slugMatch(VITOLA_SLUG, vitola),
+    );
   }
   return conds;
 }
@@ -120,6 +167,12 @@ export interface DimensionSpec {
   // The immediate parent's name (D-03 sub-label), or null for a dimension with
   // no parent to name.
   parent: SQL | null;
+  // The immediate parent's SLUG. The card and the chip option both need it to
+  // scope their own param — `lines.slug` is unique per brand, `blends.slug` per
+  // line — so a root-level `Reserva` addresses one marca's line rather than
+  // every marca's at once. Unlike `parent`, it is never suppressed for display
+  // reasons: it is navigation.
+  parentSlug: SQL | null;
   // The level above this one, so a caller can drop `parent` when the drill
   // header already says it.
   parentDimension: CatalogDimension | null;
@@ -143,6 +196,7 @@ export function dimensionSpec(by: CatalogDimension): DimensionSpec {
         slug: sql`min(ln.slug)`,
         name: sql`min(ln.name)`,
         parent: sql`min(lnbr.name)`,
+        parentSlug: sql`min(lnbr.slug)`,
         parentDimension: "brand",
         joins: sql`LEFT JOIN brands lnbr ON lnbr.id = ln.brand_id`,
         keyed: sql`ln.id IS NOT NULL`,
@@ -154,6 +208,7 @@ export function dimensionSpec(by: CatalogDimension): DimensionSpec {
         slug: sql`min(bl.slug)`,
         name: sql`min(bl.name)`,
         parent: sql`min(blln.name)`,
+        parentSlug: sql`min(blln.slug)`,
         parentDimension: "line",
         joins: sql`LEFT JOIN lines blln ON blln.id = bl.line_id`,
         keyed: sql`bl.id IS NOT NULL`,
@@ -169,6 +224,7 @@ export function dimensionSpec(by: CatalogDimension): DimensionSpec {
         slug: sql`min(${VITOLA_SLUG})`,
         name: sql`min(btrim(c.vitola_name))`,
         parent: null,
+        parentSlug: null,
         parentDimension: null,
         joins: sql``,
         keyed: sql`${VITOLA_SLUG} IS NOT NULL`,
@@ -181,6 +237,7 @@ export function dimensionSpec(by: CatalogDimension): DimensionSpec {
         slug: sql`min(br.slug)`,
         name: sql`min(br.name)`,
         parent: null,
+        parentSlug: null,
         parentDimension: null,
         joins: sql``,
         keyed: sql`br.id IS NOT NULL`,
@@ -188,11 +245,20 @@ export function dimensionSpec(by: CatalogDimension): DimensionSpec {
   }
 }
 
-// ---- Drill-header resolution (DESIGN-004 D-04) -----------------------------
+// ---- Entity resolution (DESIGN-004 D-04 / D-06) ---------------------------
 
 export interface ResolvedHierarchyLevel {
   slug: string;
   name: string;
+}
+
+// One registry row behind a pinned slug, with everything two callers need: the
+// drill header wants the name, the facet chip's union (D-06) wants the id and
+// the parent so the option it inserts is indistinguishable from a counted one.
+export interface HierarchyEntity extends ResolvedHierarchyLevel {
+  id: string;
+  parentSlug: string | null;
+  parentName: string | null;
 }
 
 // The display names behind the pinned slugs, one entry per level that RESOLVED.
@@ -204,103 +270,128 @@ export type ResolvedCatalogHierarchy = Partial<Record<CatalogDimension, Resolved
 // registry row behind it, so it resolves by construction rather than by lookup.
 const UNFILED_LEVEL: ResolvedHierarchyLevel = { slug: HIERARCHY_UNFILED, name: "Unfiled" };
 
-// Name the entities a drill header is about (D-04: "back label, the entity name,
-// and its cigar count").
+// An ancestor pinned to `unfiled` scopes nothing — there is no registry row to
+// scope by — so it is treated as absent for lookup purposes.
+const scopeSlug = (slug: string | undefined): string | null =>
+  slug != null && slug !== HIERARCHY_UNFILED ? slug : null;
+
+interface EntityRow {
+  id: string | null;
+  slug: string | null;
+  name: string | null;
+  parent_slug: string | null;
+  parent_name: string | null;
+}
+
+// Resolve ONE level's pinned slug to its row.
 //
-// DELIBERATELY NOT FACETED. This applies no q/type/own/overlay filter and no
-// `catalog_status` gate at the registry levels: it answers "what did I drill
-// into", which is a fact about the URL, not about the current result set. A
-// facet that empties the group must still leave the header naming the entity —
-// otherwise narrowing a filter blanks the header and the user loses their place.
+// DELIBERATELY NOT FACETED. No q/type/own/overlay filter and no `catalog_status`
+// gate at the registry levels: it answers "what is this slug", a fact about the
+// URL rather than about the current result set. A facet that empties the group
+// must still leave the header naming the entity, and the chip's pill must still
+// read `Vitola · Petit Corona` at a scope where the count is zero — otherwise
+// narrowing a filter blanks the label and the user loses their place.
 //
 // Ancestors DO scope the lookup, because line and blend slugs are unique only
 // within their parent (`lines_brand_id_slug_key`, `blends_line_id_slug_key`):
 // `?brand=drew-estate&line=reserva` must resolve Drew Estate's Reserva, not some
 // other brand's. With no ancestor pinned the slug can legitimately match several
-// rows; the first by name wins, so the header is at least deterministic.
+// rows; the first by name wins, so the answer is at least deterministic.
+export async function lookupHierarchyEntity(
+  deps: Deps,
+  dimension: CatalogDimension,
+  slug: string,
+  ancestors: CatalogHierarchyFilter = {},
+): Promise<HierarchyEntity | null> {
+  if (slug === HIERARCHY_UNFILED) return null;
+  const brandScope = scopeSlug(ancestors.brand);
+  const lineScope = scopeSlug(ancestors.line);
+
+  let query: SQL;
+  switch (dimension) {
+    case "brand":
+      query = sql`
+        SELECT b.id::text AS id, b.slug AS slug, b.name AS name,
+               NULL::text AS parent_slug, NULL::text AS parent_name
+        FROM brands b
+        WHERE ${slugMatch(sql`b.slug`, slug)}
+        ORDER BY b.name ASC
+        LIMIT 1
+      `;
+      break;
+    case "line":
+      query = sql`
+        SELECT ln.id::text AS id, ln.slug AS slug, ln.name AS name,
+               b.slug AS parent_slug, b.name AS parent_name
+        FROM lines ln
+        LEFT JOIN brands b ON b.id = ln.brand_id
+        WHERE ${slugMatch(sql`ln.slug`, slug)}
+          ${brandScope != null ? sql`AND ${slugMatch(sql`b.slug`, brandScope)}` : sql``}
+        ORDER BY ln.name ASC
+        LIMIT 1
+      `;
+      break;
+    case "blend":
+      query = sql`
+        SELECT bl.id::text AS id, bl.slug AS slug, bl.name AS name,
+               ln.slug AS parent_slug, ln.name AS parent_name
+        FROM blends bl
+        LEFT JOIN lines ln ON ln.id = bl.line_id
+        LEFT JOIN brands b ON b.id = ln.brand_id
+        WHERE ${slugMatch(sql`bl.slug`, slug)}
+          ${lineScope != null ? sql`AND ${slugMatch(sql`ln.slug`, lineScope)}` : sql``}
+          ${brandScope != null ? sql`AND ${slugMatch(sql`b.slug`, brandScope)}` : sql``}
+        ORDER BY bl.name ASC
+        LIMIT 1
+      `;
+      break;
+    default:
+      // No registry row exists, so the identity IS the key and the display name
+      // is a representative spelling off the leaves themselves — active ones
+      // only, since an excluded row's spelling should not name a header. First by
+      // name, for determinism.
+      query = sql`
+        SELECT ${VITOLA_SLUG} AS id, ${VITOLA_SLUG} AS slug,
+               btrim(c.vitola_name) AS name,
+               NULL::text AS parent_slug, NULL::text AS parent_name
+        FROM cigars c
+        WHERE c.catalog_status = 'active' AND ${slugMatch(VITOLA_SLUG, slug)}
+        ORDER BY btrim(c.vitola_name) ASC
+        LIMIT 1
+      `;
+      break;
+  }
+
+  const row = (await deps.db.execute(query)).rows[0] as EntityRow | undefined;
+  if (row?.id == null || row.slug == null || row.name == null) return null;
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    parentSlug: row.parent_slug,
+    parentName: row.parent_name,
+  };
+}
+
+// Name the entities a drill header is about (D-04: "back label, the entity name,
+// and its cigar count"), one lookup per pinned level.
 export async function resolveCatalogHierarchy(
   deps: Deps,
   filter: CatalogHierarchyFilter,
 ): Promise<ResolvedCatalogHierarchy> {
   const resolved: ResolvedCatalogHierarchy = {};
-  // An ancestor pinned to `unfiled` scopes nothing — there is no registry row to
-  // scope by — so it is treated as absent for lookup purposes.
-  const scope = (slug: string | undefined): string | null =>
-    slug != null && slug !== HIERARCHY_UNFILED ? slug : null;
-  const first = (rows: unknown[]): string | null =>
-    (rows as { name: string | null }[])[0]?.name ?? null;
-
-  if (filter.brand) {
-    if (filter.brand === HIERARCHY_UNFILED) {
-      resolved.brand = UNFILED_LEVEL;
-    } else {
-      const rows = await deps.db.execute(
-        sql`SELECT name FROM brands WHERE slug = ${filter.brand} ORDER BY name ASC LIMIT 1`,
-      );
-      const name = first(rows.rows);
-      if (name != null) resolved.brand = { slug: filter.brand, name };
+  for (const dimension of ["brand", "line", "blend", "vitola"] as const) {
+    const slug = filter[dimension];
+    if (!slug) continue;
+    if (slug === HIERARCHY_UNFILED) {
+      resolved[dimension] = UNFILED_LEVEL;
+      continue;
     }
+    const entity = await lookupHierarchyEntity(deps, dimension, slug, filter);
+    // The row's OWN slug, not the param: a pre-wave link carrying a brand name
+    // resolves through the fold, and the canonical slug is the honest answer to
+    // "what did I drill into".
+    if (entity) resolved[dimension] = { slug: entity.slug, name: entity.name };
   }
-
-  if (filter.line) {
-    if (filter.line === HIERARCHY_UNFILED) {
-      resolved.line = UNFILED_LEVEL;
-    } else {
-      const brandScope = scope(filter.brand);
-      const rows = await deps.db.execute(sql`
-        SELECT ln.name AS name
-        FROM lines ln
-        JOIN brands b ON b.id = ln.brand_id
-        WHERE ln.slug = ${filter.line}
-          ${brandScope != null ? sql`AND b.slug = ${brandScope}` : sql``}
-        ORDER BY ln.name ASC
-        LIMIT 1
-      `);
-      const name = first(rows.rows);
-      if (name != null) resolved.line = { slug: filter.line, name };
-    }
-  }
-
-  if (filter.blend) {
-    if (filter.blend === HIERARCHY_UNFILED) {
-      resolved.blend = UNFILED_LEVEL;
-    } else {
-      const lineScope = scope(filter.line);
-      const brandScope = scope(filter.brand);
-      const rows = await deps.db.execute(sql`
-        SELECT bl.name AS name
-        FROM blends bl
-        JOIN lines ln ON ln.id = bl.line_id
-        JOIN brands b ON b.id = ln.brand_id
-        WHERE bl.slug = ${filter.blend}
-          ${lineScope != null ? sql`AND ln.slug = ${lineScope}` : sql``}
-          ${brandScope != null ? sql`AND b.slug = ${brandScope}` : sql``}
-        ORDER BY bl.name ASC
-        LIMIT 1
-      `);
-      const name = first(rows.rows);
-      if (name != null) resolved.blend = { slug: filter.blend, name };
-    }
-  }
-
-  if (filter.vitola) {
-    if (filter.vitola === HIERARCHY_UNFILED) {
-      resolved.vitola = UNFILED_LEVEL;
-    } else {
-      // No registry row exists, so the display name is a representative spelling
-      // off the leaves themselves — active ones only, since an excluded row's
-      // spelling should not name a header. First by name, for determinism.
-      const rows = await deps.db.execute(sql`
-        SELECT btrim(c.vitola_name) AS name
-        FROM cigars c
-        WHERE c.catalog_status = 'active' AND ${VITOLA_SLUG} = ${filter.vitola}
-        ORDER BY btrim(c.vitola_name) ASC
-        LIMIT 1
-      `);
-      const name = first(rows.rows);
-      if (name != null) resolved.vitola = { slug: filter.vitola, name };
-    }
-  }
-
   return resolved;
 }

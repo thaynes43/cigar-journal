@@ -47,6 +47,17 @@ export const CATALOG_DIMENSION_META = {
 // The hierarchy slice of the URL: one slug per level, `unfiled` reserved.
 export type CatalogHierarchy = Partial<Record<CatalogDimension, string>>;
 
+// The level directly above each dimension, and therefore the param a card or a
+// facet option must also write to scope itself (see `drillInto`). Null where
+// there is nothing above to scope by: `brand` is the top of the descent, and
+// `vitola` is a key off the leaf rather than a registry row with a parent.
+export const CATALOG_PARENT_DIMENSION = {
+  brand: null,
+  line: "brand",
+  blend: "line",
+  vitola: null,
+} as const satisfies Record<CatalogDimension, CatalogDimension | null>;
+
 // ---------------------------------------------------------------------------
 // The seg (DESIGN-004 D-02)
 // ---------------------------------------------------------------------------
@@ -82,9 +93,20 @@ export function legacyViewDimension(param: string | undefined): CatalogDimension
   return param === "brands" ? "brand" : null;
 }
 
-// Normalize the `by` param to a grouping dimension. An unknown token reads as
-// absent (the flat grid), per the D-04 refinement rule.
-export function parseBy(param: string | undefined): CatalogDimension | undefined {
+// The EXPLICIT-DEFAULT token (D-09, amended). `by=all` says "no grouping" as a
+// choice rather than as an absence, which is a distinction only the future
+// stored-preference tier can act on: absence falls through to the store, an
+// explicit token answers the URL tier and stops there. `catalogUrl` never writes
+// it — only a preference canonicalizer would.
+export const CATALOG_ALL_TOKEN = "all";
+
+// Normalize the `by` param to a grouping dimension. `all` is the explicit
+// default (the flat grid, chosen); an unknown token reads as absent (the flat
+// grid, unchosen), per the D-04 refinement rule.
+export function parseBy(
+  param: string | undefined,
+): CatalogDimension | typeof CATALOG_ALL_TOKEN | undefined {
+  if (param === CATALOG_ALL_TOKEN) return CATALOG_ALL_TOKEN;
   return (CATALOG_DIMENSIONS as readonly string[]).includes(param ?? "")
     ? (param as CatalogDimension)
     : undefined;
@@ -383,7 +405,10 @@ export const CATALOG_CHIPS = {
 // row/cap/tone grammar and are absent when zero.
 export const CATALOG_GROUP_STRINGS = {
   unfiled: "Unfiled",
-  subtitle: (n: number): string => `${n} cigars`,
+  // `{n} cigars`, with its singular. §Strings pinned only the plural, so a
+  // one-member group read `1 cigars` — visibly wrong on a surface whose whole
+  // job is counting. The design's §Strings now carries both forms.
+  subtitle: (n: number): string => `${n} ${n === 1 ? "cigar" : "cigars"}`,
   inHumidor: (n: number): string => `${n} in humidor`,
   wanted: (n: number): string => `${n} wanted`,
 } as const;
@@ -435,15 +460,32 @@ export function hasActiveChip(
   );
 }
 
-export function activeChipCount(
+// What `Clear all` counts and what it clears: the chips ACTUALLY ON SCREEN —
+// `chipsFor` plus the three toggles — and nothing else.
+//
+// The drilled dimension is deliberately excluded from both. Counting it made
+// `Clear all` appear inside a drill that showed a single chip, and clearing it
+// would have left the drill through a control that is not the drill's exit: the
+// header's back link is a PUSH that restores the group screen, and a REPLACE that
+// silently dropped `?brand=` would leave the user somewhere Back cannot undo,
+// under a header that is no longer about anything. A control clears what it can
+// be seen to control.
+export function visibleChipCount(
   state: Pick<CatalogState, "hierarchy" | "inStock" | "smoked" | "favorites">,
 ): number {
   return (
-    CATALOG_DIMENSIONS.filter((d) => Boolean(state.hierarchy[d])).length +
+    chipsFor(state.hierarchy).filter((d) => Boolean(state.hierarchy[d])).length +
     (state.inStock ? 1 : 0) +
     (state.smoked ? 1 : 0) +
     (state.favorites ? 1 : 0)
   );
+}
+
+// The state `Clear all` produces: every visible chip dropped, the drill intact.
+export function clearVisibleChips(state: CatalogState): CatalogState {
+  const hierarchy: CatalogHierarchy = { ...state.hierarchy };
+  for (const dimension of chipsFor(state.hierarchy)) delete hierarchy[dimension];
+  return { ...state, hierarchy, inStock: false, smoked: false, favorites: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -455,11 +497,20 @@ export function activeChipCount(
 //   ?brand= ?line= ?blend= ?vitola=  hierarchy state — drill or chip
 //      value `unfiled`               IS NULL at that level (D-05)
 //   ?sort=field:dir                  leaf sorts + direction (absent = name:asc)
+//   ?gsort=field:dir                 group-card ordering (absent = name:asc)
 //   ?q= ?own= ?type= ?instock= ?smoked= ?favorites=   unchanged
 //
 // Build the target URL for a slice state, emitting only the params the active
 // surface answers and omitting every default so a shared URL stays minimal. Pure,
 // so the contract is unit-tested directly.
+//
+// The leaf sort and the three toggles are emitted REGARDLESS of `by`. They used
+// to be gated on the flat grid, on the reading that a grouped screen does not
+// show them — but `by` is a rung of the same navigation, not a different page:
+// drilling in clears `by` and drilling out re-sets it, so a gated param is
+// silently dropped on the way down and cannot come back. Group cards still do
+// not render chips or a leaf sort row (D-06); they simply carry that state
+// through, which is exactly what D-04's preserving push promises.
 export function catalogUrl(pathname: string, next: CatalogState): string {
   const params = new URLSearchParams();
   if (next.view === "ledger") {
@@ -481,19 +532,23 @@ export function catalogUrl(pathname: string, next: CatalogState): string {
   if (next.own !== "all") params.set("own", next.own);
   if (next.type) params.set("type", next.type);
 
-  if (next.by) {
-    // Grouped: the cards carry their own two-key sort and take no chips.
-    if (!sameSort(next.groupSort, DEFAULT_GROUP_SORT)) {
-      params.set("sort", formatSortToken(next.groupSort));
-    }
-  } else {
-    if (!sameSort(next.sort, DEFAULT_LEAF_SORT)) params.set("sort", formatSortToken(next.sort));
-    // The boolean chips are presence flags (present=on, absent=off) — the "1" is
-    // a placeholder, the parse only tests presence.
-    if (next.inStock) params.set("instock", "1");
-    if (next.smoked) params.set("smoked", "1");
-    if (next.favorites) params.set("favorites", "1");
+  // Two sort params, never one. `sort` is always the LEAF vocabulary and `gsort`
+  // always the group-card vocabulary, so the two can never be read against the
+  // wrong one: sharing a key meant a `count:desc` left on the URL by a group
+  // screen arrived at the leaf grid as an unknown field, and the leaf's own
+  // `price:desc` arrived at a group screen the same way — each silently resetting
+  // the other. `gsort` rides only a grouped URL, which is the only surface it
+  // orders.
+  if (!sameSort(next.sort, DEFAULT_LEAF_SORT)) params.set("sort", formatSortToken(next.sort));
+  if (next.by && !sameSort(next.groupSort, DEFAULT_GROUP_SORT)) {
+    params.set("gsort", formatSortToken(next.groupSort));
   }
+
+  // The boolean chips are presence flags (present=on, absent=off) — the "1" is
+  // a placeholder, the parse only tests presence.
+  if (next.inStock) params.set("instock", "1");
+  if (next.smoked) params.set("smoked", "1");
+  if (next.favorites) params.set("favorites", "1");
 
   const qs = params.toString();
   return qs ? `${pathname}?${qs}` : pathname;
@@ -511,6 +566,7 @@ export interface CatalogSearchParams {
   type?: string;
   own?: string;
   sort?: string;
+  gsort?: string;
   instock?: string;
   smoked?: string;
   favorites?: string;
@@ -544,12 +600,21 @@ export interface ResolvedCatalogState {
   source: Record<"by" | "own" | "type" | "sort", PreferenceSource>;
 }
 
+// The URL tier is passed BOXED (`{ value }` or `undefined`) rather than as a bare
+// value, because for two of these dimensions the default IS `undefined` — `by`
+// with no grouping, `type` with no type filter — and a bare argument cannot then
+// say "the URL chose the default" apart from "the URL said nothing". That
+// distinction is the entire point of the explicit-default tokens (`by=all`,
+// `type=all`, `own=all`, `sort=name:asc`): an explicit token answers the URL tier
+// and stops there, while absence falls through to the stored tier. Nothing writes
+// those tokens today — `catalogUrl` still omits every default — so the tokens are
+// read-only until a preference canonicalizer exists to mint them.
 function pick<T>(
-  fromUrl: T | undefined,
+  fromUrl: { value: T } | undefined,
   stored: T | undefined,
   fallback: T,
 ): { value: T; source: PreferenceSource } {
-  if (fromUrl !== undefined) return { value: fromUrl, source: "url" };
+  if (fromUrl !== undefined) return { value: fromUrl.value, source: "url" };
   if (stored !== undefined) return { value: stored, source: "stored" };
   return { value: fallback, source: "default" };
 }
@@ -581,42 +646,47 @@ export function resolveCatalogState(
   // (`?blend=…&by=brand`) degrades to that level's flat grid rather than asking
   // the domain for a grouping it cannot answer beneath that scope.
   const offered = groupingsFor(hierarchy);
-  const urlBy = parseBy(params.by);
-  const by = pick(
-    urlBy !== undefined && offered.includes(urlBy) ? urlBy : undefined,
+  const rawBy = parseBy(params.by);
+  // `by=all` is the explicit "no grouping" choice; a dimension this level does
+  // not offer, or an unknown token, reads as absent so a stale link degrades to
+  // the level's flat grid rather than asking the domain for a grouping it cannot
+  // answer in that scope.
+  const urlBy: { value: CatalogDimension | undefined } | undefined =
+    rawBy === CATALOG_ALL_TOKEN
+      ? { value: undefined }
+      : rawBy !== undefined && offered.includes(rawBy)
+        ? { value: rawBy }
+        : undefined;
+  const by = pick<CatalogDimension | undefined>(
+    urlBy,
     stored.by !== undefined && offered.includes(stored.by) ? stored.by : undefined,
     CATALOG_LEVELS[levelOf(hierarchy)].defaultBy,
   );
 
-  const urlOwn =
+  const urlOwn: { value: OwnershipFacet } | undefined =
     params.own === "have" || params.own === "want" || params.own === "dont" || params.own === "all"
-      ? params.own
+      ? { value: params.own }
       : undefined;
   const own = pick<OwnershipFacet>(urlOwn, stored.own, "all");
 
-  const urlType: CigarType | undefined =
-    params.type === "NC" || params.type === "CC" ? params.type : undefined;
-  const type = pick<CigarType | undefined>(
-    params.type !== undefined ? urlType : undefined,
-    stored.type,
-    undefined,
-  );
+  const urlType: { value: CigarType | undefined } | undefined =
+    params.type === "NC" || params.type === "CC"
+      ? { value: params.type }
+      : params.type === CATALOG_ALL_TOKEN
+        ? { value: undefined }
+        : undefined;
+  const type = pick<CigarType | undefined>(urlType, stored.type, undefined);
 
-  // One `sort` param serves both surfaces; which vocabulary it is read against
-  // depends on whether a grouping is active. A token from the other surface is
-  // an unknown field there and reads as that surface's default.
-  const grouped = view === "grid" && by.value !== undefined;
-  const urlSort = params.sort
-    ? parseSortToken(params.sort, LEAF_SORT_FIELDS, DEFAULT_LEAF_SORT)
-    : undefined;
-  const sort = pick<CatalogSortToken<CatalogSort>>(
-    params.sort && !grouped ? urlSort : undefined,
-    stored.sort,
-    DEFAULT_LEAF_SORT,
-  );
-  const groupSort = grouped
-    ? parseSortToken(params.sort, GROUP_SORT_FIELDS, DEFAULT_GROUP_SORT)
-    : DEFAULT_GROUP_SORT;
+  // Two params, two vocabularies, no overlap: `sort` is read against the leaf
+  // fields on every surface and `gsort` against the group fields. A token that
+  // names a field its own vocabulary does not have reads as that surface's
+  // default (the D-04 refinement rule) instead of leaking into the other one.
+  const urlSort =
+    params.sort !== undefined
+      ? { value: parseSortToken(params.sort, LEAF_SORT_FIELDS, DEFAULT_LEAF_SORT) }
+      : undefined;
+  const sort = pick<CatalogSortToken<CatalogSort>>(urlSort, stored.sort, DEFAULT_LEAF_SORT);
+  const groupSort = parseSortToken(params.gsort, GROUP_SORT_FIELDS, DEFAULT_GROUP_SORT);
 
   return {
     state: {
@@ -676,32 +746,58 @@ export function cleanSwitchWithin(hierarchy: CatalogHierarchy, segment: CatalogS
   return { ...cleanSwitch(segment), hierarchy: { ...hierarchy } };
 }
 
-// Drill in: add exactly one hierarchy param and retarget `by` to the level
-// below's registry default; everything else survives. `slug` may be UNFILED_SLUG
-// — the Unfiled card drills the same way any group card does.
+// One level's identification of its parent, as a card or a facet option carries
+// it: the dimension above and that row's slug.
+export interface HierarchyAncestor {
+  dimension: CatalogDimension;
+  slug: string;
+}
+
+// Drill in: set this level's hierarchy param, ALSO pinning the ancestor when the
+// URL does not already carry it; retarget `by` to the level below's registry
+// default; everything else survives. `slug` may be UNFILED_SLUG — the Unfiled
+// card drills the same way any group card does.
+//
+// The ancestor is not decoration. `lines.slug` is unique per BRAND and
+// `blends.slug` per LINE — never globally — so a bare `?line=reserva` addresses
+// every marca's Reserva at once, and two cards on the root Lines screen would
+// open the same merged screen while their sub-labels claimed otherwise, each
+// showing more cigars than the card it was clicked on counted. Emitting
+// `?brand=<parent>&line=<slug>` is the same statement the D-08 breadcrumb
+// already makes, for the same reason. It is skipped when the ancestor is already
+// pinned (the drill is inside it) or when the row has none — a line whose brand
+// link is null cannot be scoped by one.
 export function drillInto(
   state: CatalogState,
   dimension: CatalogDimension,
   slug: string,
+  ancestor?: HierarchyAncestor | null,
 ): CatalogState {
-  const hierarchy: CatalogHierarchy = { ...state.hierarchy, [dimension]: slug };
+  const hierarchy: CatalogHierarchy = { ...state.hierarchy };
+  if (ancestor && !hierarchy[ancestor.dimension]) hierarchy[ancestor.dimension] = ancestor.slug;
+  hierarchy[dimension] = slug;
   return { ...state, hierarchy, by: CATALOG_LEVELS[levelOf(hierarchy)].defaultBy };
 }
 
 // Which dimension the drill header is ABOUT — the one whose group screen Back
-// returns to.
+// returns to. Exactly the pinned LEVEL, and never `vitola`.
 //
-// It is not simply "the deepest pinned param", and the difference matters. A
-// `vitola` can be pinned two ways: by drilling the root Vitolas screen, or by the
-// Vitola CHIP inside a brand drill. The first is a drill and owns the header; the
-// second is a refinement of the brand screen, whose header must keep saying
-// `Drew Estate`. So the ancestor level wins whenever there is one, and a lone
-// `vitola` claims the header only at the root — which is exactly the case where
-// it was reached by drilling.
+// A vitola changes no level and owns no header, however it was reached. Pinning
+// one from the root Vitolas grouping and pinning one from the Vitola chip
+// produce the identical URL, so they must produce the identical screen; the
+// alternative — a header when `vitola` happens to be the only param, a chip when
+// anything else is also set — makes one URL mean two things and makes clearing
+// the vitola from a chip row impossible on the screen the grouping lands you on.
+// So a vitola always renders as D-06's `Label · Value` pill with its ✕, which is
+// also the only control that can clear it, and the row it sits in is its exit.
+//
+// This is why `vitola` is not a level in the table above: setting brand, line or
+// blend changes which groupings and chips the screen answers, and the level table
+// removes those chips by itself while a header takes over. Setting a vitola
+// changes none of that.
 export function drillDimension(hierarchy: CatalogHierarchy): CatalogDimension | null {
   const level = levelOf(hierarchy);
-  if (level !== "root") return level;
-  return hierarchy.vitola ? "vitola" : null;
+  return level === "root" ? null : level;
 }
 
 // Drill out: drop that one param and land back on the group screen that showed
