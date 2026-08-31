@@ -80,9 +80,9 @@ product. A packaging variant attaches to the base leaf.
 
 - **Factory** has no level in ADR-012. `domain-model-examples.md` still carries
   `manufacturer: { name, factory }` on the leaf, and NC identity is strongly
-  factory-shaped ("an A.J. Fernández blend"). Whether factory becomes a brand
-  attribute, a blend attribute, or its own reference entity is a Wave 1
-  question, not a vocabulary one.
+  factory-shaped ("an A.J. Fernández blend"). Ruled 2026-08-31 (issue #196):
+  factory stays a leaf attribute; an entity only if a real use case demands
+  one.
 - **Vitola de galera** is real, useful matching evidence with nowhere to live,
   since there is no global vitola entity. Matching v2 should decide whether it
   is a token source or a stored alias.
