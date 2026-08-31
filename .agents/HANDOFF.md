@@ -41,23 +41,51 @@ enrichment · #168 SSO + invites · #171 measured tobacco ramp/seal/chips · #17
 enrichment budgets · #184 add_smoke_photo delivery diagnostics.
 Closed: #45, #46, #48, #49, #126, #129, #154, #158, #174.
 
-## IN FLIGHT — check this first
+## IN FLIGHT — six open PRs, all reviewed, ALL HELD
 
-A four-lane burndown workflow was running when this session ended and **was
-killed by the dev-env pod bounce**. It covers #170+#157+#155+#185,
-#169+#183, #177+#173, and #159. Before starting anything:
+The burndown workflow COMPLETED (an earlier draft of this file said it was killed
+by the pod bounce — it was not; ignore that). It produced four PRs, every one
+adversarially reviewed and every one returned **hold**. CI is green on all of
+them; green CI is not the reason they are held.
 
-```bash
-git -C ~/repos/cigar-journal fetch origin --prune
-GH_TOKEN=$(cat /creds/gh_token) gh pr list --repo thaynes43/cigar-journal --state open
-GH_TOKEN=$(cat /creds/gh_token) gh pr list --repo thaynes43/haynes-ops --state open
-ls ~/work/            # orphaned worktrees: enrichment-correctness, curation-guards,
-                      # mcp-console-fixes, cj-cronjob-consolidation
-git -C ~/repos/cigar-journal branch -r | grep agent/
-```
-Any of those lanes may have pushed a branch or opened a PR before dying. Adopt
-what exists, `git worktree remove` what is stranded, and re-dispatch the rest.
-**Do not assume a lane finished because its worktree exists.**
+| PR | covers | verdict |
+|---|---|---|
+| cj **#192** | #170, #157, #155, #185 | hold — **blocker** |
+| cj **#190** | #169, #183 | hold — **blocker** |
+| cj **#188** | #177, #173 | hold — split it, see below |
+| cj **#189** | #159 docs | follows the ops pair |
+| ops **#2693** + **#2694** | #159 (1 of 2, 2 of 2) | hold — ordering hazard |
+
+Read each PR's review before touching it. The two blockers:
+
+- **#192 — the founding inference is empirically false.** It infers a cigar's
+  market from the vendors already stocking it, but **Cuban Lou's (`focus='CC'`)
+  sells a majority NON-Cuban catalogue**, so CC-vendor evidence does not mean the
+  cigar is CC. The review also found the guard is not "only ever refuses a write"
+  (on the seed path a refusal falls through to an unconditional
+  `createCigarFromListing` INSERT), and that a cross-market mis-link permanently
+  disables the guard on the row it damaged — which Cuban Lou's UNSUSPENDED offers
+  CronJob will then re-assert. Do not merge this to unblock #170; it would ship a
+  new mis-link path in the fix for mis-linking.
+- **#190 — a second door past the guard.** `applyInverse`'s `cigar.exclude` case
+  writes `catalog_status='excluded'` directly with no held-inventory check, and
+  it is console-reachable. The guard #169 asks for is not complete until that
+  path is closed too.
+
+**#188 should be split: land #173 now, hold #177.** The reviewer could not break
+the #173 half (agent-run pagination). The #177 half has three majors, including a
+described `save_smoke` queueing an enrichment request for a cigar that already
+exists, and `enrichmentQueued` now being false on a reachable path against all
+four places that document it.
+
+**#2693/#2694 ordering hazard:** #2694 is a green non-draft whose branch still
+carries the raw manifests it must not coexist with, and nothing mechanically
+enforces the order. A failed Helm upgrade after #2693 prunes them rolls back to a
+release with NO crawl CronJobs. Also confirm `timeZone` and `suspend` survive the
+chart's silent defaults — `suspend` matters most, because
+`cigar-journal-crawl-enrich-cuban-lous` must stay suspended (#170).
+
+Start by working the reviews on these six, not by opening new work.
 
 ## Do these, in this order
 
