@@ -265,4 +265,7 @@ than working around it, because the refusal is usually a near-duplicate caught.
 split_cigar breaks an entry that has been standing for several products into the
 leaves it should have been and moves each product's listings onto its own; split
 only on unambiguous listing evidence, leave the rest, and expect a partial split.
-It refuses a listing a curator or agent already ruled on.`;
+It refuses a listing a curator or agent already ruled on. A leaf it mints inherits
+the line and blend you leave out from the entry being split, and minting is
+get-or-create like register_taxonomy — parts that already name a live entry
+re-point onto it rather than growing a second copy of it.`;

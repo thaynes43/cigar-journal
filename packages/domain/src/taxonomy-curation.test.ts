@@ -22,6 +22,7 @@ import {
   assignCigarTaxonomy,
   splitCigar,
 } from "./taxonomy-curation.js";
+import { undoCurationAction } from "./curation.js";
 import { IdempotencyConflictError, UnauthorizedError, ValidationError } from "./errors.js";
 import type { Principal } from "./deps.js";
 
@@ -568,6 +569,26 @@ describe("taxonomy curation", () => {
       expect((await assignCigarTaxonomy(h.deps, curator, input)).replayed).toBe(true);
     });
 
+    // `preview` selects whether the call writes, never what it writes, so it is
+    // not part of the intent the fingerprint hashes. A client that sends the flag
+    // explicitly on the commit and drops it on the retry is making the same
+    // request twice — and meeting an IdempotencyConflictError for it would break
+    // exactly the retry the envelope exists to make safe.
+    it("replays a retry that omits the preview flag the commit sent as false", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Preview Flag Subject" });
+      const clientRequestId = newRequestId();
+      const parts = { cigarId, brandId: padronId, lineId: anniversaryLineId, vitolaName: "Exclusivo" };
+
+      const committed = await assignCigarTaxonomy(h.deps, curator, { clientRequestId, ...parts, preview: false });
+      expect(committed.replayed).toBe(false);
+
+      const retried = await assignCigarTaxonomy(h.deps, curator, { clientRequestId, ...parts });
+      expect(retried.replayed).toBe(true);
+      expect(retried.canonicalName).toBe(committed.canonicalName);
+      // Replayed, not re-written: one key for the two calls.
+      expect(await keysFor(clientRequestId)).toHaveLength(1);
+    });
+
     it("is curator-only", async () => {
       const cigarId = await h.seedCigar({ canonicalName: "Assign Denied Subject" });
       await expect(
@@ -840,6 +861,295 @@ describe("taxonomy curation", () => {
           splits: [{ listingIds: [listingIds[0]!], vitolaName: "Robusto" }],
         }),
       ).rejects.toBeInstanceOf(UnauthorizedError);
+    });
+
+    // ----------------------------------------------------------------------
+    // A minted leaf is composable, and at least as structured as its bucket
+    // ----------------------------------------------------------------------
+
+    // `Robusto` is a size every marca sells, not a cigar. A leaf named for one is
+    // a collapse bucket of a worse kind than the row being split — so the mint
+    // path makes the same refusal the assignment path does.
+    it("refuses a minted leaf with no marca to compose a name from", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Unbranded Collapse Bucket" });
+      const listing = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `split-${newRequestId()}`, cigarId, status: "auto", decidedBy: "crawler" })
+        .returning({ id: listingMatches.id });
+      const listingId = listing[0]!.id;
+
+      const error = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [{ listingIds: [listingId], vitolaName: "Nameless Robusto" }],
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]!.path).toBe("brandId");
+      expect(await h.deps.db.select().from(cigars).where(eq(cigars.canonicalName, "Nameless Robusto"))).toHaveLength(0);
+
+      // The escape hatch, and the only honest one: a curator names the leaf
+      // themselves and takes responsibility for the string, which is what
+      // `freeform` means.
+      const named = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [
+          { listingIds: [listingId], vitolaName: "Nameless Robusto", canonicalName: "Nestor Miranda Nameless Robusto" },
+        ],
+      });
+      expect(named.splits[0]).toMatchObject({ canonicalName: "Nestor Miranda Nameless Robusto", created: true });
+      expect(await cigarRow(named.splits[0]!.cigarId)).toMatchObject({ nameSource: "freeform" });
+    });
+
+    // SPLITTING BY VITOLA SAYS NOTHING ABOUT THE LINE. Reading the omitted level
+    // as `null` instead of inheriting it minted a leaf LESS structured than the
+    // bucket it came from — a fresh worklist item, made by the tool whose job is
+    // to remove them.
+    it("gives a minted leaf at least the structure of the bucket it came from", async () => {
+      const structuredId = await seedBrand("Structured Marca");
+      const reserva = await createLine(h.deps, curator, { brandId: structuredId, name: "Reserva Especial" });
+      const cigarId = await h.seedCigar({
+        canonicalName: "Structured Marca Reserva Especial",
+        brand: "Structured Marca",
+        brandId: structuredId,
+        lineId: reserva.lineId,
+      });
+      const rows = await h.deps.db
+        .insert(listingMatches)
+        .values([
+          { vendorId, listingKey: `split-${newRequestId()}`, cigarId, status: "auto" as const, decidedBy: "crawler" as const },
+          { vendorId, listingKey: `split-${newRequestId()}`, cigarId, status: "auto" as const, decidedBy: "crawler" as const },
+        ])
+        .returning({ id: listingMatches.id });
+
+      const result = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [
+          { listingIds: [rows[0]!.id], vitolaName: "Torpedo" },
+          // An explicit null is the caller saying this one really has no line —
+          // the same omitted-vs-null distinction `assign_cigar_taxonomy` draws.
+          { listingIds: [rows[1]!.id], lineId: null, vitolaName: "Sin Linea" },
+        ],
+      });
+
+      expect(result.splits[0]!.canonicalName).toBe("Structured Marca Reserva Especial Torpedo");
+      expect(await cigarRow(result.splits[0]!.cigarId)).toMatchObject({
+        lineId: reserva.lineId,
+        vitolaName: "Torpedo",
+        nameSource: "composed",
+      });
+
+      expect(result.splits[1]!.canonicalName).toBe("Structured Marca Sin Linea");
+      expect(await cigarRow(result.splits[1]!.cigarId)).toMatchObject({ lineId: null, vitolaName: "Sin Linea" });
+    });
+
+    // The registry-or-free-text fallback `loadCigarNameParts` reads, mirrored on
+    // the mint: a bucket structured only as far as a free-text `line` still knows
+    // its line, and the leaf must not be named as though it did not.
+    it("carries the bucket's free-text line onto a leaf that has no registry line", async () => {
+      const cigarId = await h.seedCigar({
+        canonicalName: "Perdomo Champagne",
+        brand: "Perdomo",
+        brandId: marcaId,
+        line: "Champagne",
+      });
+      const listing = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `split-${newRequestId()}`, cigarId, status: "auto", decidedBy: "crawler" })
+        .returning({ id: listingMatches.id });
+
+      const result = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [{ listingIds: [listing[0]!.id], vitolaName: "Epicure" }],
+      });
+
+      expect(result.splits[0]!.canonicalName).toBe("Perdomo Champagne Epicure");
+      expect(await cigarRow(result.splits[0]!.cigarId)).toMatchObject({ line: "Champagne", lineId: null });
+    });
+
+    // ----------------------------------------------------------------------
+    // Get-or-create: one identity, one leaf
+    // ----------------------------------------------------------------------
+
+    // THE TWIN ROBUSTO. Two arms naming the same product — because the evidence
+    // arrived in two batches, or two agents split the same bucket — must converge
+    // on one leaf. Minting per arm turns the duplicate-ending tool into a
+    // duplicate-making one, and its duplicates are the hardest kind to find: same
+    // marca, same parts, same name, differing only in id.
+    it("collapses two arms naming the same leaf onto one row", async () => {
+      const { cigarId, listingIds } = await seedBucket("Perdomo Twin Bucket", 2);
+      const result = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [
+          { listingIds: [listingIds[0]!], vitolaName: "Twin Robusto" },
+          { listingIds: [listingIds[1]!], vitolaName: "Twin Robusto" },
+        ],
+      });
+
+      expect(result.splits[0]!.cigarId).toBe(result.splits[1]!.cigarId);
+      // One mint, one find — the `register_taxonomy` idiom, so a caller counting
+      // new leaves sums `created` and gets 1.
+      expect(result.splits.map((split) => split.created)).toEqual([true, false]);
+      expect(
+        await h.deps.db.select().from(cigars).where(eq(cigars.canonicalName, "Perdomo Twin Robusto")),
+      ).toHaveLength(1);
+
+      for (const listingId of listingIds) {
+        expect((await matchRow(listingId)).cigarId).toBe(result.splits[0]!.cigarId);
+      }
+    });
+
+    it("re-points onto an existing leaf rather than minting a second", async () => {
+      const { cigarId, listingIds } = await seedBucket("Perdomo Preexisting Bucket", 1);
+      const existingId = await h.seedCigar({
+        canonicalName: "Perdomo Preexisting Corona",
+        brand: "Perdomo",
+        brandId: marcaId,
+        vitolaName: "Preexisting Corona",
+      });
+
+      const result = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [{ listingIds: [listingIds[0]!], vitolaName: "Preexisting Corona" }],
+      });
+      expect(result.splits[0]).toMatchObject({ cigarId: existingId, created: false });
+    });
+
+    it("refuses parts that name more than one existing entry, naming them", async () => {
+      const { cigarId, listingIds } = await seedBucket("Perdomo Doubled Bucket", 1);
+      for (const name of ["Perdomo Doubled Toro A", "Perdomo Doubled Toro B"]) {
+        await h.seedCigar({ canonicalName: name, brand: "Perdomo", brandId: marcaId, vitolaName: "Doubled Toro" });
+      }
+
+      const error = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [{ listingIds: [listingIds[0]!], vitolaName: "Doubled Toro" }],
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]!.message).toContain("Perdomo Doubled Toro A");
+      expect((error as ValidationError).fields[0]!.message).toContain("Perdomo Doubled Toro B");
+    });
+
+    // Not a get-or-create: re-pointing the bucket's listings at the bucket is a
+    // no-op dressed as a split, reported as a leaf that was never made.
+    it("refuses an arm that composes to the entry being split", async () => {
+      const cigarId = await h.seedCigar({
+        canonicalName: "Perdomo Solo Robusto",
+        brand: "Perdomo",
+        brandId: marcaId,
+        vitolaName: "Solo Robusto",
+      });
+      const listing = await h.deps.db
+        .insert(listingMatches)
+        .values({ vendorId, listingKey: `split-${newRequestId()}`, cigarId, status: "auto", decidedBy: "crawler" })
+        .returning({ id: listingMatches.id });
+
+      const error = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [{ listingIds: [listing[0]!.id], vitolaName: "Solo Robusto" }],
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]!.message).toContain("Perdomo Solo Robusto");
+    });
+
+    // ----------------------------------------------------------------------
+    // A pointed target is a SIBLING, which the tool's own copy already promises
+    // ----------------------------------------------------------------------
+
+    // Unbounded, this is a general "move these listings anywhere" verb wearing a
+    // split's name — audited as a split and reversible only listing by listing.
+    it("refuses a target under another marca, naming both cigars", async () => {
+      const { cigarId, listingIds } = await seedBucket("Perdomo Crossed Bucket", 1);
+      const foreignId = await h.seedCigar({
+        canonicalName: "Undercrown Shade Gordito",
+        brand: "Drew Estate",
+        brandId: drewEstateId,
+      });
+
+      const error = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [{ listingIds: [listingIds[0]!], targetCigarId: foreignId }],
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]!.path).toBe("splits.0.targetCigarId");
+      expect((error as ValidationError).fields[0]!.message).toContain("Undercrown Shade Gordito");
+      expect((error as ValidationError).fields[0]!.message).toContain("Perdomo Crossed Bucket");
+      expect((await matchRow(listingIds[0]!)).cigarId).toBe(cigarId);
+    });
+
+    // An unbranded row is not a sibling of everything; it is a row whose marca
+    // nobody has established yet, so a null on either side is refused rather than
+    // read as a wildcard.
+    it("refuses a target when either side has no marca", async () => {
+      const { cigarId, listingIds } = await seedBucket("Perdomo Null Target Bucket", 1);
+      const unbrandedId = await h.seedCigar({ canonicalName: "Unbranded Split Target" });
+      await expect(
+        splitCigar(h.deps, curator, {
+          clientRequestId: newRequestId(),
+          cigarId,
+          splits: [{ listingIds: [listingIds[0]!], targetCigarId: unbrandedId }],
+        }),
+      ).rejects.toBeInstanceOf(ValidationError);
+    });
+
+    // ----------------------------------------------------------------------
+    // Undo is a TRUE inverse — the same listing splits again afterwards
+    // ----------------------------------------------------------------------
+
+    // A split writes five fields on each listing it re-points: cigar, status,
+    // decider, and the two evidence fields it clears because a settled link must
+    // not read as a live doubt. An undo restoring only the first two handed the
+    // listing back to the bucket stamped `confirmed` by a curator — which the
+    // split's own settled-link refusal then reads as somebody's verdict, leaving
+    // the bucket unsplittable by the tool that mis-split it.
+    it("undoes a re-point completely enough for the same listing to split again", async () => {
+      const { cigarId, listingIds } = await seedBucket("Perdomo Undo Bucket", 1);
+      const listingId = listingIds[0]!;
+      const before = await matchRow(listingId);
+
+      const split = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [{ listingIds: [listingId], vitolaName: "Undone Lancero" }],
+      });
+      const moved = await matchRow(listingId);
+      expect(moved).toMatchObject({ cigarId: split.splits[0]!.cigarId, status: "confirmed", decidedBy: "curator" });
+      expect(moved.suggestedParse).toBeNull();
+
+      const audits = await h.deps.db
+        .select({ id: auditLog.id, before: auditLog.before })
+        .from(auditLog)
+        .where(eq(auditLog.action, "listing_match.set_status"));
+      const repoint = audits.find((row) => (row.before as { id?: string } | null)?.id === listingId);
+      expect(repoint).toBeDefined();
+
+      await undoCurationAction(h.deps, curator, { clientRequestId: newRequestId(), auditId: repoint!.id });
+
+      const restored = await matchRow(listingId);
+      expect(restored).toMatchObject({ cigarId, status: before.status, decidedBy: before.decidedBy });
+      // The resolver's account of why this row was unresolved, back intact —
+      // without it the next curator inherits a bare listing and redoes the parse
+      // by eye, which is precisely what `suggested_parse` exists to prevent.
+      expect(restored.suggestedParse).toEqual(before.suggestedParse);
+      expect(restored.unmatchedReason).toBe(before.unmatchedReason);
+
+      // THE ASSERTION THAT MATTERS: the bucket is splittable again. Without the
+      // decider restored this call is refused as a settled link.
+      const again = await splitCigar(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        splits: [{ listingIds: [listingId], vitolaName: "Undone Lancero" }],
+      });
+      // Get-or-create: the leaf minted the first time is found, not duplicated.
+      expect(again.splits[0]).toMatchObject({ cigarId: split.splits[0]!.cigarId, created: false });
+      expect((await matchRow(listingId)).cigarId).toBe(split.splits[0]!.cigarId);
     });
   });
 });

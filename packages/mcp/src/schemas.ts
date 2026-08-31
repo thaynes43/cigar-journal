@@ -1469,7 +1469,25 @@ export const splitCigarSchema = z
               .nullish()
               .describe("Overrides the name composed from the parts. Omit it and the leaf's name follows its parts, which is almost always right."),
           })
-          .strict(),
+          .strict()
+          // BOTH-OR-NEITHER, refused rather than reconciled — the same rule
+          // `assign_cigar_taxonomy` applies to `brand` and `brandId`. An arm
+          // naming a target AND parts is two different instructions: the parts
+          // are silently dropped, so a model that meant to mint a leaf and
+          // hedged with a target it half-remembered gets its listings on the
+          // wrong cigar and a result that says so only if it reads the id.
+          .superRefine((split, ctx) => {
+            if (split.targetCigarId === undefined) return;
+            const minted = (["lineId", "blendId", "vitolaName", "edition", "canonicalName"] as const).filter(
+              (part) => split[part] !== undefined,
+            );
+            if (minted.length === 0) return;
+            ctx.addIssue({
+              code: "custom",
+              path: ["targetCigarId"],
+              message: `Move these listings onto targetCigarId or mint a leaf from ${minted.join(", ")}, not both — an existing sibling already has its parts.`,
+            });
+          }),
       )
       .describe("One entry per product the listings actually name. Listings left unnamed stay on the original entry."),
     runId,

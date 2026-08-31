@@ -1,15 +1,19 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { auditLog, blenders, blends, brands, cigars, lines, listingMatches } from "@cj/db";
-import type { ListingMatchRow } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
 import { CigarNotFoundError, ValidationError } from "./errors.js";
 import { fingerprint } from "./fingerprint.js";
 import { assertReplayable, isUniqueViolation, loadIdempotency, recordIdempotency } from "./idempotency.js";
 import { auditActor } from "./audit-attribution.js";
 import { brandSlug } from "./catalog-browse.js";
-import { composeCanonicalName } from "./taxonomy-keys.js";
+import { composeCanonicalName, fold } from "./taxonomy-keys.js";
 import { assertCigarAncestry, type CigarAncestry } from "./cigar-ancestry.js";
 import { deriveBrandId, loadAncestryContext } from "./taxonomy-resolve.js";
+// The audit `before`/`after` shape `applyInverse` reads for a listing-match undo.
+// Imported rather than re-declared so a split's re-point and the console's own
+// status write are literally the same snapshot, and the undo that inverts one
+// inverts the other.
+import { listingMatchSnapshot } from "./curation.js";
 import {
   assertComposable,
   assertCurator,
@@ -701,19 +705,40 @@ export interface SplitCigarResult {
   replayed: boolean;
 }
 
-// The audit `before`/`after` shape `applyInverse` reads for a listing-match undo:
-// it takes `before.id`, `before.status` and `before.cigarId`. Matching it exactly
-// is what makes each re-point individually reversible from the review console
-// with no new undo case.
-function listingMatchSnapshot(row: ListingMatchRow): Record<string, unknown> {
-  return {
-    id: row.id,
-    vendorId: row.vendorId,
-    listingKey: row.listingKey,
-    cigarId: row.cigarId,
-    status: row.status,
-    decidedBy: row.decidedBy,
-  };
+// A leaf's IDENTITY, as a split has to compare it: the structural parts plus the
+// name they compose to. The two are checked as ALTERNATIVES, not together —
+// matching parts alone means the same product however it is spelled, and a
+// matching folded name alone catches the leaf that was minted freeform before
+// anyone structured it. The catalog is mid-migration and carries both kinds, so
+// requiring agreement on both would recognise a duplicate only once it had
+// already been structured, which is far too late to stop minting a second one.
+interface LeafIdentity {
+  lineId: string | null;
+  blendId: string | null;
+  vitolaName: string | null;
+  edition: string | null;
+  canonicalName: string;
+}
+
+// Free text compared on its FOLDED key rather than its bytes, the same rule the
+// registries match on: `Robusto` and `robusto` are one vitola, and `Edición
+// Limitada 2024` and `Edicion Limitada 2024` are one edition.
+function sameText(a: string | null, b: string | null): boolean {
+  if (a == null || b == null) return a == null && b == null;
+  return fold(a) === fold(b);
+}
+
+// Both sides are known to share a brand — the caller scopes the candidate set to
+// one marca — so `brandId` is not re-compared here.
+function sameLeaf(a: LeafIdentity, b: LeafIdentity): boolean {
+  const sameParts =
+    a.lineId === b.lineId &&
+    a.blendId === b.blendId &&
+    sameText(a.vitolaName, b.vitolaName) &&
+    sameText(a.edition, b.edition);
+  if (sameParts) return true;
+  const key = fold(a.canonicalName);
+  return key !== "" && key === fold(b.canonicalName);
 }
 
 async function splitCigarWithinTx(
@@ -738,6 +763,10 @@ async function splitCigarWithinTx(
       id: cigars.id,
       canonicalName: cigars.canonicalName,
       brand: cigars.brand,
+      // The free-text line, carried for the same reason the free-text marca is:
+      // a bucket structured only as far as `line` (no `line_id`) still knows its
+      // line, and a leaf split off it must not be named as though it did not.
+      line: cigars.line,
       brandId: cigars.brandId,
       lineId: cigars.lineId,
       blendId: cigars.blendId,
@@ -803,6 +832,30 @@ async function splitCigarWithinTx(
   const correlationId = input.correlationId ?? input.clientRequestId;
   const outcomes: SplitOutcome[] = [];
 
+  // THE SIBLING UNIVERSE, READ ONCE. Every leaf this call could mint carries the
+  // bucket's own `brand_id` verbatim, so a row that could be a duplicate of one
+  // necessarily carries it too — scoping the search to that marca is exact rather
+  // than an approximation, and it keeps the scan to one brand's leaves instead of
+  // the catalog. The bucket is deliberately included: an arm that composes to the
+  // bucket itself is the split's own worst outcome and has to be caught, not
+  // silently minted alongside it.
+  const siblings = await tx
+    .select({
+      id: cigars.id,
+      canonicalName: cigars.canonicalName,
+      lineId: cigars.lineId,
+      blendId: cigars.blendId,
+      vitolaName: cigars.vitolaName,
+      edition: cigars.edition,
+    })
+    .from(cigars)
+    .where(
+      and(
+        eq(cigars.catalogStatus, "active"),
+        bucket.brandId == null ? isNull(cigars.brandId) : eq(cigars.brandId, bucket.brandId),
+      ),
+    );
+
   for (const [index, split] of input.splits.entries()) {
     if (split.listingIds.length === 0) {
       throw new ValidationError([
@@ -821,7 +874,12 @@ async function splitCigarWithinTx(
         ]);
       }
       const rows = await tx
-        .select({ id: cigars.id, canonicalName: cigars.canonicalName, catalogStatus: cigars.catalogStatus })
+        .select({
+          id: cigars.id,
+          canonicalName: cigars.canonicalName,
+          brandId: cigars.brandId,
+          catalogStatus: cigars.catalogStatus,
+        })
         .from(cigars)
         .where(eq(cigars.id, split.targetCigarId))
         .limit(1);
@@ -832,6 +890,23 @@ async function splitCigarWithinTx(
       if (target.catalogStatus !== "active") {
         throw new ValidationError([
           { path: `splits.${index}.targetCigarId`, message: `That cigar is ${target.catalogStatus}, not active.` },
+        ]);
+      }
+      // A SIBLING, WHICH THE TOOL'S OWN COPY ALREADY PROMISES. Unbounded, this is
+      // a general "move these listings to any cigar" verb wearing a split's name:
+      // one wrong id and a Padrón bucket's listings land on a Perdomo, audited as
+      // a split and reversible only listing by listing. The minted half is bounded
+      // by construction — it inherits `brand_id` and cannot leave the marca — so
+      // leaving the pointed half unbounded made the two halves of one tool answer
+      // to different rules. A null on either side is refused rather than treated
+      // as a wildcard: an unbranded row is not a sibling of everything, it is a
+      // row whose marca nobody has established yet.
+      if (bucket.brandId == null || target.brandId == null || target.brandId !== bucket.brandId) {
+        throw new ValidationError([
+          {
+            path: `splits.${index}.targetCigarId`,
+            message: `'${target.canonicalName}' is not a sibling of '${bucket.canonicalName}' — a split moves listings within one marca, and these two do not share a brand.`,
+          },
         ]);
       }
       targetId = target.id;
@@ -852,71 +927,150 @@ async function splitCigarWithinTx(
         ]);
       }
 
+      // OMITTED INHERITS, NULL CLEARS — the same distinction `assign_cigar_taxonomy`
+      // draws, and for a sharper reason here. A split by vitola says nothing about
+      // the line, so a leaf carved out of `Structured Marca Reserva Especial` by
+      // naming `Torpedo` must come out as `Structured Marca Reserva Especial
+      // Torpedo`. Reading an absent `lineId` as "no line" instead produced
+      // `Structured Marca Torpedo`: a leaf LESS structured than the bucket it was
+      // split from, minted by the tool whose whole job is to add structure, and
+      // immediately a fresh worklist item. A caller who really means "this one has
+      // no line" says so with an explicit null.
       const ancestry: CigarAncestry = {
         brandId: bucket.brandId,
-        lineId: split.lineId ?? null,
-        blendId: split.blendId ?? null,
+        lineId: split.lineId === undefined ? bucket.lineId : split.lineId,
+        blendId: split.blendId === undefined ? bucket.blendId : split.blendId,
       };
       assertCigarAncestry(ancestry, await loadAncestryContext(tx, ancestry));
 
-      const names = await namesForAncestry(tx, ancestry, bucket.brand, null);
-      const composed = composeCanonicalName({
-        ...names,
-        vitola: split.vitolaName ?? null,
-        edition: split.edition ?? null,
-      });
+      // The bucket's free-text line rides along on exactly the terms
+      // `loadCigarNameParts` reads it: as the fallback for a level with no
+      // registry row. With a `line_id` present the registry spelling governs and
+      // a stale string underneath it would be a second, quieter answer.
+      const lineText = ancestry.lineId == null ? bucket.line : null;
+      const names = await namesForAncestry(tx, ancestry, bucket.brand, lineText);
+      const vitolaName = split.vitolaName ?? null;
+      const edition = split.edition ?? null;
+      const composed = composeCanonicalName({ ...names, vitola: vitolaName, edition });
       const explicit = split.canonicalName?.trim();
-      const canonicalName = explicit != null && explicit !== "" ? explicit : composed;
+      const freeform = explicit != null && explicit !== "";
+      const canonicalName = freeform ? explicit : composed;
       if (canonicalName === "") {
         throw new ValidationError([
           { path: `splits.${index}`, message: "This leaf's parts compose to no name — give it a canonicalName." },
         ]);
       }
+      const nameSource = freeform ? "freeform" : "composed";
 
-      const inserted = await tx
-        .insert(cigars)
-        .values({
-          canonicalName,
-          // Identity facts the sibling inherits: it is the same marca, made by
-          // the same people, in the same market. Everything the split is ABOUT
-          // (line, blend, vitola, edition) comes from the caller instead.
-          brand: bucket.brand,
-          brandId: bucket.brandId,
-          type: bucket.type,
-          manufacturer: bucket.manufacturer,
-          lineId: ancestry.lineId,
-          blendId: ancestry.blendId,
-          vitolaName: split.vitolaName ?? null,
-          edition: split.edition ?? null,
-          nameSource: explicit != null && explicit !== "" ? "freeform" : "composed",
-          // Unverified on purpose: a curator asserted the STRUCTURE here, which
-          // is a different claim from having reviewed the finished entry.
-          verification: "unverified",
-          createdAt: deps.now(),
-          updatedAt: deps.now(),
-        })
-        .returning({ id: cigars.id });
-      targetId = inserted[0]!.id;
-      targetName = canonicalName;
-      created = true;
+      // THE SAME REFUSAL THE ASSIGNMENT PATH MAKES, reached before the insert
+      // rather than after it. A mint off an unbranded bucket has nothing but the
+      // vitola to compose from, and `Robusto` is not a cigar — it is a size that
+      // every marca sells, so a row named for it is a collapse bucket of a worse
+      // kind than the one being split. The escape hatch is the honest one: name it
+      // yourself with `canonicalName` and the leaf is freeform, which is a curator
+      // taking responsibility for a string rather than the tool inventing one.
+      assertComposable(nameSource, ancestry.brandId);
 
-      await tx.insert(auditLog).values({
-        userId: principal.userId,
-        ...auditAttribution(principal, input.attribution),
-        action: "cigar.split_leaf",
-        smokeId: null,
-        before: { id: bucket.id, canonicalName: bucket.canonicalName },
-        after: {
+      // GET-OR-CREATE, THE SAME IDIOM `register_taxonomy` USES. A bucket of six
+      // Robusto listings split by two agents — or by one agent naming `Robusto`
+      // in two arms because the evidence arrived in two batches — must converge on
+      // one leaf. Minting per arm instead turns the duplicate-ending tool into a
+      // duplicate-making one, and the duplicates it makes are the hardest kind to
+      // find: same marca, same parts, same name, differing only in id.
+      //
+      // Sibling arms and stored rows are one candidate list, not two checks: a leaf
+      // minted by an earlier arm is appended below, so the second `Robusto` finds
+      // the first exactly the way it would have found one minted last week.
+      const identity: LeafIdentity = {
+        lineId: ancestry.lineId,
+        blendId: ancestry.blendId,
+        vitolaName,
+        edition,
+        canonicalName,
+      };
+      const hits = siblings.filter((candidate) => sameLeaf(identity, candidate));
+      if (hits.length > 1) {
+        throw new ValidationError([
+          {
+            path: `splits.${index}`,
+            message: `These parts name more than one existing entry (${hits
+              .map((hit) => `'${hit.canonicalName}'`)
+              .join(", ")}) — merge them, or name the one to use as targetCigarId.`,
+          },
+        ]);
+      }
+      const hit = hits[0];
+      if (hit != null && hit.id === bucket.id) {
+        // Not a get-or-create: re-pointing the bucket's listings at the bucket is
+        // a no-op dressed as a split, and it would report a leaf that was never
+        // made. The distinguishing check above catches the empty arm; this catches
+        // the arm that names parts the bucket already carries.
+        throw new ValidationError([
+          {
+            path: `splits.${index}`,
+            message: `These parts compose to '${bucket.canonicalName}', the entry being split — a new leaf has to differ from it.`,
+          },
+        ]);
+      }
+
+      if (hit != null) {
+        targetId = hit.id;
+        targetName = hit.canonicalName;
+      } else {
+        const inserted = await tx
+          .insert(cigars)
+          .values({
+            canonicalName,
+            // Identity facts the sibling inherits: it is the same marca, made by
+            // the same people, in the same market. Everything the split is ABOUT
+            // (line, blend, vitola, edition) comes from the caller instead.
+            brand: bucket.brand,
+            line: lineText,
+            brandId: bucket.brandId,
+            type: bucket.type,
+            manufacturer: bucket.manufacturer,
+            lineId: ancestry.lineId,
+            blendId: ancestry.blendId,
+            vitolaName,
+            edition,
+            nameSource,
+            // Unverified on purpose: a curator asserted the STRUCTURE here, which
+            // is a different claim from having reviewed the finished entry.
+            verification: "unverified",
+            createdAt: deps.now(),
+            updatedAt: deps.now(),
+          })
+          .returning({ id: cigars.id });
+        targetId = inserted[0]!.id;
+        targetName = canonicalName;
+        created = true;
+        siblings.push({
           id: targetId,
           canonicalName,
-          splitFrom: bucket.id,
           lineId: ancestry.lineId,
           blendId: ancestry.blendId,
-          vitolaName: split.vitolaName ?? null,
-          edition: split.edition ?? null,
-        },
-        correlationId,
-      });
+          vitolaName,
+          edition,
+        });
+
+        await tx.insert(auditLog).values({
+          userId: principal.userId,
+          ...auditAttribution(principal, input.attribution),
+          action: "cigar.split_leaf",
+          smokeId: null,
+          before: { id: bucket.id, canonicalName: bucket.canonicalName },
+          after: {
+            id: targetId,
+            canonicalName,
+            splitFrom: bucket.id,
+            lineId: ancestry.lineId,
+            blendId: ancestry.blendId,
+            vitolaName,
+            edition,
+          },
+          correlationId,
+        });
+      }
     }
 
     for (const listingId of split.listingIds) {

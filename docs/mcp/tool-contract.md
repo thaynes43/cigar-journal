@@ -196,7 +196,10 @@ than working around it, because the refusal is usually a near-duplicate caught.
 split_cigar breaks an entry that has been standing for several products into the
 leaves it should have been and moves each product's listings onto its own; split
 only on unambiguous listing evidence, leave the rest, and expect a partial split.
-It refuses a listing a curator or agent already ruled on.
+It refuses a listing a curator or agent already ruled on. A leaf it mints inherits
+the line and blend you leave out from the entry being split, and minting is
+get-or-create like register_taxonomy — parts that already name a live entry
+re-point onto it rather than growing a second copy of it.
 ```
 
 Guidance, not enforcement — the server validates every request regardless.
@@ -1694,7 +1697,24 @@ already on and the evidence is the listing itself.
 on unambiguous listing evidence; a bucket half-dispersed on good evidence is a
 better catalog than one fully dispersed on guesses.
 
-Four refusals, each refusing the whole call rather than half-applying it:
+**A minted leaf inherits the bucket's structure; an omitted level is not a
+cleared one.** Splitting by vitola says nothing about the line, so a `lineId` or
+`blendId` you leave out is taken from the entry being split — carving `Torpedo`
+out of `Padrón 1964 Anniversary Series` yields `Padrón 1964 Anniversary Series
+Torpedo`, not `Padrón Torpedo`. This is the same omitted-vs-null distinction
+`assign_cigar_taxonomy` draws: send an explicit `null` to say the leaf genuinely
+has no line. A leaf that came out less structured than its bucket would be a
+fresh worklist item minted by the tool meant to clear them.
+
+**Minting is get-or-create, like `register_taxonomy`.** An arm whose composed
+identity already names a live entry — by its folded name, or by the same
+`{brandId, lineId, blendId, vitolaName, edition}` — re-points onto that entry and
+reports `created: false` rather than minting a second one. Two arms naming the
+same product in one call collapse onto one leaf for the same reason. The
+duplicates this prevents are the hardest kind to find: same marca, same parts,
+same name, differing only in id.
+
+Refusals, each refusing the whole call rather than half-applying it:
 
 | refusal | why |
 | --- | --- |
@@ -1702,10 +1722,21 @@ Four refusals, each refusing the whole call rather than half-applying it:
 | a listing whose `decidedBy` is `curator`/`agent`, or whose status is `confirmed` | somebody already ruled on that link (ADR-006, migration 0017). Bulk evidence work does not overturn a settled verdict — the message names who decided it |
 | the same listing id in two splits | a listing names one product |
 | a new leaf with no line, blend, vitola or edition of its own | it would be the same product under a second id — the duplicate this wave exists to end, created by the tool meant to prevent it |
+| `targetCigarId` alongside any mint part | two instructions in one arm. Both-or-neither, the same rule `assign_cigar_taxonomy` applies to `brand`/`brandId` — an existing sibling already has its parts |
+| a `targetCigarId` under a different marca, or where either entry has no `brandId` | the destination is a **sibling**, which is what bounds this to the split case. Unbounded it is a general "move these listings anywhere" verb wearing a split's name. An unbranded row is not a sibling of everything; it is a row whose marca nobody has established yet |
+| a minted leaf with no marca to compose from | `Robusto` is a size every marca sells, not a cigar — a leaf named for one is a worse collapse bucket than the row being split. Name it yourself with `canonicalName` and the leaf is `freeform`, which is a curator taking responsibility for the string |
+| an arm whose parts compose to the entry being split | re-pointing the bucket's listings at the bucket is a no-op reported as a leaf that was never made |
+| parts that name more than one live entry | the duplicates are named; merge them, or pick one with `targetCigarId` |
 
 **Audited and reversible.** Each re-point is audited as `listing_match.set_status`
 with the bucket in `before`, which is the action the review console's Undo already
 inverts — so a wrong split is walked back listing by listing with no new undo path.
+The undo is a **true inverse**: it restores the decider and the resolver's
+`suggestedParse`/`unmatchedReason` alongside the cigar and status, so an undone
+listing splits again cleanly. Restoring only the cigar and status handed the
+listing back stamped `confirmed` by a curator, which the settled-link refusal
+above then reads as somebody's verdict — leaving the bucket unsplittable by the
+tool that mis-split it.
 A leaf minted in error is merged back into the bucket through the existing merge
 ledger, which carries its listings home with it (ADR-012: "reversible via the
 existing merge/unmerge ledger"). Merges themselves stay human-only in the console;

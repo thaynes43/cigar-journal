@@ -111,6 +111,42 @@ export async function assertAliasesFree(
   exceptId?: string,
 ): Promise<void> {
   if (keys.length === 0) return;
+
+  // THE CHECK IS A READ AND THE CLAIM IS A WRITE, and nothing in the schema
+  // joins them: `aliases` is a plain text[] with a GIN index and no unique
+  // constraint, so two transactions minting `Fóldy` and `Foldy` in the same
+  // moment — different slugs, one folded key `foldy` — both read a clean table,
+  // both pass this check, and both commit. The result is a matching key claimed
+  // by two rows, which is exactly the ambiguity this function exists to refuse,
+  // and it fails SILENTLY: `anchorByAlias` drops a key that resolves to more
+  // than one candidate, so the pair simply stops being findable by the spelling
+  // they fought over.
+  //
+  // So take a transaction-scoped advisory lock on every key being claimed before
+  // reading. The second writer parks here until the first COMMITs, then reads
+  // the row it would have collided with and refuses it by name — a curator sees
+  // "already claimed by 'Fóldy'" instead of forking the marca. Three properties
+  // make that safe: the keys are locked in SORTED order, so two callers claiming
+  // overlapping sets acquire in the same sequence and cannot deadlock each other
+  // (sorted HERE, not trusted from the caller — `aliasKeysFor` sorts but
+  // `editRegistryAliasesWithinTx` passes a filtered `added`); the namespace is
+  // `level:key`, so a brand's `padron` never contends with a line's; and
+  // `pg_advisory_xact_lock` releases at COMMIT or ROLLBACK, so the refusal path
+  // above leaks no lock and needs no unlock. Two keys that share a `hashtext`
+  // value, or two brands both claiming a line key `reserva`, serialize when they
+  // need not — extra waiting, never a missed guarantee.
+  //
+  // THIS ONLY SERIALIZES WRITERS THAT COME THROUGH HERE. An advisory lock is
+  // invisible to a writer that never takes it, so the durable form of this
+  // guarantee is a unique side-table keyed on (level, scope, key) with the alias
+  // claim as an insert into it — the database refusing the second claim rather
+  // than this function doing it. Reach for that the day aliases start being
+  // written outside the domain layer: a backfill script, a migration, a second
+  // service.
+  for (const key of [...keys].sort()) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${level}:${key}`}::text))`);
+  }
+
   const scoped =
     scope === null
       ? sql``

@@ -16,6 +16,7 @@ import {
   auditLog,
   favorites,
   brands,
+  type SuggestedParse,
 } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import {
@@ -2585,6 +2586,76 @@ describe("curation", () => {
       const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, m!.id));
       expect(row!.status).toBe("auto");
       expect(row!.cigarId).toBe(cigarId);
+    });
+
+    // The undo's before-snapshot was widened to carry `unmatchedReason` and
+    // `suggestedParse` for splitCigar's sake — it clears both when it settles a
+    // link, so an undo that left them out would restore a listing to the bucket
+    // with the split's erasure still on it. Nothing about that is supposed to
+    // reach setListingMatchStatus, whose forward write names only status,
+    // cigarId and decidedBy: the widened undo hands back the same values it
+    // found, which is no change at all. This is the pin on that "no change".
+    //
+    // The fixture populates BOTH evidence columns on a linked row — louder than
+    // the resolver would write — because a null could not tell a value preserved
+    // from a value cleared.
+    it("undo of a listing_match verdict leaves the evidence fields exactly as it found them", async () => {
+      const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
+      const cigarId = await h.seedCigar({ canonicalName: "Undo Match Evidence" });
+      const parse: SuggestedParse = {
+        brandId: null,
+        brandName: null,
+        lineId: null,
+        lineName: null,
+        blendId: null,
+        blendName: null,
+        vitolaName: null,
+        lengthInches: null,
+        ringGauge: null,
+        cleanedName: "undo match evidence listing",
+        packaging: null,
+        sticksPerPackage: null,
+        residue: "",
+        notes: [],
+        reason: "ambiguous",
+      };
+      const [m] = await h.deps.db
+        .insert(listingMatches)
+        .values({
+          vendorId,
+          listingKey: `undo-evidence-${newRequestId()}`,
+          cigarId,
+          status: "auto",
+          unmatchedReason: "ambiguous",
+          suggestedParse: parse,
+        })
+        .returning({ id: listingMatches.id });
+
+      await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId: m!.id,
+        status: "unmatched",
+        attribution: { actor: "agent", runId, confidence: 1 },
+      });
+      // Forward: the verdict moved status/cigarId/decidedBy and nothing else. A
+      // curator unmatching a row does not get to state WHY the resolver did —
+      // both evidence fields are the resolver's to write.
+      const [decided] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, m!.id));
+      expect(decided!.status).toBe("unmatched");
+      expect(decided!.cigarId).toBeNull();
+      expect(decided!.decidedBy).toBe("agent");
+      expect(decided!.unmatchedReason).toBe("ambiguous");
+      expect(decided!.suggestedParse).toEqual(parse);
+
+      const auditId = await agentAudit(runId, "listing_match.set_status");
+      await undoCurationAction(h.deps, admin, { clientRequestId: newRequestId(), auditId });
+
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, m!.id));
+      expect(row!.status).toBe("auto");
+      expect(row!.cigarId).toBe(cigarId);
+      expect(row!.decidedBy).toBe("crawler");
+      expect(row!.unmatchedReason).toBe("ambiguous");
+      expect(row!.suggestedParse).toEqual(parse);
     });
 
     it("undo of a photo-rights change restores the prior rights", async () => {

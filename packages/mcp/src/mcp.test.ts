@@ -34,6 +34,7 @@ import {
 } from "@cj/db";
 import { buildApp } from "./app.js";
 import { INSTRUCTIONS, TOOL_SCOPES } from "./constants.js";
+import { splitCigarSchema } from "./schemas.js";
 
 // End-to-end over the real HTTP surface: an embedded Postgres (domain harness),
 // the app's own OAuth authorization server to mint genuine audience-bound tokens,
@@ -3270,6 +3271,41 @@ describe("@cj/mcp adapter", () => {
       expect(audit?.actor).toBe("agent");
       expect(audit?.runId).toBe(runId);
       expect((audit?.after as Record<string, unknown>).remainingListings).toBe(1);
+    });
+
+    // BOTH-OR-NEITHER, on the schema rather than in the handler, because the
+    // handler cannot see the mistake: it drops the mint parts whenever a target
+    // is present, so a model that hedged its mint with a half-remembered sibling
+    // id gets its listings on the wrong cigar and a success payload. Asserted
+    // against the schema directly — the point is that these args never reach the
+    // wire, so there is no tool call to make.
+    it("splitCigarSchema refuses a split arm carrying BOTH targetCigarId and mint parts", () => {
+      const arm = (half: Record<string, unknown>) =>
+        splitCigarSchema.safeParse({
+          clientRequestId: randomUUID(),
+          cigarId: randomUUID(),
+          splits: [{ listingIds: [randomUUID()], ...half }],
+        });
+
+      const both = arm({ targetCigarId: randomUUID(), vitolaName: "Robusto" });
+      expect(both.success).toBe(false);
+      // The issue lands on `targetCigarId` and names the part that would have been
+      // dropped: the model has to be told which half of its own call it lost.
+      expect(both.error?.issues[0]?.path.at(-1)).toBe("targetCigarId");
+      expect(both.error?.issues[0]?.message).toContain("vitolaName");
+
+      // Either half ALONE is a complete instruction — the rule refuses the
+      // contradiction, it does not make parts mandatory or targets suspect.
+      expect(arm({ targetCigarId: randomUUID() }).success).toBe(true);
+      expect(arm({ lineId: randomUUID(), vitolaName: "Robusto" }).success).toBe(true);
+
+      // An EXPLICIT null is a supplied part, not an omission. `lineId: null` is a
+      // model asserting "this leaf has no line" — meaningful only while minting
+      // one, so alongside a target it is the same contradiction as any other part.
+      const nulled = arm({ targetCigarId: randomUUID(), lineId: null });
+      expect(nulled.success).toBe(false);
+      expect(nulled.error?.issues[0]?.path.at(-1)).toBe("targetCigarId");
+      expect(nulled.error?.issues[0]?.message).toContain("lineId");
     });
 
     it("refuses all four taxonomy tools for a journal token without curation:write: 403", async () => {

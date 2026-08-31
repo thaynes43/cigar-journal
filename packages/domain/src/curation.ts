@@ -178,7 +178,22 @@ function cigarSnapshot(row: CigarRow): Record<string, unknown> {
 
 // JSON-safe audit snapshot of a listing match — the mutable link a curator/agent
 // confirms or unmatches.
-function listingMatchSnapshot(row: ListingMatchRow): Record<string, unknown> {
+//
+// EVERY MUTABLE FIELD ANY WRITER TOUCHES, not just the ones one writer touches.
+// `setListingMatchStatus` only moves `status`/`cigarId`/`decidedBy`, so the
+// narrower snapshot was enough for it — but `splitCigar` also clears
+// `unmatched_reason` and `suggested_parse` on the rows it re-points, and a
+// snapshot that omits them makes the undo a partial inverse: the listing goes
+// home to the bucket with the resolver's account of why it was unresolved
+// destroyed, and the next split of that same bucket runs against evidence that
+// no longer exists. The rule is that this shape is the row's restorable state,
+// which keeps a future writer of a new field honest by construction.
+//
+// Exported for `splitCigar`, which audits its re-points under this same action so
+// the console's existing Undo inverts them. Shared rather than copied: a second
+// copy is a second answer to "what does undo restore?", and the two would agree
+// only until one of them was extended.
+export function listingMatchSnapshot(row: ListingMatchRow): Record<string, unknown> {
   return {
     id: row.id,
     vendorId: row.vendorId,
@@ -186,6 +201,8 @@ function listingMatchSnapshot(row: ListingMatchRow): Record<string, unknown> {
     cigarId: row.cigarId,
     status: row.status,
     decidedBy: row.decidedBy,
+    unmatchedReason: row.unmatchedReason,
+    suggestedParse: row.suggestedParse,
   };
 }
 
@@ -3048,15 +3065,40 @@ async function applyInverse(
       if (!match) throw new ValidationError([{ path: "auditId", message: "The listing match no longer exists." }]);
       const priorStatus = (before.status as ListingMatchStatus | undefined) ?? "auto";
       const priorCigarId = (before.cigarId as string | null | undefined) ?? null;
+      // RESTORED, NOT LEFT ALONE. `splitCigar` re-points a listing by writing all
+      // five of these at once — cigar, status, decider, and the two evidence
+      // fields it clears because a settled link must not read as a live doubt. An
+      // undo that put back only the first two would hand the listing back to the
+      // bucket already stamped 'confirmed' by a curator, which the split's own
+      // settled-link refusal then reads as somebody's verdict and declines to
+      // touch: the bucket becomes unsplittable by the tool that mis-split it.
+      const priorDecidedBy = (before.decidedBy as ListingMatchRow["decidedBy"] | undefined) ?? "crawler";
+      // KEY-PRESENT, NOT VALUE-NULL. Audit rows written before this snapshot
+      // carried these fields say nothing about them, and writing null for
+      // "unrecorded" would destroy live evidence in the name of restoring it. An
+      // absent key leaves the column exactly as the narrower undo left it.
+      const restoreEvidence = "unmatchedReason" in before || "suggestedParse" in before;
+      const priorEvidence = restoreEvidence
+        ? {
+            unmatchedReason: (before.unmatchedReason as ListingMatchRow["unmatchedReason"] | undefined) ?? null,
+            suggestedParse: (before.suggestedParse as SuggestedParse | null | undefined) ?? null,
+          }
+        : {};
       const snap = listingMatchSnapshot(match);
       await tx
         .update(listingMatches)
-        .set({ status: priorStatus, cigarId: priorCigarId, updatedAt: deps.now() })
+        .set({
+          status: priorStatus,
+          cigarId: priorCigarId,
+          decidedBy: priorDecidedBy,
+          ...priorEvidence,
+          updatedAt: deps.now(),
+        })
         .where(eq(listingMatches.id, matchId));
       return writeUndo({
         action: "listing_match.set_status",
         before: snap,
-        after: { ...snap, status: priorStatus, cigarId: priorCigarId },
+        after: { ...snap, status: priorStatus, cigarId: priorCigarId, decidedBy: priorDecidedBy, ...priorEvidence },
       });
     }
     case "product_photo.set_rights": {
