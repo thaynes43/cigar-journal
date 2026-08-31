@@ -1,6 +1,13 @@
 import { and, eq, sql } from "drizzle-orm";
-import { cigars, listingMatches, type ListingMatchRow } from "@cj/db";
-import type { Queryer } from "@cj/domain";
+import { auditLog, cigars, listingMatches, type ListingMatchRow } from "@cj/db";
+import {
+  auditActor,
+  coversMarket,
+  evidencedMarket,
+  type CigarType,
+  type Queryer,
+  type VendorFocus,
+} from "@cj/domain";
 
 // Listing → catalog matching (ADR-006). Same trigram machinery the domain search
 // uses: an exact case-insensitive canonical-name hit wins outright, else the best
@@ -16,10 +23,68 @@ export interface CatalogHit {
   canonicalName: string;
 }
 
-export async function findCatalogMatch(db: Queryer, name: string): Promise<CatalogHit | null> {
-  const trimmed = name.trim();
-  if (!trimmed) return null;
+export interface FindCatalogMatchOptions {
+  // The crawling vendor's `vendors.focus`. Supplied, it turns on the cross-market
+  // guard below; omitted (or null/'both'), matching behaves exactly as before and
+  // costs not one extra query.
+  vendorFocus?: VendorFocus | null;
+}
 
+// THE SEED/OFFERS HALF OF #170, and the half that has already fired in production.
+// Both live cross-market rows came through this function, not through the enrich
+// drain: a vendor walking its own sitemap trigram-matched a catalogue cigar from
+// the other market and auto-linked it (`Petit Royales Romeo y Julieta`, type='CC',
+// linked by an NC-focus vendor to its Altadis `Romeo y Julieta 1875` listing).
+//
+// The guard REJECTS, it does not re-rank. The market test is applied to the
+// candidate this function would have returned anyway, so it can only ever remove a
+// link and never create one — the same posture as every other guard in this lane,
+// and the property the risk assessment rests on. Folding the predicate into the
+// SQL `WHERE` instead would make the query return the best MARKET-COMPATIBLE
+// candidate, which sounds better and is not: the 0.55 floor is a verified
+// false-positive source (`similarity('Romeo y Julieta Mini White Original',
+// 'Romeo y Julieta Mini') = 0.5833`), so substituting a lower-scoring row would
+// invent mis-links that do not exist today. Rejection cannot.
+//
+// A REFUSAL IS NOT A MISS, and the result type says so. Both used to collapse to
+// `null`, which the caller could only read as "nothing matched" — so in `seed` mode
+// a cross-market refusal fell through to `createCigarFromListing` and minted a new
+// catalogue row for the very cigar we had just declined to link. That reasoning
+// ("a listing whose market contradicts its best match is a different cigar") is
+// only sound when the market evidence is sound; when it is not, the refusal is
+// false and the fall-through turns one bad link into a permanent duplicate, which
+// is strictly worse and invisible. A refusal now says so by name, and the caller
+// leaves the listing unmatched for a human instead of guessing.
+export type CatalogMatchResult =
+  // Nothing cleared the similarity floor. In `seed` mode this is what licenses
+  // creating a catalogue row: we looked and there is genuinely nothing to link to.
+  | { kind: "none" }
+  // A candidate cleared the floor and the market guard accepted it.
+  | { kind: "match"; hit: CatalogHit }
+  // A candidate cleared the floor and this vendor's focus contradicts the cigar's
+  // evidenced market. We know something is here; we do not know enough to act.
+  | { kind: "refused"; hit: CatalogHit; market: CigarType | null };
+
+export async function findCatalogMatch(
+  db: Queryer,
+  name: string,
+  options?: FindCatalogMatchOptions,
+): Promise<CatalogMatchResult> {
+  const trimmed = name.trim();
+  if (!trimmed) return { kind: "none" };
+
+  const hit = await bestCandidate(db, trimmed);
+  if (!hit) return { kind: "none" };
+
+  const focus = options?.vendorFocus ?? null;
+  // A vendor with no single market cannot conflict with one; skip the read.
+  if (focus == null || focus === "both") return { kind: "match", hit };
+
+  const market = await evidencedMarket(db, hit.cigarId);
+  return coversMarket(focus, market) ? { kind: "match", hit } : { kind: "refused", hit, market };
+}
+
+async function bestCandidate(db: Queryer, trimmed: string): Promise<CatalogHit | null> {
   const exact = await db
     .select({ id: cigars.id, canonicalName: cigars.canonicalName })
     .from(cigars)
@@ -47,6 +112,14 @@ export interface UpsertMatchInput {
   cigarId: string | null;
   status: "auto" | "unmatched";
   now: Date;
+  // WHY this row is unmatched, when the resolver is the one saying so (0025).
+  // Always written — including as null on an `auto` upsert — so a row that
+  // becomes a link again cannot carry a stale reason from when it was not one.
+  unmatchedReason?: "market_refusal" | "no_match" | null;
+  // The `crawl_runs` row this write belongs to, stamped on the audit row a
+  // downgrade emits. Null on a dry run and in unit callers, which write no
+  // crawl_runs row to correlate to.
+  runId?: string | null;
 }
 
 // Upsert the (vendorId, listingKey) match. The crawler NEVER overwrites a
@@ -68,11 +141,48 @@ export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): 
   const row = existing[0];
   if (row) {
     if (row.decidedBy !== "crawler" || row.status === "confirmed") return row;
+    const reason = input.unmatchedReason ?? null;
     const updated = await db
       .update(listingMatches)
-      .set({ cigarId: input.cigarId, status: input.status, updatedAt: input.now })
+      .set({ cigarId: input.cigarId, status: input.status, unmatchedReason: reason, updatedAt: input.now })
       .where(eq(listingMatches.id, row.id))
       .returning();
+
+    // A DOWNGRADE IS AN UNLINK, AND AN UNLINK MUST BE ATTRIBUTABLE. Every other
+    // path that clears a listing→cigar link writes an audit row with a before
+    // snapshot: setListingMatchStatus does it for a curator or an agent, and
+    // excludeCigar does it for the cascade. The crawler's own downgrade — the
+    // market guard refusing a link the last crawl made, which is exactly the
+    // `Romeo y Julieta 1875` unlink this PR exists to produce — was a bare UPDATE.
+    // The row simply changed, with nothing anywhere saying it had, so the one
+    // write #170 was written to perform was the one write nobody could see.
+    //
+    // Only on a real transition (`cigar_id` actually changed): a re-crawl rewrites
+    // every match row every night, and an audit log that records "unchanged"
+    // 1,284 times a run is an audit log nobody reads. `actor: 'import'` with a
+    // null `user_id` is the crawler's established shape (approved-import); the
+    // action is shared with setListingMatchStatus so one query answers "what
+    // moved this link?" whoever moved it.
+    if (row.cigarId != null && row.cigarId !== input.cigarId) {
+      const before = {
+        id: row.id,
+        vendorId: row.vendorId,
+        listingKey: row.listingKey,
+        cigarId: row.cigarId,
+        status: row.status,
+        decidedBy: row.decidedBy,
+      };
+      await db.insert(auditLog).values({
+        userId: null,
+        ...auditActor(undefined, "import"),
+        action: "listing_match.set_status",
+        smokeId: null,
+        before,
+        after: { ...before, cigarId: input.cigarId, status: input.status, unmatchedReason: reason },
+        correlationId: input.runId ?? null,
+        runId: input.runId ?? null,
+      });
+    }
     return updated[0]!;
   }
 
@@ -83,6 +193,7 @@ export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): 
       listingKey: input.listingKey,
       cigarId: input.cigarId,
       status: input.status,
+      unmatchedReason: input.unmatchedReason ?? null,
       createdAt: input.now,
       updatedAt: input.now,
     })

@@ -1056,7 +1056,7 @@ export const getCurationQueueSchema = z
     kind: z
       .enum(["unverified", "duplicates", "match_triage", "unbranded", "untyped", "missing_photos"])
       .describe(
-        "Which backlog to page: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only), match_triage (vendor listing→cigar auto-matches to confirm/unmatch), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo).",
+        "Which backlog to page: unverified (active cigars not yet verified), duplicates (near-duplicate name pairs — human merge only), match_triage (vendor listings the crawler has not settled: auto rows to confirm/unmatch, and unmatched rows it produced no link for, each carrying a reason), unbranded (null brand), untyped (null NC/CC), missing_photos (no product photo).",
       ),
     cursor: z
       .string()
@@ -1071,7 +1071,7 @@ export type GetCurationQueueArgs = z.infer<typeof getCurationQueueSchema>;
 export const setListingMatchStatusSchema = z
   .object({
     clientRequestId: curationClientRequestId,
-    matchId: z.string().describe("Listing-match id from a get_curation_queue match_triage row."),
+    matchId: z.string().describe("Listing-match id from a get_curation_queue match_triage row with status auto."),
     status: z
       .enum(["confirmed", "unmatched"])
       .describe("confirmed keeps the auto-matched cigar; unmatched clears the link (the listing matched no catalog cigar)."),

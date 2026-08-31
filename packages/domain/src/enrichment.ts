@@ -4,7 +4,7 @@ import type { Deps, Principal, Tx } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
 import type { CigarRef, ProvenanceInput, Verification } from "./types.js";
 import { resolveCigar, type ResolvedCigar } from "./cigar-resolution.js";
-import { enrichmentCoverageForCigar, type EnrichmentCoverage } from "./enrichment-coverage.js";
+import { enrichmentCoverageForCigar, evidencedMarket, type EnrichmentCoverage } from "./enrichment-coverage.js";
 import { CigarNotFoundError } from "./errors.js";
 import { provenanceToActor } from "./mapping.js";
 
@@ -186,7 +186,12 @@ export async function classifyEnrichmentRequest(tx: Tx, cigarId: string): Promis
     .from(enrichmentRequests)
     .where(eq(enrichmentRequests.cigarId, cigarId));
   const seen = new Set(statusRows.map((r) => r.status));
-  const coverage = await enrichmentCoverageForCigar(tx, cigarId, cigar.type);
+  // THE EVIDENCED market, not `cigars.type` (#170, §2c of the 2026-08-30
+  // amendment). The crawler's drain filters its open set on the evidenced market;
+  // if this rollup filtered on the raw column the two would disagree about which
+  // vendors are in the fleet, and a vendor the drain will never send would sit in
+  // the denominator holding the request open forever.
+  const coverage = await enrichmentCoverageForCigar(tx, cigarId, await evidencedMarket(tx, cigarId));
 
   let status: EnrichmentRequestStatus;
   if (assessment.complete) status = "not_needed";
