@@ -2279,6 +2279,19 @@ function clampBacklogLimit(limit: number | undefined): number {
 
 // An untyped cigar could be either market, so it needs BOTH covered — enrichment is
 // what would tell us which, and guessing is how the 41 CC rows would get retired.
+//
+// THIS DELIBERATELY STILL READS `cigars.type`, not the evidenced market (#170
+// §7). It is the QUEUE GATE, a conservative positive claim, and it is the only
+// one of the three predicates that decides how much crawling to CREATE. On the
+// evidenced market it would accept prod's 821 Fox-evidenced untyped rows the
+// moment it shipped: ~800 new asks and, at ENRICH_DEFAULT_LIMIT = 10 a night,
+// months of nightly Fox drains. That is a crawl-volume and vendor-courtesy
+// decision, not a correctness one, and it belongs in its own PR with the owner's
+// sign-off. The cost of leaving it is a real and stated inconsistency — the
+// enqueue gate and the exhaustion denominator now read the market from two
+// different sources — which is defensible only because they are different
+// predicates with opposite postures, and is written into ADR-006 rather than left
+// implicit here.
 function marketCovered(type: CigarType | null, markets: Set<CigarType>): boolean {
   if (type === "CC" || type === "NC") return markets.has(type);
   return markets.has("CC") && markets.has("NC");
@@ -2413,6 +2426,15 @@ async function queueBacklogWithinTx(
       // 100 rows a press.
       ...(status === "exhausted" || status === "vendor_unreachable"
         ? { triedVendors: classified.coverage.tried.map((v) => v.name) }
+        : {}),
+      // ...and its mirror on the one verdict that is not a retirement (#185). An
+      // `already_queued` row held open by a lane that stopped running was
+      // indistinguishable, on this report, from one being worked through tonight.
+      // Naming the lanes that owe it a look is what makes the operator's two
+      // levers — unsuspend, or `crawl_enabled = false` — obvious. The real fix is
+      // #156; this is the honest report until then.
+      ...(status === "already_queued" && classified.coverage.awaiting.length > 0
+        ? { awaitingVendors: classified.coverage.awaiting.map((v) => v.name) }
         : {}),
     });
   }

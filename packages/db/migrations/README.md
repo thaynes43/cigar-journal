@@ -85,3 +85,26 @@ init container at startup (ADR-003).
   writes stamp it from the server-derived `Principal`; the web console has no
   OAuth client and stays null. No FK: the audit log is append-only history that
   must outlive the client row it names.
+- `0025_enrichment_market_evidence.sql` — two read-path indexes,
+  `listing_matches (cigar_id) WHERE cigar_id IS NOT NULL` and
+  `crawl_runs (vendor_id, kind, status, started_at DESC)`. Schema-neutral: no
+  column, no constraint, no data write. They serve two predicates added by the
+  2026-08-30 ADR-006 amendment. The **evidenced market** (#170) — `cigars.type`
+  if set, else the single market shared by every single-market vendor that
+  already stocks the cigar — is a correlated subquery keyed on
+  `listing_matches.cigar_id`, which carried **no index at all** (only the pkey
+  and `UNIQUE (vendor_id, listing_key)`), and it is evaluated per candidate row:
+  twice per row in the crawler's open set, once per row for up to
+  `ENRICHMENT_BACKLOG_MAX = 100` rows a backlog press. The partial clause keeps
+  the unmatched half of the triage queue out of the index, and an unmatched
+  listing is evidence about no cigar anyway. `crawl_runs` gets the per-vendor
+  liveness read #185 adds (when did this lane last START a succeeded `enrich`
+  run) plus #155's stranded-run sweep (any row still `running` for this
+  (vendor, kind)). **The evidenced market is deliberately never stored:**
+  writing an inferred market into `cigars.type` — a curator-trust-order,
+  user-visible field — from a signal as coarse as a vendor's focus manufactures
+  catalogue facts, which the same amendment forbids, and a backfill would freeze
+  at the moment it ran while the derived value sharpens with every crawl and is
+  overridden the moment a curator types the cigar. #157 and #155 need no
+  migration either: 0023 already normalized the legacy `in_progress` rows and the
+  drain no longer writes that state, so there is no state for a reaper to guard.

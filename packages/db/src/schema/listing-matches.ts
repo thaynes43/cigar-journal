@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, unique } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, unique, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { vendors } from "./vendors.js";
 import { cigars } from "./cigars.js";
 
@@ -22,7 +23,14 @@ export const listingMatches = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [unique().on(table.vendorId, table.listingKey)],
+  (table) => [
+    unique().on(table.vendorId, table.listingKey),
+    // The EVIDENCED MARKET's read path (migration 0025, #170): "which
+    // single-market vendors already stock this cigar?" is a correlated subquery
+    // keyed here, evaluated per candidate row on every drain and backlog press.
+    // Partial because an unmatched listing is evidence about nothing.
+    index("listing_matches_cigar_idx").on(table.cigarId).where(sql`${table.cigarId} IS NOT NULL`),
+  ],
 );
 
 export type ListingMatchRow = typeof listingMatches.$inferSelect;

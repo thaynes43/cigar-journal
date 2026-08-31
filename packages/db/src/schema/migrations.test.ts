@@ -202,4 +202,28 @@ describe("migrations", () => {
     // And an outcome-only row (no bytes) is unconstrained — the negative cache.
     await insert("brand_slug, brand_name, status", "'gate-c', 'Gate C', 'no_match'");
   });
+
+  // 0025: two read-path indexes, no schema change and no data write. They are not
+  // an optimization detail — the evidenced market (#170) is a correlated subquery
+  // keyed on `listing_matches.cigar_id`, a column that carried NO index at all,
+  // evaluated twice per row in the crawler's open set and once per row for up to
+  // ENRICHMENT_BACKLOG_MAX = 100 rows a backlog press.
+  it("0025 creates the evidenced-market and lane-liveness indexes", async () => {
+    const rows = await pg.db.execute(sql`
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND indexname IN ('listing_matches_cigar_idx', 'crawl_runs_vendor_kind_started_idx')
+      ORDER BY indexname
+    `);
+    const byName = new Map((rows.rows as { indexname: string; indexdef: string }[]).map((r) => [r.indexname, r.indexdef]));
+
+    // Partial on NOT NULL: an unmatched listing is evidence about no cigar, and
+    // most of the triage queue is unmatched.
+    expect(byName.get("listing_matches_cigar_idx")).toMatch(/cigar_id IS NOT NULL/);
+    // Column order follows the equality predicates the two readers share, with
+    // started_at trailing so the liveness read is a backwards scan for its max.
+    expect(byName.get("crawl_runs_vendor_kind_started_idx")).toMatch(
+      /\(vendor_id, kind, status, started_at DESC\)/,
+    );
+  });
 });

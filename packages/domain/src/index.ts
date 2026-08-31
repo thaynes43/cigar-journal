@@ -167,6 +167,10 @@ export {
   ATTEMPTS_PER_VENDOR,
   ERROR_BUDGET,
   coversMarketSql,
+  coversMarket,
+  mayWriteCatalogPhoto,
+  evidencedMarketSql,
+  evidencedMarket,
   vendorNotRetiredSql,
   enrichVendorFleet,
   liveEnrichMarkets,
@@ -176,7 +180,9 @@ export {
   type EnrichmentOutcome,
   type EnrichmentCoverage,
   type FleetVendor,
+  type RequestRef,
   type VendorBrief,
+  type VendorFocus,
   type VendorAttemptSummary,
 } from "./enrichment-coverage.js";
 // Product photos (ADR-007). Catalog-scoped (not owner-scoped); the serving route

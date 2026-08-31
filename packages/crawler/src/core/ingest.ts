@@ -1,13 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import { crawlRuns, enrichmentRequests, productPhotos, vendors, type Database } from "@cj/db";
+import { enrichmentRequests, productPhotos, vendors, type Database } from "@cj/db";
 import {
   recordPriceObservation,
   recordEnrichmentAttempt,
   enrichmentCoverageForRequest,
+  coversMarket,
   coversMarketSql,
+  evidencedMarket,
+  evidencedMarketSql,
+  mayWriteCatalogPhoto,
   vendorNotRetiredSql,
+  type CigarType,
   type EnrichmentOutcome,
+  type VendorFocus,
 } from "@cj/domain";
 import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedPhoto } from "@cj/photos";
 import type { VendorAdapter } from "../adapters/types.js";
@@ -17,6 +23,7 @@ import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
 import { isCigarListing, normalizeListing, type NormalizedListing } from "./normalize.js";
 import { createCigarFromListing, findCatalogMatch, upsertListingMatch } from "./match.js";
 import { parseRobots } from "./robots.js";
+import { openCrawlRun, reclaimStrandedRuns, type SignalHost } from "./run-record.js";
 import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
 
 // The run driver (ADR-006). Three modes share one polite walk: `seed` (catalog
@@ -42,6 +49,12 @@ export interface IngestStats {
   cigarsCreated: number;
   offersWritten: number;
   photosCaptured: number;
+  // Catalogue-photo writes REFUSED by the write-authority guard (#170): this
+  // vendor's focus is a single market and the cigar's evidenced market is either
+  // unknown or the other one. Present only when non-zero, so the JSONB of a run
+  // that refused nothing stays byte-identical to what it was before this field
+  // existed. Not an error — a refusal is the guard working.
+  photosSkippedMarket?: number;
   errors: number;
   // Present only for a vendor with sitemapSampling configured — absent keeps the
   // JSONB byte-identical for every other vendor.
@@ -82,6 +95,12 @@ export interface IngestStats {
     // summary that folded the two together would say "we looked and found
     // nothing" about a vendor nobody could reach.
     blocked: number;
+    // Looks that found a listing above the similarity floor and REFUSED to link it
+    // (#170): between the open-set SELECT and the write, the cigar's evidenced
+    // market resolved to the market this vendor does not trade in. Counted as a
+    // completed look (a `miss`) and not as an error, because we did read the
+    // vendor's catalogue — what we declined is the conclusion, not the look.
+    skippedMarket: number;
   };
 }
 
@@ -93,6 +112,9 @@ export interface IngestDeps {
   // Injectable so ingest tests need neither sharp nor real image bytes; the CLI
   // wires the real @cj/photos pipeline.
   processPhoto?: (input: Buffer, contentType: string) => Promise<ProcessedPhoto>;
+  // Injectable so a test can drive the #155 SIGTERM handler without signalling —
+  // or exiting — the vitest worker. Production leaves it unset and gets `process`.
+  signalHost?: SignalHost;
 }
 
 export interface IngestOptions {
@@ -207,21 +229,56 @@ async function productUrls(deps: IngestDeps, adapter: VendorAdapter, stats: Inge
 
 // --- per-listing ingest ------------------------------------------------------
 
+// WRITE AUTHORITY FOR THE ONE CATALOGUE-PHOTO SLOT (#170).
+//
+// `product_photos` is UNIQUE(cigar_id), inserted with onConflictDoNothing, and
+// nothing in the crawler ever deletes a row. One global slot per cigar, first
+// write wins, forever — so unlike a listing match (per-vendor, named, revisable,
+// re-written next crawl) a wrong photo here is silent and permanent. That
+// asymmetry, not the similarity score, is what makes #170 severe, and it is why
+// this guard is STRICTER than the one on the link: the slot may only be filled
+// when the cigar's evidenced market is KNOWN and this vendor's focus covers it.
+//
+// The market is read HERE, after the listing match has been committed, and that
+// ordering is the whole design (option A, SELF-EVIDENCING):
+//   * a single-market vendor that links a cigar nobody else stocks becomes its own
+//     sole evidence, so it may photograph it — Fox's working seed/enrich lanes are
+//     not regressed by this guard at all;
+//   * a second vendor of the OTHER market linking the same cigar makes the
+//     evidence conflict, which resolves to unknown, and its photo is refused.
+// The residual, stated: the first vendor to discover a cigar can always photograph
+// it, so a CC lane that name-matches a Nicaraguan brand nobody else stocks still
+// fills the slot. Closing that needs INDEPENDENT evidence (`cigars.type`, or a
+// different vendor already stocking it), which would mean the discovering vendor
+// can never photograph what it found — an owner call, raised as such, not decided
+// here.
 async function capturePhoto(
   deps: IngestDeps,
   vendorId: string,
+  focus: VendorFocus | null,
   cigarId: string,
   listing: NormalizedListing,
   stats: IngestStats,
 ): Promise<void> {
   if (!deps.storage || !listing.imageUrl) return;
 
+  // The slot check comes FIRST so `photosSkippedMarket` counts only refusals that
+  // would otherwise have written: a cigar that already has its photo is a no-op
+  // whatever the market says, and counting it would inflate the number an operator
+  // reads as "wrong-market photos this run prevented".
   const existing = await deps.db
     .select({ id: productPhotos.id })
     .from(productPhotos)
     .where(eq(productPhotos.cigarId, cigarId))
     .limit(1);
   if (existing[0]) return;
+
+  // The market gate precedes the download: a photo we are not allowed to write is
+  // a photo we should not have spent a vendor's bandwidth fetching.
+  if (!mayWriteCatalogPhoto(focus, await evidencedMarket(deps.db, cigarId))) {
+    stats.photosSkippedMarket = (stats.photosSkippedMarket ?? 0) + 1;
+    return;
+  }
 
   // Bounded: a vendor's product image is whatever their CMS holds, and an
   // oversize one throws — both call sites already isolate a photo failure into
@@ -277,6 +334,7 @@ async function capturePhoto(
 async function ingestListing(
   deps: IngestDeps,
   options: IngestOptions,
+  focus: VendorFocus | null,
   url: string,
   listing: NormalizedListing,
   product: JsonLdProduct,
@@ -286,7 +344,14 @@ async function ingestListing(
   const listingKey = pathOf(url);
 
   const cigarId = await deps.db.transaction(async (tx) => {
-    const hit = await findCatalogMatch(tx, listing.name);
+    // `vendorFocus` is the seed/offers half of #170, and the half that has already
+    // fired in production: BOTH live cross-market rows came through here, not
+    // through the drain. A CC vendor walking its own sitemap trigram-matched an NC
+    // catalogue row and auto-linked it. The guard is a pure negative filter — it
+    // can only ever refuse a link, never redirect one — so in `seed` mode a
+    // refusal falls through to createCigarFromListing, which is the right answer:
+    // a listing whose market contradicts its best match is a DIFFERENT cigar.
+    const hit = await findCatalogMatch(tx, listing.name, { vendorFocus: focus });
     let linkedCigarId: string | null = null;
     let status: "auto" | "unmatched";
 
@@ -336,7 +401,7 @@ async function ingestListing(
 
   if (cigarId) {
     try {
-      await capturePhoto(deps, options.vendorId, cigarId, listing, stats);
+      await capturePhoto(deps, options.vendorId, focus, cigarId, listing, stats);
     } catch (error) {
       // Photo ingestion is isolated from the offer write (ADR-007).
       stats.errors += 1;
@@ -350,6 +415,7 @@ async function ingestListing(
 async function walkListings(
   deps: IngestDeps,
   options: IngestOptions,
+  focus: VendorFocus | null,
   stats: IngestStats,
   report: string[],
 ): Promise<void> {
@@ -391,7 +457,7 @@ async function walkListings(
         continue;
       }
 
-      await ingestListing(deps, options, url, listing, product, stats);
+      await ingestListing(deps, options, focus, url, listing, product, stats);
     } catch (error) {
       stats.errors += 1;
       void error;
@@ -409,6 +475,7 @@ async function nameSimilarity(deps: IngestDeps, a: string, b: string): Promise<n
 async function drainEnrichment(
   deps: IngestDeps,
   options: IngestOptions,
+  focus: VendorFocus | null,
   stats: IngestStats,
   report: string[],
 ): Promise<void> {
@@ -421,20 +488,6 @@ async function drainEnrichment(
 
   const urls = await productUrls(deps, adapter, stats);
   const candidates = urls.map((url) => ({ url, tokens: slugTokens(lastSegment(pathOf(url))) }));
-
-  // This vendor's market, read from the REGISTRY rather than from the adapter.
-  // The adapter carries the same field, but the exhaustion rollup reads
-  // `vendors.focus`, and a drain filtered on a different copy of that fact could
-  // look at a request it is not counted against — a whole class of drift removed
-  // for one indexed read per run. NULL focus means unknown, which covers
-  // everything: the filter is a NEGATIVE one, and both this clause and the
-  // rollup's come from coversMarketSql so the two cannot drift.
-  const vendorRows = await deps.db
-    .select({ focus: vendors.focus })
-    .from(vendors)
-    .where(eq(vendors.id, options.vendorId))
-    .limit(1);
-  const focus = vendorRows[0]?.focus ?? null;
 
   const limit = options.limit ?? ENRICH_DEFAULT_LIMIT;
 
@@ -455,14 +508,29 @@ async function drainEnrichment(
   // `fulfilled` is deliberately absent: one catalogue photo per cigar (ADR-007)
   // means the ask is answered. The join to `cigars` also kills the per-request
   // SELECT the old loop did, so the canonical name and market arrive in one read.
+  //
+  // THE MARKET FILTER READS THE EVIDENCED MARKET, NOT `cigars.type` (#170). On the
+  // raw column the predicate is inert for 884 of prod's 971 active cigars, because
+  // `coversMarketSql` admits an unknown market by design — so a CC lane could and
+  // would select 91% of the catalogue. The evidenced market resolves 878 of those
+  // 884 from links the crawler already wrote (see evidencedMarketSql), which is
+  // what turns a filter that is correct-but-inert into one that bites.
+  //
+  // The same fragment is SELECTED as `market` and handed to finalizeEnrichment, so
+  // the rollup's denominator is computed from the identical value this open set was
+  // filtered with. Two evaluations of a correlated subquery per candidate row is
+  // the price of that coupling, and at LIMIT 10 it is not a price worth optimizing
+  // away — a drain that filters on one market while the rollup counts on another
+  // holds requests open forever.
   const open = await deps.db.execute(sql`
-    SELECT r.id AS request_id, c.id AS cigar_id, c.canonical_name, c.type
+    SELECT r.id AS request_id, c.id AS cigar_id, c.canonical_name,
+           ${evidencedMarketSql(sql`c.id`)} AS market
     FROM enrichment_requests r
     JOIN cigars c ON c.id = r.cigar_id
     LEFT JOIN enrichment_attempts a
            ON a.request_id = r.id AND a.vendor_id = ${options.vendorId}
     WHERE r.status IN ('pending', 'in_progress', 'exhausted')
-      AND ${coversMarketSql(sql`${focus}::text`, sql`c.type`)}
+      AND ${coversMarketSql(sql`${focus}::text`, evidencedMarketSql(sql`c.id`))}
       AND ${vendorNotRetiredSql(sql`COALESCE(a.attempts, 0)`, sql`COALESCE(a.errors, 0)`)}
     ORDER BY r.created_at
     LIMIT ${limit}
@@ -471,10 +539,18 @@ async function drainEnrichment(
     request_id: string;
     cigar_id: string;
     canonical_name: string;
-    type: "NC" | "CC" | null;
+    market: CigarType | null;
   }[];
 
-  const enrich = { requests: pending.length, looked: 0, matched: 0, errored: 0, spent: 0, blocked: 0 };
+  const enrich = {
+    requests: pending.length,
+    looked: 0,
+    matched: 0,
+    errored: 0,
+    spent: 0,
+    blocked: 0,
+    skippedMarket: 0,
+  };
   stats.enrich = enrich;
 
   for (const request of pending) {
@@ -487,14 +563,14 @@ async function drainEnrichment(
       .sort((a, b) => b.score - a.score)
       .slice(0, MAX_ENRICH_CANDIDATES);
 
-    const outcome = await tryEnrichCandidates(deps, options, cigar, ranked, candidates.length, stats, report);
+    const outcome = await tryEnrichCandidates(deps, options, focus, cigar, ranked, candidates.length, stats, report);
     if (outcome === "error") enrich.errored += 1;
     else enrich.looked += 1;
     if (outcome === "match") enrich.matched += 1;
 
     if (options.dryRun) continue;
 
-    const retired = await finalizeEnrichment(deps, options, request.request_id, request.type, outcome);
+    const retired = await finalizeEnrichment(deps, options, request.request_id, request.market, outcome);
     if (retired === "exhausted") enrich.spent += 1;
     else if (retired === "blocked") enrich.blocked += 1;
   }
@@ -539,6 +615,7 @@ async function drainEnrichment(
 async function tryEnrichCandidates(
   deps: IngestDeps,
   options: IngestOptions,
+  focus: VendorFocus | null,
   cigar: { id: string; canonicalName: string },
   ranked: { url: string }[],
   enumerated: number,
@@ -578,7 +655,17 @@ async function tryEnrichCandidates(
     }
 
     const now = deps.now();
-    await deps.db.transaction(async (tx) => {
+    // WRITE AUTHORITY, re-evaluated at the write (#170). The open set already
+    // filtered on the evidenced market, so this normally agrees — it is here
+    // because the two reads are seconds of polite HTTP apart, and in that window a
+    // curator can set `cigars.type` or another lane can link the row and turn an
+    // unknown market into a known, conflicting one. Authority belongs at the write
+    // site; a filter on the way in is an optimization, not a guarantee.
+    //
+    // Evaluated INSIDE the transaction that writes the match, so the check and the
+    // write see one snapshot.
+    const linked = await deps.db.transaction(async (tx) => {
+      if (!coversMarket(focus, await evidencedMarket(tx, cigar.id))) return false;
       const match = await upsertListingMatch(tx, {
         vendorId: options.vendorId,
         listingKey: pathOf(candidate.url),
@@ -604,7 +691,18 @@ async function tryEnrichCandidates(
         seenAt: now,
       });
       if (observation.inserted) stats.offersWritten += 1;
+      return true;
     });
+
+    // A refusal ends the LOOK, not just this candidate: the conflict is a property
+    // of (this vendor, this cigar), so every remaining candidate would be refused
+    // for the same reason. It scores as a `miss` — we read the vendor's catalogue
+    // and declined to conclude from it — never as an `error`, which would burn
+    // ERROR_BUDGET on a guard doing its job and re-fetch the same pages nightly.
+    if (!linked) {
+      if (stats.enrich) stats.enrich.skippedMarket += 1;
+      return "miss";
+    }
 
     // KNOWN MISREPORT, deliberately unchanged by #158 and stated rather than
     // silently carried: a capture that throws still returns `match`, so a request
@@ -617,7 +715,7 @@ async function tryEnrichCandidates(
     // product call, not a ledger one. The row stays visible: it reports as
     // exhausted-AND-fulfilled on the backlog press, which `retryExhausted` clears.
     try {
-      await capturePhoto(deps, options.vendorId, cigar.id, listing, stats);
+      await capturePhoto(deps, options.vendorId, focus, cigar.id, listing, stats);
     } catch {
       stats.errors += 1;
     }
@@ -647,7 +745,9 @@ async function finalizeEnrichment(
   deps: IngestDeps,
   options: IngestOptions,
   requestId: string,
-  type: "NC" | "CC" | null,
+  // The EVIDENCED market, carried over from the open-set SELECT so the rollup's
+  // denominator is computed from the same value the drain filtered on (#170 §2c).
+  market: CigarType | null,
   outcome: EnrichmentOutcome,
 ): Promise<Retirement> {
   const now = deps.now();
@@ -674,7 +774,7 @@ async function finalizeEnrichment(
       return "open";
     }
 
-    const coverage = await enrichmentCoverageForRequest(tx, requestId, type);
+    const coverage = await enrichmentCoverageForRequest(tx, requestId, market);
     if (coverage.exhausted) {
       await tx
         .update(enrichmentRequests)
@@ -706,13 +806,32 @@ async function finalizeEnrichment(
 
 // --- entry -------------------------------------------------------------------
 
+// PRECONDITION, and it is not enforceable from here: a non-dry run must be entered
+// while holding this lane's advisory lock (cli.ts wraps the call in
+// withVendorLaneLock). The stranded-run sweep below is only correct under it —
+// without the lock it could fail a run that is genuinely in flight.
 export async function runIngest(deps: IngestDeps, options: IngestOptions): Promise<IngestResult> {
   const stats = emptyStats();
   const report: string[] = [];
 
+  // This vendor's market, read ONCE from the REGISTRY rather than from the adapter.
+  // The adapter carries the same field, but every market predicate downstream —
+  // the drain's open set, the exhaustion rollup, both write guards — reads
+  // `vendors.focus`, and a crawl acting on a different copy of that fact could
+  // write where the rollup says it may not. One indexed read per run removes the
+  // whole class of drift. NULL focus means unknown, which the negative filter
+  // treats as covering everything and the photo guard treats as no authority to
+  // assert either way.
+  const vendorRows = await deps.db
+    .select({ focus: vendors.focus })
+    .from(vendors)
+    .where(eq(vendors.id, options.vendorId))
+    .limit(1);
+  const focus = vendorRows[0]?.focus ?? null;
+
   const run = async (): Promise<void> => {
-    if (options.mode === "enrich") await drainEnrichment(deps, options, stats, report);
-    else await walkListings(deps, options, stats, report);
+    if (options.mode === "enrich") await drainEnrichment(deps, options, focus, stats, report);
+    else await walkListings(deps, options, focus, stats, report);
   };
 
   if (options.dryRun) {
@@ -726,27 +845,33 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
     }
   }
 
-  const started = await deps.db
-    .insert(crawlRuns)
-    .values({ vendorId: options.vendorId, kind: options.mode, status: "running", startedAt: deps.now() })
-    .returning({ id: crawlRuns.id });
-  const crawlRunId = started[0]!.id;
+  // #155: close out anything a previous process for this lane left `running`
+  // before opening a new row, so a pod lost to SIGKILL/OOM/node-loss does not leave
+  // an immortal row nothing re-selects. Lock-scoped, hence no age ceiling — see
+  // reclaimStrandedRuns.
+  await reclaimStrandedRuns(deps.db, { vendorId: options.vendorId, kind: options.mode });
+
+  const record = await openCrawlRun(deps.db, {
+    vendorId: options.vendorId,
+    kind: options.mode,
+    now: deps.now,
+    host: deps.signalHost,
+  });
 
   try {
     await run();
     stats.pagesFetched = deps.fetcher.pagesFetched;
-    await deps.db
-      .update(crawlRuns)
-      .set({ status: "succeeded", stats, finishedAt: deps.now() })
-      .where(eq(crawlRuns.id, crawlRunId));
-    return { crawlRunId, status: "succeeded", stats, report };
+    await record.close("succeeded", { stats });
+    return { crawlRunId: record.crawlRunId, status: "succeeded", stats, report };
   } catch (error) {
     stats.pagesFetched = deps.fetcher.pagesFetched;
     const message = errorText(error);
-    await deps.db
-      .update(crawlRuns)
-      .set({ status: "failed", stats, error: message, finishedAt: deps.now() })
-      .where(eq(crawlRuns.id, crawlRunId));
-    return { crawlRunId, status: "failed", stats, error: message, report };
+    await record.close("failed", { stats, error: message });
+    return { crawlRunId: record.crawlRunId, status: "failed", stats, error: message, report };
+  } finally {
+    // Idempotent with close(); the point is that a throw between the two — or a
+    // caller that keeps the process alive — never leaves a listener holding a
+    // reference to a run that is already over.
+    record.dispose();
   }
 }

@@ -1253,6 +1253,18 @@ export interface EnrichmentBacklogEntry {
   // so "no match" is evidence about that vendor and about nothing else, and
   // "could not be reached" is not evidence about anything at all.
   triedVendors?: string[];
+  // The mirror of `triedVendors` on the one verdict that is NOT a retirement:
+  // present only on `already_queued`, naming the counted lanes that still OWE this
+  // row a look (#185). Without it a row held open by a lane that stopped running
+  // is an invisible `already_queued` no operator can act on — which is the whole
+  // reported defect. Two readings, and the operator needs both:
+  //   * NAMED lanes — those lanes are counted and unspent. Unsuspend one, or flip
+  //     its `crawl_enabled` off, which drops it from the fleet and frees the row.
+  //   * ABSENT — no lane counts at all. The row is open and self-healing, and
+  //     nothing is owed until a lane covering its market runs.
+  // Omitted rather than sent empty: at 100 rows a press an always-present array is
+  // payload noise, and the absent case has its own meaning above.
+  awaitingVendors?: string[];
 }
 
 // `limit` is clamped to [1, ENRICHMENT_BACKLOG_MAX] (curation.ts) — the ceiling is

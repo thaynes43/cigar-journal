@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { cigars, listingMatches, type ListingMatchRow } from "@cj/db";
-import type { Queryer } from "@cj/domain";
+import { coversMarket, evidencedMarket, type Queryer, type VendorFocus } from "@cj/domain";
 
 // Listing → catalog matching (ADR-006). Same trigram machinery the domain search
 // uses: an exact case-insensitive canonical-name hit wins outright, else the best
@@ -16,10 +16,50 @@ export interface CatalogHit {
   canonicalName: string;
 }
 
-export async function findCatalogMatch(db: Queryer, name: string): Promise<CatalogHit | null> {
+export interface FindCatalogMatchOptions {
+  // The crawling vendor's `vendors.focus`. Supplied, it turns on the cross-market
+  // guard below; omitted (or null/'both'), matching behaves exactly as before and
+  // costs not one extra query.
+  vendorFocus?: VendorFocus | null;
+}
+
+// THE SEED/OFFERS HALF OF #170, and the half that has already fired in production.
+// Both live cross-market rows came through this function, not through the enrich
+// drain: a vendor walking its own sitemap trigram-matched a catalogue cigar from
+// the other market and auto-linked it (`Petit Royales Romeo y Julieta`, type='CC',
+// linked by an NC-focus vendor to its Altadis `Romeo y Julieta 1875` listing).
+//
+// The guard REJECTS, it does not re-rank. The market test is applied to the
+// candidate this function would have returned anyway, so it can only ever remove a
+// link and never create one — the same posture as every other guard in this lane,
+// and the property the risk assessment rests on. Folding the predicate into the
+// SQL `WHERE` instead would make the query return the best MARKET-COMPATIBLE
+// candidate, which sounds better and is not: the 0.55 floor is a verified
+// false-positive source (`similarity('Romeo y Julieta Mini White Original',
+// 'Romeo y Julieta Mini') = 0.5833`), so substituting a lower-scoring row would
+// invent mis-links that do not exist today. Rejection cannot.
+//
+// A refusal in `seed` mode falls through to createCigarFromListing, which is the
+// right outcome: a listing whose market contradicts its best match is a different
+// cigar. In `offers` mode it leaves the listing `unmatched` for the triage queue.
+export async function findCatalogMatch(
+  db: Queryer,
+  name: string,
+  options?: FindCatalogMatchOptions,
+): Promise<CatalogHit | null> {
   const trimmed = name.trim();
   if (!trimmed) return null;
 
+  const hit = await bestCandidate(db, trimmed);
+  if (!hit) return null;
+
+  const focus = options?.vendorFocus ?? null;
+  // A vendor with no single market cannot conflict with one; skip the read.
+  if (focus == null || focus === "both") return hit;
+  return coversMarket(focus, await evidencedMarket(db, hit.cigarId)) ? hit : null;
+}
+
+async function bestCandidate(db: Queryer, trimmed: string): Promise<CatalogHit | null> {
   const exact = await db
     .select({ id: cigars.id, canonicalName: cigars.canonicalName })
     .from(cigars)

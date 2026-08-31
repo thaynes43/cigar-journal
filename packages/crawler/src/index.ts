@@ -78,7 +78,21 @@ export {
   createCigarFromListing,
   MATCH_THRESHOLD,
   type CatalogHit,
+  type FindCatalogMatchOptions,
 } from "./core/match.js";
+// The crawl_runs row's lifecycle and the per-(vendor, mode) lane lock (#155,
+// #157). Exported because the CLI is the only production caller and it lives
+// outside core/ — nothing else should reach for these.
+export {
+  openCrawlRun,
+  reclaimStrandedRuns,
+  markRunTerminated,
+  withVendorLaneLock,
+  type OpenCrawlRun,
+  type LaneLockResult,
+  type CrawlRunOutcome,
+  type SignalHost,
+} from "./core/run-record.js";
 export {
   runIngest,
   RobotsDisallowedError,

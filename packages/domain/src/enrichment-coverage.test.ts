@@ -1,18 +1,23 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { crawlRuns, enrichmentAttempts, enrichmentRequests, vendors } from "@cj/db";
+import { crawlRuns, enrichmentAttempts, enrichmentRequests, listingMatches, vendors } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { maybeQueueEnrichment } from "./enrichment.js";
+import type { CigarType } from "./types.js";
 import {
   ATTEMPTS_PER_VENDOR,
   ERROR_BUDGET,
+  coversMarket,
   coversMarketSql,
   enrichVendorFleet,
   enrichmentCoverageForCigar,
   enrichmentCoverageForRequest,
+  evidencedMarket,
   liveEnrichMarkets,
+  mayWriteCatalogPhoto,
   recordEnrichmentAttempt,
   vendorNotRetiredSql,
+  type VendorFocus,
 } from "./enrichment-coverage.js";
 
 // The vendor dimension (#158, migration 0023). Every assertion here exists because
@@ -26,6 +31,14 @@ import {
 describe("enrichment coverage", () => {
   let h: DomainHarness;
   const at = new Date("2026-08-30T12:00:00.000Z");
+  // Liveness is a per-request COMPARISON since #185 — a lane counts only if it has
+  // already looked at the ask, or started a succeeded enrich run since the ask was
+  // filed. So both instants are pinned rather than left to wall-clock defaults:
+  // `makeVendor` seeds a lane that ran AFTER `makeRequest` files its ask, which is
+  // the ordinary case the rest of these cases assume. The cases that are ABOUT the
+  // ordering set it themselves.
+  const REQUEST_AT = new Date("2026-08-26T00:00:00.000Z");
+  const LANE_RAN_AT = new Date("2026-08-28T12:00:00.000Z");
 
   beforeAll(async () => {
     h = await createHarness();
@@ -60,7 +73,9 @@ describe("enrichment coverage", () => {
       .returning({ id: vendors.id });
     const vendorId = rows[0]!.id;
     if (opts.enrichRun ?? true) {
-      await h.deps.db.insert(crawlRuns).values({ vendorId, kind: "enrich", status: "succeeded" });
+      await h.deps.db
+        .insert(crawlRuns)
+        .values({ vendorId, kind: "enrich", status: "succeeded", startedAt: LANE_RAN_AT });
     }
     return vendorId;
   }
@@ -69,7 +84,7 @@ describe("enrichment coverage", () => {
     const cigarId = await h.seedCigar({ canonicalName: `${name} ${newRequestId().slice(0, 8)}`, type });
     const rows = await h.deps.db
       .insert(enrichmentRequests)
-      .values({ cigarId, status: "pending" })
+      .values({ cigarId, status: "pending", createdAt: REQUEST_AT })
       .returning({ id: enrichmentRequests.id });
     return { cigarId, requestId: rows[0]!.id };
   }
@@ -153,6 +168,42 @@ describe("enrichment coverage", () => {
     expect((await enrichmentCoverageForRequest(h.deps.db, requestId, "NC")).exhausted).toBe(true);
   });
 
+  // The MARKET side of the same complement (#170 §2c). The drain filters its open
+  // set with coversMarketSql over the evidenced market; the rollup builds its
+  // denominator with the same predicate over the same value. A vendor the drain
+  // will never send must not appear in the fleet the rollup counts, or the request
+  // hangs on a lane that is never coming.
+  it("the fleet is the exact complement of the drain's market filter", async () => {
+    await clearFleet();
+    const nc = await makeVendor("Complement NC", "NC");
+    const cc = await makeVendor("Complement CC", "CC");
+
+    const ids = async (market: CigarType | null) =>
+      (await enrichVendorFleet(h.deps.db, market)).map((v) => v.vendorId).sort();
+
+    for (const [market, expected] of [
+      ["NC", [nc]],
+      ["CC", [cc]],
+      [null, [nc, cc]],
+    ] as [CigarType | null, string[]][]) {
+      expect([market, await ids(market)]).toEqual([market, expected.sort()]);
+      // ...and each vendor's membership is exactly what the SQL predicate says.
+      for (const [vendorId, focus] of [
+        [nc, "NC"],
+        [cc, "CC"],
+      ] as [string, VendorFocus][]) {
+        const rows = await h.deps.db.execute(
+          sql`SELECT ${coversMarketSql(sql`${focus}::text`, sql`${market}::text`)} AS ok`,
+        );
+        expect([focus, market, (rows.rows[0] as { ok: boolean }).ok]).toEqual([
+          focus,
+          market,
+          expected.includes(vendorId),
+        ]);
+      }
+    }
+  });
+
   // --- eligibility vs liveness ---------------------------------------------
 
   it("the fleet is crawl_enabled x focus; `live` additionally needs a succeeded enrich run", async () => {
@@ -175,24 +226,30 @@ describe("enrichment coverage", () => {
 
     // None of them has run an enrich pass, so none is live and no market is
     // enriched. Nothing here counts toward exhaustion.
-    expect((await enrichVendorFleet(h.deps.db, null)).some((v) => v.live)).toBe(false);
+    expect((await enrichVendorFleet(h.deps.db, null)).some((v) => v.lastEnrichStartedAt != null)).toBe(false);
     expect([...(await liveEnrichMarkets(h.deps.db))]).toEqual([]);
 
-    await h.deps.db.insert(crawlRuns).values({ vendorId: nc, kind: "enrich", status: "succeeded" });
-    expect((await enrichVendorFleet(h.deps.db, "NC")).filter((v) => v.live).map((v) => v.vendorId)).toEqual([nc]);
+    await h.deps.db
+      .insert(crawlRuns)
+      .values({ vendorId: nc, kind: "enrich", status: "succeeded", startedAt: LANE_RAN_AT });
+    expect((await enrichVendorFleet(h.deps.db, "NC")).filter((v) => v.lastEnrichStartedAt != null).map((v) => v.vendorId)).toEqual([nc]);
     expect([...(await liveEnrichMarkets(h.deps.db))].sort()).toEqual(["NC"]);
     // A `seed` run is not an enrich lane — the prod shape this gate was written for.
-    await h.deps.db.insert(crawlRuns).values({ vendorId: cc, kind: "seed", status: "succeeded" });
-    expect((await enrichVendorFleet(h.deps.db, "CC")).filter((v) => v.live).map((v) => v.vendorId)).toEqual([]);
+    await h.deps.db
+      .insert(crawlRuns)
+      .values({ vendorId: cc, kind: "seed", status: "succeeded", startedAt: LANE_RAN_AT });
+    expect((await enrichVendorFleet(h.deps.db, "CC")).filter((v) => v.lastEnrichStartedAt != null).map((v) => v.vendorId)).toEqual([]);
     expect([...(await liveEnrichMarkets(h.deps.db))].sort()).toEqual(["NC"]);
 
     // The one place a NULL focus is treated differently, and deliberately: it
     // cannot be used to CLAIM a market is covered (a positive claim), but it
     // cannot be ruled out of a cigar's fleet either (the negative filter).
-    await h.deps.db.insert(crawlRuns).values({ vendorId: unknownFocus, kind: "enrich", status: "succeeded" });
+    await h.deps.db
+      .insert(crawlRuns)
+      .values({ vendorId: unknownFocus, kind: "enrich", status: "succeeded", startedAt: LANE_RAN_AT });
     expect([...(await liveEnrichMarkets(h.deps.db))].sort()).toEqual(["NC"]);
     expect(
-      (await enrichVendorFleet(h.deps.db, "CC")).filter((v) => v.live).map((v) => v.vendorId),
+      (await enrichVendorFleet(h.deps.db, "CC")).filter((v) => v.lastEnrichStartedAt != null).map((v) => v.vendorId),
     ).toEqual([unknownFocus]);
   });
 
@@ -227,7 +284,9 @@ describe("enrichment coverage", () => {
     // ...and the consequence that makes it safe: the moment Cuban Lou's lane
     // completes a run it joins the denominator, and the request it has not looked
     // at reopens on its own. No reopen job, no backfill.
-    await h.deps.db.insert(crawlRuns).values({ vendorId: cubanLous, kind: "enrich", status: "succeeded" });
+    await h.deps.db
+      .insert(crawlRuns)
+      .values({ vendorId: cubanLous, kind: "enrich", status: "succeeded", startedAt: LANE_RAN_AT });
     const reopened = await enrichmentCoverageForRequest(h.deps.db, requestId, null);
     expect(reopened.exhausted).toBe(false);
     expect(reopened.openRequests).toBe(1);
@@ -245,13 +304,19 @@ describe("enrichment coverage", () => {
 
     await spend(requestId, running, 1);
     let coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
-    expect(coverage.live).toHaveLength(0);
+    // It has no succeeded enrich run at all, so the ONLY thing counting it is the
+    // look it recorded here — which is exactly what `live` reports since #185: the
+    // lanes counted against THIS ask, not the lanes that have ever run.
+    expect(coverage.live.map((v) => v.vendorId)).toEqual([running]);
+    // ...and it still owes a second look, so it is also awaited.
+    expect(coverage.awaiting.map((v) => v.vendorId)).toEqual([running]);
     expect(coverage.exhausted).toBe(false);
     expect(coverage.openRequests).toBe(1);
 
     await spend(requestId, running, 1);
     coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
     expect(coverage.exhausted).toBe(true);
+    expect(coverage.awaiting).toHaveLength(0);
   });
 
   // --- the atomic upsert ----------------------------------------------------
@@ -518,5 +583,251 @@ describe("enrichment coverage", () => {
     const coverage = await enrichmentCoverageForCigar(h.deps.db, cigarId, "NC");
     expect(coverage.exhausted).toBe(false);
     expect(coverage.openRequests).toBe(0);
+  });
+
+  // --- the evidenced market (#170) ------------------------------------------
+
+  // A vendor's listing, as a market claim about the cigar it links to.
+  async function stock(vendorId: string, cigarId: string | null): Promise<void> {
+    await h.deps.db.insert(listingMatches).values({
+      vendorId,
+      listingKey: `/p/${newRequestId()}`,
+      cigarId,
+      status: cigarId ? "auto" : "unmatched",
+    });
+  }
+
+  async function vendorName(vendorId: string): Promise<string> {
+    const rows = await h.deps.db.select({ name: vendors.name }).from(vendors).where(eq(vendors.id, vendorId));
+    return rows[0]!.name;
+  }
+
+  // The whole of #170 rests on this read being right, because on prod 884 of 971
+  // active cigars are untyped and `coversMarketSql` admits an unknown market by
+  // design — so on the raw column the market predicate is inert for 91% of the
+  // catalogue and a CC lane may select almost all of it.
+  it("the evidenced market: cigars.type wins, one single-market source resolves, conflicting sources do not", async () => {
+    await clearFleet();
+    const nc = await makeVendor("Evidence NC", "NC", { enrichRun: false });
+    const cc = await makeVendor("Evidence CC", "CC", { enrichRun: false });
+    const both = await makeVendor("Evidence Both", "both", { enrichRun: false });
+
+    // No type and nobody stocks it: unknown, and the guards stay liberal.
+    const bare = await h.seedCigar({ canonicalName: `Bare Row ${newRequestId()}`, type: null });
+    expect(await evidencedMarket(h.deps.db, bare)).toBeNull();
+
+    // ONE single-market vendor stocking it resolves the market. This is ADR-006's
+    // own negative filter run backwards: a CC-only vendor will not carry an NC
+    // cigar, so an NC-only vendor carrying this one means it is not CC.
+    const foxOnly = await h.seedCigar({ canonicalName: `Fox Only Row ${newRequestId()}`, type: null });
+    await stock(nc, foxOnly);
+    expect(await evidencedMarket(h.deps.db, foxOnly)).toBe("NC");
+
+    // Two disagreeing sources resolve to UNKNOWN, not to a winner. Conservative on
+    // purpose: one of the two links is wrong and nothing here can say which.
+    await stock(cc, foxOnly);
+    expect(await evidencedMarket(h.deps.db, foxOnly)).toBeNull();
+
+    // `cigars.type` OVERRIDES linkage evidence outright, so a curator always has
+    // the last word — the live `Petit Royales Romeo y Julieta` shape: a CC cigar
+    // wrongly auto-linked by an NC vendor stays CC.
+    const typed = await h.seedCigar({ canonicalName: `Typed Row ${newRequestId()}`, type: "CC" });
+    await stock(nc, typed);
+    expect(await evidencedMarket(h.deps.db, typed)).toBe("CC");
+
+    // A both-market vendor stocking a cigar says nothing about its market.
+    const bothOnly = await h.seedCigar({ canonicalName: `Both Only Row ${newRequestId()}`, type: null });
+    await stock(both, bothOnly);
+    expect(await evidencedMarket(h.deps.db, bothOnly)).toBeNull();
+
+    // An UNMATCHED listing (cigar_id NULL) is evidence about no cigar at all...
+    const triaged = await h.seedCigar({ canonicalName: `Triaged Row ${newRequestId()}`, type: null });
+    await stock(cc, null);
+    expect(await evidencedMarket(h.deps.db, triaged)).toBeNull();
+    // ...and it does not disturb the answer for a cigar that does have evidence.
+    await stock(nc, triaged);
+    expect(await evidencedMarket(h.deps.db, triaged)).toBe("NC");
+  });
+
+  // The TS mirrors exist so the write sites do not round-trip to Postgres to
+  // evaluate a three-term boolean. Nothing but this case stops them drifting from
+  // the SQL the drain and the rollup actually filter with.
+  it("coversMarket mirrors coversMarketSql over the whole truth table, and the photo guard is strictly stricter", async () => {
+    const focuses: (VendorFocus | null)[] = [null, "both", "NC", "CC"];
+    const markets: (CigarType | null)[] = [null, "NC", "CC"];
+    for (const focus of focuses) {
+      for (const market of markets) {
+        const rows = await h.deps.db.execute(
+          sql`SELECT ${coversMarketSql(sql`${focus}::text`, sql`${market}::text`)} AS ok`,
+        );
+        const inSql = (rows.rows[0] as { ok: boolean }).ok;
+        expect([focus, market, inSql]).toEqual([focus, market, coversMarket(focus, market)]);
+        // Write authority can never permit what the link filter already refuses.
+        if (!coversMarket(focus, market)) expect(mayWriteCatalogPhoto(focus, market)).toBe(false);
+      }
+    }
+
+    // And it is STRICTLY stricter, which is the reversibility split: a single-market
+    // vendor may LINK a cigar whose market is unknown (revisable, per-vendor, named)
+    // but may not fill its one permanent catalogue-photo slot.
+    expect(coversMarket("NC", null)).toBe(true);
+    expect(mayWriteCatalogPhoto("NC", null)).toBe(false);
+    // A vendor with no single market has none to conflict with, so the guard is
+    // inert there rather than asserting an authority it does not have.
+    expect(mayWriteCatalogPhoto("both", null)).toBe(true);
+    expect(mayWriteCatalogPhoto(null, null)).toBe(true);
+  });
+
+  // --- per-request liveness (#185) -------------------------------------------
+
+  async function laneRan(vendorId: string, startedAt: Date, finishedAt?: Date): Promise<void> {
+    await h.deps.db
+      .insert(crawlRuns)
+      .values({ vendorId, kind: "enrich", status: "succeeded", startedAt, finishedAt: finishedAt ?? startedAt });
+  }
+
+  async function askedAt(createdAt: Date, type: CigarType | null = "NC"): Promise<{ cigarId: string; requestId: string }> {
+    const cigarId = await h.seedCigar({ canonicalName: `Timed Ask ${newRequestId()}`, type });
+    const rows = await h.deps.db
+      .insert(enrichmentRequests)
+      .values({ cigarId, status: "pending", createdAt })
+      .returning({ id: enrichmentRequests.id });
+    return { cigarId, requestId: rows[0]!.id };
+  }
+
+  // THE #185 DEFECT. "Has this lane ever run?" is MONOTONE: once true it is true
+  // forever, so a lane that runs once and stops counts against every request filed
+  // afterwards, and those requests can never reach `exhausted` — nor, therefore,
+  // `retryExhausted`. The per-request question fixes the inflow.
+  it("a lane that stopped running does not count against a request filed after it stopped", async () => {
+    await clearFleet();
+    const stopped = await makeVendor("Aaa Stopped Lane", "NC", { enrichRun: false });
+    const nightly = await makeVendor("Bbb Nightly Lane", "NC", { enrichRun: false });
+    await laneRan(stopped, new Date("2026-08-01T06:00:00.000Z"));
+    await laneRan(nightly, new Date("2026-08-29T06:00:00.000Z"));
+
+    const { requestId } = await askedAt(new Date("2026-08-15T00:00:00.000Z"));
+
+    // Both are ELIGIBLE — the negative filter rules out neither — but only the lane
+    // that has run since the ask was filed counts against it.
+    const before = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(before.eligible.map((v) => v.vendorId).sort()).toEqual([stopped, nightly].sort());
+    expect(before.live.map((v) => v.vendorId)).toEqual([nightly]);
+    expect(before.awaiting.map((v) => v.vendorId)).toEqual([nightly]);
+
+    // ...so the ask retires on the remaining lane alone instead of hanging forever.
+    await spend(requestId, nightly);
+    const after = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(after.exhausted).toBe(true);
+    expect(after.blocked).toBe(false);
+    expect(after.awaiting).toHaveLength(0);
+  });
+
+  // The #181 clause has to survive the change, or a lane's own first night reads as
+  // a lag: while it drains, its crawl_run row is still `running`, so nothing but
+  // the look it just recorded can count it.
+  it("a lane that has already looked counts even with no succeeded run since the ask", async () => {
+    await clearFleet();
+    const draining = await makeVendor("Draining Now", "NC", { enrichRun: false });
+    await laneRan(draining, new Date("2026-08-01T06:00:00.000Z"));
+    const { requestId } = await askedAt(new Date("2026-08-15T00:00:00.000Z"));
+
+    // No run since the ask, so liveness alone would not count it...
+    expect((await enrichmentCoverageForRequest(h.deps.db, requestId, "NC")).live).toHaveLength(0);
+    // ...but a recorded look is the same demonstration, one run earlier.
+    await spend(requestId, draining, 1);
+    const coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(coverage.live.map((v) => v.vendorId)).toEqual([draining]);
+    expect(coverage.awaiting.map((v) => v.vendorId)).toEqual([draining]);
+    expect(coverage.exhausted).toBe(false);
+  });
+
+  // `started_at`, not `finished_at`. The drain's open-set SELECT happens near the
+  // START of a run, so a run that began before the ask existed never saw the row
+  // however late it finished. Reading finished_at would count it and hang the ask.
+  it("a run that started before the ask but finished after it does not count", async () => {
+    await clearFleet();
+    const straddling = await makeVendor("Straddling Lane", "NC", { enrichRun: false });
+    await laneRan(
+      straddling,
+      new Date("2026-08-10T04:00:00.000Z"),
+      new Date("2026-08-20T06:30:00.000Z"),
+    );
+    const { requestId } = await askedAt(new Date("2026-08-15T00:00:00.000Z"));
+
+    const coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(coverage.live).toHaveLength(0);
+    // Zero counted lanes is OPEN, never exhausted and never blocked (#158).
+    expect(coverage.exhausted).toBe(false);
+    expect(coverage.blocked).toBe(false);
+    expect(coverage.openRequests).toBe(1);
+  });
+
+  // The obvious way to get #185 wrong: a brand-new ask has no ledger rows and no
+  // lane with a run since its creation, so `counted` is empty. Empty must read as
+  // "open, self-healing", never as "we asked everyone and nobody had it".
+  it("a brand-new ask is open, never exhausted and never blocked, on day zero", async () => {
+    await clearFleet();
+    await makeVendor("Ran Yesterday", "NC", { enrichRun: false }).then((id) =>
+      laneRan(id, new Date("2026-08-28T06:00:00.000Z")),
+    );
+    const { requestId } = await askedAt(new Date("2026-08-30T09:00:00.000Z"));
+
+    const coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(coverage.openRequests).toBe(1);
+    expect(coverage.exhausted).toBe(false);
+    expect(coverage.blocked).toBe(false);
+    expect(coverage.live).toHaveLength(0);
+    expect(coverage.awaiting).toHaveLength(0);
+  });
+
+  // THE RESIDUAL, asserted rather than papered over. #185's rule fixes the inflow
+  // and NOT the standing backlog: an ask filed before a lane's last run, which that
+  // lane never reached, still counts that lane forever. At ENRICH_DEFAULT_LIMIT = 10
+  // a lane reaches ten asks a night, so on prod's shape that is most of the queue.
+  // What this lane ships instead of a better proxy: the row NAMES who it is waiting
+  // on, and the operator's existing lever clears it in one statement.
+  it("the residual is real and named, and crawl_enabled=false clears it", async () => {
+    await clearFleet();
+    const stalled = await makeVendor("Aaa Stalled Lane", "CC", { enrichRun: false });
+    const nightly = await makeVendor("Bbb Nightly Lane", "NC", { enrichRun: false });
+    await laneRan(stalled, new Date("2026-08-20T06:00:00.000Z"));
+    await laneRan(nightly, new Date("2026-08-29T06:00:00.000Z"));
+    // Untyped and unlinked, so both markets are eligible — prod's dominant shape.
+    const { requestId } = await askedAt(new Date("2026-08-10T00:00:00.000Z"), null);
+
+    await spend(requestId, nightly);
+    const held = await enrichmentCoverageForRequest(h.deps.db, requestId, null);
+    expect(held.exhausted).toBe(false);
+    expect(held.openRequests).toBe(1);
+    // Both ran AFTER the ask was filed, so both count — and the stalled one, which
+    // will never look again, is the one still owed. Naming it is the whole fix.
+    expect(held.awaiting.map((v) => v.vendorId)).toEqual([stalled]);
+    expect(held.awaiting.map((v) => v.name)).toEqual([await vendorName(stalled)]);
+
+    // The lever that already exists: ADR-006 rules `crawl_enabled` a pure negative
+    // filter, so flipping it off drops the lane from the fleet and frees the ask —
+    // today, with no migration and no reopen job. #156 is still the real fix.
+    await h.deps.db.update(vendors).set({ crawlEnabled: false }).where(eq(vendors.id, stalled));
+    const freed = await enrichmentCoverageForRequest(h.deps.db, requestId, null);
+    expect(freed.exhausted).toBe(true);
+    expect(freed.awaiting).toHaveLength(0);
+  });
+
+  // The queue gate stays MONOTONE, deliberately, and the asymmetry is the point:
+  // it is evaluated at ENQUEUE time, when the request does not exist, so "has a
+  // lane run since now?" is never true and a per-request rule here would refuse
+  // every ask forever. A stale `true` only permits filing an ask; a stale `true`
+  // in the denominator blocks retirement forever.
+  it("liveEnrichMarkets is deliberately unchanged: a lane that ran once still reports its market reachable", async () => {
+    await clearFleet();
+    const once = await makeVendor("Ran Once", "CC", { enrichRun: false });
+    await laneRan(once, new Date("2026-01-01T06:00:00.000Z"));
+
+    expect([...(await liveEnrichMarkets(h.deps.db))]).toEqual(["CC"]);
+
+    // ...even though the very same lane counts against nothing filed since.
+    const { requestId } = await askedAt(new Date("2026-08-10T00:00:00.000Z"), "CC");
+    expect((await enrichmentCoverageForRequest(h.deps.db, requestId, "CC")).live).toHaveLength(0);
   });
 });

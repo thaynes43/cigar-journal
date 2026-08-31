@@ -82,7 +82,11 @@ describe("queueEnrichmentBacklog", () => {
     type: "NC" | "CC" | null = "NC",
     outcome: "miss" | "error" = "miss",
   ) {
-    const live = (await enrichVendorFleet(h.deps.db, type)).filter((v) => v.live);
+    // "Has ever run an enrich pass" — the fleet-level reading of liveness, which
+    // since #185 is a timestamp rather than a flag. Retiring by spending the ledger
+    // works whatever the per-request denominator says, because a recorded look
+    // counts a lane unconditionally.
+    const live = (await enrichVendorFleet(h.deps.db, type)).filter((v) => v.lastEnrichStartedAt != null);
     expect(live.length).toBeGreaterThan(0);
     const budget = outcome === "miss" ? ATTEMPTS_PER_VENDOR : ERROR_BUDGET;
     for (const vendor of live) {
@@ -583,5 +587,54 @@ describe("queueEnrichmentBacklog", () => {
     expect(result).toMatchObject({ eligible: 0, considered: 0, queued: 0, skipped: 0 });
     expect(result.entries).toEqual([]);
     expect(await requestRows(shot)).toHaveLength(0);
+  });
+
+  // --- awaitingVendors (#185) -------------------------------------------------
+
+  // `already_queued` was the report's blind spot. Every OTHER verdict says what to
+  // do about it; this one said only "something is queued", so a row held open by a
+  // lane that stopped running looked exactly like a row being worked through
+  // tonight. Naming the counted lanes that owe it a look is what makes the
+  // operator's two levers — unsuspend the lane, or flip `crawl_enabled` off — a
+  // choice rather than a guess.
+  it("an already_queued row names the lanes that still owe it a look", async () => {
+    const admin = await curator();
+    const cigarId = await seedHeld(admin, "Backlog Awaiting Named");
+    // Filed BEFORE the fixture fleet's enrich runs, so those lanes count against it
+    // and none of them has spent anything on it.
+    await h.deps.db
+      .insert(enrichmentRequests)
+      .values({ cigarId, status: "pending", createdAt: new Date("2026-08-01T00:00:00.000Z") });
+
+    const result = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+    const entry = result.entries.find((e) => e.cigarId === cigarId)!;
+
+    expect(entry.status).toBe("already_queued");
+    expect(entry.awaitingVendors?.length ?? 0).toBeGreaterThan(0);
+    // Every awaited lane is one that COULD look — the two lists are the same fleet
+    // read at different strengths, and a name in one that is absent from the other
+    // would mean the denominator and the eligibility filter had drifted.
+    for (const name of entry.awaitingVendors!) expect(result.eligibleVendors).toContain(name);
+    // It is not a retirement, so the retirement list stays off the row.
+    expect(entry.triedVendors).toBeUndefined();
+    expect(await requestRows(cigarId)).toHaveLength(1);
+  });
+
+  // The other reading of the same field, and the reason it is omitted rather than
+  // sent empty: no lane counts at all. The row is open and self-healing, nobody
+  // owes it anything, and there is nothing for an operator to unsuspend.
+  it("an already_queued row that no lane counts against carries no awaitingVendors", async () => {
+    const admin = await curator();
+    const cigarId = await seedHeld(admin, "Backlog Awaiting Nobody");
+    // Filed NOW — after every fixture lane's last run — so liveness counts none of
+    // them, and an empty ledger counts none of them either.
+    await h.deps.db.insert(enrichmentRequests).values({ cigarId, status: "pending" });
+
+    const result = await queueEnrichmentBacklog(h.deps, admin, { clientRequestId: newRequestId() });
+    const entry = result.entries.find((e) => e.cigarId === cigarId)!;
+
+    expect(entry.status).toBe("already_queued");
+    expect(entry.awaitingVendors).toBeUndefined();
+    expect(await requestRows(cigarId)).toHaveLength(1);
   });
 });
