@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import { readHandoff } from "./support";
 import type { Handoff } from "./seed.js";
 
@@ -14,6 +14,23 @@ test.beforeAll(() => {
 
 const PHONE = { width: 390, height: 844 };
 
+// A one-word query, so the URL assertions read without percent-encoding noise.
+// It matches the structured branch, so it narrows the grid rather than emptying it.
+const QUERY = "Liga";
+
+// Type the query and wait for it to reach the URL, returning the box so the test
+// can read it back. Two waits, both load-bearing: the search box is a controlled
+// input, so a fill landing before hydration is swallowed — and the grid's count
+// line renders only once the client query has run, which is an honest "React is
+// live" gate. The URL wait then settles the 250ms debounce.
+async function searchFor(page: Page): Promise<Locator> {
+  await expect(page.getByText(/\d+ cigars/)).toBeVisible();
+  const box = page.getByRole("textbox", { name: "Search the catalog" });
+  await box.fill(QUERY);
+  await expect(page).toHaveURL(new RegExp(`[?&]q=${QUERY}`));
+  return box;
+}
+
 test("the seg swaps the whole screen for group cards", async ({ page }) => {
   await page.goto("/cigars");
   await page.getByRole("group", { name: "Catalog view" }).getByRole("button", { name: "Brands" }).click();
@@ -26,10 +43,69 @@ test("the seg swaps the whole screen for group cards", async ({ page }) => {
   await expect(page.getByText(h.taxonomy.composed.canonicalName)).toHaveCount(0);
 });
 
+// The search box is the one control whose value is LOCAL state over a URL-owned
+// fact, so it is the one place in the toolbar where the two can disagree. These
+// three pin the reconciliation from both sides.
+
+test("a seg switch empties the search box, not just the URL", async ({ page }) => {
+  await page.goto("/cigars");
+  const box = await searchFor(page);
+
+  await page.getByRole("group", { name: "Catalog view" }).getByRole("button", { name: "Brands" }).click();
+
+  await expect(page).toHaveURL(/[?&]by=brand/);
+  await expect(page).not.toHaveURL(/[?&]q=/);
+  await expect(box).toHaveValue("");
+});
+
+test("Back and Forward keep the search box and the URL in agreement", async ({ page }) => {
+  await page.goto("/cigars");
+  const box = await searchFor(page);
+  await page.getByRole("group", { name: "Catalog view" }).getByRole("button", { name: "Brands" }).click();
+  await expect(page).toHaveURL(/[?&]by=brand/);
+
+  // A same-route push never remounts the toolbar, so nothing reseeds the input
+  // from props — it has to adopt each externally-driven `q` itself, and in both
+  // directions: the restored search is as much a change under it as the cleared one.
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`[?&]q=${QUERY}`));
+  await expect(box).toHaveValue(QUERY);
+
+  await page.goForward();
+  await expect(page).not.toHaveURL(/[?&]q=/);
+  await expect(box).toHaveValue("");
+});
+
+test("an abandoned search is not resurrected by the next refinement", async ({ page }) => {
+  await page.goto("/cigars");
+  const box = await searchFor(page);
+  await page.getByRole("group", { name: "Catalog view" }).getByRole("button", { name: "Brands" }).click();
+  await expect(page).toHaveURL(/[?&]by=brand/);
+
+  // Every refinement sends the box's text along with it, so text the seg switch
+  // had already dropped from the URL rode the next unrelated edit straight back
+  // onto it.
+  await page.getByRole("group", { name: "Ownership" }).getByRole("button", { name: "Have", exact: true }).click();
+
+  await expect(page).toHaveURL(/[?&]own=have/);
+  await expect(page).not.toHaveURL(/[?&]q=/);
+  await expect(box).toHaveValue("");
+});
+
 test("the legacy ?view=brands link canonicalizes onto the brand grouping", async ({ page }) => {
   await page.goto("/cigars?view=brands");
   await expect(page).toHaveURL(/[?&]by=brand/);
   await expect(page).not.toHaveURL(/view=brands/);
+});
+
+test("the legacy canonicalization keeps every filter the link carried", async ({ page }) => {
+  // The redirect rebuilds the URL from the resolved state, so a param the
+  // rebuild does not emit is lost for good — a shared pre-wave link would
+  // silently arrive narrower than it was written.
+  await page.goto("/cigars?view=brands&type=NC&instock=1");
+  await expect(page).toHaveURL(/[?&]by=brand/);
+  await expect(page).toHaveURL(/[?&]type=NC/);
+  await expect(page).toHaveURL(/[?&]instock=1/);
 });
 
 test("the retired brand route redirects onto the hierarchy param", async ({ page }) => {
@@ -98,6 +174,29 @@ test("a drill preserves the facets that were already narrowing the screen", asyn
   await expect(page).toHaveURL(new RegExp(`brand=${h.taxonomy.brand.slug}`));
 });
 
+test("a drill carries the toggles and the leaf sort in BOTH directions", async ({ page }) => {
+  // `by` is a rung of the same navigation, not a different page: drilling in
+  // clears it and drilling out re-sets it, so a param emitted only on the flat
+  // grid is dropped on the way down and can never come back. Group cards still
+  // render no chips and no leaf sort row — they just carry the state through.
+  const carried = [/[?&]instock=1/, /[?&]smoked=1/, /[?&]favorites=1/, /[?&]sort=price(%3A|:)asc/];
+  const { brandName, brandSlug } = h.cigars.everyToggle;
+  await page.goto("/cigars?by=brand&instock=1&smoked=1&favorites=1&sort=price%3Aasc");
+
+  await page.getByRole("link", { name: new RegExp(`^${brandName}`) }).click();
+  await expect(page).toHaveURL(new RegExp(`brand=${brandSlug}`));
+  for (const param of carried) await expect(page).toHaveURL(param);
+  // The one row that survives all three toggles is still on screen, and the
+  // header counts it in the singular — a one-member group is `1 cigar`.
+  await expect(page.getByText(h.cigars.everyToggle.name).first()).toBeVisible();
+  await expect(page.getByText("1 cigar", { exact: true })).toBeVisible();
+
+  await page.getByRole("link", { name: "All brands" }).click();
+  await expect(page).toHaveURL(/[?&]by=brand/);
+  await expect(page).not.toHaveURL(new RegExp(`brand=${brandSlug}`));
+  for (const param of carried) await expect(page).toHaveURL(param);
+});
+
 test("the Unfiled card counts the gap and drills to it", async ({ page }) => {
   // Inside the brand, grouped by line: the structured rows form a card and the
   // brand-only row falls into Unfiled. That is the honest state of the catalog
@@ -160,6 +259,57 @@ test("a vitola chip is a slice, so it keeps its Label · Value pill and its ✕"
   await expect(page).toHaveURL(new RegExp(`brand=${h.taxonomy.brand.slug}`));
 });
 
+test("at the root a vitola is still a pill, never a drill", async ({ page }) => {
+  // A vitola changes no level and owns no header, however it was reached — so a
+  // bare `?vitola=` at the root must render the same pill it renders inside a
+  // brand. The alternative makes one URL mean two screens, and leaves the pill
+  // with no ✕ on the one the grouping lands you on.
+  await page.goto(`/cigars?vitola=${h.taxonomy.vitola.slug}`);
+
+  await expect(page.getByText(`Vitola · ${h.taxonomy.vitola.name}`)).toBeVisible();
+  await expect(page.getByRole("heading", { name: h.taxonomy.vitola.name, level: 2 })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "All vitolas" })).toHaveCount(0);
+
+  // The ✕ is the only control that can clear it, and at the root it clears to the root.
+  await page.getByRole("button", { name: "Clear Vitola filter", exact: true }).click();
+  await expect(page).not.toHaveURL(/[?&]vitola=/);
+});
+
+test("the root Vitolas grouping drills onto that same pill", async ({ page }) => {
+  await page.goto("/cigars?by=vitola");
+  await page.getByRole("link", { name: new RegExp(`^${h.taxonomy.vitola.name}`) }).click();
+
+  // The card writes the param a chip would, so it must land on the screen a chip
+  // produces: the grouping is cleared, the pill is there, no header took over.
+  await expect(page).toHaveURL(new RegExp(`vitola=${h.taxonomy.vitola.slug}`));
+  await expect(page).not.toHaveURL(/[?&]by=/);
+  await expect(page.getByText(`Vitola · ${h.taxonomy.vitola.name}`)).toBeVisible();
+  await expect(page.getByRole("heading", { name: h.taxonomy.vitola.name, level: 2 })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "All vitolas" })).toHaveCount(0);
+});
+
+test("Clear all clears the chips on screen and leaves the drill standing", async ({ page }) => {
+  // The gate first: inside a drill the drilled brand is not one of the chips, so
+  // a screen showing ONE pill counts one, not two, and offers no Clear all.
+  await page.goto(`/cigars?brand=${h.taxonomy.brand.slug}&vitola=${h.taxonomy.vitola.slug}`);
+  await expect(page.getByText(`Vitola · ${h.taxonomy.vitola.name}`)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Clear all" })).toHaveCount(0);
+
+  // A second visible chip earns it.
+  await page.goto(
+    `/cigars?brand=${h.taxonomy.brand.slug}&vitola=${h.taxonomy.vitola.slug}&instock=1`,
+  );
+  await expect(page.getByText(`Vitola · ${h.taxonomy.vitola.name}`)).toBeVisible();
+  await page.getByRole("button", { name: "Clear all" }).click();
+
+  await expect(page).not.toHaveURL(/[?&]vitola=/);
+  await expect(page).not.toHaveURL(/[?&]instock=/);
+  // The drill survives: it is a push the header's back link owns, and this is a
+  // replace — dropping it here would strand the user where Back cannot undo.
+  await expect(page).toHaveURL(new RegExp(`brand=${h.taxonomy.brand.slug}`));
+  await expect(page.getByRole("heading", { name: h.taxonomy.brand.name, level: 2 })).toBeVisible();
+});
+
 test("sort pills carry a direction and cycle in two states", async ({ page }) => {
   await page.goto("/cigars");
   const sort = page.getByRole("group", { name: "Sort" });
@@ -174,6 +324,18 @@ test("sort pills carry a direction and cycle in two states", async ({ page }) =>
 
   await sort.getByRole("button", { name: "Price" }).click();
   await expect(page).toHaveURL(/sort=price%3Aasc|sort=price:asc/);
+});
+
+test("group-card ordering rides its own param", async ({ page }) => {
+  // Two params, two vocabularies. Sharing one key meant a `count:desc` left
+  // behind by a group screen reached the leaf grid as an unknown field, and the
+  // leaf's own `price:desc` reached a group screen the same way — each silently
+  // resetting the other.
+  await page.goto("/cigars?by=brand");
+  await page.getByRole("group", { name: "Sort" }).getByRole("button", { name: "Count" }).click();
+
+  await expect(page).toHaveURL(/[?&]gsort=count(%3A|:)desc/);
+  await expect(page).not.toHaveURL(/[?&]sort=count/);
 });
 
 test("the detail page carries the breadcrumb and the blend facts", async ({ page }) => {
@@ -192,6 +354,27 @@ test("the detail page carries the breadcrumb and the blend facts", async ({ page
   // The breadcrumb navigates back onto the one catalog surface, drilled.
   await crumbs.getByRole("link", { name: h.taxonomy.line.name }).click();
   await expect(page).toHaveURL(new RegExp(`line=${h.taxonomy.line.slug}`));
+});
+
+test("only a row known to be New World credits a blender", async ({ page }) => {
+  // `type` is nullable and most of the catalog is untyped, so the gate is a
+  // POSITIVE `NC`: an unestablished type is not a New World claim, and crediting
+  // a person there would invent a fact rather than omit one (ADR-013).
+  // Each leg anchors on the page it is asserting an absence from — a missing row
+  // and a page that never rendered look identical to `toHaveCount(0)`.
+  await page.goto(`/cigars/${h.taxonomy.untyped.id}`);
+  await expect(
+    page.getByRole("heading", { name: h.taxonomy.untyped.canonicalName, level: 1 }),
+  ).toBeVisible();
+  // Same blend, so the blend's own facts still render — only the person is gone.
+  await expect(page.getByText("Connecticut Broadleaf")).toBeVisible();
+  await expect(page.getByText("Blender")).toHaveCount(0);
+  await expect(page.getByText(h.taxonomy.blender)).toHaveCount(0);
+
+  // And a Cuban row never earns one: Habanos credits the marca, not a person.
+  await page.goto(`/cigars/${h.cigars.detailWant.id}`);
+  await expect(page.getByRole("heading", { name: h.cigars.detailWant.name, level: 1 })).toBeVisible();
+  await expect(page.getByText("Blender")).toHaveCount(0);
 });
 
 test("mobile 390×844: one-row chip bar and a viewport-clamped popover", async ({ page }) => {

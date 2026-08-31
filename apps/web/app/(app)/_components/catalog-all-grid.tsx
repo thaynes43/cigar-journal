@@ -5,7 +5,7 @@ import { keepPreviousData } from "@tanstack/react-query";
 import type { CatalogCigarTile } from "@cj/domain";
 import { api } from "@/lib/trpc/react";
 import { ui } from "@/lib/ui";
-import { CATALOG_GRID, levelOf, type CatalogState } from "./catalog-registry";
+import { CATALOG_GRID, CATALOG_GROUP_STRINGS, levelOf, type CatalogState } from "./catalog-registry";
 import { CatalogDrillHeader, type DrillHeaderProps } from "./catalog-drill-header";
 import { CigarStillTile } from "./cigar-still-tile";
 
@@ -108,11 +108,14 @@ export function CatalogAllGrid({
   return (
     <div className="flex flex-col gap-6">
       {/* Inside a drill the count rides the header, so the screen states it once.
-          At the root there is no header and the count stands on its own line. */}
+          At the root there is no header and the count stands on its own line.
+          Both go through the ONE strings entry: spelled out here it read
+          `1 cigars` while the header beside it read `1 cigar` — two renderings of
+          the same sentence, which is the whole thing a strings table prevents. */}
       {header ? (
         <CatalogDrillHeader {...header} count={totalCount} />
       ) : (
-        <p className="label-caps tabular-nums">{totalCount} cigars</p>
+        <p className="label-caps tabular-nums">{CATALOG_GROUP_STRINGS.subtitle(totalCount)}</p>
       )}
       <ul
         className={`${CATALOG_GRID} transition-opacity ${query.isPlaceholderData ? "opacity-55" : ""}`}

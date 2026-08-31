@@ -189,6 +189,7 @@ sub-label.
 ?brand= ?line= ?blend= ?vitola=  hierarchy state — drill or chip      [drill: preserving PUSH; chip: REPLACE]
    value `unfiled`               IS NULL at that level (D-05)
 ?sort=field:dir                  leaf sorts + direction (absent = name:asc) [REPLACE]
+?gsort=field:dir                 group-card ordering (absent = name:asc)    [REPLACE]
 ?q= ?own= ?type= ?instock= ?smoked= ?favorites=   unchanged           [REPLACE]
 ```
 

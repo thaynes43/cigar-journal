@@ -8,6 +8,7 @@ import {
   cigars,
   crawlRuns,
   lines,
+  offers,
   purchases,
   users,
   vendors,
@@ -19,6 +20,7 @@ import {
   reserveInvite,
   revokeInvite,
   saveSmoke,
+  setFavorite,
   setWant,
   type Deps,
   type Principal,
@@ -86,6 +88,10 @@ export interface Handoff {
     // A held cigar with no product photo — the "Missing photos" worklist row the
     // admin console's Queue enrichment button acts on (#154).
     heldPhotoless: { id: string; name: string };
+    // Smoked, favorited AND priced in stock — the one row that survives every
+    // leaf toggle at once, so a grouped screen carrying all three still has a
+    // card to drill through. `brandSlug` is the param that drill lands on.
+    everyToggle: { id: string; name: string; brandSlug: string; brandName: string };
   };
   // A deterministic near-duplicate pair for the admin console's merge/unmerge
   // round trip. Distinct from every other seeded name so the pair is the only one
@@ -109,6 +115,9 @@ export interface Handoff {
     // A composed row: inside a line drill its caption elides to `No. 9 · Toro`
     // (D-07) while its canonical name stays the full string.
     composed: { id: string; canonicalName: string; elidedInLine: string };
+    // The same blend, `type` unknown — production's dominant shape, and the row
+    // that shows an unestablished type credits no blender.
+    untyped: { id: string; canonicalName: string };
     // Structured down to the brand only — the row the `line=unfiled` card drills to.
     unfiled: { id: string; canonicalName: string };
   };
@@ -357,6 +366,21 @@ export async function seed(opts: {
       lengthInches: "6",
       ringGauge: 52,
     });
+    // The same blend with its `type` unknown — the shape the overwhelming
+    // majority of production rows are in. It is what makes the blender credit
+    // testable: the gate is a POSITIVE `type === "NC"`, so a row nobody has
+    // established anything about credits nobody (ADR-013).
+    const ligaNo9CoronaDoble = await insertCigar(deps, {
+      ...structured,
+      type: null,
+      blendId: noNine!.id,
+      canonicalName: "Drew Estate Liga Privada No. 9 Corona Doble",
+      brand: "Drew Estate",
+      line: "Liga Privada",
+      vitolaName: "Corona Doble",
+      lengthInches: "7",
+      ringGauge: 54,
+    });
     // Brand known, line unknown — exactly the shape 97% of production is in
     // until Wave 3 curates. This is what the trailing `Unfiled` card counts, and
     // what `?brand=drew-estate&line=unfiled` drills to.
@@ -477,6 +501,24 @@ export async function seed(opts: {
       journal: { narrative: "No title on this one — the cigar name has to carry the page." },
     });
 
+    // The Montecristo carries the other two leaf marks as well, so exactly ONE
+    // row in the catalog survives `instock=1&smoked=1&favorites=1` at once.
+    // Without it that combination empties every grouped screen, and the drill
+    // round trip that has to hold all three on the URL has no card to descend
+    // through. The offer takes the ad-hoc path (no listing match), which is all
+    // `has_in_stock` reads.
+    await setFavorite(deps, admin, { cigarId: monte2, favorited: true });
+    await deps.db.insert(offers).values({
+      vendorId: vendorRows[0]!.id,
+      cigarId: monte2,
+      inStock: true,
+      price: "24.00",
+      currency: "USD",
+      packaging: "single",
+      sticksPerPackage: 1,
+      pricePerStickCents: 2400,
+    });
+
     // A holding with no product photo, so /admin/catalog renders the "Missing
     // photos" worklist and its Queue enrichment button has something to queue.
     // Inserted directly rather than through recordPurchase: that path queues an
@@ -594,6 +636,12 @@ export async function seed(opts: {
         wanted: { id: hemingway, name: "Arturo Fuente Hemingway Short Story" },
         sampleNC: { id: padron64, name: "Padrón 1964 Anniversary Maduro" },
         heldPhotoless: { id: photoless, name: "Tatuaje Black Label Corona Gorda" },
+        everyToggle: {
+          id: monte2,
+          name: "Montecristo No. 2",
+          brandSlug: "montecristo",
+          brandName: "Montecristo",
+        },
       },
       duplicatePair: {
         survivor: { id: dupePlain, name: "Ramon Allones Especialmente Seleccionados" },
@@ -611,6 +659,10 @@ export async function seed(opts: {
           id: ligaNo9Toro,
           canonicalName: "Drew Estate Liga Privada No. 9 Toro",
           elidedInLine: "No. 9 · Toro",
+        },
+        untyped: {
+          id: ligaNo9CoronaDoble,
+          canonicalName: "Drew Estate Liga Privada No. 9 Corona Doble",
         },
         unfiled: { id: undercrown, canonicalName: "Drew Estate Undercrown Gordito" },
       },
