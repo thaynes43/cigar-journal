@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.32.1](https://github.com/thaynes43/cigar-journal/compare/v0.32.0...v0.32.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* **crawler:** approved-list import never asserts a market focus ([#210](https://github.com/thaynes43/cigar-journal/issues/210)) ([#225](https://github.com/thaynes43/cigar-journal/issues/225)) ([21d28a4](https://github.com/thaynes43/cigar-journal/commit/21d28a43b6f02752658d110f2e823d299ec0c099))
+* **domain:** malformed external ids answer as not-found everywhere ([#206](https://github.com/thaynes43/cigar-journal/issues/206)) ([#228](https://github.com/thaynes43/cigar-journal/issues/228)) ([dd23d2a](https://github.com/thaynes43/cigar-journal/commit/dd23d2a33036b04bfbc7af0538912913e6cd876c))
+* **taxonomy:** mint emits folded alias keys only; clean legacy keys and Padrón's slug (migration 0029) ([#227](https://github.com/thaynes43/cigar-journal/issues/227)) ([a2b0b9e](https://github.com/thaynes43/cigar-journal/commit/a2b0b9e0af058a61dedf85ec22e4f7cd7043f12d))
+
 ## [0.32.0](https://github.com/thaynes43/cigar-journal/compare/v0.31.1...v0.32.0) (2026-08-31)
 
 
