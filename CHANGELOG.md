@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.28.1](https://github.com/thaynes43/cigar-journal/compare/v0.28.0...v0.28.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* **crawler:** bound brand-image downloads before buffering ([#197](https://github.com/thaynes43/cigar-journal/issues/197)) ([be15ac1](https://github.com/thaynes43/cigar-journal/commit/be15ac17021941241fedeb5db2c6c61aba988ed3))
+* **mcp:** upload link is the photo flow — validate before consuming, 24h TTL, honest errors ([#203](https://github.com/thaynes43/cigar-journal/issues/203)) ([b212674](https://github.com/thaynes43/cigar-journal/commit/b21267451ec10a4c4698681c42167db18457d606))
+* **web:** agent-run console pages past 100 rows ([#173](https://github.com/thaynes43/cigar-journal/issues/173)) ([#194](https://github.com/thaynes43/cigar-journal/issues/194)) ([d3ddfe5](https://github.com/thaynes43/cigar-journal/commit/d3ddfe5616947322c4705e2dc1b1df6451404001))
+* **web:** malformed public ids 404; journal photo caching becomes revocable ([#200](https://github.com/thaynes43/cigar-journal/issues/200)) ([483b4e8](https://github.com/thaynes43/cigar-journal/commit/483b4e8bda0b05c1d0113d1903180d080c2ac5ad))
+
 ## [0.28.0](https://github.com/thaynes43/cigar-journal/compare/v0.27.1...v0.28.0) (2026-08-30)
 
 
