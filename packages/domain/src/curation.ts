@@ -22,6 +22,7 @@ import {
   type Database,
 } from "@cj/db";
 import type { Deps, Principal, Queryer, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type {
   MergeCigarsInput,
   MergeCigarsResult,
@@ -120,7 +121,7 @@ function assertCurator(principal: Principal): void {
 // runId + confidence, so "Recent agent runs" can group and score the write. Actor
 // is always server-derived from the calling surface — never a tool argument.
 //
-// `clientId` comes off the PRINCIPAL (migration 0023, ADR-011), so it is
+// `clientId` comes off the PRINCIPAL (migration 0024, ADR-011), so it is
 // server-derived twice over: `validateAccessToken` reads it from the token row,
 // and no tool argument can reach it. It is what makes an operator-minted
 // curation token attributable: without it every credential a subject holds
@@ -128,6 +129,11 @@ function assertCurator(principal: Principal): void {
 // `set_listing_match_status` across the triage queue would be indistinguishable
 // afterwards from the daily lane doing its job. A session-driven web call has no
 // client and stays null.
+//
+// Curation keeps its own wrapper because it carries two columns nothing else
+// does (runId/confidence, the "Recent agent runs" grouping). The actor+client
+// half delegates to the shared `auditActor` every other audit insert now spreads
+// (#183), so there is one rule and not two that can drift.
 function auditAttribution(
   principal: Principal,
   attribution: CurationAttribution | undefined,
@@ -137,11 +143,12 @@ function auditAttribution(
   confidence: number | null;
   clientId: string | null;
 } {
+  const actor = attribution?.actor ?? "web";
   return {
-    actor: attribution?.actor ?? "web",
+    ...auditActor(principal, actor),
+    actor, // re-stated only to narrow "web" | "agent" out of the helper's wider actor union
     runId: attribution?.runId ?? null,
     confidence: attribution?.confidence ?? null,
-    clientId: principal.clientId ?? null,
   };
 }
 
@@ -2777,9 +2784,6 @@ async function applyInverse(
   after: Record<string, unknown>,
   input: UndoCurationActionInput,
 ): Promise<string> {
-  // A human curator drove the undo: actor 'web', no runId/confidence — so it never
-  // re-enters a "Recent agent runs" list.
-  const attribution = auditAttribution(principal, undefined);
   const correlationId = input.correlationId ?? input.clientRequestId;
 
   async function writeUndo(values: {
@@ -2791,7 +2795,11 @@ async function applyInverse(
       .insert(auditLog)
       .values({
         userId: principal.userId,
-        ...attribution,
+        // A human curator drove the undo: actor 'web', no runId/confidence — so it
+        // never re-enters a "Recent agent runs" list. Called here rather than
+        // hoisted so the attribution is visible AT the insert, which is the shape
+        // the audit-attribution drift test reads (#183).
+        ...auditAttribution(principal, undefined),
         action: values.action,
         smokeId: null,
         before: values.before,

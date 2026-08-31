@@ -351,7 +351,7 @@ describe("service tokens", () => {
     // The principal — not just the ValidateResult beside it — carries the client
     // id, because the curation audit row is written deep in @cj/domain, which
     // sees only the principal. This is the near end of the attribution chain
-    // migration 0023 closes: without it, every credential this subject holds
+    // migration 0024 closes: without it, every credential this subject holds
     // writes indistinguishable history.
     expect(result.principal.clientId).toBe(minted.clientId);
 
@@ -1138,6 +1138,14 @@ describe("service tokens", () => {
     expect(revokeRow).toBeDefined();
     expect(revokeRow!.actor).toBe("system");
     expect(revokeRow!.after).toMatchObject({ familyRevoked: false, reason: "rotated" });
+
+    // The operator CLI's own rows keep client_id NULL, by design (#183). The trap
+    // this pins: all three rows already carry the minted client in before/after,
+    // where it means "the client this row is ABOUT". Copying it into the column
+    // would silently redefine client_id from "the credential that drove this
+    // write" to "the subject", and would fold every mint into that credential's
+    // own activity in the runbook's `where client_id = '<id>'` incident query.
+    expect([created!.clientId, mintRow!.clientId, revokeRow!.clientId]).toEqual([null, null, null]);
 
     const dump = JSON.stringify(after);
     expect(dump).not.toContain(minted.token);

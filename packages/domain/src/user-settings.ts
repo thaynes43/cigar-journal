@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { auditLog, users } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { UpdateUserSettingsInput, UserSettings } from "./types.js";
 import { ValidationError } from "./errors.js";
 import { provenanceToActor } from "./mapping.js";
@@ -129,7 +130,7 @@ async function updateWithinTx(
     // defaults to `manual` (actor `web`).
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      actor: provenanceToActor(input.provenance?.source ?? "manual"),
+      ...auditActor(principal, provenanceToActor(input.provenance?.source ?? "manual")),
       action: "settings.update",
       smokeId: null,
       before,

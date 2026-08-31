@@ -1,6 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { auditLog, cigars, smokes, smokeProgression, type SmokeRow, type NewSmokeRow } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { UpdateSmokeInput, UpdateSmokeResult, UpdateSmokeChanges } from "./types.js";
 import { validateUpdateInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
@@ -86,7 +87,7 @@ async function updateWithinTx(
   const provenanceSource = input.provenance?.source ?? "manual";
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: provenanceToActor(provenanceSource),
+    ...auditActor(principal, provenanceToActor(provenanceSource)),
     action: "smoke.updated",
     smokeId: current.id,
     before: auditedConsumption ? { ...before, consumption: consumption.before } : before,

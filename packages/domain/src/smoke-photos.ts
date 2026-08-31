@@ -3,6 +3,7 @@ import { and, count, eq } from "drizzle-orm";
 import { auditLog, smokePhotos, smokes, users } from "@cj/db";
 import type { PhotoStorage } from "@cj/photos";
 import type { Deps, Principal } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { SmokePhotoKind, SmokePhotoView } from "./types.js";
 import { SmokeNotFoundError, PhotoNotFoundError, PhotoLimitError } from "./errors.js";
 import { toSmokePhotoView, smokePhotoSnapshot } from "./mapping.js";
@@ -102,7 +103,7 @@ export async function addSmokePhoto(
 
       await tx.insert(auditLog).values({
         userId: principal.userId,
-        actor: input.actor ?? "web",
+        ...auditActor(principal, input.actor ?? "web"),
         action: "smoke_photo.add",
         smokeId: input.smokeId,
         before: null,
@@ -197,7 +198,7 @@ export async function removeSmokePhoto(
     await tx.delete(smokePhotos).where(eq(smokePhotos.id, photo.id));
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      actor: "web",
+      ...auditActor(principal, "web"),
       action: "smoke_photo.remove",
       smokeId: photo.smokeId,
       before: smokePhotoSnapshot(photo),

@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { auditLog, purchases, vendors } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { CigarRef, RecordPurchaseInput, RecordPurchaseResult } from "./types.js";
 import { validateRecordPurchaseInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
@@ -108,7 +109,7 @@ async function recordWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: provenanceToActor(provenanceSource),
+    ...auditActor(principal, provenanceToActor(provenanceSource)),
     action: "purchase.record",
     smokeId: null,
     before: null,

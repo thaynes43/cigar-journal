@@ -116,6 +116,11 @@ describe("diffApproved / applyApproved (embedded Postgres)", () => {
     expect(audits).toHaveLength(3);
     expect(audits.every((a) => a.actor === "import")).toBe(true);
     expect(audits.every((a) => a.runId === "wo-approved-sync-test")).toBe(true);
+    // …and with NO client id (#183). This lane runs from a file in the repo with no
+    // credential at all, so a non-null value here would be invented. The column's
+    // one useful guarantee is that a non-null client_id is an OAuth client you can
+    // look up in `oauth_client` and revoke; `actor: import` is this lane's marker.
+    expect(audits.every((a) => a.clientId === null)).toBe(true);
   });
 
   it("applyApproved on an empty diff writes nothing", async () => {

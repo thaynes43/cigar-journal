@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gt, isNotNull, isNull } from "drizzle-orm";
 import { auditLog, invites, users } from "@cj/db";
 import type { Deps, Principal, Queryer } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { CreateInviteInput, InviteView, MintedInvite, RevokeInviteInput } from "./types.js";
 import { InviteInvalidError, UnauthorizedError, ValidationError } from "./errors.js";
 
@@ -89,7 +90,7 @@ export async function createInvite(
 
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      actor: "web",
+      ...auditActor(principal, "web"),
       action: "invite.create",
       smokeId: null,
       before: null,
@@ -146,7 +147,7 @@ export async function revokeInvite(
 
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      actor: "web",
+      ...auditActor(principal, "web"),
       action: "invite.revoke",
       smokeId: null,
       before: null,
@@ -222,7 +223,10 @@ export async function claimInvite(
 
     await tx.insert(auditLog).values({
       userId: args.userId,
-      actor: "web",
+      // No principal exists yet by construction — this row IS the sign-up. Routed
+      // through the helper anyway so "null by design" is visible in the diff
+      // rather than inferred from a missing field (#183).
+      ...auditActor(undefined, "web"),
       action: "invite.redeem",
       smokeId: null,
       before: null,

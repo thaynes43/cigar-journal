@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { auditLog, cigars, type CigarRow, type NewCigarRow } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { UpdateCigarInput, UpdateCigarResult } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
@@ -116,7 +117,7 @@ async function updateWithinTx(
 
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      actor: provenanceToActor(input.provenance?.source ?? "llm-conversation"),
+      ...auditActor(principal, provenanceToActor(input.provenance?.source ?? "llm-conversation")),
       action: "cigar.update",
       smokeId: null,
       before,

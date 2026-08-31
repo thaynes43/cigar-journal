@@ -1,5 +1,6 @@
 import { auditLog } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { AddCigarInput, AddCigarResult } from "./types.js";
 import { fingerprint } from "./fingerprint.js";
 import { resolveAndEnrich } from "./enrichment.js";
@@ -60,7 +61,7 @@ async function addWithinTx(
 
   await tx.insert(auditLog).values({
     userId: principal.userId,
-    actor: provenanceToActor(provenanceSource),
+    ...auditActor(principal, provenanceToActor(provenanceSource)),
     action: "cigar.add",
     smokeId: null,
     before: null,

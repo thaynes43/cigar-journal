@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { auditLog, oauthAccessToken, oauthClient, users, type Database } from "@cj/db";
+import { auditActor } from "@cj/domain";
 import { SUPPORTED_SCOPES, mcpResource, resourceMatches } from "./config.js";
 import { hashToken, randomClientId, randomToken } from "./crypto.js";
 import { invalidRequest, invalidScope, invalidTarget } from "./errors.js";
@@ -422,7 +423,14 @@ export async function mintServiceToken(
       });
       await tx.insert(auditLog).values({
         userId: user.id,
-        actor: "system",
+        // Null by design (#183). The operator CLI has no OAuth credential — it runs
+        // on a `kubectl exec -it` stream, and `actor: system` is its marker. THE
+        // TRAP: this row already carries `after.clientId`, which is the client the
+        // row is ABOUT. Stamping that into the column would silently redefine
+        // client_id from "the credential that drove this write" to "the subject",
+        // and would poison the runbook's `where client_id = '<id>'` incident query
+        // by folding the mint into that credential's own activity.
+        ...auditActor(undefined, "system"),
         action: "oauth.service_client.create",
         after: { clientId, clientName: input.clientName, isService: true },
         correlationId: input.correlationId ?? null,
@@ -459,7 +467,7 @@ export async function mintServiceToken(
     // list months later.
     await tx.insert(auditLog).values({
       userId: user.id,
-      actor: "system",
+      ...auditActor(undefined, "system"), // operator CLI; the subject client stays in `after` (#183)
       action: "oauth.service_token.mint",
       after: {
         tokenId,
@@ -705,7 +713,7 @@ export async function revokeServiceToken(
 
     await tx.insert(auditLog).values({
       userId: row.userId,
-      actor: "system",
+      ...auditActor(undefined, "system"), // operator CLI; the subject client stays in `before` (#183)
       action: "oauth.service_token.revoke",
       before: {
         tokenId: row.id,

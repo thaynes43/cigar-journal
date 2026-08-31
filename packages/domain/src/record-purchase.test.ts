@@ -53,6 +53,24 @@ describe("recordPurchase", () => {
     expect(rec).toBeDefined();
     expect(rec!.actor).toBe("mcp");
     expect(rec!.smokeId).toBeNull();
+    expect(rec!.clientId).toBeNull(); // no credential on this principal (#183)
+  });
+
+  it("stamps the calling credential's client on the purchase audit row", async () => {
+    // The inventory half of #183: a leaked journal-scoped token buying on the
+    // owner's behalf must be separable from the owner's own console afterwards.
+    const cigarId = await h.seedCigar({ canonicalName: "Client Attribution Corona" });
+    const result = await recordPurchase(h.deps, { ...user, clientId: "cl_journal_token" }, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      quantity: 3,
+    });
+
+    const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.userId, user.userId));
+    const rec = audits.find(
+      (a) => a.action === "purchase.record" && (a.after as { purchaseId?: string }).purchaseId === result.purchaseId,
+    )!;
+    expect([rec.actor, rec.clientId]).toEqual(["mcp", "cl_journal_token"]);
   });
 
   it("resolves a known vendor case-insensitively and links it by id", async () => {

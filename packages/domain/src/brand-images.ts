@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import { auditLog, brandImages, type BrandImageRow } from "@cj/db";
 import type { Deps, Principal, Queryer } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import { fingerprint } from "./fingerprint.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
@@ -203,7 +204,7 @@ export async function setBrandImageRights(
 
       await tx.insert(auditLog).values({
         userId: principal.userId,
-        actor: input.attribution?.actor ?? "web",
+        ...auditActor(principal, input.attribution?.actor ?? "web"),
         runId: input.attribution?.runId ?? null,
         confidence: input.attribution?.confidence ?? null,
         action: "brand_image.set_rights",
@@ -287,7 +288,7 @@ export async function chooseBrandImageCandidate(
 
       await tx.insert(auditLog).values({
         userId: principal.userId,
-        actor: input.attribution?.actor ?? "web",
+        ...auditActor(principal, input.attribution?.actor ?? "web"),
         runId: input.attribution?.runId ?? null,
         confidence: input.attribution?.confidence ?? null,
         action: "brand_image.choose",

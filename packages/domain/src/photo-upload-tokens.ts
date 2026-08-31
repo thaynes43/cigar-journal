@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { auditLog, cigars, photoUploadTokens, smokes } from "@cj/db";
 import type { Deps, Principal } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import type { SmokePhotoKind } from "./types.js";
 import { CigarNotFoundError, SmokeNotFoundError, UnauthorizedError, UploadTokenInvalidError } from "./errors.js";
 
@@ -94,7 +95,7 @@ export async function mintPhotoUploadToken(
 
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      actor: "mcp",
+      ...auditActor(principal, "mcp"),
       action: "photo_upload_token.mint",
       smokeId: input.smokeId,
       before: null,
@@ -143,7 +144,7 @@ export async function mintProductPhotoUploadToken(
 
     await tx.insert(auditLog).values({
       userId: principal.userId,
-      actor: "web",
+      ...auditActor(principal, "web"),
       action: "photo_upload_token.mint",
       smokeId: null,
       before: null,

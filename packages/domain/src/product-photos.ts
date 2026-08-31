@@ -3,6 +3,7 @@ import { and, eq, ne } from "drizzle-orm";
 import { auditLog, cigars, productPhotos, type ProductPhotoRow } from "@cj/db";
 import type { PhotoStorage, ProcessedPhoto } from "@cj/photos";
 import type { Deps, Principal } from "./deps.js";
+import { auditActor } from "./audit-attribution.js";
 import { fingerprint } from "./fingerprint.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError } from "./errors.js";
@@ -190,7 +191,7 @@ export async function attachProductPhoto(
 
       await tx.insert(auditLog).values({
         userId: principal.userId,
-        actor: "web",
+        ...auditActor(principal, "web"),
         action: "product_photo.attach",
         smokeId: null,
         before,

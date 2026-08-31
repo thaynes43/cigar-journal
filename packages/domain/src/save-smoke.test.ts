@@ -86,6 +86,38 @@ describe("saveSmoke", () => {
     expect(audits).toHaveLength(1);
     expect(audits[0]!.action).toBe("smoke.created");
     expect(audits[0]!.actor).toBe("mcp");
+    // A session-driven principal carries no OAuth client (#183).
+    expect(audits[0]!.clientId).toBeNull();
+  });
+
+  it("records the calling credential's client on a journal write, and null without one", async () => {
+    // The incident question issue #183 exists for: a service token minted with the
+    // default allowlist can write its subject's journal, and before this those rows
+    // were indistinguishable from the same subject's own web session. actor and
+    // clientId are asserted TOGETHER — the sweep that added the client must not have
+    // quietly changed an actor.
+    const cigarId = await h.seedCigar({ canonicalName: "Attribution Test Robusto" });
+    const viaToken: Principal = { ...user, clientId: "cl_service_token" };
+
+    const withClient = await saveSmoke(h.deps, viaToken, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["cedar"],
+      assessment: { liked: true },
+    });
+    const clientless = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["cedar"],
+      assessment: { liked: true },
+    });
+
+    const rowFor = async (smokeId: string) =>
+      (await h.deps.db.select().from(auditLog).where(eq(auditLog.smokeId, smokeId)))[0]!;
+    const tokenRow = await rowFor(withClient.smoke.smokeId);
+    expect([tokenRow.actor, tokenRow.clientId]).toEqual(["mcp", "cl_service_token"]);
+    const sessionRow = await rowFor(clientless.smoke.smokeId);
+    expect([sessionRow.actor, sessionRow.clientId]).toEqual(["mcp", null]);
   });
 
   it("accepts a sparse but valid smoke (cigar + one substantive field)", async () => {
