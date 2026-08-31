@@ -55,6 +55,82 @@ Any of those lanes may have pushed a branch or opened a PR before dying. Adopt
 what exists, `git worktree remove` what is stranded, and re-dispatch the rest.
 **Do not assume a lane finished because its worktree exists.**
 
+## Do these, in this order
+
+Every one of these is unblocked. Nothing here waits on the owner.
+
+### 1. Recover the killed burndown (first, before new work)
+See "IN FLIGHT" above. Adopt surviving branches/PRs, `git worktree remove` the
+stranded ones, re-dispatch the rest.
+
+### 2. #170 — vendor-focus predicate on enrich matching
+Highest priority defect on the board. A CC drain can answer an NC request and
+attach a Habanos photo to a non-Cuban cigar; `product_photos` is
+UNIQUE(cigar_id), so the wrong photo takes the only slot and is not merely a
+display bug.
+**`cigar-journal-crawl-enrich-cuban-lous` is SUSPENDED as the workaround for
+this. Do not unsuspend it until #170 ships.** Unsuspending it is the last step
+of #170, not a separate task, and it is what finally gives Cuban Lou's a
+recurring enrich lane.
+
+### 3. #169 — excludeCigar must refuse a cigar with purchase lots
+Already cost the owner 23 sticks (three samplers hidden from his humidor). Refuse
+for ANY user's lots, not just the caller's. Guidance already exists in the agent
+manual (haynes-ops#2680) but guidance is not enforcement.
+
+### 4. #177 — gap-fill drops the journal entry
+Our own MCP instruction. Verified from Loki: the owner's whole session was
+`browse_catalog`, `search_cigars`, `add_cigar` — no `save_smoke`, no errors.
+
+### 5. Re-probe 2 Guys, then enable it (separate PRs)
+v0.28.0 carries the corrected gate from #179 but the vendor has NOT been
+re-probed. This is what gets a catalogue photo for brands Fox does not stock —
+the owner's "Red Anchor Captain" case.
+
+Run an in-cluster probe Job in ns `frontend` from the CURRENT image (build the
+Job by taking a crawl CronJob's `jobTemplate` and replacing the command with
+`--probe --vendor two-guys-cigars`; the dev pod cannot reach vendor domains, only
+an in-cluster Job can):
+
+```
+kubectl -n frontend get cronjob cigar-journal-crawl-offers-fox-cigar -o json \
+  | <swap container command to: node --import tsx src/cli.ts --probe --vendor two-guys-cigars> \
+  | kubectl apply -f -
+kubectl -n frontend logs job/<name> -c crawl
+```
+
+**The full acceptance checklist is in the review on PR #179 — read it before
+judging the output.** Two points from it that catch a void run: the verdict must
+be `ok`, and the gate line must read `prefix /store/ minus /^\/store\/go(?:\/|$)/i`
+— if it still prints a bare `prefix /store/`, the Job ran a cached image and the
+result means nothing. The last probe (2026-08-30, pre-fix) showed robots
+allowing, `varied=no` across 4 samples (the sitemap variance is GONE), and 3/3
+sampled URLs failing because `/store/` was matching `/store/go/registry/` pages.
+
+Enabling is a SEPARATE PR from the probe, and green CI is not vendor
+verification.
+
+### 6. Codex-validate the photo path (owner requires this before he retests)
+#184 shipped diagnostics against a live server, so this runs AFTER a deploy, not
+against a branch. The validation plan is in PR #184's body. Be honest about the
+ceiling: codex can prove server-side handling, the diagnostics firing, no secrets
+in logs, and that the fallback never errors. It CANNOT prove whether ChatGPT's UI
+binds an in-chat image — only the owner can exercise that.
+
+### 7. Then the rest
+#157, #155, #185, #183, #173, #156, #159, the #127 remainder, and the 44-row
+packaging-SKU exclusion batch documented in `.agents/reference/catalog-exclusions.md`
+(planned and gated, never applied — re-run its gate before applying, and the
+selector must not touch anything the owner holds a lot for).
+
+### Rules that bit us today
+- Pre-assign a migration number per lane and put it in the lane's prompt. Next
+  free is **0025**. #178 and #181 both took 0023.
+- A red CI `test` job is now a REAL failure (#180 fixed the flake). Do not
+  retrigger past one.
+- On any image bump, check ALL FIVE pins — the HelmRelease anchor and the four
+  CronJobs. Renovate bumps only the HelmRelease (#2689).
+
 ## Blocked on the owner (everything else is yours)
 
 1. **#97 go-live cutover** — the actual launch: journal visibility flip, archive
