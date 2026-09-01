@@ -17,6 +17,20 @@ describe("middleware matcher", () => {
     expect(matcher.test("/api/trpc/invites.create")).toBe(false);
   });
 
+  // Every image route authorizes itself on a server-derived Principal and
+  // answers 401 when there is none. An edge redirect in front of them turns that
+  // 401 into a 307 to an HTML page: a bearer-token client (no session cookie)
+  // never reaches the route at all, and any surface rendering catalog art gets
+  // blank <img>s instead of a real status.
+  it("lets every image route reach its own principal check", () => {
+    expect(matcher.test("/api/photos/abc123")).toBe(false);
+    expect(matcher.test("/api/photos/abc123/thumb")).toBe(false);
+    expect(matcher.test("/api/product-photos/abc123")).toBe(false);
+    expect(matcher.test("/api/product-photos/abc123/thumb")).toBe(false);
+    expect(matcher.test("/api/brand-images/padron")).toBe(false);
+    expect(matcher.test("/api/brand-images/padron/thumb")).toBe(false);
+  });
+
   it("still gates the authed app surfaces", () => {
     expect(matcher.test("/cigars")).toBe(true);
     expect(matcher.test("/settings")).toBe(true);
