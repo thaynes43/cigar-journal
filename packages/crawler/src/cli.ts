@@ -8,6 +8,7 @@ import { runIngest, type CrawlMode, type IngestResult } from "./core/ingest.js";
 import { withVendorLaneLock } from "./core/run-record.js";
 import { runProbe, formatProbe, probeFetchBudget } from "./core/probe.js";
 import { runBrandImages, probeBrandTaxonomy, type BrandImagesResult } from "./core/brand-images.js";
+import { vendorPostureDrift, formatVendorPostureDrift } from "./core/vendor-posture.js";
 import {
   parseApprovedWiki,
   diffApproved,
@@ -161,13 +162,34 @@ function parseArgs(argv: string[]): CrawlArgs {
 // admin-owned row is returned untouched, never overwritten by a crawl. A fresh
 // row for an unprobed vendor is crawl_enabled=false; the coordinator enables it
 // after the in-cluster probe passes.
+//
+// The cost of insert-if-absent is that a posture flip in an ADAPTER does nothing
+// for a vendor that already has a row — which is every vendor we ship, and the
+// rider #179 and #217 both left standing. It reconciles by REPORT: the run prints
+// what the row and the adapter disagree about rather than writing over an admin's
+// decision. See core/vendor-posture.ts.
 async function resolveVendor(db: Database, adapter: VendorAdapter): Promise<string> {
   const existing = await db
-    .select({ id: vendors.id })
+    .select({
+      id: vendors.id,
+      kind: vendors.kind,
+      focus: vendors.focus,
+      crawlEnabled: vendors.crawlEnabled,
+      displayEnabled: vendors.displayEnabled,
+      approvalStatus: vendors.approvalStatus,
+      purchaseLinkout: vendors.purchaseLinkout,
+    })
     .from(vendors)
     .where(eq(vendors.name, adapter.name))
     .limit(1);
-  if (existing[0]) return existing[0].id;
+  if (existing[0]) {
+    // Insert-if-absent, so the row is returned as it stands — but say so when it
+    // disagrees with the adapter, or an adapter-side posture flip looks applied
+    // and is not (the #179 / #217 rider).
+    const drift = formatVendorPostureDrift(adapter.name, vendorPostureDrift(existing[0], adapter));
+    if (drift.length > 0) console.warn(drift.join("\n"));
+    return existing[0].id;
+  }
 
   const inserted = await db
     .insert(vendors)

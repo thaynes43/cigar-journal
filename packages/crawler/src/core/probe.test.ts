@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { runProbe, formatProbe, probeFetchBudget, MAX_PROBE_CHILDREN } from "./probe.js";
 import { cubanLous } from "../adapters/cuban-lous.js";
 import { twoGuysCigars } from "../adapters/two-guys-cigars.js";
+import { foxCigar } from "../adapters/fox-cigar.js";
 import {
   createMockFetcher,
   loadFixture,
@@ -9,7 +10,7 @@ import {
   type MockFetcher,
   type MockRoute,
 } from "../testing/fixtures.js";
-import type { VendorAdapter } from "../adapters/types.js";
+import type { PrefixVendorAdapter, VendorAdapter } from "../adapters/types.js";
 
 // The probe is a pure read (no DB, no storage) — mock the fetcher per the
 // guardrail (NEVER live sites) and assert the verdict it prints.
@@ -81,8 +82,8 @@ describe("runProbe", () => {
   });
 
   it("flags needs-attention when the product gate matches nothing", async () => {
-    // Uses 2 Guys (real "/store/" prefix) — cubanLous now carries "/" which
-    // matches every loc by design (its sitemap is product-only).
+    // Uses 2 Guys — cubanLous carries "/" and matches every loc by design (its
+    // sitemap is product-only), so it cannot express an empty gate.
     const fetcher = createMockFetcher({
       ["https://www.2guyscigars.com/robots.txt"]: { body: ALLOW_ALL },
       ["https://www.2guyscigars.com/sitemap.xml"]: { body: urlsetXml(["https://www.2guyscigars.com/blog/monte-4/"]) },
@@ -363,46 +364,63 @@ describe("runProbe", () => {
   });
 });
 
-// The live 2026-08-30 2 Guys failure, reproduced and then fixed in one place.
-// `/store/` is the right product prefix and ALSO matches `/store/go/registry/<n>/`
-// — gift-registry pages carrying no Product JSON-LD. All three spread picks
-// landed inside that block, so the probe printed "no schema.org Product JSON-LD"
-// on a vendor whose actual fault was the gate. The verdict was true; the reason
-// was not, and a seed crawl would have fetched ~1,400 registry pages.
-describe("2 Guys product gate — the /store/go/ registry block", () => {
-  const PADRON = "https://www.2guyscigars.com/store/padron-1926-serie-no-9-maduro/";
-  const CUTTER = "https://www.2guyscigars.com/store/xikar-xi3-cutter/";
-  const ABOUT = "https://www.2guyscigars.com/about-us/";
+// The live 2026-08-30 failure, reproduced and then fixed in one place: a product
+// prefix that is right and ALSO matches a non-catalog subtree whose pages carry
+// no Product JSON-LD. All three spread picks landed inside that block, so the
+// probe printed "no schema.org Product JSON-LD" on a vendor whose actual fault
+// was the gate. The verdict was true; the reason was not, and a seed crawl would
+// have fetched ~1,400 registry pages.
+//
+// It was 2 Guys' `/store/` when it was found. 2 Guys has since moved to Mode B
+// (#217, 2026-09-01 live read: its products are not under `/store/` at all), so
+// this runs against a synthetic Mode-A adapter over `__fixtures__/mode-a-exclusion`
+// — the pipeline behaviour is what is under test, and it is still reachable by
+// the next adapter that needs a prefix minus a subtree.
+describe("mode-A product gate — a non-product subtree under the prefix", () => {
+  // Built from a Mode-A adapter, so "prefix plus an exclusion" is the only thing
+  // that varies from a shipping one.
+  const modeA: PrefixVendorAdapter = {
+    ...foxCigar,
+    slug: "vendor-example",
+    name: "Vendor Example",
+    url: "https://vendor.example",
+    sitemapUrl: "https://vendor.example/sitemap.xml",
+    productPathPrefix: "/store/",
+    nonProductPathPattern: /^\/store\/go(?:\/|$)/i,
+  };
+  const PADRON = "https://vendor.example/store/padron-1926-serie-no-9-maduro/";
+  const CUTTER = "https://vendor.example/store/xikar-xi3-cutter/";
+  const ABOUT = "https://vendor.example/about-us/";
   // Ids placed so spreadIndices(14, 3) = [2, 7, 11] draws 1059, 4401 and 8079 —
   // the three URLs the live probe really sampled.
   const registryLocs = [612, 840, 1059, 1783, 2450, 3117, 3760, 4401, 5502, 6390, 7233, 8079].map(
-    (id) => `https://www.2guyscigars.com/store/go/registry/${id}/`,
+    (id) => `https://vendor.example/store/go/registry/${id}/`,
   );
 
   // Same catalog every time; only the non-product block under /store/ varies.
   const routesFor = (nonProductLocs: string[]): Record<string, MockRoute> => {
     const routes: Record<string, MockRoute> = {
-      ["https://www.2guyscigars.com/robots.txt"]: { body: loadFixture("robots.txt", "two-guys") },
-      [twoGuysCigars.sitemapUrl]: {
-        body: urlsetXml(["https://www.2guyscigars.com/", ...nonProductLocs, PADRON, CUTTER, ABOUT]),
+      ["https://vendor.example/robots.txt"]: { body: ALLOW_ALL },
+      [modeA.sitemapUrl]: {
+        body: urlsetXml(["https://vendor.example/", ...nonProductLocs, PADRON, CUTTER, ABOUT]),
       },
-      [PADRON]: { body: loadFixture("product.html", "two-guys") },
-      [CUTTER]: { body: loadFixture("product-cutter.html", "two-guys") },
+      [PADRON]: { body: loadFixture("product.html", "mode-a-exclusion") },
+      [CUTTER]: { body: loadFixture("product-cutter.html", "mode-a-exclusion") },
     };
-    for (const loc of nonProductLocs) routes[loc] = { body: loadFixture("registry.html", "two-guys") };
+    for (const loc of nonProductLocs) routes[loc] = { body: loadFixture("registry.html", "mode-a-exclusion") };
     return routes;
   };
 
   it("reproduces the live false verdict with the exclusion removed", async () => {
-    const unfixed: VendorAdapter = { ...twoGuysCigars, nonProductPathPattern: undefined };
+    const unfixed: PrefixVendorAdapter = { ...modeA, nonProductPathPattern: undefined };
     const fetcher = createMockFetcher(routesFor(registryLocs));
     const result = await runProbe(fetcher, unfixed);
 
     expect(result.sitemap.productLocs).toBe(14); // 12 registry + 2 real products
     expect(result.products.map((p) => p.url)).toEqual([
-      "https://www.2guyscigars.com/store/go/registry/1059/",
-      "https://www.2guyscigars.com/store/go/registry/4401/",
-      "https://www.2guyscigars.com/store/go/registry/8079/",
+      "https://vendor.example/store/go/registry/1059/",
+      "https://vendor.example/store/go/registry/4401/",
+      "https://vendor.example/store/go/registry/8079/",
     ]);
     // Byte-for-byte the live line: 200, but nothing to parse.
     expect(result.products.every((p) => p.status === 200 && !p.hasProduct)).toBe(true);
@@ -414,28 +432,28 @@ describe("2 Guys product gate — the /store/go/ registry block", () => {
 
   it("reaches the real products once /store/go/ is subtracted", async () => {
     const fetcher = createMockFetcher(routesFor(registryLocs));
-    const result = await runProbe(fetcher, twoGuysCigars);
+    const result = await runProbe(fetcher, modeA);
 
     expect(result.sitemap.productLocs).toBe(2);
     expect(result.products.map((p) => p.url)).toEqual([PADRON, CUTTER]);
     expect(result.productSummary).toEqual({ sampled: 2, parsed: 2, cigars: 1 });
     expect(result.verdict).toBe("ok");
     expect(result.gate).toBe("prefix /store/ minus /^\\/store\\/go(?:\\/|$)/i");
-    expectWithinBudget(fetcher, twoGuysCigars);
+    expectWithinBudget(fetcher, modeA);
   });
 
   // Diagnosability, on the exact run that misled us. Every probe here is an
   // in-cluster Job, so a needs-attention has to name the shape it saw or the next
   // move costs another round-trip.
   it("names the registry block in the path census on both sides of the gate", async () => {
-    const unfixed: VendorAdapter = { ...twoGuysCigars, nonProductPathPattern: undefined };
+    const unfixed: PrefixVendorAdapter = { ...modeA, nonProductPathPattern: undefined };
     const broken = formatProbe(await runProbe(createMockFetcher(routesFor(registryLocs)), unfixed));
     // The accepted side shows the gate admitting a non-product subtree — the one
     // line that would have identified the defect on the first probe.
     expect(broken).toContain("paths: in  /store/go 12");
     expect(broken).toContain("out / 1 · /about-us 1");
 
-    const fixed = formatProbe(await runProbe(createMockFetcher(routesFor(registryLocs)), twoGuysCigars));
+    const fixed = formatProbe(await runProbe(createMockFetcher(routesFor(registryLocs)), modeA));
     // After the fix the block has moved to the rejected side.
     expect(fixed).toContain("out /store/go 12");
     expect(fixed).toContain("paths: in  /store/padron-1926-serie-no-9-maduro 1");
@@ -444,13 +462,13 @@ describe("2 Guys product gate — the /store/go/ registry block", () => {
   it("collapses a long tail of shapes into a (+keys, urls) count", async () => {
     // Eight distinct rejected shapes, so the top-5 cut leaves a tail to report.
     const junk = ["blog", "brands", "pages", "help", "news", "events", "press", "legal"].map(
-      (segment) => `https://www.2guyscigars.com/${segment}/x/`,
+      (segment) => `https://vendor.example/${segment}/x/`,
     );
     const routes = routesFor(registryLocs);
-    routes[twoGuysCigars.sitemapUrl] = {
+    routes[modeA.sitemapUrl] = {
       body: urlsetXml([...junk, ...registryLocs, PADRON, CUTTER, ABOUT]),
     };
-    const out = formatProbe(await runProbe(createMockFetcher(routes), twoGuysCigars));
+    const out = formatProbe(await runProbe(createMockFetcher(routes), modeA));
 
     // 10 rejected keys (8 junk + /store/go + /about-us), 5 shown: 5 hidden keys
     // behind 5 URLs — /store/go is the count-12 key, so it is never in the tail.
@@ -461,14 +479,91 @@ describe("2 Guys product gate — the /store/go/ registry block", () => {
     // Siblings we have never sampled. If the gate named `registry` these would
     // pass and the sampler would draw them exactly as it drew the registry pages.
     const siblings = Array.from({ length: 6 }, (_, i) => [
-      `https://www.2guyscigars.com/store/go/wishlist/${i}/`,
-      `https://www.2guyscigars.com/store/go/cart/${i}/`,
+      `https://vendor.example/store/go/wishlist/${i}/`,
+      `https://vendor.example/store/go/cart/${i}/`,
     ]).flat();
-    const result = await runProbe(createMockFetcher(routesFor(siblings)), twoGuysCigars);
+    const result = await runProbe(createMockFetcher(routesFor(siblings)), modeA);
 
     expect(result.sitemap.productLocs).toBe(2);
     expect(result.products.map((p) => p.url)).toEqual([PADRON, CUTTER]);
     expect(result.verdict).toBe("ok");
+  });
+});
+
+
+// 2 Guys as it actually is, from the 2026-09-01 in-cluster read (#217). The gate
+// now selects the right URLs — and the probe still says needs-attention, for a
+// reason that is finally the true one: this vendor serves NO JSON-LD. Every
+// fixture below is a real response.
+//
+// These assertions are a CHARACTERIZATION of a blocked vendor, not an aspiration.
+// When the OG/microdata extractor lands they must be rewritten, deliberately, by
+// whoever makes `parsed` non-zero.
+describe("2 Guys, live shape — the gate is right and the parser still has nothing", () => {
+  const two = (path: string): string => `https://www.2guyscigars.com${path}`;
+  const PERDOMO = two("/perdomo-30th-robusto-sg-s-165681/");
+  const ROMACRAFT = two("/romacraft-steel-porcupine-184527/");
+  const CANDLE = two("/smoke-exterm-candle-orange-734366037362/");
+
+  const liveRoutes = (): Record<string, MockRoute> => ({
+    [two("/robots.txt")]: { body: loadFixture("robots.txt", "two-guys") },
+    [twoGuysCigars.sitemapUrl]: { body: loadFixture("sitemap.xml", "two-guys") },
+    [PERDOMO]: { body: loadFixture("live-product-perdomo-30th-robusto-sg-s-165681.html", "two-guys") },
+    [ROMACRAFT]: { body: loadFixture("live-product-romacraft-steel-porcupine-184527.html", "two-guys") },
+    [CANDLE]: { body: loadFixture("live-product-smoke-exterm-candle-orange-734366037362.html", "two-guys") },
+    [two("/cigars-perdomo-30th-maduro/")]: {
+      body: loadFixture("live-landing-cigars-perdomo-30th-maduro.html", "two-guys"),
+    },
+    [two("/zino-nicaragua-cigars/")]: {
+      status: 404,
+      body: loadFixture("live-404-zino-nicaragua-cigars.html", "two-guys"),
+    },
+  });
+
+  it("passes the live robots.txt, which allows / and only asks for a crawl delay", async () => {
+    const result = await runProbe(createMockFetcher(liveRoutes()), twoGuysCigars);
+    expect(result.robots.status).toBe(200);
+    expect(result.robots.matchedAgent).toBe("*");
+    // Two `*` groups in the live file; combined, nothing disallows the root.
+    expect(result.robots.productPathAllowed).toBe(true);
+  });
+
+  it("selects the product-code slugs and samples three real product pages", async () => {
+    const fetcher = createMockFetcher(liveRoutes());
+    const result = await runProbe(fetcher, twoGuysCigars);
+
+    expect(result.sitemap.enumeratedLocs).toBe(21);
+    expect(result.sitemap.productLocs).toBe(9);
+    // spreadIndices(9, 3) — and none of the three is under /store/ or a landing
+    // page, which is requirement 4 of the #179 re-probe bar.
+    expect(result.products.map((p) => p.url)).toEqual([PERDOMO, ROMACRAFT, CANDLE]);
+    expect(result.products.every((p) => !p.url.includes("/store/"))).toBe(true);
+    expectWithinBudget(fetcher, twoGuysCigars);
+  });
+
+  it("reports needs-attention because the pages carry no JSON-LD at all", async () => {
+    const result = await runProbe(createMockFetcher(liveRoutes()), twoGuysCigars);
+
+    // 200s, real product pages, nothing to parse: og:type=product and
+    // itemtype="https://schema.org/Product" are not what extractJsonLd reads.
+    expect(result.products.every((p) => p.status === 200)).toBe(true);
+    expect(result.products.every((p) => !p.hasProduct)).toBe(true);
+    expect(result.productSummary).toEqual({ sampled: 3, parsed: 0, cigars: 0 });
+    expect(result.verdict).toBe("needs-attention");
+    expect(result.notes.join(" ")).toMatch(/no schema\.org Product JSON-LD/);
+  });
+
+  it("prints the gate and both census sides so a probe log identifies the build", async () => {
+    const out = formatProbe(await runProbe(createMockFetcher(liveRoutes()), twoGuysCigars));
+
+    expect(out).toContain("gate=not /^\\/store(?:\\/|$)|^\\/(?![^/]*-\\d+\\/?$)/i segments 1..1");
+    expect(out).toContain("product-locs=9");
+    // The registry family is now on the rejected side where it belongs.
+    expect(out).toContain("out /store/go 5");
+    // And the accepted side is the signature #217 was named after: nine URLs
+    // under nine distinct keys, one each — the per-product tail of a catalog,
+    // not a few fat non-product families.
+    expect(out).toMatch(/in {2}(?:\/[^ ]+ 1 · ){4}\/[^ ]+ 1 \(\+4 keys, 4 urls\)/);
   });
 });
 

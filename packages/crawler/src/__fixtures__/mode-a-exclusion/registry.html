@@ -1,0 +1,30 @@
+<!doctype html>
+<!-- SYNTHETIC, the non-product under the prefix (see product.html): a gift
+     registry with breadcrumbs, a heading and deliberately NO schema.org Product
+     JSON-LD, so `hasProduct=false` — the shape the 2026-08-30 probe kept
+     sampling before Mode A could subtract a subtree:
+
+       fail .../store/go/registry/1059/  status=200 hasProduct=false
+
+     Routed in the probe tests to prove a narrowed prefix gate never hands one of
+     these to the parser. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Gift Registry — Vendor Example</title>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://vendor.example/" },
+    { "@type": "ListItem", "position": 2, "name": "Gift Registry" }
+  ]
+}
+</script>
+</head>
+<body>
+<h1>Gift Registry</h1>
+<p>This registry has no public items.</p>
+</body>
+</html>

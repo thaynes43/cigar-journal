@@ -27,17 +27,13 @@ interface AdapterCase {
   expectedKind: "urlset" | "sitemapindex";
 }
 
+// 2 Guys is deliberately NOT in this list. The harness asserts `verdict=ok` and
+// a parsed product, and 2 Guys cannot produce one: the 2026-09-01 live read
+// (#217) found no `application/ld+json` on its pages at all. Its fixtures are
+// real captures and its probe is asserted, honestly, as needs-attention in
+// `core/probe.test.ts`. Putting it back here would mean re-writing a page it does
+// not serve, which is the mistake this whole lane has been unwinding.
 const cases: AdapterCase[] = [
-  {
-    adapter: twoGuysCigars,
-    dir: "two-guys",
-    robotsUrl: "https://www.2guyscigars.com/robots.txt",
-    sitemapUrl: "https://www.2guyscigars.com/sitemap.xml",
-    productUrl: "https://www.2guyscigars.com/store/padron-1926-serie-no-9-maduro/",
-    cutterUrl: "https://www.2guyscigars.com/store/xikar-xi3-cutter/",
-    expectedName: "Padron 1926 Serie No. 9 Maduro",
-    expectedKind: "urlset",
-  },
   {
     adapter: smallBatchCigar,
     dir: "small-batch",
@@ -95,7 +91,8 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
 
   // The live 2 Guys failure mode (2026-08-29), replayed against the real adapter:
   // the same sitemap URL alternates between a product-bearing response and one
-  // with no /store/ entries at all. Four samples union past it.
+  // carrying no products at all. Four samples union past it — the enumeration is
+  // what is under test here, so it holds regardless of what the pages parse to.
   it("two-guys: sampling absorbs a sitemap that alternates between product-bearing and cold", async () => {
     const warm = loadFixture("sitemap.xml", "two-guys");
     const cold = loadFixture("sitemap-cold.xml", "two-guys");
@@ -104,23 +101,15 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
       [twoGuysCigars.sitemapUrl]: {
         sequence: [{ body: cold }, { body: warm }, { body: cold }, { body: cold }],
       },
-      ["https://www.2guyscigars.com/store/padron-1926-serie-no-9-maduro/"]: {
-        body: loadFixture("product.html", "two-guys"),
-      },
-      ["https://www.2guyscigars.com/store/xikar-xi3-cutter/"]: {
-        body: loadFixture("product-cutter.html", "two-guys"),
-      },
     });
 
     const result = await runProbe(fetcher, twoGuysCigars);
 
     expect(result.sitemap.samples).toHaveLength(4);
     expect(result.sitemap.varied).toBe(true);
-    // Only the warm sample carried /store/ locs, and its twelve registry locs are
-    // excluded by the gate — so the union is the two real products.
-    expect(result.sitemap.productLocs).toBe(2);
+    // Only the warm sample carried product-code slugs; the union is its nine.
+    expect(result.sitemap.productLocs).toBe(9);
     expect(result.notes.join(" ")).toMatch(/VARIES/);
-    expect(result.verdict).toBe("ok");
     expect(fetcher.pagesFetched).toBeLessThanOrEqual(probeFetchBudget(twoGuysCigars));
   });
 
@@ -128,6 +117,8 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
     for (const c of cases) {
       expect(c.adapter.crawlEnabled).toBe(false);
     }
+    // 2 Guys is not in `cases` and is the one that most needs saying.
+    expect(twoGuysCigars.crawlEnabled).toBe(false);
     // Cuban Lou's posture: unapproved + no purchase link-out (owner ruling).
     expect(cubanLous.approvalStatus).toBe("unapproved");
     expect(cubanLous.purchaseLinkout).toBe(false);
@@ -136,13 +127,22 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
     expect(smallBatchCigar.purchaseLinkout).toBe(true);
   });
 
-  it("carries the crawl-shape fixes the live 2026-08-29 probes called for", () => {
-    // 2 Guys served varying sitemap content on 2026-08-29 (not reproduced on
-    // 2026-08-30) — the enumeration unions N fetches until two clean probes say
-    // otherwise. Its `/store/` prefix also admits the `/store/go/` dispatcher
-    // subtree, so Mode A subtracts that family (live probe 2026-08-30).
+  it("carries the crawl-shape fixes the live probes called for", () => {
+    // 2 Guys served varying sitemap content on 2026-08-29 (not reproduced since)
+    // — the enumeration unions N fetches until two clean probes POST-enablement
+    // say otherwise.
     expect(twoGuysCigars.sitemapSampling?.samples).toBe(4);
+    // Mode B since 2026-09-01 (#217): its products are root-level slugs, so there
+    // is no prefix left to gate on.
+    expect(twoGuysCigars.productPathPrefix).toBeUndefined();
     expect(twoGuysCigars.nonProductPathPattern).toBeInstanceOf(RegExp);
+    expect(twoGuysCigars.productPathSegments).toEqual({ min: 1, max: 1 });
+    // Its robots.txt asks `*` for Crawl-delay: 5 (live capture 2026-09-01), which
+    // the parser ignores and the adapter has to honor. Below 5000 we would be
+    // crawling faster than the vendor asked.
+    expect(twoGuysCigars.minIntervalMs).toBe(5000);
+    // #179 left a seed crawl unbounded: no maxPages against an uncapped fetcher.
+    expect(twoGuysCigars.maxPages).toBeGreaterThan(0);
     // Small Batch products are root-level slugs: exclusion gate, no prefix.
     expect(smallBatchCigar.productPathPrefix).toBeUndefined();
     expect(smallBatchCigar.nonProductPathPattern).toBeInstanceOf(RegExp);

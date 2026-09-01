@@ -1,41 +1,56 @@
-import type { PrefixVendorAdapter } from "./types.js";
+import type { ExclusionVendorAdapter } from "./types.js";
 
 // 2 Guys Cigars (2guyscigars.com) — a WebSell/NitroSell store (ADR-006 /
-// vendor-sources.md). Live-probed twice from the cluster; the values below are
-// what those probes established, plus the assumptions they have not yet reached.
+// vendor-sources.md). Every value below is live-read from the cluster; the dev
+// pod cannot reach this domain, so nothing here is inferred from the platform.
 //
-// robots/ToS: allowed (`status=200 agent=* allows=true`, 2026-08-29 and
-// 2026-08-30). `crawlEnabled: false` still, because no probe has yet PARSED a
-// real product page here — see the re-probe bar in the ADR-006 amendment.
+// robots/ToS: allowed. Live capture 2026-09-01 (`__fixtures__/two-guys/robots.txt`
+// is that response verbatim): TWO `User-agent: *` groups — one `Disallow:
+// /store/filtered/`, one `Crawl-delay: 5` — plus a long list of named bots
+// disallowed outright. We are not among them, `/` is allowed, and the 5s delay is
+// honored by `minIntervalMs` below.
 //
-// 2026-08-30 probe, the one that mattered:
-//   sitemap: 6,356 locs, 6,351 enumerated, 1,462 passing `/store/`
-//   products: sampled=3 parsed=0 — all three picks were
-//     `/store/go/registry/{1059,4401,8079}/`, gift-registry pages with no
-//     schema.org Product JSON-LD.
-// The verdict (`needs-attention`) was TRUE but misattributed: it read as "this
-// vendor has no JSON-LD" when the real fault was the GATE. `/store/` also matches
-// `/store/go/...`, a non-catalog dispatcher subtree, so the enumeration handed the
-// sampler ~1,400 customers' registry pages. A seed crawl would have fetched them
-// all at >=2.5s each — a courtesy problem, not just a wasted-budget one. Hence the
-// subtraction below.
+// `crawlEnabled: false` still, and it CANNOT go true yet: see "the standing
+// blocker" at the bottom.
 //
-// The 2026-08-29 sitemap CONTENT VARIANCE (1,462 `/store/` locs on one fetch,
-// 6,356 with none on the next) did NOT reproduce on 2026-08-30: four samples all
-// returned 6,356 locs, `new=6351/0/0/0`, `varied=no`. One clean observation does
-// not disprove an intermittent behaviour and the 2026-08-29 reading was real, so
-// `sitemapSampling` stays. Bar for reducing it: two consecutive `varied=no`
-// probes AFTER the vendor is enabled, as its own change.
+// --- how the gate got here (three in-cluster probes) -------------------------
+// 2026-08-30 (#179): `productPathPrefix: "/store/"` admitted 1,462 locs, all of
+//   them `/store/go/registry/<n>/` gift-registry pages. Narrowing to `/store/`
+//   minus `/store/go/` was correct as far as it went.
+// 2026-08-31 (#217): the re-probe on that build returned `product-locs=0`. The
+//   `/store/` prefix is not just polluted, it is WRONG: all 1,466 `/store/` locs
+//   are the registry family and the rejected census showed 4,883 one-URL-per-key
+//   shallow slugs outside it — the per-product tail of a healthy catalog.
+// 2026-09-01 (this change): Jobs in ns `frontend` fetched robots.txt, the sitemap
+//   and 18 pages from it. The shape, exactly:
 //
-// Probe MUST still confirm, and the coordinator correct the adapter where wrong:
-//   1. That a real product URL exists under `/store/` outside `/store/go/`, and
-//      that it embeds a schema.org Product in JSON-LD (NitroSell templates vary).
-//      If `product-locs` drops to 0, this sitemap does not enumerate products
-//      under `/store/` at all and the next move is a different prefix or a
-//      different enumeration source — read the `paths: out ...` census line.
-//   2. The breadcrumb shape `isCigarListing` gates on. The fixture's breadcrumbs
-//      are hand-written; no live product page has been parsed yet.
-export const twoGuysCigars: PrefixVendorAdapter = {
+//     6,356 distinct locs = 1 root + 4,888 ONE-segment slugs + 1,467 four-segment
+//     `/store/go/registry/<n>/`. Nothing else. No query strings, no other host,
+//     no file extensions, no depth 2 or 3 anywhere.
+//
+//     Of the 4,888 one-segment slugs, 3,841 end in `-<digits>` and 1,047 do not.
+//     That suffix is the NitroSell product code: on every product page sampled it
+//     is repeated as `<meta property="og:upc">` (165681, 184527, 734366037362).
+//
+//     Sampled with the trailing code (5/5): all 200, all `og:type=product`, all
+//     carrying `itemtype="https://schema.org/Product"`.
+//     Sampled without it (13): six 404 (`zino-nicaragua-cigars`,
+//     `perdomo-30th-maduro`, `worlds-strongest-cigar`, `roma-craft-gran-perfecto`,
+//     `el-mago-el-cubano-toro-tubo`, `hvc-first-selection-broadleaf` — the sitemap
+//     enumerates dead slugs), six category/brand/site pages (`/Cigars/`,
+//     `/crowned-heads/`, `/aganorsa-leaf/`, `/cigars-mi-querida/`,
+//     `/cigars-perdomo-30th-maduro/`, `/about-us/`), and one real product with a
+//     NON-numeric code (`gift-certificates-25-giftcard-web25`,
+//     `og:upc=GiftCard-Web25`).
+//
+// So the product signature is the trailing product code, not a prefix and not a
+// nameable family. That is why the pattern below does not enumerate brand/promo
+// families: they cannot be enumerated. ~500 of the 1,047 are arbitrary line
+// landing slugs (`perdomo-30th-maduro`, `montecristo-1935-diamante`) that no
+// keyword separates from a product slug — and the keywords that look promising
+// are traps. `^\/cigars-` would drop nine URLs that DO carry a product code, and
+// over-matching drops products silently while under-matching only costs fetches.
+export const twoGuysCigars: ExclusionVendorAdapter = {
   slug: "two-guys-cigars",
   name: "2 Guys Cigars",
   url: "https://www.2guyscigars.com",
@@ -46,28 +61,75 @@ export const twoGuysCigars: PrefixVendorAdapter = {
   approvalStatus: "owner-added",
   displayEnabled: true,
   purchaseLinkout: true,
-  productPathPrefix: "/store/",  // live-probed 2026-08-29: 1,462 locs under /store/
-  // …minus the `/store/go/` dispatcher subtree. Excludes the WHOLE family, not
-  // just `registry`, because siblings we have not sampled (`cart`, `wishlist`,
-  // `account`) are the same kind of page. `go` followed by a numeric id is a
-  // router shape, not a product slug.
+  // Exclusion gate (Mode B), two branches, both anchored:
   //
-  // `(?:\/|$)` is a full SEGMENT boundary and NOT `\b`: `\b` fires at a hyphen
-  // too, which is how Small Batch's `^\/cart\b` silently ate
-  // `/cart-blanche-robusto/`. As written, `/store/go-big-or-go-home-robusto/`
-  // and `/store/gold-label-toro/` are kept; only a literal `go` segment goes.
+  //   `^\/store(?:\/|$)` — the whole `/store/` subtree. Live: 1,467 locs, every
+  //     one a gift registry, zero products. `(?:\/|$)` is a full SEGMENT
+  //     boundary and NOT `\b`, which also fires at a hyphen — the trap that let
+  //     Small Batch's `^\/cart\b` eat `/cart-blanche-robusto/`. A product slug
+  //     `/store-something-123/` therefore survives this branch.
   //
-  // The `i` flag is belt-and-braces only: `startsWith("/store/")` is
-  // case-SENSITIVE, so `/Store/Go/` never reaches this pattern at all. Do not
-  // "harmonize" the two sides without deciding which way — dropping `i` narrows
-  // the exclusion, and case-folding the prefix widens the gate.
-  nonProductPathPattern: /^\/store\/go(?:\/|$)/i,
-  // Four fetches, kept from 2026-08-29 (see the variance note above). Cost is
-  // four fetches (~12s) against a multi-hundred-page walk at >=2.5s — noise. No
-  // intervalMs: the fetcher's global limiter already spaces them, and we have no
-  // measurement of this vendor's cache TTL to pick a better number from.
-  sitemapSampling: { samples: 4 },
+  //   `^\/(?![^/]*-\d+\/?$)` — reject any path whose one segment does not END in
+  //     a product code. Written as a lookahead because the field is a rejection
+  //     pattern and the finding is a positive one ("a product URL ends in
+  //     `-<digits>`"); the two are the same statement. `[^/]*` cannot cross a
+  //     separator, so this also rejects every multi-segment path, which is the
+  //     same answer `productPathSegments` gives — deliberate belt and braces.
+  //
+  // Accepts 3,841 of the 6,356 enumerated locs. TWO KNOWN IMPRECISIONS, both
+  // measured, both on the cheap side of the asymmetry:
+  //   - It admits 9 category pages whose title ends in a number
+  //     (`cigars-byron-1850`, `cigars-topper-1894`, …). They parse to nothing;
+  //     the cost is 9 fetches.
+  //   - It drops a product whose code is alphanumeric — one such loc exists
+  //     today, a gift certificate. If a CIGAR ever ships an alphanumeric code we
+  //     lose it silently, which is why the accepted count belongs in the probe
+  //     line: 3,841 against 4,888 one-segment locs is the number to watch.
+  nonProductPathPattern: /^\/store(?:\/|$)|^\/(?![^/]*-\d+\/?$)/i,
+  // Products are ROOT-LEVEL slugs. Live: no loc on this site has depth 2 or 3,
+  // and the only depth-4 family is the registry.
+  productPathSegments: { min: 1, max: 1 },
+  // No prefix to ask robots about, and products sit at the root, so the gate path
+  // is `/` (the default). Stated by omission, as Small Batch does.
   cigarCategoryPattern: /cigar/i,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?/i,
   excludeNamePattern: /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b/i,
+  // Four fetches, kept from 2026-08-29. The variance seen that day (1,462
+  // `/store/` locs on one fetch, 6,356 with none on the next) has not reproduced
+  // since — `varied=no` on 2026-08-30 and 2026-08-31, and this change's own fetch
+  // returned 6,356 distinct locs, in range. #179's bar for reducing `samples` is
+  // two clean probes AFTER the vendor is enabled, as its own change; the vendor
+  // is not enabled, so this is not that change.
+  sitemapSampling: { samples: 4 },
+  // The vendor's own `Crawl-delay: 5` for `*`, honored. Our floor is 2.5s and the
+  // fetcher clamps UP, never down, so this is the binding number. ADR-006 already
+  // rules that robots' rate ask wins; the 2026-09-01 capture is the first time we
+  // have actually read one from this vendor.
+  minIntervalMs: 5000,
+  // Safety cap for the probe/dry-run era, well under the 3,841 the gate accepts —
+  // #179 left this open and a seed crawl is unbounded without it (`createFetcher`
+  // has no default). Raise it deliberately for a full seed once the vendor parses.
+  maxPages: 500,
 };
+
+// --- the standing blocker (found 2026-09-01, NOT fixed here) -----------------
+// This adapter now selects the right URLs and still cannot produce a listing:
+// 2 Guys serves NO `application/ld+json` AT ALL. Zero blocks in all 18 pages
+// fetched, product pages included. What a product page does carry:
+//
+//   <meta property="og:type" content="product">        og:title / og:image
+//   <meta property="product:price:amount" content="13.79">   product:price:currency
+//   <meta property="og:availability" content="instock">      og:upc / og:brand
+//   <div itemscope itemtype="https://schema.org/Product"> … <h1 itemprop="name">
+//
+// and its breadcrumb is deliberately "Home / <brand>" — no category path (the
+// page's own comment: "ticket 126909: Home and brand URL instead of Breadcrumbs
+// on product pages"). CATEGORY pages keep a real `Home > Cigars > <line>` trail.
+//
+// `extractJsonLd` reads `<script type="application/ld+json">` only, so a probe
+// against this gate reports `sampled=3 parsed=0` and the note "no schema.org
+// Product JSON-LD". That is now a TRUE and correctly-attributed reading, and it
+// is the reason `crawlEnabled` stays false: a second extractor (OG + microdata)
+// is a core change with an ADR question behind it — whether OG counts as a
+// structured source, and where the category comes from when the product page
+// does not state one. Tracked separately; see the ADR-006 amendment 2026-09-01.
