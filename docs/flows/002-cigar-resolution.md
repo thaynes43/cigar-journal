@@ -77,10 +77,18 @@ one family the one the user named is offered first instead of buried.
 ## Failure modes
 
 - `cigar_ambiguous` at save time → model asks the user, retries with the
-  chosen id and the **same** `clientRequestId`. When the user confirms none of
+  chosen id and the **same** `clientRequestId`. Re-issuing the same call is safe
+  under the same id: the ambiguity is raised inside the transaction, so nothing
+  was written and the key was never recorded. When the user confirms none of
   the candidates is theirs, the deadlock breaks with `confirmedDistinct: true`:
   on `add_cigar`, whose `cigarId` the save then runs against — the turn still
   ends with the save — or, when the ambiguity arose on `record_purchase`, on
   that call itself, which resolves and lands the purchase in one go. The flag
   lives on those two tools only; `save_smoke` never sets it.
+  **The `add_cigar` detour SPENDS that `clientRequestId`.** Keys are unique per
+  user and id, not per tool, so the save that follows the detour must carry a
+  FRESH one — reusing the spent id is a different payload under a recorded key,
+  which is `idempotency_conflict` and is not recoverable. One id per mutation,
+  not one per turn: a retry of the same call keeps its id, a second tool call
+  takes its own.
 - Model invents a `cigarId` → `cigar_not_found`, recoverable via search.

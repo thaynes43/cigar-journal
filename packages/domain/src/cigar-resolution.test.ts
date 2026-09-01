@@ -13,8 +13,8 @@ import {
   variantCompatible,
   identityTokensCompatible,
 } from "./cigar-resolution.js";
-import { variantRelation, identitySimilarity, rankByIdentity } from "./name-heuristics.js";
-import { CigarAmbiguousError, CigarNotFoundError } from "./errors.js";
+import { variantRelation, identityCoverage, rankByIdentity } from "./name-heuristics.js";
+import { CigarAmbiguousError, CigarNotFoundError, IdempotencyConflictError } from "./errors.js";
 import type { Principal } from "./index.js";
 
 // Pure guard coverage (no DB): the disqualifiers behind the strong-link filter.
@@ -115,10 +115,10 @@ describe("strong-link guard predicates", () => {
   // Ranking, not just admissibility: within a family the residue is the ONLY
   // signal that distinguishes members, so it has to outrank the whole-string
   // score rather than tie-break under it.
-  it("identitySimilarity: ranks the named sibling above a higher-scoring cousin", () => {
+  it("identityCoverage: ranks the named sibling above a higher-scoring cousin", () => {
     const query = "Tatuaje Monster Smash The Creature";
-    expect(identitySimilarity(query, "Tatuaje Monster Smash The Creature")).toBe(1);
-    expect(identitySimilarity(query, "Tatuaje Monster Smash The Bride")).toBeLessThan(1);
+    expect(identityCoverage(query, "Tatuaje Monster Smash The Creature")).toBe(1);
+    expect(identityCoverage(query, "Tatuaje Monster Smash The Bride")).toBeLessThan(1);
 
     const ranked = rankByIdentity(
       query,
@@ -129,6 +129,27 @@ describe("strong-link guard predicates", () => {
       (row) => row,
     );
     expect(ranked[0]!.name).toBe("Tatuaje Monster Smash The Creature");
+  });
+
+  // THE MEASURE IS ASYMMETRIC FOR THIS CASE. A query naming only a brand states
+  // nothing that could rank one catalog row above another, so every candidate
+  // carrying the brand must TIE and the trigram order must survive intact. A
+  // symmetric measure (Jaccard) fails exactly here: dividing by the union scores
+  // each candidate `1/k` in its own token count and reorders the page by
+  // shortest name — a length preference wearing the identity rule's clothes.
+  it("identityCoverage: a brand-only query ties, leaving the trigram order intact", () => {
+    const query = "Tatuaje";
+    expect(identityCoverage(query, "Tatuaje Monster Smash The Bride")).toBe(1);
+    expect(identityCoverage(query, "Tatuaje Havana VI Verocu No. 2")).toBe(1);
+
+    const rows = [
+      { name: "Tatuaje Havana VI Verocu No. 2", sim: 0.42 },
+      { name: "Tatuaje Monster Smash The Bride", sim: 0.31 },
+      { name: "Tatuaje Brown Label Robusto", sim: 0.28 },
+    ];
+    expect(rankByIdentity(query, rows, (row) => row).map((r) => r.name)).toEqual(
+      rows.map((r) => r.name),
+    );
   });
 
   // TWO GUARDS, NOT THREE. Matching v2 added a wrapper-variant guard and it
@@ -435,6 +456,78 @@ describe("resolveCigar and search_cigars over a sibling family", () => {
     });
     expect(result.created).toBe(true);
     expect(result.cigar.canonicalName).toBe("Tatuaje Monster Smash The Ghoul");
+  });
+
+  // SAVE_SMOKE REACHES THE SAME BRANCH WITH NO ESCAPE HATCH OF ITS OWN — it
+  // never sets `confirmedDistinct` — so mid-journal the model has to settle the
+  // question and save again. The plain recovery is safe: the ambiguity threw
+  // inside the transaction, so nothing was written and the clientRequestId was
+  // never spent.
+  it("asks when save_smoke names an unseen sibling, then re-saves under the same clientRequestId", async () => {
+    const requestId = newRequestId();
+    const error = await saveSmoke(h.deps, user, {
+      clientRequestId: requestId,
+      cigar: { described: { canonicalName: "Tatuaje Monster Smash The Banshee" } },
+      overallDescriptors: ["cocoa"],
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CigarAmbiguousError);
+    const candidates = (error as CigarAmbiguousError).candidates;
+    expect(candidates.length).toBeGreaterThan(0);
+    // Every candidate is a member of this family — including The Ghoul, minted
+    // by the confirmed-distinct case above and a true sibling from then on.
+    for (const candidate of candidates) {
+      expect(candidate.canonicalName.startsWith("Tatuaje Monster Smash ")).toBe(true);
+    }
+
+    const brideId = seeded.get("Tatuaje Monster Smash The Bride")!;
+    const saved = await saveSmoke(h.deps, user, {
+      clientRequestId: requestId,
+      cigar: { cigarId: brideId },
+      overallDescriptors: ["cocoa"],
+    });
+    expect(saved.smoke.cigar.cigarId).toBe(brideId);
+    expect(saved.cigarCreated).toBe(false);
+  });
+
+  // THE TRAP IN THE OTHER RECOVERY. Idempotency keys are unique per (user,
+  // clientRequestId) and NOT per tool, so routing the answer through add_cigar
+  // SPENDS the id the save was going to reuse. The follow-up save then arrives
+  // with a different payload under a spent key: `idempotency_conflict`, and it
+  // is `recoverable: false` — the journal entry is stranded unless the model
+  // knows to issue the save under a fresh id. This is what the tool text now
+  // states, pinned here so the text cannot drift from the mechanic.
+  it("strands the save under a spent clientRequestId when the recovery detours through add_cigar", async () => {
+    const requestId = newRequestId();
+    const ambiguous = await saveSmoke(h.deps, user, {
+      clientRequestId: requestId,
+      cigar: { described: { canonicalName: "Tatuaje Monster Smash The Banshee" } },
+      overallDescriptors: ["cedar"],
+    }).catch((e: unknown) => e);
+    expect(ambiguous).toBeInstanceOf(CigarAmbiguousError);
+
+    // The user confirms none of the siblings is theirs.
+    const added = await addCigar(h.deps, user, {
+      clientRequestId: requestId,
+      cigar: { canonicalName: "Tatuaje Monster Smash The Banshee", brand: "Tatuaje" },
+      confirmedDistinct: true,
+    });
+    expect(added.created).toBe(true);
+
+    const conflict = await saveSmoke(h.deps, user, {
+      clientRequestId: requestId,
+      cigar: { cigarId: added.cigar.cigarId },
+      overallDescriptors: ["cedar"],
+    }).catch((e: unknown) => e);
+    expect(conflict).toBeInstanceOf(IdempotencyConflictError);
+    expect((conflict as IdempotencyConflictError).recoverable).toBe(false);
+
+    // A fresh id finishes the entry the user was in the middle of writing.
+    const saved = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: added.cigar.cigarId },
+      overallDescriptors: ["cedar"],
+    });
+    expect(saved.smoke.cigar.cigarId).toBe(added.cigar.cigarId);
   });
 
   // RANKING, the second defect. Fourteen siblings score alike on trigram, so the

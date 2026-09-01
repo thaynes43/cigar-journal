@@ -806,7 +806,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Save smoke",
       description:
-        "Persist one finished smoke, called once when the user signals the cigar is over — never per observation. Omit anything the user did not establish; sparse is correct. When you pass a consumption block (the ask-once 'From your humidor?' beat), the result adds holdingAfter { totalAcquired, remaining } so you can confirm the new count without another read.",
+        "Persist one finished smoke, called once when the user signals the cigar is over — never per observation. Omit anything the user did not establish; sparse is correct. When you pass a consumption block (the ask-once 'From your humidor?' beat), the result adds holdingAfter { totalAcquired, remaining } so you can confirm the new count without another read. A described cigar can error cigar_ambiguous when the name lands a word away from a catalog sibling — show the user the search_cigars candidates; when they confirm one, save against that cigarId under the same clientRequestId, since the failed save wrote nothing. When they confirm none is theirs, create the distinct product with add_cigar confirmedDistinct:true and save against the cigarId it returns under a FRESH clientRequestId, because add_cigar has spent the first one. This tool has no confirmedDistinct of its own.",
       inputSchema: saveSmokeSchema,
       outputSchema: saveSmokeOutput,
       annotations: {

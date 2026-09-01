@@ -239,33 +239,43 @@ function identityTokens(name: string): Set<string> {
   return residueOf(foldTokens(name), NOTHING_SHARED);
 }
 
-// Agreement on identity alone, 0..1 (Jaccard over identity tokens).
+// How much of what the QUERY claims a candidate accounts for, 0..1 — the share
+// of the query's identity tokens the candidate also carries.
 //
 // This is the ranking answer to the second half of the Face/Bride report: a
 // family whose members share a brand, a line and a release word — the fourteen
 // live `Tatuaje Monster Smash` siblings — differs on ONE token out of six, so
 // whole-string trigram scores every sibling nearly alike and the ordering it
-// yields is noise. Identity agreement reads only the tokens that distinguish
-// them, so the sibling a name actually names sorts to the top and the rest sort
-// below it as siblings rather than as near-duplicates of each other.
-export function identitySimilarity(query: string, candidate: string): number {
+// yields is noise. Reading only the tokens that distinguish them puts the
+// sibling a name actually names on top.
+//
+// ASYMMETRIC ON PURPOSE, and a symmetric measure is wrong here. Jaccard would
+// divide by the union, so a query that names only a brand — every candidate
+// containing all of it, none of it distinguishing — would score `1/k` and rank
+// the SHORTEST catalog name first, silently replacing the trigram order with a
+// length preference on exactly the queries that carry no identity claim to rank
+// by. Dividing by the query alone makes those candidates genuinely tie, which
+// hands the decision back to the trigram tiebreaker where it belongs. Extra
+// tokens on the candidate are not penalized: `…No. 9` scoring below `…No. 9
+// Flying Pig` for a query naming the Pig is the point, and the reverse case (a
+// query naming less than the row) is the one-sided residue the guard permits.
+export function identityCoverage(query: string, candidate: string): number {
   const q = identityTokens(query);
+  // A query that is all vocabulary and no identity makes no claim to rank by.
+  if (q.size === 0) return 1;
   const c = identityTokens(candidate);
   let overlap = 0;
   for (const token of q) if (c.has(token)) overlap++;
-  const union = q.size + c.size - overlap;
-  // Two names that are all vocabulary and no identity make no identity claim to
-  // disagree about; the trigram score is left to break the tie.
-  return union === 0 ? 1 : overlap / union;
+  return overlap / q.size;
 }
 
 // Candidates ordered by IDENTITY FIRST, trigram second — the ordering ADR-012's
 // header warns the raw score gets wrong ("trigram similarity RANKS DISTINCT
 // PRODUCTS ABOVE TRUE SIBLINGS"). Whole-string similarity is kept as the
 // tiebreaker, not discarded: within one identity verdict it is still the best
-// signal there is, and a query naming only a brand ties every candidate at the
-// same identity score and so is ordered exactly as it was before. The sort is
-// stable, so an unbroken tie preserves the order SQL returned.
+// signal there is. A query naming only a brand covers equally in every candidate
+// that carries the brand, so those tie here and the sort — being stable — hands
+// them back in the order SQL returned them.
 export function rankByIdentity<T>(
   query: string,
   rows: readonly T[],
@@ -274,7 +284,7 @@ export function rankByIdentity<T>(
   return rows
     .map((row) => {
       const { name, sim } = read(row);
-      return { row, identity: identitySimilarity(query, name), sim };
+      return { row, identity: identityCoverage(query, name), sim };
     })
     .sort((a, b) => b.identity - a.identity || b.sim - a.sim)
     .map((scored) => scored.row);
