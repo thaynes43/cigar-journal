@@ -655,7 +655,11 @@ export interface EnrichCandidateScore {
 export function scoreEnrichCandidate(ask: EnrichAsk, keys: ReadonlySet<string>): EnrichCandidateScore {
   let identity = 0;
   let detail = 0;
-  for (const key of ask.requiredKeys) {
+  // Over the DISTINCT required keys. `requiredKeys` is a token list in title
+  // order, because `coversAsk` reads it as one, and a name that repeats a word
+  // (`Romeo y Julieta Romeo No 2`) would otherwise score a candidate carrying that
+  // word once as high as one carrying two different identity words.
+  for (const key of new Set(ask.requiredKeys)) {
     if (!keys.has(key)) continue;
     if (isIdentityBearing(key)) identity += 1;
     else if (/^\d+$/.test(key)) detail += 1;
