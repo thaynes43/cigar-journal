@@ -97,12 +97,13 @@ journalEntryCreated:false — so the request is not complete until the save_smok
 or record_purchase that motivated it has run in the same turn, against the
 cigarId add_cigar returned. A catalog row with no journal entry is worse than
 no row at all: it looks like success and drops what the user actually said. If
-add_cigar errors cigar_ambiguous, show the search_cigars candidates and ask;
-only when the user confirms none is theirs, retry add_cigar with
-confirmedDistinct:true to create the distinct product. record_purchase is also
-how the humidor count is corrected — the ledger is append-only and holdings are
-derived, so a miscount is fixed with a negative-quantity row (say why in notes),
-never an edit. Record only what the user stated: never invent a price, date, or
+add_cigar or record_purchase errors cigar_ambiguous, show the search_cigars
+candidates and ask; only when the user confirms none is theirs, re-issue the
+same call with confirmedDistinct:true to create the distinct product — for a
+purchase that is one call, not a detour through add_cigar. record_purchase is
+also how the humidor count is corrected — the ledger is append-only and
+holdings are derived, so a miscount is fixed with a negative-quantity row (say
+why in notes), never an edit. Record only what the user stated: never invent a price, date, or
 vendor.
 
 Humidor deduction. A saved smoke deducts one stick from the humidor only when the
@@ -137,9 +138,13 @@ Photos attach through add_smoke_photo, never save_smoke. Call it with just the
 smoke id: you get back a one-time upload link — relay it to the user, it works
 once and lasts 24 hours, and shareWithUser is the sentence to say. If the host
 forwarded an attached image with the call the photo is stored directly instead and
-no link is needed; delivery.status reports which happened. Never fill the image
-argument yourself, and never paste an image, a chat file link, or a file id into
-any field. A photo never blocks saving the smoke.
+no link is needed; delivery.status reports which happened. A host that forwards
+anything is understood to forward only an image attached to the message that
+triggered the call, so when the user wants one stored directly ask them to
+attach (or re-attach) it in the same message as the request; the link works
+either way. Never fill the image argument yourself, and never paste an image, a
+chat file link, or a file id into any field. A photo never blocks saving the
+smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -724,7 +729,8 @@ and a product photo. Use before `save_smoke`/`record_purchase` when the cigar is
 missing. Resolve-or-create is the exact path `save_smoke` uses for a described
 cigar (exact-name link, `cigar_ambiguous` when it can't decide, unverified create
 otherwise); this tool adds the enrichment queue and the `confirmedDistinct`
-escape hatch.
+escape hatch — which `record_purchase` carries too, so an acquisition never needs
+this tool as a detour just to reach the flag.
 
 **It is a prelude, never the answer** (#177). It writes no journal entry and no
 purchase — `journalEntryCreated` is always `false` — so it never satisfies "log
@@ -773,6 +779,8 @@ arguments:
   clientRequestId: 8c14aa7e-...
   cigar:                         # exactly one of cigarId / described (as save_smoke)
     cigarId: cg_01j9x2
+  confirmedDistinct: false       # optional, default false; `described` refs only —
+                                 # the cigar_ambiguous recovery, below
   quantity: 10                   # integer, non-zero; NEGATIVE corrects an over-count
   purchasedAt: "2026-01-10"      # optional; only what the user stated
   packaging: box                 # optional
@@ -800,6 +808,27 @@ reason); a zero quantity is rejected. Provenance is server-stamped
 conversational mention. **`wanted`** reports whether the caller had this cigar on
 their want list — acquisition never clears it silently (R-WANT-2), so when it is
 `true` the model offers the clear (`set_want`, `wanted: false`).
+
+**`cigar_ambiguous` recovers in ONE call** (2026-08-31). A described name that
+strong-matches two catalog rows — or a related-but-distinct sibling the
+number/packaging guard refuses to link — returns `cigar_ambiguous`, exactly as
+`add_cigar` does. Show the user the `search_cigars` candidates; when they confirm
+none is theirs, re-issue **this same `record_purchase`** with
+`confirmedDistinct: true`. The semantics are `add_cigar`'s, field for field:
+strong-link and ambiguity are skipped and the described entry is created, except a
+case-insensitive **exact** `canonical_name` match still links (`created: false`),
+so an override can never mint a literal duplicate. It applies to a `described` ref
+only — a `cigarId` is already resolved — and changes nothing else about the call:
+the ledger row, its audit, the savepointed enrichment queue and its `cigar.created`
+gate behave exactly as they do without the flag, so an override that linked an
+exact name created no gap and queues nothing. Reusing the `clientRequestId` from
+the ambiguous attempt is safe — that call rolled back and recorded no envelope —
+and a genuine retry of the confirmed call replays as usual (`confirmedDistinct` is
+part of the intent, so it must be repeated identically, like every other argument).
+
+Without it, a sampler of related-but-distinct sticks cost three calls each —
+`search_cigars` → `add_cigar(confirmedDistinct)` → `record_purchase(cigarId)` —
+because the flag existed only on `add_cigar`.
 
 ## update_smoke — write, idempotent
 
@@ -953,6 +982,22 @@ offered the link that actually works. So no model-facing string asserts it: the
 model hands over the link and uses `delivery.status` to say something true about
 why. The hypothesis stays a hypothesis, in client-compatibility.md, until
 `photo_intake_request` settles it.
+
+**Amended 2026-08-31 — the same-turn rule is now stated, as odds and not as fact.**
+A session that evening supplied the detail the earlier transcript lacked: the
+user's photo was attached *several turns before* `add_smoke_photo` was called, and
+nothing was forwarded (the upload link carried the smoke). Whatever hydration a
+host does, current-turn-only is the plausible contract — every integration
+reported to receive files receives the *invoking* turn's attachment. So the tool
+description and the server instructions each gained one sentence: a host that
+forwards anything is understood to forward only an image attached to the message
+that triggered the call, so ask the user to attach (or re-attach) the photo in
+that same message when they want it stored directly. This does **not** reinstate
+what was withdrawn above. That instruction fired on `no_image_received` and
+*delayed* the link; this one is standing advice that ends by naming the link as
+the path that works either way, and it is phrased as how to maximize the chance —
+never as established behavior — because forwarding has still never been observed
+on this connector (#202).
 
 Errors are now a shorter set: `unavailable` when photo storage is unconfigured (the
 tool is genuinely non-functional — a minted link would 503 on upload),

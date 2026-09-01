@@ -77,8 +77,19 @@ async function recordWithinTx(
   // the same one add_cigar and save_smoke use. A described ref may create the
   // cigar; a resolved id only ever links. Enrichment is queued after the ledger
   // write, below.
+  //
+  // `confirmedDistinct` is add_cigar's escape hatch, carried here with identical
+  // semantics (owner, 2026-08-31): on `cigar_ambiguous` the model confirms with
+  // the user and re-issues THIS call with the flag, instead of detouring through
+  // search → add_cigar(confirmedDistinct) → record_purchase(cigarId) for every
+  // stick of a related-but-distinct sampler. The resolver keeps the one safety
+  // it keeps for add_cigar — a case-insensitive exact canonical_name match still
+  // links (created:false), so an override can never mint a literal duplicate —
+  // and it is inert on a cigarId ref, which resolves before options are read.
   const describedRef = "described" in input.cigar;
-  const cigar: ResolvedCigar = await resolveCigar(tx, input.cigar as CigarRef);
+  const cigar: ResolvedCigar = await resolveCigar(tx, input.cigar as CigarRef, {
+    confirmedDistinct: input.confirmedDistinct ?? false,
+  });
 
   const { vendorId, unknownVendor } = await resolveVendor(tx, input.vendorName);
   // Fold an unknown vendor into notes; keep the user's own notes ahead of it.

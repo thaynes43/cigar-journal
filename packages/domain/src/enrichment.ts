@@ -125,9 +125,10 @@ export async function queueEnrichmentSafely(tx: Tx, cigarId: string, requestedBy
 // add_cigar's path, where the queue IS the point of the call. The enrichment gate
 // is evaluated on both create AND resolve, so a described name that links to an
 // existing but under-documented catalog row still gets filled, and
-// `confirmedDistinct` is add_cigar's escape hatch, forwarded to the resolver.
-// save_smoke and record_purchase do not come through here: they resolve first,
-// write their entry, and only then queue via queueEnrichmentSafely.
+// `confirmedDistinct` is forwarded to the resolver. save_smoke and
+// record_purchase do not come through here: they resolve first, write their
+// entry, and only then queue via queueEnrichmentSafely — record_purchase passes
+// its own `confirmedDistinct` straight to resolveCigar for the same reason.
 export async function resolveAndEnrich(
   tx: Tx,
   ref: CigarRef,

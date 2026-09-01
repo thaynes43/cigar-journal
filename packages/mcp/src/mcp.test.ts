@@ -1309,6 +1309,53 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  it("record_purchase with confirmedDistinct breaks a near-match deadlock and lands the purchase in ONE call", async () => {
+    // The sampler shape: two same-number, non-packaging siblings the guard cannot
+    // separate, so a naked described purchase deadlocks on cigar_ambiguous. Until
+    // this flag reached record_purchase the model had to detour — search_cigars →
+    // add_cigar(confirmedDistinct) → record_purchase(cigarId) — for every stick.
+    // Now the confirmation goes back into the purchase itself.
+    await h.seedCigar({ canonicalName: "Comet Ledger 2001 Alpha", brand: "Comet" });
+    await h.seedCigar({ canonicalName: "Comet Ledger 2001 Beta", brand: "Comet" });
+    await withClient(ownerFull, async (client) => {
+      const clientRequestId = randomUUID();
+      const cigar = { described: { canonicalName: "Comet Ledger 2001", brand: "Comet" } };
+
+      const deadlock = await call(client, "record_purchase", { clientRequestId, cigar, quantity: 4 });
+      expect(errorOf(deadlock).code).toBe("cigar_ambiguous");
+
+      // Same clientRequestId: the ambiguous call rolled back and stored no
+      // envelope, so this is a re-issue of one intent, not a second purchase.
+      const data = payloadOf(
+        await call(client, "record_purchase", {
+          clientRequestId,
+          cigar,
+          confirmedDistinct: true,
+          quantity: 4,
+        }),
+      ) as {
+        purchaseId: string;
+        cigar: { cigarId: string; canonicalName: string; verification: string };
+        holdingAfter: { totalAcquired: number; remaining: number };
+        replayed: boolean;
+      };
+      expect(data.purchaseId).toBeTruthy();
+      expect(data.cigar.canonicalName).toBe("Comet Ledger 2001");
+      expect(data.cigar.verification).toBe("unverified"); // the distinct product
+      expect(data.holdingAfter).toEqual({ totalAcquired: 4, remaining: 4 });
+      expect(data.replayed).toBe(false);
+      // Enrichment gating survives the override: the row was created, so the gap
+      // it opened is queued.
+      expect(await enrichmentRows(data.cigar.cigarId)).toHaveLength(1);
+
+      // And it is really in the humidor — one call did the whole job.
+      const inv = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: { cigar: { cigarId: string }; remaining: number }[];
+      };
+      expect(inv.holdings.find((hh) => hh.cigar.cigarId === data.cigar.cigarId)!.remaining).toBe(4);
+    });
+  });
+
   it("record_purchase corrects an over-count with a negative-quantity row", async () => {
     const cigarId = await h.seedCigar({ canonicalName: "Correction Corona", brand: "Correction" });
     await withClient(ownerFull, async (client) => {

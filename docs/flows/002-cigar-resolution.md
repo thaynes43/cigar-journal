@@ -58,7 +58,9 @@ high trigram score, so it creates a new entry rather than mislinking.
 
 - `cigar_ambiguous` at save time → model asks the user, retries with the
   chosen id and the **same** `clientRequestId`. When the user confirms none of
-  the candidates is theirs, the deadlock breaks through `add_cigar` with
-  `confirmedDistinct: true` (the flag exists only there) and the save then runs
-  against the `cigarId` it returns — the turn still ends with the save.
+  the candidates is theirs, the deadlock breaks with `confirmedDistinct: true`:
+  on `add_cigar`, whose `cigarId` the save then runs against — the turn still
+  ends with the save — or, when the ambiguity arose on `record_purchase`, on
+  that call itself, which resolves and lands the purchase in one go. The flag
+  lives on those two tools only; `save_smoke` never sets it.
 - Model invents a `cigarId` → `cigar_not_found`, recoverable via search.
