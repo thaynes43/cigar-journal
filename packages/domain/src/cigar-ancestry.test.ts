@@ -12,6 +12,7 @@ const LINE_A = "33333333-3333-3333-3333-333333333333";
 const LINE_B = "44444444-4444-4444-4444-444444444444";
 const BLEND_A = "55555555-5555-5555-5555-555555555555";
 
+const brandA = { id: BRAND_A };
 const lineA = { id: LINE_A, brandId: BRAND_A };
 const lineB = { id: LINE_B, brandId: BRAND_B };
 const blendA = { id: BLEND_A, lineId: LINE_A };
@@ -29,12 +30,17 @@ describe("cigar ancestry", () => {
     // The 565 unbranded production rows become these once Wave 3 attaches them:
     // brand known, line not. ADR-012 requires this to be representable.
     it("accepts a brand with no line — the cigar hangs off its brand", () => {
-      expect(checkCigarAncestry({ brandId: BRAND_A, lineId: null, blendId: null })).toEqual([]);
+      expect(checkCigarAncestry({ brandId: BRAND_A, lineId: null, blendId: null }, { brand: brandA })).toEqual(
+        [],
+      );
     });
 
     it("accepts a brand and a line that belongs to it", () => {
       expect(
-        checkCigarAncestry({ brandId: BRAND_A, lineId: LINE_A, blendId: null }, { line: lineA }),
+        checkCigarAncestry(
+          { brandId: BRAND_A, lineId: LINE_A, blendId: null },
+          { brand: brandA, line: lineA },
+        ),
       ).toEqual([]);
     });
 
@@ -42,7 +48,7 @@ describe("cigar ancestry", () => {
       expect(
         checkCigarAncestry(
           { brandId: BRAND_A, lineId: LINE_A, blendId: BLEND_A },
-          { line: lineA, blend: blendA },
+          { brand: brandA, line: lineA, blend: blendA },
         ),
       ).toEqual([]);
     });
@@ -54,7 +60,7 @@ describe("cigar ancestry", () => {
     it("rejects a line belonging to a different brand", () => {
       const errors = checkCigarAncestry(
         { brandId: BRAND_A, lineId: LINE_B, blendId: null },
-        { line: lineB },
+        { brand: brandA, line: lineB },
       );
       expect(paths(errors)).toEqual(["lineId"]);
       expect(errors[0]!.message).toMatch(/different brand/);
@@ -63,7 +69,7 @@ describe("cigar ancestry", () => {
     it("rejects a blend belonging to a different line", () => {
       const errors = checkCigarAncestry(
         { brandId: BRAND_A, lineId: LINE_B, blendId: BLEND_A },
-        { line: { ...lineB, brandId: BRAND_A }, blend: blendA },
+        { brand: brandA, line: { ...lineB, brandId: BRAND_A }, blend: blendA },
       );
       expect(paths(errors)).toEqual(["blendId"]);
       expect(errors[0]!.message).toMatch(/different line/);
@@ -80,7 +86,7 @@ describe("cigar ancestry", () => {
     it("rejects a blend with no line", () => {
       const errors = checkCigarAncestry(
         { brandId: BRAND_A, lineId: null, blendId: BLEND_A },
-        { blend: blendA },
+        { brand: brandA, blend: blendA },
       );
       expect(paths(errors)).toContain("lineId");
     });
@@ -88,18 +94,49 @@ describe("cigar ancestry", () => {
     // A caller that cannot load the row it is asserting has not verified
     // anything, so an unresolved level is a violation rather than a pass.
     it("rejects an unresolvable line or blend", () => {
-      expect(paths(checkCigarAncestry({ brandId: BRAND_A, lineId: LINE_A, blendId: null }))).toEqual([
-        "lineId",
-      ]);
       expect(
-        paths(checkCigarAncestry({ brandId: BRAND_A, lineId: LINE_A, blendId: BLEND_A }, { line: lineA })),
+        paths(checkCigarAncestry({ brandId: BRAND_A, lineId: LINE_A, blendId: null }, { brand: brandA })),
+      ).toEqual(["lineId"]);
+      expect(
+        paths(
+          checkCigarAncestry(
+            { brandId: BRAND_A, lineId: LINE_A, blendId: BLEND_A },
+            { brand: brandA, line: lineA },
+          ),
+        ),
       ).toEqual(["blendId"]);
+    });
+
+    // #230. The marca was the level nothing checked: an unresolvable `brandId`
+    // sailed past this rule into the cigar UPDATE and came back as an untyped FK
+    // violation (23503) — a 500 where its siblings produce a field error.
+    it("rejects a brand the context could not resolve", () => {
+      const errors = checkCigarAncestry({ brandId: BRAND_A, lineId: null, blendId: null }, { brand: null });
+      expect(errors).toEqual([{ path: "brandId", message: "No such brand." }]);
+    });
+
+    // Absent and wrong are one refusal: a context carrying another marca's row
+    // has resolved nothing about the brand this ancestry names.
+    it("rejects a brand context holding another brand's row", () => {
+      const errors = checkCigarAncestry(
+        { brandId: BRAND_A, lineId: null, blendId: null },
+        { brand: { id: BRAND_B } },
+      );
+      expect(errors).toEqual([{ path: "brandId", message: "No such brand." }]);
+    });
+
+    // A caller that never looked has not verified the marca either — the same
+    // rule line and blend have always followed.
+    it("rejects an ancestry whose brand was never loaded", () => {
+      expect(paths(checkCigarAncestry({ brandId: BRAND_A, lineId: null, blendId: null }))).toEqual([
+        "brandId",
+      ]);
     });
 
     it("rejects a context row whose id is not the one referenced", () => {
       const errors = checkCigarAncestry(
         { brandId: BRAND_A, lineId: LINE_A, blendId: null },
-        { line: { id: LINE_B, brandId: BRAND_A } },
+        { brand: brandA, line: { id: LINE_B, brandId: BRAND_A } },
       );
       expect(paths(errors)).toEqual(["lineId"]);
       expect(errors[0]!.message).toMatch(/does not match/);
@@ -115,7 +152,10 @@ describe("cigar ancestry", () => {
   describe("assertCigarAncestry", () => {
     it("returns silently on a consistent ancestry", () => {
       expect(() =>
-        assertCigarAncestry({ brandId: BRAND_A, lineId: LINE_A, blendId: BLEND_A }, { line: lineA, blend: blendA }),
+        assertCigarAncestry(
+          { brandId: BRAND_A, lineId: LINE_A, blendId: BLEND_A },
+          { brand: brandA, line: lineA, blend: blendA },
+        ),
       ).not.toThrow();
     });
 
@@ -124,7 +164,10 @@ describe("cigar ancestry", () => {
     it("throws a ValidationError naming the level at fault", () => {
       let thrown: unknown;
       try {
-        assertCigarAncestry({ brandId: BRAND_A, lineId: LINE_B, blendId: null }, { line: lineB });
+        assertCigarAncestry(
+          { brandId: BRAND_A, lineId: LINE_B, blendId: null },
+          { brand: brandA, line: lineB },
+        );
       } catch (error) {
         thrown = error;
       }

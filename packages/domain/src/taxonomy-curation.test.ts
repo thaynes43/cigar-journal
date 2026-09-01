@@ -738,10 +738,38 @@ describe("taxonomy curation", () => {
       ]);
     });
 
-    // The marca is the one level nothing resolves before the write — `brandId` is
-    // carried into `namesForAncestry`, which looked it up directly. A preview
-    // naming a brand that cannot exist has to behave like one naming a brand that
-    // merely does not: no row found, the row's own free text stands in.
+    // #230. The marca used to be the one level nothing resolved before the write:
+    // `lineId` and `blendId` went through `loadAncestryContext` and came back as
+    // field errors, while a well-formed but unknown `brandId` was carried into the
+    // cigar UPDATE and raised FK 23503 on `cigars_brand_id_fkey` — untyped, so a
+    // 500 out of a tool whose ids are all bare strings. The loader resolves the
+    // brand too now, and the refusal is the one `register_taxonomy` and
+    // `create_line` already make.
+    it("refuses an unknown brandId, and a malformed one exactly the same way", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Assign Unknown Brand Subject" });
+      const malformed = await assignCigarTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        brandId: "not-a-uuid",
+      }).catch((e: unknown) => e);
+      const unknown = await assignCigarTaxonomy(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        cigarId,
+        brandId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "brandId", message: "No such brand." },
+      ]);
+      // Refused before the UPDATE that used to raise the violation, so the row
+      // is untouched rather than half-written.
+      expect(await cigarRow(cigarId)).toMatchObject({ brandId: null });
+    });
+
+    // THE PREVIEW REFUSES WHAT THE COMMIT REFUSES. It used to answer a brand that
+    // cannot exist with a cheerful `changedFields: ["brandId"]` and let the
+    // commit fail — the exact surprise a dry run exists to remove.
     it("previews a malformed brandId exactly as it previews an unknown one", async () => {
       const cigarId = await h.seedCigar({ canonicalName: "Preview Malformed Brand Subject" });
       const malformed = await assignCigarTaxonomy(h.deps, curator, {
@@ -749,15 +777,18 @@ describe("taxonomy curation", () => {
         cigarId,
         brandId: "not-a-uuid",
         preview: true,
-      });
+      }).catch((e: unknown) => e);
       const unknown = await assignCigarTaxonomy(h.deps, curator, {
         clientRequestId: newRequestId(),
         cigarId,
         brandId: newRequestId(),
         preview: true,
-      });
-      expect(malformed).toEqual(unknown);
-      expect(malformed.changedFields).toEqual(["brandId"]);
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "brandId", message: "No such brand." },
+      ]);
     });
   });
 

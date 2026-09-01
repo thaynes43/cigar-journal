@@ -959,9 +959,10 @@ export async function assignCigarPartsWithinTx(
   input: AssignCigarPartsInput,
 ): Promise<AssignCigarPartsResult> {
   // The leaf being assigned, refused as absent before the read that would raise
-  // 22P02 on the caller's transaction (./uuid.ts). `lineId` and `blendId` need no
-  // check of their own: they are resolved through `loadAncestryContext`, which
-  // carries the guard for every path that asserts an ancestry.
+  // 22P02 on the caller's transaction (./uuid.ts). `brandId`, `lineId` and
+  // `blendId` need no check of their own: all three are resolved through
+  // `loadAncestryContext`, which carries the guard for every path that asserts
+  // an ancestry.
   if (!isUuid(input.cigarId)) throw new CigarNotFoundError();
 
   const rows = await tx

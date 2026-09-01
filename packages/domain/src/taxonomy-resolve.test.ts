@@ -470,8 +470,38 @@ describe("taxonomy resolution", () => {
         lineId: anniversaryId,
         blendId: maduroId,
       });
+      expect(context.brand).toEqual({ id: padronId });
       expect(context.line).toEqual({ id: anniversaryId, brandId: padronId });
       expect(context.blend).toEqual({ id: maduroId, lineId: anniversaryId });
+    });
+
+    // #230. The marca was the level this loader skipped, so an unknown `brandId`
+    // was the one FK no write path checked — it reached the cigar UPDATE and
+    // raised 23503 instead of the field error its siblings produce. Loading it
+    // here is what turns that into a refusal every caller already knows how to
+    // report, and a malformed id answers the same way an unknown one does.
+    it("answers a malformed brandId exactly as it answers an unknown one", async () => {
+      const malformedAncestry: CigarAncestry = { brandId: "not-a-uuid", lineId: null, blendId: null };
+      const unknownAncestry: CigarAncestry = { brandId: newRequestId(), lineId: null, blendId: null };
+      const malformed = await loadAncestryContext(h.deps.db, malformedAncestry);
+      const unknown = await loadAncestryContext(h.deps.db, unknownAncestry);
+
+      expect(malformed).toEqual(unknown);
+      expect(malformed).toEqual({ brand: null });
+
+      const refusalFor = (ancestry: CigarAncestry, context: CigarAncestryContext) => {
+        try {
+          assertCigarAncestry(ancestry, context);
+          return null;
+        } catch (error) {
+          return (error as ValidationError).toPayload();
+        }
+      };
+      expect(refusalFor(malformedAncestry, malformed)).toMatchObject({
+        code: "validation_error",
+        fields: [{ path: "brandId", message: "No such brand." }],
+      });
+      expect(refusalFor(malformedAncestry, malformed)).toEqual(refusalFor(unknownAncestry, unknown));
     });
 
     // A level whose row does not exist comes back null, which the assertion
@@ -509,7 +539,7 @@ describe("taxonomy resolution", () => {
       const unknown = await loadAncestryContext(h.deps.db, unknownAncestry);
 
       expect(malformed).toEqual(unknown);
-      expect(malformed).toEqual({ line: null, blend: null });
+      expect(malformed).toEqual({ brand: { id: padronId }, line: null, blend: null });
 
       // Which the assertion turns into the same ValidationError, not a 500.
       const refusalFor = (ancestry: CigarAncestry, context: CigarAncestryContext) => {
@@ -557,7 +587,13 @@ describe("taxonomy resolution", () => {
           .from(cigars)
           .where(eq(cigars.id, id))
       )[0]!;
-      expect(() => assertCigarAncestry(row, { line: { id: anniversaryId, brandId: padronId }, blend: { id: maduroId, lineId: anniversaryId } })).not.toThrow();
+      expect(() =>
+        assertCigarAncestry(row, {
+          brand: { id: padronId },
+          line: { id: anniversaryId, brandId: padronId },
+          blend: { id: maduroId, lineId: anniversaryId },
+        }),
+      ).not.toThrow();
     });
   });
 });
