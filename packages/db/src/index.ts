@@ -10,7 +10,28 @@ function connect(): Database {
   if (database) return database;
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is not set");
-  database = drizzle(new Pool({ connectionString: url }), { schema });
+  const pool = new Pool({ connectionString: url });
+
+  // A server that goes away terminates the clients this pool still holds, and
+  // node-postgres surfaces that as an 'error' event on the POOL — which, with no
+  // listener attached, is an UNHANDLED error that takes the whole process down.
+  // The embedded-pg harness guards its own pool this way; the ambient singleton
+  // needs it too, because five test files point DATABASE_URL at that embedded
+  // server and then rely on teardown *ordering* ($client.end() before pg.stop())
+  // to keep the FATAL from ever arriving. Losing that race is the residual half
+  // of the standing CI flake (#174): a run reported 1831/1831 passed and still
+  // exited 1 on a pg 57P01 "terminating connection due to administrator command".
+  //
+  // The race is inherent to a pool outliving its server, so expect it rather than
+  // order it away: swallow the shutdown class, and report anything else — loudly,
+  // but without killing a process whose work was otherwise fine.
+  pool.on("error", (error: unknown) => {
+    const code = (error as { code?: string } | null)?.code;
+    if (code === "57P01" || code === "ECONNRESET" || code === "EPIPE") return;
+    console.error("[db] unexpected pool error", error);
+  });
+
+  database = drizzle(pool, { schema });
   return database;
 }
 
