@@ -12,8 +12,25 @@ describe("next.config redirects", () => {
     expect(curation?.permanent).toBe(false);
   });
 
-  it("keeps the /inventory redirects intact", async () => {
+  // Both /inventory rules, whole. Asserting that *some* rule has source
+  // `/inventory` passed even if the query-conditional one were deleted — the
+  // regression that silently lands `?view=table` readers on the poster grid
+  // instead of the Ledger.
+  it("keeps both /inventory redirects, the query-conditional one first", async () => {
     const redirects = await config.redirects!();
-    expect(redirects.some((r) => r.source === "/inventory")).toBe(true);
+    const inventory = redirects.filter((r) => r.source === "/inventory");
+    expect(inventory).toHaveLength(2);
+
+    // Order is the contract: Next takes the FIRST match, so an unconditional rule
+    // placed above the conditional one would swallow it.
+    const [table, rest] = inventory;
+    expect(table?.has).toEqual([{ type: "query", key: "view", value: "table" }]);
+    expect(table?.destination).toBe("/cigars?view=ledger");
+    expect(table?.permanent).toBe(false);
+
+    // The catch-all carries no condition and maps to the Have facet.
+    expect(rest?.has).toBeUndefined();
+    expect(rest?.destination).toBe("/cigars?own=have");
+    expect(rest?.permanent).toBe(false);
   });
 });

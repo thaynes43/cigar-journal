@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { TRPCError } from "@trpc/server";
 import { DomainError } from "@cj/domain";
+import { vendors, listingMatches, offers } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "@cj/domain/testing";
 import type { Principal } from "@cj/domain";
 import { isUnresolvableSmoke } from "@/lib/smoke-lookup";
@@ -279,6 +280,53 @@ describe("tRPC API", () => {
   it("requires auth to set a favorite", async () => {
     const anon = caller(h.deps, null);
     const err = await trpcError(anon.cigars.setFavorite({ cigarId: "x", favorited: true }));
+    expect(err.code).toBe("UNAUTHORIZED");
+  });
+
+  // The lapsed-offer rule needs the whole observation series, not just the rows
+  // that carry a per-stick figure (DESIGN-002 §Price; the delta filed on #219).
+  // `getCigarOfferHistory` had been written in the domain for the MCP tool and
+  // left unexposed, so the web could not tell "never offered" from "lapsed".
+  it("summarises a cigar's whole offer series, counting observations with no per-stick price", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: `Lapsed ${newRequestId()}`, brand: "LA" });
+    const [vendor] = await h.deps.db
+      .insert(vendors)
+      .values({ name: `Lapsed Shop ${newRequestId()}` })
+      .returning({ id: vendors.id });
+    const [match] = await h.deps.db
+      .insert(listingMatches)
+      .values({ vendorId: vendor!.id, cigarId, listingKey: newRequestId(), status: "confirmed" })
+      .returning({ id: listingMatches.id });
+    // Two observations, neither with a derivable per-stick figure — invisible to
+    // `priceHistory`, which is what made the old gate call this cigar unpriced.
+    for (const seenAt of ["2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z"]) {
+      await h.deps.db.insert(offers).values({
+        vendorId: vendor!.id,
+        listingMatchId: match!.id,
+        price: "180.00",
+        currency: "USD",
+        seenAt: new Date(seenAt),
+      });
+    }
+
+    const a = caller(h.deps, userA);
+    expect(await a.cigars.priceHistory({ cigarId })).toEqual([]);
+
+    const history = await a.cigars.offerHistory({ cigarId });
+    expect(history.observationCount).toBe(2);
+    expect(history.firstSeenAt).toBe("2026-06-01T00:00:00.000Z");
+    expect(history.lastSeenAt).toBe("2026-07-01T00:00:00.000Z");
+    expect(history.minPricePerStick).toBeNull();
+
+    // A cigar nobody ever offered stays at zero — the signal that keeps the Price
+    // section absent rather than claiming offers lapsed.
+    const bare = await h.seedCigar({ canonicalName: `Bare ${newRequestId()}` });
+    expect((await a.cigars.offerHistory({ cigarId: bare })).observationCount).toBe(0);
+  });
+
+  it("requires auth to read a cigar's offer history", async () => {
+    const anon = caller(h.deps, null);
+    const err = await trpcError(anon.cigars.offerHistory({ cigarId: "x" }));
     expect(err.code).toBe("UNAUTHORIZED");
   });
 

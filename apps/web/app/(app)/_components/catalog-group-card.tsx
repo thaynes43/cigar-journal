@@ -4,8 +4,9 @@ import { ui, wantChip } from "@/lib/ui";
 import { BandTile } from "./band-tile";
 import { CATALOG_GROUP_STRINGS } from "./catalog-registry";
 
-// The aggregate group card (DESIGN-004 D-03) — the sibling of `brand-poster-tile`
-// that a grouped view fills the whole grid with. A grouped view is a WHOLE-SCREEN
+// The aggregate group card (DESIGN-004 D-03) — what a grouped view fills the
+// whole grid with, and what retired the brand poster tile that used to carry the
+// brand wall (the brand route is a redirect now). A grouped view is a WHOLE-SCREEN
 // SWAP: one grid of these replaces the leaf grid, never section headers, never
 // per-group sub-grids, never collapsible shelves (port of the haynesnetwork
 // grouping mechanic, library-client.tsx:1089 / group-card.tsx).

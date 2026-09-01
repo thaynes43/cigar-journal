@@ -6,6 +6,7 @@ import type { AgentRunRow, AgentRunSummary } from "@cj/domain";
 import { api } from "@/lib/trpc/react";
 import { actionErrorMessage } from "@/lib/trpc/error";
 import { ui } from "@/lib/ui";
+import { actionLabel } from "./labels";
 import { LocalDate } from "../../_components/local-date";
 
 // The "Recent agent runs" review (DESIGN-003 §Curation, issue 126): agent audit work
@@ -41,7 +42,7 @@ function RunCard({ run }: { run: AgentRunSummary }) {
           <span className="flex flex-wrap gap-1.5">
             {run.actions.map((a) => (
               <span key={a.action} className={`${ui.chipOutline} tabular-nums`}>
-                {a.action} {a.count}
+                {actionLabel(a.action)} {a.count}
               </span>
             ))}
           </span>
@@ -130,9 +131,9 @@ function RowItem({ row }: { row: AgentRunRow }) {
       <div className="flex min-w-0 flex-col gap-1">
         <span className="flex flex-wrap items-center gap-2">
           <span className="truncate font-display text-sm font-semibold text-ink">
-            {row.targetName ?? row.action}
+            {row.targetName ?? actionLabel(row.action)}
           </span>
-          <span className="label-caps">{row.action}</span>
+          <span className="label-caps">{actionLabel(row.action)}</span>
           {row.confidence != null ? (
             <span className="text-xs text-muted tabular-nums">{Math.round(row.confidence * 100)}%</span>
           ) : null}
