@@ -2003,6 +2003,13 @@ error:
 Idempotent replay is not an error: same envelope returns the original result
 with `replayed: true`.
 
+**In `record_purchase_batch` these payloads arrive per item**, on the line that
+raised them, not as the call's own error result — one item's `cigar_ambiguous`
+or `validation_error` never fails the batch, and a `validation_error`'s
+`fields[].path` is rewritten to `items[i].<field>`. The call errors only for a
+failure of the whole batch: an unauthorized token, a malformed or colliding
+envelope, a conflicting batch `clientRequestId`.
+
 **Two validation layers.** Value violations the domain owns — rating range,
 `approximatePosition` bounds, malformed `smokedAt`/`smokedAfter` dates, empty
 `update_smoke.changes` — return the structured `validation_error` above (machine
