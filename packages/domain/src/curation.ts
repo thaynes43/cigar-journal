@@ -2525,8 +2525,8 @@ function clampBacklogLimit(limit: number | undefined): number {
 // §7). It is the QUEUE GATE, a conservative positive claim, and it is the only
 // one of the three predicates that decides how much crawling to CREATE. On the
 // evidenced market it would accept prod's 821 Fox-evidenced untyped rows the
-// moment it shipped: ~800 new asks and, at ENRICH_DEFAULT_LIMIT = 10 a night,
-// months of nightly Fox drains. That is a crawl-volume and vendor-courtesy
+// moment it shipped: ~800 new asks and, at ENRICH_DEFAULT_LIMIT = 50 a night,
+// weeks of nightly Fox drains. That is a crawl-volume and vendor-courtesy
 // decision, not a correctness one, and it belongs in its own PR with the owner's
 // sign-off. The cost of leaving it is a real and stated inconsistency — the
 // enqueue gate and the exhaustion denominator now read the market from two

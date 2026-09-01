@@ -351,3 +351,33 @@ init container at startup (ADR-003).
   violation that rolls the deploy back. `brand_images.brand_slug` is untouched
   and needs to be: it keys on brandSlug() of the free-text `cigars.brand` column
   and joins the registry by `brand_id`. Data only — no schema change.
+- `0030_enrich_no_candidate.sql` — the ledger half of #240: a fifth
+  `enrichment_attempts.last_outcome`, `'no_candidate'`, and a clean slate for the
+  asks the old prefilter wrote off. The drain's slug-token prefilter was a second
+  matcher standing in front of matching v2 — three-character floor, no accent
+  folding, brand words scored equal to identity words — and every ask it scored
+  zero on was recorded as a `miss`, which asserts "vendor V read its catalogue and
+  does not carry cigar C" for a look that opened no page. Prod ran that for four
+  nights: 58 of 58 rows `miss`, zero cigars enriched, the queue clearing by
+  exhaustion, while the offers walk over the SAME two vendors and the same URLs
+  auto-matched 992 listings. `'no_candidate'` is the outcome a look that read
+  nothing may record; it carries `attempts = 0` on the same terms as
+  `'photo_refused'` and for the reason stated the other way round — `attempts`
+  running out is what licenses `exhausted`, and a row that fetched no page cannot
+  be a step toward it. The row is still WRITTEN, because "which lane came up
+  empty-handed, and when" is what separates a shop that does not stock the brand
+  from a registry that has not learned its aliases. **The data half deletes
+  evidence, and is scoped three ways because of it:** only non-fulfilled requests
+  (a fulfilled ask's history is the record of how it got its photo), only `'miss'`
+  and `'error'` (a `'match'` is the trail behind a real link and a
+  `'photo_refused'` is why an ask is visibly stuck — neither exists on prod today,
+  the predicate is there so a row written between review and deploy is not swept
+  up), and `enrichment_requests.attempts` is RE-DERIVED from what survives rather
+  than zeroed, so the request total and the per-vendor ledger cannot disagree.
+  Requests left `exhausted` by a rollup over rows that no longer exist go back to
+  `'pending'` with `resolved_at` cleared, `in_progress` normalizing to `'pending'`
+  on the way past (0023's reasoning: the drain has not written that state since
+  #157). Nothing is lost by being wrong in the other direction — `exhausted` is in
+  the drain's open set, so an ask requeued that a vendor genuinely does not carry
+  re-earns its two looks and re-retires, once. Every statement is re-runnable and
+  the suite replays the file to prove a second application changes nothing.

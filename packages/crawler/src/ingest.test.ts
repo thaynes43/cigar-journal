@@ -43,6 +43,10 @@ const UNKNOWN_MARCA_URL = "https://foxcigar.com/shop/vuelta-abajo-reserva-especi
 const LIGHTER_URL = "https://foxcigar.com/shop/xikar-hp3-lighter/";
 const SAMPLER_URL = "https://foxcigar.com/shop/fox-5-cigar-sampler/";
 const OLIVA_URL = "https://foxcigar.com/shop/oliva-serie-v-melanio-torpedo/";
+// The two shelf-mates the enrich drain's miss cases read: a product the ask's own
+// marca is on, which is not the ask. See `missRoutes`.
+const OLIVA_ROBUSTO_URL = "https://foxcigar.com/shop/oliva-serie-v-melanio-robusto/";
+const RED_ANCHOR_URL = "https://foxcigar.com/shop/red-anchor-admiral/";
 const PADRON_IMG = "https://foxcigar.com/wp-content/uploads/padron-1964-torpedo.jpg";
 const OLIVA_IMG = "https://foxcigar.com/wp-content/uploads/oliva-melanio-torpedo.jpg";
 const ROBOTS = "https://foxcigar.com/robots.txt";
@@ -603,13 +607,29 @@ describe("crawler ingest (embedded Postgres)", () => {
   const ledgerRows = async (requestId: string) =>
     pg.db.select().from(enrichmentAttempts).where(eq(enrichmentAttempts.requestId, requestId));
 
-  // A sitemap that enumerates products, none of which resemble the requested
-  // cigar: the shape of a real "this vendor does not carry that brand" drain.
+  // A sitemap that enumerates products the requested cigar's OWN MARCA is on and
+  // which are not it: the shape of a real "this vendor stocks the brand, not this
+  // stick" drain, and the only shape that produces a `miss`.
+  //
+  // THE THREE SHELVES ARE THE POINT (#240). A `miss` is a page this run opened, so
+  // a case about the attempt ledger has to give the ask something to open — an
+  // enumeration that names the ask nowhere is `no_candidate` now and burns
+  // nothing. Every miss-path case below therefore asks for a Red Anchor, a Padron
+  // or an Oliva, and gets back the sibling this shop actually stocks. The prod
+  // shape exactly: Fox carries the Red Anchor Admiral, and the owner's ask is the
+  // Captain.
   const missRoutes = {
     [ROBOTS]: { body: loadFixture("robots.txt") },
-    [SITEMAP]: { body: urlsetXml([PADRON_URL]) },
+    [SITEMAP]: { body: urlsetXml([PADRON_URL, RED_ANCHOR_URL, OLIVA_ROBUSTO_URL]) },
     [PADRON_URL]: { body: loadFixture("product-padron.html") },
+    [RED_ANCHOR_URL]: { body: loadFixture("product-red-anchor-admiral.html") },
+    [OLIVA_ROBUSTO_URL]: { body: loadFixture("product-oliva-robusto.html") },
   };
+
+  // The same enumeration, asked about a cigar it names NOWHERE — no slug carries
+  // one of the ask's identity keys or one of its marca's. No page is fetched and
+  // no attempt is spent (#240).
+  const noCandidateRoutes = missRoutes;
 
   const hitRoutes = {
     [ROBOTS]: { body: loadFixture("robots.txt") },
@@ -705,7 +725,7 @@ describe("crawler ingest (embedded Postgres)", () => {
     const only = await makeVendor("Sole Lane", "NC");
     await arrange([only]);
 
-    const cigarId = await seedCigar("Nonexistent Phantom Cigar Zeta", "NC");
+    const cigarId = await seedCigar("Red Anchor Zeta", "NC");
     const requestId = await seedRequest(cigarId);
 
     await enrichRun(only, missRoutes);
@@ -763,7 +783,7 @@ describe("crawler ingest (embedded Postgres)", () => {
 
     const rows = await pg.db
       .insert(cigars)
-      .values({ canonicalName: `Untyped Prod Row ${randomUUID().slice(0, 8)}`, type: null, verification: "verified" })
+      .values({ canonicalName: `Red Anchor Untyped Prod Row ${randomUUID().slice(0, 8)}`, type: null, verification: "verified" })
       .returning({ id: cigars.id });
     const requestId = await seedRequest(rows[0]!.id);
 
@@ -793,7 +813,7 @@ describe("crawler ingest (embedded Postgres)", () => {
 
     const rows = await pg.db
       .insert(cigars)
-      .values({ canonicalName: `Unknown Market Mystery ${randomUUID().slice(0, 8)}`, type: null, verification: "verified" })
+      .values({ canonicalName: `Red Anchor Unknown Market Mystery ${randomUUID().slice(0, 8)}`, type: null, verification: "verified" })
       .returning({ id: cigars.id });
     const requestId = await seedRequest(rows[0]!.id);
 
@@ -839,7 +859,7 @@ describe("crawler ingest (embedded Postgres)", () => {
     const a = await makeVendor("Reopen Miss A", "NC");
     await arrange([a]);
 
-    const cigarId = await seedCigar("Nonexistent Phantom Cigar Omega", "NC");
+    const cigarId = await seedCigar("Red Anchor Omega", "NC");
     const requestId = await seedRequest(cigarId);
     await enrichRun(a, missRoutes);
     await enrichRun(a, missRoutes);
@@ -972,9 +992,10 @@ describe("crawler ingest (embedded Postgres)", () => {
     const only = await makeVendor("Parses Fine", "NC");
     await arrange([only]);
 
-    // Shares a slug token with the Padron listing (so it ranks and IS fetched) and
-    // nothing else (so it falls under the similarity floor).
-    const cigarId = await seedCigar("Vega Fina Nicaragua Torpedo", "NC");
+    // The Padron shelf, and not the Padron on it: the ask's marca ranks the 1964
+    // Torpedo into the shortlist, so the page IS fetched, and `1926`/`6` are
+    // required keys that page does not carry.
+    const cigarId = await seedCigar("Padron 1926 No 6", "NC");
     const requestId = await seedRequest(cigarId);
 
     const run = await enrichRun(only, missRoutes);
@@ -986,23 +1007,57 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(ledger[0]!.lastOutcome).toBe("miss");
   });
 
-  // The tempting mis-read this guards against: "no candidate scored" is not an
-  // absence of evidence. The vendor's product list WAS read and nothing in it
-  // resembled the cigar — the Red Anchor/Fox drain (10 pages, 8 listings, 0
-  // matches) is exactly this, and it is honest evidence about Fox.
-  it("'no candidate scored above zero' is a completed look and burns an attempt", async () => {
+  // THE INVERSION #240 IS ABOUT, and the case that used to assert the opposite.
+  // "No candidate scored" was read as evidence — the enumeration IS the vendor's
+  // product list, so nothing in it resembling the cigar was itself the answer —
+  // and that reading has one load-bearing premise: that a zero-length shortlist
+  // means the shelf is empty rather than that our prefilter is broken. Prod
+  // falsified it. Four nights, 58 attempts, 58 `miss`, zero cigars enriched, on
+  // vendors whose offers walk auto-matched 992 listings over the same URLs.
+  //
+  // So a look that opened no page records `no_candidate`, burns neither counter,
+  // and leaves the ask exactly where it found it. `exhausted` goes back to meaning
+  // "a vendor was read and the cigar was not there".
+  it("an ask the enumeration names nowhere fetches nothing and burns nothing", async () => {
     const only = await makeVendor("Scoreless", "NC");
     await arrange([only]);
 
     const cigarId = await seedCigar("Nonexistent Phantom Cigar Kappa", "NC");
     const requestId = await seedRequest(cigarId);
 
-    const run = await enrichRun(only, missRoutes);
-    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, errored: 0 });
+    const run = await enrichRun(only, noCandidateRoutes);
+    // Not a look, and reported apart from one: `looked` is what burns budget.
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 0, matched: 0, errored: 0, noCandidate: 1 });
+    // The robots and sitemap reads only — no product page was opened for it.
+    expect(run.stats.listingsParsed).toBe(0);
+
     const ledger = await ledgerRows(requestId);
-    expect(ledger[0]!.attempts).toBe(1);
+    expect(ledger[0]!.attempts).toBe(0);
     expect(ledger[0]!.errors).toBe(0);
-    expect(ledger[0]!.lastOutcome).toBe("miss");
+    expect(ledger[0]!.lastOutcome).toBe("no_candidate");
+
+    // And it never retires, however many nights run: the row stays open, at a cost
+    // of zero fetches, until a lane can name it or a curator gives it an alias.
+    await enrichRun(only, noCandidateRoutes);
+    const third = await enrichRun(only, noCandidateRoutes);
+    expect(third.stats.enrich).toMatchObject({ requests: 1, spent: 0, blocked: 0, noCandidate: 1 });
+    const row = await requestRow(requestId);
+    expect(row.status).toBe("pending");
+    expect(row.resolvedAt).toBeNull();
+    expect(row.attempts).toBe(0);
+    expect((await ledgerRows(requestId))[0]!.attempts).toBe(0);
+  });
+
+  // The counter is absent-when-zero like its siblings, so an enrich run that named
+  // every ask serialises into `crawl_runs.stats` exactly as it did before #240.
+  it("does not write a noCandidate counter into a run that named every ask", async () => {
+    const only = await makeVendor("Named Every Ask", "NC");
+    await arrange([only]);
+    await seedRequest(await seedCigar("Red Anchor Iota Prime", "NC"));
+
+    const run = await enrichRun(only, missRoutes);
+    expect(run.stats.enrich!.looked).toBe(1);
+    expect(run.stats.enrich).not.toHaveProperty("noCandidate");
   });
 
   // #157 defect 2 cannot form. The drain no longer claims a request with
@@ -1013,7 +1068,7 @@ describe("crawler ingest (embedded Postgres)", () => {
     const only = await makeVendor("Crashing", "NC");
     await arrange([only]);
 
-    const firstId = await seedRequest(await seedCigar("Nonexistent Phantom Cigar Mu", "NC"), new Date("2026-08-30T09:00:00.000Z"));
+    const firstId = await seedRequest(await seedCigar("Red Anchor Mu", "NC"), new Date("2026-08-30T09:00:00.000Z"));
     const secondId = await seedRequest(
       await seedCigar("Padron 1964 Anniversary Maduro Torpedo Exploding", "NC"),
       new Date("2026-08-30T10:00:00.000Z"),
@@ -2141,18 +2196,19 @@ describe("crawler ingest (embedded Postgres)", () => {
   };
 
   // THE CUBAN LOU'S SHAPE. The ask is the Habanos `Hoyo de Monterrey Epicure
-  // Especial`; the shop's only Hoyo listing is the General Cigar bundle — a
-  // different market and a different blend that happens to share the marca's
-  // words. Two independent things refuse it, and the ask stays open for a vendor
-  // that might actually carry it:
-  //   * the slug prefilter offers no candidate at all, because the ask's stored
-  //     name abbreviates the marca to `HdM` and shares no token with the listing's
-  //     slug — hence `listingsParsed` 0, a completed look over an enumerated
-  //     catalogue and therefore an honest miss (never an error, #158);
-  //   * and had it been fetched, `hdm` is still a REQUIRED key, so the structural
-  //     rule refuses it too. That arm is pinned pure in core/enrich-cover.test.ts,
-  //     along with the curator's fix: an alias, never a looser matcher.
-  it("a Cuban Hoyo ask is not answered by the non-Cuban Hoyo bundle", async () => {
+  // Especial`, stored under a name that abbreviates its own marca to `HdM`; the
+  // shop's only Hoyo listing is the General Cigar bundle — a different market and
+  // a different blend that happens to share the marca's words.
+  //
+  // WHAT #240 CHANGED HERE, and it is the shape of the whole fix. The old
+  // prefilter tokenized the ask's NAME, so `hdm` met `hoyo-de-monterrey-...` on
+  // nothing, offered no candidate, and the drain recorded a `miss` — a claim about
+  // this shop's Hoyo shelf, written without opening a page on it. The prefilter now
+  // reads the ask's registry BRAND, so the shelf is genuinely read, and the miss
+  // that comes back is one: `hdm` is still a REQUIRED key and the structural rule
+  // refuses the bundle. That arm is pinned pure in core/enrich-cover.test.ts, along
+  // with the curator's fix — an alias, never a looser matcher.
+  it("a Cuban Hoyo ask reads the shop's Hoyo shelf and is not answered by the non-Cuban bundle", async () => {
     const lane = await makeVendor("Cuban Lous Hoyo", "both");
     await arrange([lane]);
 
@@ -2161,17 +2217,22 @@ describe("crawler ingest (embedded Postgres)", () => {
 
     const run = await enrichRun(lane, hoyoRoutes, createMemoryPhotoStorage());
     expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
-    expect(run.stats.listingsParsed).toBe(0);
+    // The page WAS opened — that is what makes the `miss` below evidence.
+    expect(run.stats.listingsParsed).toBe(1);
     expect(run.stats.photosCaptured).toBe(0);
     expect(await photosFor(askId)).toHaveLength(0);
     expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "miss" }]);
     expect((await requestRow(requestId)).status).toBe("pending");
   });
 
-  // The plainest miss of all, and the one that says the rule did not simply become
-  // "yes": a marca this catalogue does not carry at all. Nothing here shares so
-  // much as a word with the Padron shelf.
-  it("an ask for a marca the catalogue does not carry misses", async () => {
+  // THE OTHER HALF OF #240, in the prod case the issue names. Fox has never
+  // stocked Caldwell: not the marca, not one of the ask's identity words, nothing.
+  // The old prefilter still handed it eight pages on `robusto` and `the` alone,
+  // spent the fetches, wrote `miss`, and marched the ask toward `exhausted` —
+  // "Fox read its catalogue and does not carry it" assembled out of unrelated
+  // cigars. Now no page is opened, nothing is spent, and the ask waits for a lane
+  // that stocks the brand.
+  it("an ask for a marca the catalogue does not carry opens no page and burns nothing", async () => {
     const lane = await makeVendor("Caldwell Lane", "NC");
     await arrange([lane]);
 
@@ -2179,10 +2240,12 @@ describe("crawler ingest (embedded Postgres)", () => {
     const requestId = await seedRequest(askId);
 
     const run = await enrichRun(lane, missRoutes, createMemoryPhotoStorage());
-    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 0, matched: 0, errored: 0, noCandidate: 1 });
+    expect(run.stats.listingsParsed).toBe(0);
     expect(run.stats.matchesAuto).toBe(0);
     expect(await photosFor(askId)).toHaveLength(0);
-    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "miss" }]);
+    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 0, errors: 0, lastOutcome: "no_candidate" }]);
+    expect((await requestRow(requestId)).status).toBe("pending");
   });
 
   // HOW DEEP THE NIGHTLY DRAIN GOES, raised 10 → 50 with #233. At ten a night the
@@ -2194,9 +2257,11 @@ describe("crawler ingest (embedded Postgres)", () => {
     const lane = await makeVendor("Drain Depth", "NC");
     await arrange([lane]);
 
-    // Names that share no slug token with the Padron fixture, so every look is a
-    // zero-candidate miss: this case is about selection, and a fetch per request
-    // would make it about politeness instead.
+    // Names this enumeration carries no word of, so nothing is fetched: the case
+    // is about SELECTION, and a page per request would make it about politeness
+    // instead. Since #240 that is a `no_candidate` rather than a zero-cost miss,
+    // which is why the ledger below reads `attempts: 0` — selection is still
+    // visible, because the drain writes a row for every request it took.
     const ids: string[] = [];
     for (let i = 0; i < 51; i++) {
       const cigarId = await seedCigar(`Phantom Depth Zeta ${i}`, "NC");
@@ -2204,11 +2269,11 @@ describe("crawler ingest (embedded Postgres)", () => {
     }
 
     const run = await enrichRun(lane, missRoutes);
-    expect(run.stats.enrich).toMatchObject({ requests: 50, looked: 50, matched: 0, errored: 0 });
+    expect(run.stats.enrich).toMatchObject({ requests: 50, looked: 0, matched: 0, errored: 0, noCandidate: 50 });
 
-    // The oldest was looked at, and so was the 50th...
-    expect(await ledgerRows(ids[0]!)).toMatchObject([{ attempts: 1, lastOutcome: "miss" }]);
-    expect((await requestRow(ids[0]!)).attempts).toBe(1);
+    // The oldest was selected, and so was the 50th...
+    expect(await ledgerRows(ids[0]!)).toMatchObject([{ attempts: 0, lastOutcome: "no_candidate" }]);
+    expect((await requestRow(ids[0]!)).attempts).toBe(0);
     expect(await ledgerRows(ids[49]!)).toHaveLength(1);
 
     // ...and the 51st was not touched at all: no ledger row, no attempt, still
@@ -2229,7 +2294,7 @@ describe("crawler ingest (embedded Postgres)", () => {
     const cc = await makeVendor("Coupling CC", "CC");
     await arrange([nc, cc]);
 
-    const cigarId = await seedCigar(`Coupled Untyped ${randomUUID().slice(0, 8)}`, null);
+    const cigarId = await seedCigar(`Red Anchor Coupled Untyped ${randomUUID().slice(0, 8)}`, null);
     const requestId = await seedRequest(cigarId);
     await stock(nc, cigarId); // evidenced NC
 
@@ -2271,7 +2336,7 @@ describe("crawler ingest (embedded Postgres)", () => {
     // fixture row is itself a `succeeded` enrich run.
     const only = await makeVendor("Lane Lock", "NC", { enrichRun: false });
     await arrange([only]);
-    const cigarId = await seedCigar("Nonexistent Phantom Cigar Lock", "NC");
+    const cigarId = await seedCigar("Red Anchor Lock", "NC");
     const requestId = await seedRequest(cigarId);
 
     await withPool(async (pool) => {

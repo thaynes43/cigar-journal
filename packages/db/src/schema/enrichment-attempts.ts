@@ -36,11 +36,15 @@ export const enrichmentAttempts = pgTable(
     // Looks that could not complete. Bounded separately so a broken vendor cannot
     // pin a request open forever, and reset by any completed look.
     errors: integer("errors").notNull().default(0),
-    // The three verdicts a LOOK can reach, plus one that is not a look at all:
-    // `photo_refused` (migration 0025) is a completed look whose catalogue-photo
-    // write was refused by the write-authority guard. It burns neither counter
-    // above — see recordEnrichmentAttempt.
-    lastOutcome: text("last_outcome").$type<"miss" | "match" | "error" | "photo_refused">().notNull(),
+    // The three verdicts a LOOK can reach, plus two that are not looks at all and
+    // burn neither counter above (see recordEnrichmentAttempt):
+    //   `photo_refused` (0025) — a completed look whose catalogue-photo write the
+    //     write-authority guard refused.
+    //   `no_candidate` (0030) — the vendor's enumeration named this ask nowhere,
+    //     so no page was fetched and no catalogue was read.
+    lastOutcome: text("last_outcome")
+      .$type<"miss" | "match" | "error" | "photo_refused" | "no_candidate">()
+      .notNull(),
     lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }).notNull().defaultNow(),
     note: text("note"),
   },

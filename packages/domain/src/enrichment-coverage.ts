@@ -58,8 +58,14 @@ const FAR_FUTURE = new Date(8_640_000_000_000_000);
 
 // How one vendor's look at one ask ended. The first three are verdicts about a
 // CATALOGUE; `photo_refused` is a verdict about an ARTIFACT and behaves unlike all
-// of them — see recordEnrichmentAttempt and migration 0025.
-export type EnrichmentOutcome = "match" | "miss" | "error" | "photo_refused";
+// of them — see recordEnrichmentAttempt and migration 0025. `no_candidate` (#240,
+// migration 0030) is a verdict about NEITHER: the vendor's enumeration named the
+// ask nowhere, so no page was fetched, nothing was read, and the row exists only
+// to say which lane came up empty-handed and when. Only `match` and `miss` burn an
+// attempt, and that is the whole invariant this type carries — `attempts` running
+// out is what licenses the sentence "we read this catalogue and the cigar is not in
+// it", so an outcome that read no catalogue must not spend one.
+export type EnrichmentOutcome = "match" | "miss" | "error" | "photo_refused" | "no_candidate";
 
 export interface VendorBrief {
   vendorId: string;
@@ -560,8 +566,10 @@ export interface RequestRef {
 //
 // WHAT IT DOES NOT FIX, stated rather than papered over: an ask filed BEFORE the
 // lane's last run that the lane never reached still counts that lane, forever. At
-// ENRICH_DEFAULT_LIMIT = 10 a lane reaches ten asks a night, so on prod's shape
-// that residual is most of the queue. A recency window ("count only if the lane
+// ENRICH_DEFAULT_LIMIT = 50 a lane reaches fifty asks a night, which covers prod's
+// whole standing queue today — but that is a property of the ratio and not a fixed
+// win: one backlog press files hundreds of asks and puts the residual straight
+// back. A recency window ("count only if the lane
 // ran in the last N days") would close it and is REJECTED: it needs a constant
 // tracking the slowest lane's schedule, has to be revisited on every cadence
 // change, and is still a proxy for the thing #156 will actually record. The
@@ -784,7 +792,10 @@ export async function recordEnrichmentAttempt(
   input: { requestId: string; vendorId: string; outcome: EnrichmentOutcome; at: Date; note?: string | null },
 ): Promise<void> {
   const isError = input.outcome === "error";
-  const looked = !isError && input.outcome !== "photo_refused";
+  // A COMPLETED LOOK IS A PAGE THIS LANE ACTUALLY READ. Stated as a positive list
+  // rather than as exclusions, because every outcome added since 0023 has been one
+  // that reads nothing and the exclusion form kept having to be remembered.
+  const looked = input.outcome === "match" || input.outcome === "miss";
   await q.execute(sql`
     INSERT INTO enrichment_attempts
       (request_id, vendor_id, attempts, errors, last_outcome, last_attempt_at, note)

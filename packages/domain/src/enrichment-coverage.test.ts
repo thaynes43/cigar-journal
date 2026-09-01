@@ -357,6 +357,51 @@ describe("enrichment coverage", () => {
     expect(row!.lastOutcome).toBe("miss");
   });
 
+  // ONLY A PAGE WE OPENED BURNS BUDGET (#240). `attempts` running out is the whole
+  // licence for `exhausted`, whose meaning is "we read this catalogue and the
+  // cigar is not in it" — so the two outcomes that read nothing must leave the
+  // counter alone, and `no_candidate` is the one prod proved this on: 58 of 58
+  // ledger rows reading `miss`, most of them written without a page being fetched,
+  // clearing the queue by exhaustion under a sentence that was never true.
+  //
+  // The row is still written. "Which lane came up empty-handed, and when" is worth
+  // having — and the drain's open set reads `attempts`, so a zero-attempt row keeps
+  // the ask selectable rather than parking it.
+  it("no_candidate and photo_refused record the lane without spending its budget", async () => {
+    await clearFleet();
+    const vendorId = await makeVendor("Named Nothing", "NC");
+    const { requestId } = await makeRequest("NC");
+
+    for (let i = 0; i < ATTEMPTS_PER_VENDOR + 1; i += 1) {
+      await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId, outcome: "no_candidate", at });
+    }
+    let row = await ledger(requestId, vendorId);
+    expect(row!.attempts).toBe(0);
+    expect(row!.errors).toBe(0);
+    expect(row!.lastOutcome).toBe("no_candidate");
+
+    // However many nights it repeats, it can never retire the ask: the lane is
+    // counted (it has a row here) and it still owes a look.
+    let coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(coverage.exhausted).toBe(false);
+    expect(coverage.blocked).toBe(false);
+    expect(coverage.awaiting.map((v) => v.vendorId)).toEqual([vendorId]);
+
+    // A refusal behaves the same way on the counter, and has since #209 — asserted
+    // beside it so the shared invariant is one test rather than two conventions.
+    await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId, outcome: "photo_refused", at });
+    expect((await ledger(requestId, vendorId))!.attempts).toBe(0);
+
+    // And the moment the lane actually reads a page, the budget moves again.
+    for (let i = 0; i < ATTEMPTS_PER_VENDOR; i += 1) {
+      await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId, outcome: "miss", at });
+    }
+    row = await ledger(requestId, vendorId);
+    expect(row!.attempts).toBe(ATTEMPTS_PER_VENDOR);
+    coverage = await enrichmentCoverageForRequest(h.deps.db, requestId, "NC");
+    expect(coverage.exhausted).toBe(true);
+  });
+
   // A failed look is not evidence about a catalogue, so it never burns `attempts` —
   // but it is bounded, and a completed look clears the streak because the budget is
   // for CONSECUTIVE failures.
@@ -796,8 +841,9 @@ describe("enrichment coverage", () => {
 
   // THE RESIDUAL, asserted rather than papered over. #185's rule fixes the inflow
   // and NOT the standing backlog: an ask filed before a lane's last run, which that
-  // lane never reached, still counts that lane forever. At ENRICH_DEFAULT_LIMIT = 10
-  // a lane reaches ten asks a night, so on prod's shape that is most of the queue.
+  // lane never reached, still counts that lane forever. At ENRICH_DEFAULT_LIMIT = 50
+  // a lane reaches fifty asks a night, which covers prod's standing queue today —
+  // but one backlog press files hundreds and puts the residual straight back.
   // What this lane ships instead of a better proxy: the row NAMES who it is waiting
   // on, and the operator's existing lever clears it in one statement.
   it("the residual is real and named, and crawl_enabled=false clears it", async () => {
