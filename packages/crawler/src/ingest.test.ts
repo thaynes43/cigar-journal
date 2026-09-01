@@ -537,6 +537,205 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(recrawl.decidedBy).toBe("agent");
   });
 
+  // --- #245: the drain may claim a REASONLESS agent unmatch -------------------
+  //
+  // The ruling of 2026-09-01. "Curator outranks crawler" (ADR-006, migration
+  // 0017) was written about a HUMAN, and prod then filled with 883 rows that are
+  // not one: three curation-lane batches (`wo-cigar-curate-20260829/30/31`, 291 +
+  // 300 + 292 rows in ~35 s each) wrote `decided_by='agent'`, `unmatched`, with
+  // no reason and no cigar. That row says "nothing in the catalogue explained
+  // this listing" — catalogue state at a moment — and an enrichment ask filed
+  // afterwards is catalogue state that moment did not have. So the drain may
+  // claim exactly that shape, and nothing adjacent to it.
+  //
+  // The shape is checked clause by clause below because every clause is what
+  // stops the ruling from becoming "the crawler outranks everyone".
+
+  // THE FLAG IS THE DISCRIMINATOR, and this case proves it by writing the same
+  // row twice: the seed walk's upsert and the drain's differ in one field, and
+  // only the drain's moves the row.
+  it("the drain claims a reasonless agent unmatch; the seed path leaves the same row alone", async () => {
+    const cigar = await seedCigar(`Claim Reasonless ${randomUUID().slice(0, 8)}`);
+    const listingKey = `/shop/claim-reasonless-${randomUUID().slice(0, 8)}/`;
+
+    const seeded = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+    // The curation lane's own write, in the shape prod holds it: agent-decided,
+    // unmatched, no reason, no cigar.
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "unmatched", cigarId: null, decidedBy: "agent", unmatchedReason: null })
+      .where(eq(listingMatches.id, seeded.id));
+
+    const audited = async () =>
+      (await pg.db.select().from(auditLog).where(eq(auditLog.action, "listing_match.set_status"))).filter(
+        (a) => (a.before as { id?: string }).id === seeded.id,
+      );
+
+    // A re-crawl — the seed or offers walk — passes no flag and is refused, as it
+    // has been since 0017. Nothing moved, and nothing was logged as if it had.
+    const recrawl = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+    expect(recrawl).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent" });
+    expect(await audited()).toHaveLength(0);
+
+    // The drain asks, and the row is one it may have.
+    const claimed = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: cigar,
+      status: "auto",
+      unmatchedReason: null,
+      runId: "crawl-run-claim",
+      claimAgentUnmatched: true,
+      now: now(),
+    });
+    // OWNERSHIP MOVES WITH THE LINK. The crawler wrote it, so the crawler owns it
+    // — which is also what keeps matching v2 and the seed walk able to re-decide
+    // the row later, rather than freezing it under an authority that never wrote it.
+    expect(claimed).toMatchObject({ status: "auto", cigarId: cigar, decidedBy: "crawler" });
+
+    // THE SUPERSEDED VERDICT IS RECOVERABLE. This is the only write in match.ts
+    // that overrides another actor's decision, so the row it replaced has to
+    // survive somewhere — the `before` snapshot is that record.
+    const rows = await audited();
+    expect(rows).toHaveLength(1);
+    const entry = rows[0]!;
+    // The crawler's established shape: no signed-in principal, no OAuth client.
+    expect(entry.actor).toBe("import");
+    expect(entry.userId).toBeNull();
+    expect(entry.runId).toBe("crawl-run-claim");
+    expect(entry.before).toMatchObject({ cigarId: null, status: "unmatched", decidedBy: "agent" });
+    expect(entry.after).toMatchObject({ cigarId: cigar, status: "auto", decidedBy: "crawler" });
+  });
+
+  // THE THREE SHAPES THE RULING DELIBERATELY LEAVES UNTOUCHABLE. Each is refused
+  // for a different reason, and none of them is "it was not the drain asking".
+  it("the claim never reaches a curator, a reasoned unmatch, or an agent row that points somewhere", async () => {
+    const cigar = await seedCigar(`Claim Protected ${randomUUID().slice(0, 8)}`);
+    const other = await seedCigar(`Claim Protected Other ${randomUUID().slice(0, 8)}`);
+
+    const plant = async (
+      slug: string,
+      state: {
+        status: "auto" | "confirmed" | "unmatched";
+        cigarId: string | null;
+        decidedBy: "crawler" | "curator" | "agent";
+        unmatchedReason?: "market_refusal" | "no_match" | "no_anchor" | "ambiguous" | null;
+      },
+    ) => {
+      const key = `/shop/claim-protected-${slug}-${randomUUID().slice(0, 8)}/`;
+      const seeded = await upsertListingMatch(pg.db, {
+        vendorId,
+        listingKey: key,
+        cigarId: cigar,
+        status: "auto",
+        now: now(),
+      });
+      await pg.db.update(listingMatches).set(state).where(eq(listingMatches.id, seeded.id));
+      return key;
+    };
+
+    const claim = (listingKey: string) =>
+      upsertListingMatch(pg.db, {
+        vendorId,
+        listingKey,
+        cigarId: cigar,
+        status: "auto",
+        claimAgentUnmatched: true,
+        now: now(),
+      });
+
+    // A HUMAN. The rule the ruling narrows was written about this row, and it is
+    // untouchable whatever the reason column says.
+    const curator = await plant("curator", {
+      status: "unmatched",
+      cigarId: null,
+      decidedBy: "curator",
+      unmatchedReason: null,
+    });
+    expect(await claim(curator)).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "curator" });
+
+    // A REASON IS INTENT. Someone wrote down WHY this listing is not a link, so
+    // the row is a refusal rather than a report on the catalogue.
+    const reasoned = await plant("reasoned", {
+      status: "unmatched",
+      cigarId: null,
+      decidedBy: "agent",
+      unmatchedReason: "market_refusal",
+    });
+    expect(await claim(reasoned)).toMatchObject({
+      status: "unmatched",
+      cigarId: null,
+      decidedBy: "agent",
+      unmatchedReason: "market_refusal",
+    });
+
+    // AN AGENT'S LINK IS A LINK. Claiming it would repoint a listing an agent
+    // deliberately attached to another catalog row — the theft `existingCrawlerLink`
+    // guards against on the crawler's side, one authority over.
+    const agentLink = await plant("agent-link", { status: "auto", cigarId: other, decidedBy: "agent" });
+    expect(await claim(agentLink)).toMatchObject({ status: "auto", cigarId: other, decidedBy: "agent" });
+
+    // ...and the same holds for the odd row that is `unmatched` yet still points
+    // at something. The clause reads `cigar_id IS NULL`, not "status says so".
+    const agentPointing = await plant("agent-pointing", { status: "unmatched", cigarId: other, decidedBy: "agent" });
+    expect(await claim(agentPointing)).toMatchObject({ status: "unmatched", cigarId: other, decidedBy: "agent" });
+
+    // A confirmed row is untouchable ahead of every other test, whoever owns it.
+    const confirmed = await plant("confirmed", { status: "confirmed", cigarId: cigar, decidedBy: "agent" });
+    expect(await claim(confirmed)).toMatchObject({ status: "confirmed", decidedBy: "agent" });
+  });
+
+  // THE TRANSITION IS `unmatched` → `auto` AND NOTHING ELSE. The flag says the
+  // caller is entitled to ask; it never says what the write may do.
+  it("the claim licenses no transition but the one that writes a link", async () => {
+    const cigar = await seedCigar(`Claim Transition ${randomUUID().slice(0, 8)}`);
+
+    const plant = async (slug: string) => {
+      const key = `/shop/claim-transition-${slug}-${randomUUID().slice(0, 8)}/`;
+      const seeded = await upsertListingMatch(pg.db, {
+        vendorId,
+        listingKey: key,
+        cigarId: cigar,
+        status: "auto",
+        now: now(),
+      });
+      await pg.db
+        .update(listingMatches)
+        .set({ status: "unmatched", cigarId: null, decidedBy: "agent", unmatchedReason: null })
+        .where(eq(listingMatches.id, seeded.id));
+      return key;
+    };
+
+    // A DOWNGRADE IS NOT A CLAIM. Re-stating "unmatched" over an agent's unmatch
+    // would take ownership of the row while adding nothing to it.
+    const downgrade = await plant("downgrade");
+    expect(
+      await upsertListingMatch(pg.db, {
+        vendorId,
+        listingKey: downgrade,
+        cigarId: null,
+        status: "unmatched",
+        unmatchedReason: "no_match",
+        claimAgentUnmatched: true,
+        now: now(),
+      }),
+    ).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent", unmatchedReason: null });
+
+    // AND AN `auto` POINTING AT NOTHING IS A WORSE VERDICT THAN THE ONE IT
+    // REPLACES, so the null-cigar clause is not redundant with the status clause.
+    const empty = await plant("empty");
+    expect(
+      await upsertListingMatch(pg.db, {
+        vendorId,
+        listingKey: empty,
+        cigarId: null,
+        status: "auto",
+        claimAgentUnmatched: true,
+        now: now(),
+      }),
+    ).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent" });
+  });
+
   // --- mode: enrich, per-vendor budgets (#158, migration 0023) ---------------
   //
   // The ruling these tests encode: a vendor's catalogue is PARTIAL, so "no match
@@ -2125,6 +2324,115 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect((await requestRow(requestId)).status).toBe("pending");
     expect(run.stats.photosCaptured).toBe(0);
     expect(await photosFor(askId)).toHaveLength(0);
+    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "miss" }]);
+  });
+
+  // --- #245 end to end: the drain claims what the curation lane swept ----------
+  //
+  // The prod case, replayed. `/shop/cigars/liga-privada-no-9-corona-doble-2/` is
+  // one of the 883 rows the 2026-08-29..31 curation batches left as
+  // `agent`/`unmatched` with no reason and no cigar, and `Drew Estate Liga
+  // Privada No. 9` is a pending ask that names it. Every step in front of the
+  // write already worked — the prefilter ranked it (#240), `coversAsk` admitted
+  // it (#233), the page was fetched and parsed — and the write refused, so the
+  // drain paid for a real look and recorded a miss. That is the whole issue.
+  it("the drain claims an agent-unmatched listing and fills the ask it was hiding", async () => {
+    const lane = await makeVendor("Liga Claim Lane", "NC");
+    await arrange([lane]);
+
+    const askId = await seedCigar(LIGA_BLEND_ASK, "NC", { brand: "Drew Estate" });
+    const requestId = await seedRequest(askId);
+
+    // The curation lane's sweep, in the shape prod holds it. It is deliberately
+    // the CORONA DOBLE — the earlier case pins that as the listing this drain
+    // ranks FIRST — so the claim is what carries the look rather than a
+    // fallthrough to the untouched sibling proving nothing.
+    const swept = await upsertListingMatch(pg.db, {
+      vendorId: lane,
+      listingKey: pathOf(LIGA_DOBLE_URL),
+      cigarId: askId,
+      status: "auto",
+      now: now(),
+    });
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "unmatched", cigarId: null, decidedBy: "agent", unmatchedReason: null })
+      .where(eq(listingMatches.id, swept.id));
+
+    const run = await enrichRun(lane, ligaRoutes, createMemoryPhotoStorage());
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 1, errored: 0 });
+    expect(run.stats.matchesAuto).toBe(1);
+
+    // The same row, claimed in place: same match id, so the offer history hanging
+    // off it survives the transition rather than starting again beside it.
+    expect(await matchFor(lane, pathOf(LIGA_DOBLE_URL))).toMatchObject({
+      id: swept.id,
+      cigarId: askId,
+      status: "auto",
+      decidedBy: "crawler",
+      unmatchedReason: null,
+    });
+
+    // THE ARTIFACT THE ASK EXISTS FOR (#209/ADR-007). A claim that links and does
+    // not photograph has not answered anything.
+    expect(run.stats.photosCaptured).toBe(1);
+    expect(await photosFor(askId)).toHaveLength(1);
+    expect((await requestRow(requestId)).status).toBe("fulfilled");
+    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "match" }]);
+
+    // ...and the superseded verdict is recoverable, stamped with the crawl run
+    // that superseded it.
+    const audited = (await pg.db.select().from(auditLog).where(eq(auditLog.action, "listing_match.set_status"))).filter(
+      (a) => (a.before as { id?: string }).id === swept.id,
+    );
+    expect(audited).toHaveLength(1);
+    expect(audited[0]!.actor).toBe("import");
+    expect(audited[0]!.runId).not.toBeNull();
+    expect(audited[0]!.before).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent" });
+    expect(audited[0]!.after).toMatchObject({ status: "auto", cigarId: askId, decidedBy: "crawler" });
+  });
+
+  // AND THE HONEST MISS THAT SURVIVES THE RULING. The same listing, the same
+  // look, one column different: the agent wrote down WHY, so the row is a refusal
+  // and the drain must pay for the look and record a miss — which is what the
+  // `declined` arm is for now that it no longer swallows half the shelf.
+  it("a reasoned agent unmatch still declines the drain, and takes no photo slot", async () => {
+    const lane = await makeVendor("Liga Reasoned Lane", "NC");
+    await arrange([lane]);
+
+    const askId = await seedCigar(LIGA_BLEND_ASK, "NC", { brand: "Drew Estate" });
+    const requestId = await seedRequest(askId);
+
+    const refused = await upsertListingMatch(pg.db, {
+      vendorId: lane,
+      listingKey: pathOf(LIGA_DOBLE_URL),
+      cigarId: askId,
+      status: "auto",
+      now: now(),
+    });
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "unmatched", cigarId: null, decidedBy: "agent", unmatchedReason: "market_refusal" })
+      .where(eq(listingMatches.id, refused.id));
+
+    const run = await enrichRun(lane, ligaRoutes, createMemoryPhotoStorage());
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
+    expect(run.stats.matchesAuto).toBe(0);
+
+    // Untouched, reason intact.
+    expect(await matchFor(lane, pathOf(LIGA_DOBLE_URL))).toMatchObject({
+      cigarId: null,
+      status: "unmatched",
+      decidedBy: "agent",
+      unmatchedReason: "market_refusal",
+    });
+
+    // `declined` ends the look, so the Viva is not taken as a consolation prize
+    // and the ask keeps its empty photo slot for a later night.
+    expect(await matchFor(lane, pathOf(LIGA_VIVA_URL))).toBeUndefined();
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(await photosFor(askId)).toHaveLength(0);
+    expect((await requestRow(requestId)).status).toBe("pending");
     expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "miss" }]);
   });
 
