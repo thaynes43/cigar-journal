@@ -33,6 +33,7 @@ import {
   queueEnrichmentBacklog,
   registerTaxonomy,
   updateRegistryAliases,
+  renameRegistryEntity,
   assignCigarTaxonomy,
   splitCigar,
   UnauthenticatedError,
@@ -104,6 +105,8 @@ import {
   registerTaxonomyOutput,
   updateRegistryAliasesSchema,
   updateRegistryAliasesOutput,
+  renameRegistryEntitySchema,
+  renameRegistryEntityOutput,
   assignCigarTaxonomySchema,
   assignCigarTaxonomyOutput,
   splitCigarSchema,
@@ -142,7 +145,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl, uploadUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The thirty-one-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The thirty-two-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -1609,6 +1612,36 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           id: args.id,
           ...(args.add != null ? { add: args.add } : {}),
           ...(args.remove != null ? { remove: args.remove } : {}),
+          attribution: curationAttribution(args),
+          correlationId,
+        });
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "rename_registry_entity",
+    {
+      title: "Rename registry entity",
+      description:
+        "Correct the spelling a brand, line, blend or blender is DISPLAYED under — `H Upmann` to `H. Upmann`, `Partagas` to `Partagás`. Reach for it when a registry entry is right but its spelling is not; it is the act `update_registry_aliases` names when it refuses to drop an entity's own key. Nothing but the name moves: the entity keeps its slug, so published links still resolve, and it keeps every matching key it already holds, so vendor listings that match today keep matching. The new spelling is added as a key only when it folds to one the entity does not already answer to — and that key is refused, naming the holder, when another entity at the same level claims it, which is a near-duplicate caught. Catalog entries whose name is composed from their parts are recomposed to the new spelling in the same call; `recomposedCigars` says how many moved. Renaming an entity to the name it already carries writes nothing and reports `changed: false`. Admin only. Idempotent via clientRequestId; pass runId/confidence for the run audit.",
+      inputSchema: renameRegistryEntitySchema,
+      outputSchema: renameRegistryEntityOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Rename registry entity",
+      },
+    },
+    (args, extra) =>
+      run("rename_registry_entity", extra.authInfo, async ({ principal }, correlationId) => {
+        assertAdmin(principal);
+        const result = await renameRegistryEntity(deps, principal, {
+          clientRequestId: args.clientRequestId,
+          level: args.level,
+          id: args.id,
+          name: args.name,
           attribution: curationAttribution(args),
           correlationId,
         });

@@ -6,8 +6,8 @@
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
 // The tool surface. The first eighteen are the conversational journal contract
-// (reads annotated readOnlyHint). The final thirteen are the admin catalog-curation
-// surface (DESIGN-003 wave 4a/4b, issue #126; the taxonomy four from ADR-012 Wave 3,
+// (reads annotated readOnlyHint). The final fourteen are the admin catalog-curation
+// surface (DESIGN-003 wave 4a/4b, issue #126; the taxonomy five from ADR-012 Wave 3,
 // issue #196): the ops-agent tools, gated on `curation:*` scope AND an admin-role
 // principal — additive, existing tools and scopes untouched (R-MCP-4).
 export const TOOL_NAMES = [
@@ -29,7 +29,7 @@ export const TOOL_NAMES = [
   "request_cigar_enrichment",
   "update_cigar",
   "record_price",
-  // Curation surface (admin-only) — one paged read + twelve curator writes.
+  // Curation surface (admin-only) — one paged read + thirteen curator writes.
   "get_curation_queue",
   "set_listing_match_status",
   "set_cigar_facts",
@@ -40,10 +40,12 @@ export const TOOL_NAMES = [
   "rename_cigar",
   "queue_enrichment_backlog",
   // The taxonomy verbs (ADR-012 Wave 3, issue #196): find-or-mint a registry
-  // path, edit the spellings a registry row answers to, place a leaf in the
-  // structure, and split an entry that stands for several products.
+  // path, edit the spellings a registry row answers to, correct the spelling it is
+  // displayed under, place a leaf in the structure, and split an entry that stands
+  // for several products.
   "register_taxonomy",
   "update_registry_aliases",
+  "rename_registry_entity",
   "assign_cigar_taxonomy",
   "split_cigar",
 ] as const;
@@ -88,7 +90,7 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   update_cigar: ["journal:write"],
   record_price: ["journal:write"],
   // Curation surface (DESIGN-003 wave 4a, extended by ADR-012 Wave 3). The read
-  // takes curation:read, the twelve writes curation:write — a separate scope pair from journal/catalog, so a
+  // takes curation:read, the thirteen writes curation:write — a separate scope pair from journal/catalog, so a
   // journal:write token can never reach a curation tool. Scope is necessary but
   // NOT sufficient: every curation handler also requires an admin principal (the
   // domain services assert the curator role, and the adapter re-checks), so a
@@ -112,6 +114,7 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   queue_enrichment_backlog: ["curation:write"],
   register_taxonomy: ["curation:write"],
   update_registry_aliases: ["curation:write"],
+  rename_registry_entity: ["curation:write"],
   assign_cigar_taxonomy: ["curation:write"],
   split_cigar: ["curation:write"],
 };
@@ -246,8 +249,8 @@ Field conventions:
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - Combine related corrections into one update_smoke call rather than several.
 
-Catalog curation (admin only). The get_curation_queue read and the twelve curation
-write tools are for an operations agent maintaining the catalog — not for
+Catalog curation (admin only). The get_curation_queue read and the thirteen
+curation write tools are for an operations agent maintaining the catalog — not for
 conversational journaling; a normal chat session never uses them. get_curation_queue
 pages the work by kind (unverified, duplicates, match_triage, unbranded, unlined,
 unblended, untyped, missing_photos); drain a kind with its nextCursor. A
@@ -294,6 +297,10 @@ before the flip. update_registry_aliases is what closes a no_anchor listing: add
 the spelling as a key on the entity it names, never loosen the match. A key some
 other entity already claims is refused and that entity is named — use it rather
 than working around it, because the refusal is usually a near-duplicate caught.
+rename_registry_entity corrects the spelling an entity is DISPLAYED under (H
+Upmann to H. Upmann) and moves nothing else: the slug and the matching keys it
+already holds stay, so listings that match today keep matching, and the new
+spelling becomes a key only when it folds to one the entity does not hold.
 split_cigar breaks an entry that has been standing for several products into the
 leaves it should have been and moves each product's listings onto its own; split
 only on unambiguous listing evidence, leave the rest, and expect a partial split.
