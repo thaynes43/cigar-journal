@@ -82,6 +82,71 @@ LLM-created cigars accumulate until curated.
 
 ## Amendments
 
+- **2026-09-01 — the drain's prefilter joins matching v2, and a look that read
+  nothing stops claiming it did (issue #240).** The amendment below put the
+  drain's *comparison* on matching v2 and left the step in front of it alone: a
+  private slug-token prefilter chose which of a vendor's ~2,000 product URLs were
+  worth fetching, and `coversAsk` only ever saw what it handed over. Four nights
+  of prod drains ran green — `errors=0`, jobs complete — and enriched **nothing**:
+  all 58 rows in `enrichment_attempts` read `last_outcome = 'miss'`, 100%, while
+  the offers walk over the SAME two vendors and the same URLs auto-matched 992
+  listings. The 06:00 Cuban Lou's run logged `requests=48 looked=48 matched=0`
+  against a crawl that fetched 242 pages: most of those "looks" opened no page at
+  all.
+  - **The prefilter was a second matcher, and it disagreed with the first on
+    every axis that matters.** It lowercased, split on `[^a-z0-9]+`, kept tokens
+    of three characters or more, scored an unweighted set overlap and took the
+    best eight. So: `ó` was a *separator*, and `Bolívar` arrived as `bol` + `var`
+    and met `bolivar-belicosos-finos` on neither; `vi`, `no`, `9`, `54` — the
+    short tokens that in this trade ARE the identity — were dropped by the floor;
+    a brand word scored exactly as high as an identity word, so Fox's five Tabak
+    Especials each scored 2 on `{drew, estate}` and, ties keeping enumeration
+    order, filled the shortlist while `liga-privada-no-9-corona-doble` was never
+    fetched — the amendment below's own flagship case, lost one step before the
+    rule written to fix it saw a candidate; and trade vocabulary (`robusto`,
+    `toro`, `the`) scored at all, so an ask for a marca a vendor has never
+    stocked still drew eight pages of unrelated cigars.
+  - **The fix is subtraction, not a new rule.** The prefilter now reads
+    `fold`/`foldTokens` for its keys, `enrichAsk`'s already-computed required keys
+    for identity, the ask's registry brand aliases for the marca, and
+    `isIdentityBearing` — the same list `coversAsk` uses — for what counts as a
+    word about a product. Ranking is three tiers read in order (identity, then
+    bare ordinals as a tie-break, then marca); admission is identity **or** marca,
+    so a vendor's brand shelf still earns a look and a `miss` stays reachable.
+    **No stemming and no fuzz:** `monster` does not meet `monsters` here, exactly
+    as it does not in `coversAsk`, and the day that becomes wrong the fix is one
+    alias in the registry rather than two rules to keep in step. The invariant is
+    that the prefilter can never drop a pair `coversAsk` would have linked.
+  - **"No candidate scored above zero" is NOT a miss — this reverses the ruling
+    in the 2026-08-30 amendment below.** That ruling rested on one premise, which
+    it stated and which prod falsified: that a zero-length shortlist means the
+    vendor's shelf holds nothing like the ask, rather than that our own shortlist
+    is broken. It named the residual precisely — "zero ranked candidates means
+    zero fetches, and no drain-time check can close that" — and located the
+    guarantee in the pre-enable `--probe`. The probe checks the *gate*; nothing
+    checked the *prefilter*, and the prefilter is what was wrong. A verdict about
+    a catalogue that our own shortlist can manufacture is not evidence about that
+    catalogue.
+  - So a look that fetched no page records **`no_candidate`** (migration 0030),
+    which burns neither `attempts` nor `errors` and is not counted as a look. It
+    is written to the ledger rather than dropped, because "which lane came up
+    empty-handed, and when" is what separates a shop that does not stock the brand
+    from a registry that has not learned its aliases; the run reports it as its own
+    counter. `exhausted` goes back to meaning what this ADR says it means: a vendor
+    was read, and the cigar was not there.
+  - **The hang the old ruling existed to prevent is real and is accepted here in a
+    smaller form.** An ask no lane can name never retires. It costs zero fetches a
+    night, and the levers are the ones this ADR already documents — an alias in the
+    registry, or a lane that stocks the brand — but it does hold its place in the
+    oldest-first open set, so a queue with many such asks drains fewer new ones per
+    run. That is a visible, bounded cost paid to stop the ledger recording
+    inventions; the alternative was a queue that clears itself by writing false
+    sentences about vendors.
+  - Migration 0030 also clears the miss/error ledger off every still-open ask, so
+    the standing backlog retries under the fixed matcher rather than re-retiring on
+    verdicts the defect wrote. Match and photo-refusal rows are kept, and
+    `enrichment_requests.attempts` is re-derived from what survives.
+
 - **2026-08-31 — the enrich drain rides matching v2, and its open set is 50
   (issue #233).** The amendment below retired the trigram resolver for the
   seed and offers walks and left the drain behind: `tryEnrichCandidates` was
@@ -191,6 +256,7 @@ LLM-created cigars accumulate until curated.
     its vitola siblings share one photo home — not from a bigger drain.
   - The #170/#192 market and photo-authority gates are untouched, and the
     `match | miss | error | photo_refused` outcome vocabulary is preserved.
+    (Extended with `no_candidate` on 2026-09-01 — see the top amendment.)
 - **2026-08-31 — listing matching superseded by ADR-012 (matching v2).** The
   "normalized canonical name + trigram similarity" resolver above is retired:
   it inverts at scale (distinct blends outscore true sibling vitolas), so
@@ -441,18 +507,18 @@ LLM-created cigars accumulate until curated.
     an empty enumeration, no candidate that answered 200, and candidates that
     answered 200 with nothing a product parser could read. A parsed product that
     is an accessory, or that misses the similarity floor, is a MISS: we did read
-    the vendor's catalogue, and what it holds is not this cigar. "No candidate
+    the vendor's catalogue, and what it holds is not this cigar. ~~"No candidate
     scored above zero" is a miss too — the enumeration IS the vendor's product
-    list, and nothing in it resembled the cigar. **The residual, stated rather
-    than papered over:** that last rule assumes the enumeration really is
-    products, and a broken gate can defeat it, because zero ranked candidates
-    means zero fetches and so nothing for the parsed-product test to run on. No
-    drain-time check can close that; the pre-enable `--probe` and its path-shape
-    census are what close it, which is why this ADR requires live verification
-    before a vendor is enabled and why a gate correction never rides a ledger
-    change. Widening the rule instead — calling "nothing scored" an error —
-    would mean a vendor that simply does not stock a brand could never retire
-    the request, which is the hang this amendment exists to remove.
+    list, and nothing in it resembled the cigar.~~ **REVERSED 2026-09-01 (#240);
+    see the top amendment.** The residual this paragraph then went on to state —
+    "zero ranked candidates means zero fetches, and no drain-time check can close
+    that" — is exactly what happened, and the guarantee was located in the wrong
+    place: the pre-enable `--probe` checks the GATE, and it was the PREFILTER that
+    was broken. Four nights of prod drains wrote 58 of 58 `miss` without opening a
+    page for most of them. Such a look now records `no_candidate`, burns nothing,
+    and never retires the ask. The hang this paragraph feared is real and is
+    accepted in the smaller form the new amendment describes: an ask no lane can
+    name stays open at zero fetches a night.
 - **2026-08-30 — the evidenced market, write authority, and per-request lane
   liveness (issues #170, #157, #155, #185).** The 2026-08-30 per-vendor ledger
   amendment above put ONE market predicate in the drain and the rollup. That was

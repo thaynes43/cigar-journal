@@ -9,6 +9,7 @@ import {
   evidencedMarket,
   extractDims,
   fold,
+  foldTokens,
   identityTokensCompatible,
   loadAncestryContext,
   parseListing,
@@ -428,6 +429,16 @@ export interface EnrichAsk {
   // Estate), and comparing raw names would read that omission as an identity
   // disagreement and refuse the match this whole path exists for.
   identityName: string;
+  // The marca's own folded keys — the ask's free-text brand and every alias its
+  // registry row answers to, flattened to single tokens. Struck out of
+  // `requiredKeys` above, and kept HERE because the prefilter still needs them:
+  // a vendor's brand shelf is the only reason to open a page for an ask whose
+  // identity words appear nowhere in the enumeration, and it is what keeps
+  // `miss` ("we read this shop's Bolivars and Belicosos Finos is not among
+  // them") reachable at all. Grammar is dropped on the same list the identity
+  // rule uses, so `Hoyo de Monterrey` contributes `hoyo`/`monterrey`/`hdm` and
+  // never `de`, which half a catalogue's slugs carry.
+  brandKeys: string[];
 }
 
 export interface EnrichAskRow {
@@ -476,6 +487,14 @@ export function enrichAsk(row: EnrichAskRow): EnrichAsk {
   }
 
   const requiredKeys = keys.filter((_, i) => !consumed.has(i));
+  const brandKeys = [
+    ...new Set([row.brand, ...(row.brandAliases ?? [])].flatMap((n) => (n == null ? [] : foldTokens(n)))),
+    // Grammar is dropped on the same list the identity rule uses — `de` is on half
+    // a catalogue's slugs and would admit everything. A BARE NUMBER is kept, which
+    // is the one place the two questions come apart: `isIdentityBearing` refuses
+    // one because an ask's residue of `no 2` names nothing, while a marca that IS
+    // a number (601, 1502) names a house. Same vocabulary, different question.
+  ].filter((key) => isIdentityBearing(key) || /^\d+$/.test(key));
   return {
     cigarId: row.cigarId,
     canonicalName: row.canonicalName,
@@ -484,6 +503,7 @@ export function enrichAsk(row: EnrichAskRow): EnrichAsk {
     blendId: row.blendId,
     requiredKeys,
     identityName: requiredKeys.join(" "),
+    brandKeys,
   };
 }
 
@@ -554,4 +574,112 @@ export function coversAsk(ask: EnrichAsk, parse: ListingParse): boolean {
 
   const candidate = new Set(identityKeys(parse.cleanedName).keys);
   return ask.requiredKeys.every((key) => candidate.has(key));
+}
+
+// --- the drain's prefilter (#240) --------------------------------------------
+//
+// WHICH OF A VENDOR'S ~2,000 PRODUCT URLS ARE WORTH FETCHING FOR THIS ASK. It is
+// a shortlist, not a verdict: `coversAsk` above still decides every link, and
+// nothing here can admit a pair that rule would refuse. What it decides is where
+// the look's page budget goes — and, because a shortlist of zero means no page is
+// fetched at all, whether the ask gets a look on this vendor's ledger.
+//
+// IT USED TO BE ITS OWN LITTLE MATCHER, AND THAT IS THE WHOLE OF #240. The
+// prefilter tokenized both sides with a private `toLowerCase().split(/[^a-z0-9]+/)`
+// keeping tokens of three characters or more, scored an unweighted set overlap,
+// and took the best eight. Prod ran it for four nights and matched nothing —
+// 58/58 attempts `miss` — while the offers path, on the same vendors and the same
+// URLs, auto-matched 992 listings. Four separate failures, each of them a
+// disagreement with the matcher standing directly behind it:
+//
+//   ACCENTS SPLIT WORDS. `[^a-z0-9]` runs on the lowercased string, so `ó` is a
+//   separator: `Bolívar` became `bol` + `var` and matched `bolivar-belicosos-finos`
+//   on neither. `fold()` — NFKD, drop the combining marks, then slug — is what
+//   every alias key in the database is made with, and it makes both sides `bolivar`.
+//
+//   THE THREE-CHARACTER FLOOR ATE THE DISCRIMINATORS. `Cohiba Siglo VI` lost `vi`,
+//   `Liga Privada No. 9` lost `no` and `9`, `H Upmann Magnum 54` lost `h` and `54`.
+//   In this trade the short token IS the identity — the rest of the name is shared
+//   with every sibling on the shelf.
+//
+//   BRAND WORDS OUTVOTED IDENTITY WORDS. Overlap counted every token the same, so
+//   `drew-estate-tabak-especial-toro-negra` scored 2 against the ask `Drew Estate
+//   Liga Privada No. 9` — exactly what `liga-privada-no-9-corona-doble` scored —
+//   and ties keep enumeration order, so eight Tabak Especials filled the shortlist
+//   and the one right answer was never fetched. That is ADR-012's flagship case
+//   being lost one step BEFORE the rule written to fix it.
+//
+//   TRADE VOCABULARY SCORED AT ALL. `robusto`, `toro`, `box`, and `the` are on
+//   half a catalogue's slugs, so an ask for a brand a vendor has never heard of
+//   still drew eight pages of unrelated cigars, spent the fetches, and retired
+//   the ask as looked-at.
+//
+// So the prefilter now runs on matching v2's own machinery: `fold`/`foldTokens`
+// for the keys, `enrichAsk`'s already-computed required keys for the ask's
+// identity, its brand aliases for the marca, and `isIdentityBearing` — the same
+// list `coversAsk` uses — for what counts as a word about a product. NO STEMMING,
+// NO FUZZ, NO SECOND VOCABULARY: `monster` still does not meet `monsters`, here
+// or in `coversAsk`, and the day that becomes wrong it is one alias in the
+// registry rather than two rules to keep in step.
+
+// The folded keys of a product URL's own slug — `/shop/cigars/bolivar-belicosos-finos/`
+// is `{bolivar, belicosos, finos}`. The last path segment only: the category
+// segments above it are the vendor's merchandising taxonomy, which ADR-012 keeps
+// as evidence and refuses to match on.
+export function enrichCandidateKeys(path: string): Set<string> {
+  const trimmed = path.replace(/\/+$/, "");
+  const idx = trimmed.lastIndexOf("/");
+  return new Set(foldTokens(idx === -1 ? trimmed : trimmed.slice(idx + 1)));
+}
+
+// One candidate's standing against one ask, in three tiers that are read in
+// order. They are separate numbers rather than one weighted sum because only the
+// first and the last confer ADMISSION, and a sum would let enough of the middle
+// buy a page fetch.
+export interface EnrichCandidateScore {
+  // Required keys that SAY WHICH CIGAR. The ask's name minus its marca, minus
+  // packaging and dimensions, minus the trade vocabulary — what `coversAsk` will
+  // demand in full, so a candidate that shares none of it can only ever be
+  // admitted on its brand.
+  identity: number;
+  // Required keys the tier above excludes as vocabulary but which still separate
+  // siblings once the identity words tie: bare ordinals, which is how `no-9`
+  // beats `t52` among the Liga Privadas. A TIE-BREAK ONLY — `9` alone appears on
+  // hundreds of slugs and buys nothing.
+  detail: number;
+  // The ask's marca. Ranks below both, and admits: "we read this shop's Bolivars"
+  // is the honest look that makes a `miss` mean something.
+  brand: number;
+}
+
+export function scoreEnrichCandidate(ask: EnrichAsk, keys: ReadonlySet<string>): EnrichCandidateScore {
+  let identity = 0;
+  let detail = 0;
+  for (const key of ask.requiredKeys) {
+    if (!keys.has(key)) continue;
+    if (isIdentityBearing(key)) identity += 1;
+    else if (/^\d+$/.test(key)) detail += 1;
+  }
+  let brand = 0;
+  for (const key of ask.brandKeys) if (keys.has(key)) brand += 1;
+  return { identity, detail, brand };
+}
+
+// The shortlist: everything the ask names by identity or by marca, best first,
+// capped. `sort` is stable, so candidates that tie on all three tiers keep
+// enumeration order — the sitemap's, which is as good an arbitrary as any and is
+// at least reproducible.
+export function rankEnrichCandidates<T extends { keys: ReadonlySet<string> }>(
+  ask: EnrichAsk,
+  candidates: readonly T[],
+  limit: number,
+): T[] {
+  return candidates
+    .map((candidate) => ({ candidate, score: scoreEnrichCandidate(ask, candidate.keys) }))
+    .filter(({ score }) => score.identity > 0 || score.brand > 0)
+    .sort((a, b) =>
+      b.score.identity - a.score.identity || b.score.detail - a.score.detail || b.score.brand - a.score.brand,
+    )
+    .slice(0, limit)
+    .map(({ candidate }) => candidate);
 }

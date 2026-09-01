@@ -254,6 +254,14 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
       // will stay open until a vendor that may write the slot reaches them (#209).
       lines.push(`  enrich photo refused, request left open: ${enrich.photoRefused}`);
     }
+    if (enrich.noCandidate) {
+      // Asks this enumeration named nowhere, so no page was opened for them (#240).
+      // Printed apart from `looked` because it is the number that separates "this
+      // shop does not stock these brands" from "this shop was read and came up
+      // empty" — and because the two used to be added together, which is how a
+      // drain that fetched nothing reported forty-eight looks.
+      lines.push(`  enrich no candidate, no page fetched: ${enrich.noCandidate}`);
+    }
   }
   if (result.error) lines.push(`  error: ${result.error}`);
   if (result.report.length > 0) {

@@ -29,7 +29,9 @@ import {
   coversAsk,
   createCigarFromListing,
   enrichAsk,
+  enrichCandidateKeys,
   existingCrawlerLink,
+  rankEnrichCandidates,
   resolveListing,
   toSuggestedParse,
   upsertListingMatch,
@@ -51,9 +53,11 @@ import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
 // thrown away by the floor anyway.
 //
 // The politeness arithmetic, which is what actually bounds this. One look fetches
-// at most MAX_ENRICH_CANDIDATES product pages — 8, and in practice ~5, since the
-// slug-overlap prefilter rarely offers eight plausible URLs — plus the robots and
-// sitemap reads the whole run shares. So 50 looks is ~250 pages and at most 400,
+// at most MAX_ENRICH_CANDIDATES product pages — 8, and in practice fewer, since
+// the prefilter (`rankEnrichCandidates`, match.ts) rarely offers eight URLs that
+// name the ask — plus the robots and sitemap reads the whole run shares. An ask
+// the enumeration names not at all fetches NOTHING (#240): it is a `no_candidate`,
+// not a look. So a 50-request drain is a few hundred pages and at most 400,
 // against a seed/offers walk that reads every product URL a vendor publishes
 // (Fox's flat sitemap is ~2,035 locs) on the same 2.5s interval. The drain stays
 // the SMALL walk of the two; it is a targeted lookup lane, not a catalogue crawl.
@@ -168,6 +172,14 @@ export interface IngestStats {
     // request is NOT fulfilled by one: the photo was the point of the ask, so the
     // ask stays open for a vendor that may write it. Absent when zero.
     photoRefused?: number;
+    // Asks this enumeration NAMED NOWHERE: no product URL carried one of the
+    // ask's identity keys or one of its marca's, so no page was fetched (#240).
+    // Not a look, and it burns nothing — the ledger cannot say "we read this
+    // catalogue" about pages nobody opened. It is the number to watch after a
+    // vendor is enabled: high and steady means this shop does not stock these
+    // brands, high and falling means the registry is learning their aliases.
+    // Absent when zero, like its siblings.
+    noCandidate?: number;
   };
 }
 
@@ -232,27 +244,6 @@ function emptyStats(): IngestStats {
     photosCaptured: 0,
     errors: 0,
   };
-}
-
-function lastSegment(path: string): string {
-  const trimmed = path.replace(/\/+$/, "");
-  const idx = trimmed.lastIndexOf("/");
-  return idx === -1 ? trimmed : trimmed.slice(idx + 1);
-}
-
-function slugTokens(value: string): Set<string> {
-  return new Set(
-    value
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((token) => token.length >= 3),
-  );
-}
-
-function overlap(a: Set<string>, b: Set<string>): number {
-  let count = 0;
-  for (const token of a) if (b.has(token)) count += 1;
-  return count;
 }
 
 function priceToDecimal(priceCents: number | null): string | null {
@@ -737,7 +728,7 @@ async function drainEnrichment(
   }
 
   const urls = await productUrls(deps, adapter, stats);
-  const candidates = urls.map((url) => ({ url, tokens: slugTokens(lastSegment(pathOf(url))) }));
+  const candidates = urls.map((url) => ({ url, keys: enrichCandidateKeys(pathOf(url)) }));
 
   const limit = options.limit ?? ENRICH_DEFAULT_LIMIT;
 
@@ -769,7 +760,7 @@ async function drainEnrichment(
   // The same fragment is SELECTED as `market` and handed to finalizeEnrichment, so
   // the rollup's denominator is computed from the identical value this open set was
   // filtered with. Two evaluations of a correlated subquery per candidate row is
-  // the price of that coupling, and at LIMIT 10 it is not a price worth optimizing
+  // the price of that coupling, and at LIMIT 50 it is not a price worth optimizing
   // away — a drain that filters on one market while the rollup counts on another
   // holds requests open forever.
   const open = await deps.db.execute(sql`
@@ -832,12 +823,7 @@ async function drainEnrichment(
       lineAliases: request.line_aliases,
     });
 
-    const wanted = slugTokens(ask.canonicalName);
-    const ranked = candidates
-      .map((candidate) => ({ ...candidate, score: overlap(wanted, candidate.tokens) }))
-      .filter((candidate) => candidate.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, MAX_ENRICH_CANDIDATES);
+    const ranked = rankEnrichCandidates(ask, candidates, MAX_ENRICH_CANDIDATES);
 
     const outcome = await tryEnrichCandidates(
       deps,
@@ -851,8 +837,13 @@ async function drainEnrichment(
       report,
     );
     if (outcome === "error") enrich.errored += 1;
-    else enrich.looked += 1;
+    // `no_candidate` is not a look and must never be counted as one (#240): no
+    // page was fetched, so nothing was read, so nothing can be concluded. It was
+    // being counted here — 48 "looks" against a run that fetched 242 pages — and
+    // that arithmetic is what made the drain read as busy while it did nothing.
+    else if (outcome !== "no_candidate") enrich.looked += 1;
     if (outcome === "match") enrich.matched += 1;
+    if (outcome === "no_candidate") enrich.noCandidate = (enrich.noCandidate ?? 0) + 1;
     // A photo refusal is a COMPLETED look (`looked` above) that is not a `match`:
     // the listing was found and linked, and the artifact the ask existed for was
     // refused. Counting it as matched would report a fulfilled ask that is still
@@ -873,15 +864,29 @@ async function drainEnrichment(
 //
 //   match — a listing cleared the similarity floor.
 //   miss  — we READ this vendor's catalogue and it does not carry the cigar.
-//           Honest evidence; it burns one of this vendor's two attempts. NOTE that
-//           "nothing scored above zero" is a miss, not an absence of evidence: the
-//           enumeration IS the vendor's product list and nothing in it resembled
-//           the cigar, which is exactly the Red Anchor/Fox result. That rests on
-//           the enumeration being real products, which nothing at drain time can
-//           check — zero candidates means zero fetches. It is the ADR's mandatory
-//           pre-enable `--probe` (and its path-shape census, #179) that
-//           establishes it, and the reason a gate correction is never allowed to
-//           ride a ledger change.
+//           Honest evidence; it burns one of this vendor's two attempts. THE LINE
+//           IS A PAGE THIS RUN ACTUALLY OPENED — see `no_candidate` below.
+//   no_candidate — the enumeration named this ask NOWHERE, so no page was fetched
+//           and nothing was read (#240). It burns no attempt and it is not a look.
+//           This used to be a `miss`, on the reasoning that the enumeration IS the
+//           vendor's product list, so nothing resembling the cigar in it is itself
+//           the evidence. That reasoning has one load-bearing premise — that the
+//           prefilter offering zero URLs means the vendor's shelf holds nothing
+//           like the ask — and prod falsified it: the slug-overlap prefilter was
+//           its own private matcher, and it scored zero on asks the vendors
+//           demonstrably stock. Four nights, 58 attempts, 58 `miss`, 0 cigars
+//           enriched, with the queue clearing by exhaustion. A verdict about a
+//           catalogue that can be manufactured by a defect in our own shortlist is
+//           not evidence about that catalogue, and `exhausted` must go back to
+//           meaning "a vendor was read and the cigar was not there".
+//
+//           WHAT THIS LEAVES OPEN, stated rather than discovered: an ask no lane
+//           can name never retires. It costs nothing — zero fetches, every night —
+//           but it holds its place in the oldest-first open set, so a queue with
+//           many such asks drains fewer new ones per run. The lever is the same
+//           one the rest of this module documents (an alias in the registry, or a
+//           lane that stocks the brand), and the counter that makes it visible is
+//           `IngestStats.enrich.noCandidate`.
 //   error — the look could not COMPLETE, so it says nothing about any catalogue:
 //           it never burns an attempt, and ERROR_BUDGET bounds it so a permanently
 //           broken vendor cannot pin the request open and re-fetch the same
@@ -945,7 +950,7 @@ async function tryEnrichCandidates(
 ): Promise<EnrichmentOutcome> {
   const { adapter } = options;
   if (enumerated === 0) return "error";
-  if (ranked.length === 0) return "miss";
+  if (ranked.length === 0) return "no_candidate";
 
   // Did we actually READ this vendor's catalogue? A 200 is not enough — see the
   // header: a gate that admits non-product pages answers 200 and parses nothing.
@@ -1184,7 +1189,7 @@ async function finalizeEnrichment(
     // real looks too — keep their meaning. A `photo_refused` look is excluded for
     // the same reason it is excluded from the per-vendor counter: the two numbers
     // mean the same thing and must not disagree about the same look.
-    if (outcome !== "error" && outcome !== "photo_refused") {
+    if (outcome !== "error" && outcome !== "photo_refused" && outcome !== "no_candidate") {
       await tx
         .update(enrichmentRequests)
         .set({ attempts: sql`${enrichmentRequests.attempts} + 1` })
@@ -1205,7 +1210,13 @@ async function finalizeEnrichment(
     // `retired()` is false for it and the rollup below would be reading a lane that
     // still owes the ask. Short-circuiting is the same answer the rollup would
     // give, one query cheaper, and it says so at the point where a reader asks why.
-    if (outcome === "photo_refused") {
+    // A NO-CANDIDATE LOOK RETIRES NOTHING EITHER, and for the same arithmetic
+    // reason one step earlier: its ledger row carries attempts = 0, so `retired()`
+    // is false for this vendor and the rollup below would be reading a lane that
+    // still owes the ask. The difference from a photo refusal is only WHY the lane
+    // still owes it — there the catalogue was read and the artifact refused, here
+    // the catalogue was never opened (#240).
+    if (outcome === "photo_refused" || outcome === "no_candidate") {
       await tx
         .update(enrichmentRequests)
         .set({ status: "pending", resolvedAt: null })

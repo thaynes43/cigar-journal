@@ -10,8 +10,10 @@ merge.
 
 - **v0.31.1 live** (sixth deploy of the day: 0.28.1 → 0.29.0 → 0.30.0 →
   0.31.0 → 0.31.1), both pods 1/1, health 200. Migrations through **0027**
-  applied. Ledger: **0028 = open PR #222** (reviews slice 1), next free
-  **0029**. A new lane pre-assigns its number here and says so in its prompt.
+  applied. Ledger: **0028 = open PR #222** (reviews slice 1); 0029 (accent-key
+  cleanup) and **0030 (#240, enrich `no_candidate` + open-ask ledger reset)** are
+  since taken, so next free is **0031**. A new lane pre-assigns its number here
+  and says so in its prompt.
 - **The taxonomy program (ADR-012, #196) is BUILT and DEPLOYED through Wave 4:**
   registries + backfill (0026), matching v2 under the positive-evidence rule
   (0027 — an existing link is never broken by registry silence, only by a

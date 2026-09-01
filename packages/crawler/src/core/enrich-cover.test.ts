@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { identityTokensCompatible, parseListingTitle, type ListingParse, type ParseRegistry } from "@cj/domain";
-import { coversAsk, enrichAsk, type EnrichAsk, type EnrichAskRow } from "./match.js";
+import {
+  coversAsk,
+  enrichAsk,
+  enrichCandidateKeys,
+  rankEnrichCandidates,
+  scoreEnrichCandidate,
+  type EnrichAsk,
+  type EnrichAskRow,
+} from "./match.js";
 
 // THE ENRICH DRAIN'S ADMISSION RULE, pure (#233, ADR-012). `coversAsk` is what
 // replaced `similarity(canonical_name, title) > 0.55` as the thing that decides
@@ -434,6 +442,171 @@ describe("coversAsk", () => {
       // The invariant itself, stated once per pair rather than inferred from the
       // table: nothing the guard refuses may ever be covered.
       if (!compatible) expect(coversAsk(testCase.ask, parsed)).toBe(false);
+    }
+  });
+});
+
+// THE PREFILTER (#240) — the step BEFORE `coversAsk`, which decides which of a
+// vendor's ~2,000 product URLs are worth a page fetch for one ask. It is not a
+// verdict, but it is the only reason a look ever reaches `coversAsk` at all, and
+// on prod it was quietly deciding everything: four nights of drains, 58 of 58
+// attempts `miss`, 0 cigars enriched, while the offers path auto-matched 992
+// listings over the same vendors and the same URLs.
+//
+// EVERY SLUG BELOW IS A REAL ONE, read off prod's `listing_matches` for Fox Cigar
+// and Cuban Lou's on 2026-09-01, and every ask is a real open row from
+// `enrichment_requests`. The old prefilter's four defects are one case each.
+describe("rankEnrichCandidates", () => {
+  // The candidate as the drain builds it: a product URL path and the folded keys
+  // of its last segment.
+  const candidate = (path: string) => ({ path, keys: enrichCandidateKeys(path) });
+
+  const rank = (a: EnrichAsk, paths: string[], limit = 8): string[] =>
+    rankEnrichCandidates(a, paths.map(candidate), limit).map((c) => c.path);
+
+  // ACCENTS SPLIT WORDS. The old prefilter lowercased and split on `[^a-z0-9]+`,
+  // which treats `ó` as a separator — so the ask's own marca arrived as `bol` and
+  // `var` and met `bolivar` on neither. `fold()` is the projection every alias key
+  // in the database is made with; both sides go through it now.
+  it("folds accents on both sides, so the marca meets the vendor's slug", () => {
+    const bolivar = ask({ canonicalName: "Bolívar Belicosos Finos", brand: "Bolívar", brandId: "bol" });
+
+    expect(bolivar.brandKeys).toEqual(["bolivar"]);
+    expect(scoreEnrichCandidate(bolivar, enrichCandidateKeys("/cuban-cigars/bolivar-belicosos-finos/"))).toEqual({
+      identity: 2,
+      detail: 0,
+      brand: 1,
+    });
+  });
+
+  // THE THREE-CHARACTER FLOOR ATE THE DISCRIMINATORS. `vi` is the whole of what
+  // separates a Siglo VI from a Siglo I, and the old filter dropped both.
+  it("scores the short tokens that are the entire identity claim", () => {
+    const siglo = ask({ canonicalName: "Cohiba Siglo VI", brand: "Cohiba", brandId: "coh" });
+
+    expect(rank(siglo, ["/cuban-cigars/cohiba-siglo-i/", "/cuban-cigars/cohiba-siglo-vi/"])).toEqual([
+      "/cuban-cigars/cohiba-siglo-vi/",
+      "/cuban-cigars/cohiba-siglo-i/",
+    ]);
+  });
+
+  // THE FLAGSHIP, and the one that cost prod four nights. Unweighted overlap
+  // scored a brand word exactly as high as an identity word, so Fox's five Tabak
+  // Especials scored 2 on `{drew, estate}` — the same 2 the real answer scores on
+  // `{liga, privada}` — and ties keep enumeration order, so eight of them filled
+  // the shortlist and `liga-privada-no-9-corona-doble-2` was never fetched. That
+  // is ADR-012's own flagship case being lost one step before the rule written to
+  // fix it ever saw a candidate.
+  it("ranks identity words above the marca, so the ask's own blend is not crowded out", () => {
+    const liga = ask({ canonicalName: "Drew Estate Liga Privada No. 9", brand: "Drew Estate", brandId: "de" });
+    const fox = [
+      "/shop/cigars/drew-estate-tabak-especial-cafecita-dulce/",
+      "/shop/cigars/drew-estate-tabak-especial-toro-negra/",
+      "/shop/cigars/drew-estate-tabak-especial-cafecita-negra/",
+      "/shop/cigars/drew-estate-tabak-especial-gordito-negra/",
+      "/shop/cigars/drew-estate-tabak-especial-robusto-negra/",
+      "/shop/cigars/liga-privada-t52-robusto-2/",
+      "/shop/cigars/liga-privada-h99-super-ancho-3/",
+      "/shop/cigars/liga-privada-10-aniversario-toro-2/",
+      "/shop/cigars/liga-privada-no-9-corona-doble-2/",
+    ];
+
+    // The bare ordinal is the tie-break among the Liga Privadas — `no` and `9`
+    // say which blend, and nothing else in the ask does.
+    expect(rank(liga, fox)[0]).toBe("/shop/cigars/liga-privada-no-9-corona-doble-2/");
+    expect(rank(liga, fox).slice(0, 4)).not.toContain(
+      "/shop/cigars/drew-estate-tabak-especial-cafecita-dulce/",
+    );
+  });
+
+  // TRADE VOCABULARY SCORED AT ALL. Fox has never stocked Caldwell, and the old
+  // prefilter still drew it eight pages of unrelated cigars on `robusto` alone,
+  // spent the fetches, and retired the ask as looked-at. `robusto` is a vitola on
+  // half the catalogue, so it says nothing about which cigar this is — the same
+  // list `coversAsk` uses to decide that is the list used here.
+  it("gives no candidate to an ask whose only shared words are the trade's", () => {
+    const caldwell = ask({
+      canonicalName: "Caldwell Midnight Express Robusto",
+      brand: "Caldwell",
+      brandId: "cw",
+    });
+
+    expect(
+      rank(caldwell, [
+        "/shop/cigars/tatuaje-black-label-robusto/",
+        "/shop/cigars/cao-zocalo-robusto-2/",
+        "/shop/cigars/undercrown-el-tigre-dominicano-robusto/",
+      ]),
+    ).toEqual([]);
+  });
+
+  // ...AND THE MARCA STILL BUYS A LOOK, which is what keeps `miss` reachable. Fox
+  // stocks Red Anchor — the Admiral, not the Captain — so the ask deserves a page
+  // fetch and the honest answer "we read this shop's Red Anchors". An empty
+  // shortlist here would record `no_candidate` and the ask would never retire.
+  it("admits the marca's own shelf, so a real miss stays reachable", () => {
+    const captain = ask({ canonicalName: "Red Anchor Captain", brand: "Red Anchor", brandId: "ra" });
+
+    expect(rank(captain, ["/shop/cigars/red-anchor-admiral-2/", "/shop/cigars/cohiba-blue-toro-2/"])).toEqual([
+      "/shop/cigars/red-anchor-admiral-2/",
+    ]);
+  });
+
+  // The last path segment is the product slug; everything above it is the vendor's
+  // merchandising taxonomy, which ADR-012 keeps as evidence and refuses to match
+  // on. Cuban Lou's files Habanos under `/cuban-cigars/`, and letting that segment
+  // score would hand every Cuban ask the same 985 candidates.
+  it("reads the product slug only, never the category path above it", () => {
+    const media = ask({ canonicalName: "Trinidad Media Luna", brand: "Trinidad", brandId: "tri" });
+
+    expect(enrichCandidateKeys("/cuban-cigars/trinidad-media-luna/")).toEqual(
+      new Set(["trinidad", "media", "luna"]),
+    );
+    expect(rank(media, ["/cuban-cigars/trinidad-espiritu-series-3-toro-2/", "/cuban-cigars/trinidad-media-luna/"])[0])
+      .toBe("/cuban-cigars/trinidad-media-luna/");
+  });
+
+  // THE INVARIANT THAT MAKES THIS A PREFILTER AND NOT A SECOND MATCHER: the
+  // shortlist may never drop a listing `coversAsk` would have linked. Both sides
+  // read the same folded keys, so a covering candidate's slug carries every one of
+  // the ask's required keys — and either one of them is identity-bearing (the
+  // first arm) or the ask has no identity claim of its own and rides on its marca
+  // (the second, which is `Diplomaticos No 2`). Asserted over the same pairs the
+  // coverage table above admits, from their vendor slugs.
+  it("never drops a candidate coversAsk would have linked", () => {
+    const pairs: { ask: EnrichAsk; path: string }[] = [
+      {
+        ask: ask({ canonicalName: "Drew Estate Liga Privada No. 9", brand: "Drew Estate", brandId: "de" }),
+        path: "/shop/cigars/liga-privada-no-9-corona-viva/",
+      },
+      {
+        ask: ask({ canonicalName: "Bolívar Belicosos Finos", brand: "Bolívar", brandId: "bol" }),
+        path: "/cuban-cigars/bolivar-belicosos-finos/",
+      },
+      {
+        ask: ask({ canonicalName: "Cohiba Siglo VI", brand: "Cohiba", brandId: "coh" }),
+        path: "/cuban-cigars/cohiba-siglo-vi-box-of-25/",
+      },
+      // No identity claim of its own once the marca comes off (`no 2` is grammar
+      // and a bare ordinal), so the brand arm is the one that has to admit it.
+      {
+        ask: ask({ canonicalName: "Diplomaticos No 2", brand: "Diplomaticos", brandId: "dip" }),
+        path: "/cuban-cigars/diplomaticos-no-2/",
+      },
+    ];
+
+    for (const pair of pairs) {
+      const keys = enrichCandidateKeys(pair.path);
+      // The coverage rule itself, read off the same keys: every required key is
+      // there, which is what makes this pair one `coversAsk` would admit.
+      expect({ path: pair.path, covered: pair.ask.requiredKeys.every((k) => keys.has(k)) }).toEqual({
+        path: pair.path,
+        covered: true,
+      });
+      expect({ path: pair.path, ranked: rank(pair.ask, [pair.path]) }).toEqual({
+        path: pair.path,
+        ranked: [pair.path],
+      });
     }
   });
 });
