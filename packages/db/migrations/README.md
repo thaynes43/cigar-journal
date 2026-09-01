@@ -381,3 +381,51 @@ init container at startup (ADR-003).
   the drain's open set, so an ask requeued that a vendor genuinely does not carry
   re-earns its two looks and re-retires, once. Every statement is re-runnable and
   the suite replays the file to prove a second application changes nothing.
+- `0032_revert_offers_vitola_misbinds.sql` — the data half of the `chooseLeaf`
+  vitola guard: one `UPDATE` returning the 1,067 auto-links written by Fox
+  offers run `5eb6586b-83e5-4e23-9585-e9ee155dce74` (2026-09-01 15:32:06.893-04
+  → 17:04:14.866-04, succeeded) to `status='unmatched'`, `cigar_id = NULL`,
+  `unmatched_reason = NULL`. `decided_by` STAYS `'crawler'`: the crawler is still
+  the lane that owns these rows and the only one that can re-decide them.
+  **The defect** is that after the brand — and where the title named one, the
+  line — anchored, `chooseLeaf` could bind a listing to a SIBLING without
+  requiring the listing's own vitola/edition tokens to agree. The freeform arm
+  never called `identityTokensCompatible` (that mutual-residue check belongs to
+  `coversAsk` and `strongLinkCompatible`, which the offers walk does not call —
+  the same asymmetry 0031's header records from the other side), and the
+  structural arm linked a line's ONLY leaf with no name comparison at all.
+  Proven: `CAO Flavours Bella Vanilla Corona` → `CAO Flavours Moontrance Corona`
+  while the correct row `CAO Flavours Bella Vanilla` existed;
+  `Tatuaje Skinny Monsters Frank` → the line's lone leaf `… Chuck`;
+  `Rocky Patel Dark Star Toro` → `… Sixty`; and nine `Davidoff Grand Cru *` SKUs
+  all onto the single row `Davidoff Grand Cru`.
+  **The whole batch goes because no predicate separates it.** A 60-link audit
+  against `offers.raw->'listing'->>'name'` put the marca right 60/60 — the brand
+  anchor was never the problem — and the link fully right only 40/60 (19 wrong
+  vitola, 1 wrong line), which extrapolates to roughly 355 bad links in the
+  1,067; 20 of them point at `catalog_status='excluded'` gift cards. The revert
+  is cheap because the matcher is deterministic and the guard only ever REMOVES
+  candidates: the ~712 correct links re-form identically on the fixed re-run,
+  while the ~355 wrong ones fail to form and are recorded as honest `unmatched`,
+  which routes them into enrichment and triage instead of the catalogue. A wrong
+  link is worse than an honest miss because it is invisible — it reads as
+  settled fact on the cigar's page, in its offers, and in the evidenced market
+  computed from `listing_matches.cigar_id`.
+  **Both ends of the window are bound**, and the upper one is not optional: a
+  lower-bound-only revert would swallow every link the FIXED matcher writes
+  after the deploy, and would do it again every night. **Provenance is derived,
+  not transcribed** — the bounds are read off the `crawl_runs` row itself
+  (joined on the run's id AND vendor AND kind, with `finished_at IS NOT NULL`
+  guarding the upper bound), so the statement names the run it undoes and cannot
+  drift from it, and on any database that never held that row — a fresh deploy,
+  a restored backup, this package's own test database — it updates nothing.
+  Untouched: `decided_by IN ('agent','curator')`, the 209 `confirmed` rows, the
+  68 crawler `auto` rows at or before the run's start (the lower bound is
+  strict, and the run's own first write is 30 seconds in), and
+  `suggested_parse` / `category_path` / `updated_at` — the last being the only
+  surviving mark of which run wrote a row. `unmatched_reason` is nulled rather
+  than set to `'no_match'`: a reason is a per-listing judgement and none was made
+  here, and the null also keeps all 1,067 out of `matchTriagePage` at deploy, so
+  they surface one at a time as the crawler re-decides them — the same property
+  0031 leaned on. Re-runnable: after the first execution no `status='auto'` row
+  remains in the window.

@@ -10,7 +10,7 @@ import {
   type ListingParse,
   type ParseRegistry,
 } from "./catalog-parse.js";
-import { numbersCompatible, packagingCompatible, variantRelation, vitolaAgrees } from "./name-heuristics.js";
+import { leafBindingCompatible, variantRelation, vitolaAgrees } from "./name-heuristics.js";
 import { isUuid } from "./uuid.js";
 import type { CigarAncestry, CigarAncestryContext } from "./cigar-ancestry.js";
 
@@ -384,7 +384,33 @@ export function chooseLeaf(parse: ListingParse, candidates: LeafCandidate[]): Le
 
   if (candidates.length === 0) return { kind: "none", note: "No leaf exists under this brand yet." };
 
-  const structural = structuralMatches(parse, candidates);
+  // THE BINDING GUARD RUNS BEFORE EITHER ARM CHOOSES, and running it in only one
+  // of them is the defect it was written for (#260). The freeform arm at least
+  // compared the two names; the structural arm compared NOTHING — a line holding
+  // exactly one leaf handed that leaf every SKU the vendor sells under the line,
+  // because `finalists.length === 1` was reached without a single word of either
+  // name being read. That is how `Tatuaje Skinny Monsters Frank` became `Chuck`
+  // and nine `Davidoff Grand Cru` sizes became one row, on a prod run that got the
+  // marca right 60/60 and the leaf right 40/60.
+  //
+  // Structure is still trusted for SCOPE — a shared line is what makes these rows
+  // comparable at all — but it is no longer trusted as IDENTITY. A `line_id` says
+  // two rows are siblings, which is precisely the situation in which telling them
+  // apart matters most.
+  //
+  // IT ONLY EVER REMOVES CANDIDATES, so it cannot invent a link that did not exist
+  // before: every arm below sees a subset of what it saw, an unambiguous choice
+  // stays unambiguous, and a candidate set emptied by the guard becomes `none` —
+  // which is `unmatched` at the write, and routes the listing to enrichment. An
+  // honest miss is recoverable; a wrong link is invisible.
+  const compatible = candidates.filter((c) =>
+    leafBindingCompatible(parse.cleanedName, stripPackaging(c.canonicalName).cleaned, c.vitolaName),
+  );
+  if (compatible.length === 0) {
+    return { kind: "none", note: "No leaf under this brand is compatible with what this listing names." };
+  }
+
+  const structural = structuralMatches(parse, compatible);
   if (structural) {
     const narrowed =
       parse.vitolaName != null
@@ -422,13 +448,19 @@ export function chooseLeaf(parse: ListingParse, candidates: LeafCandidate[]): Le
   // only one side was allowed to keep. 70 of the 94 anchored losses measured on
   // prod were this one bug, and every one of them was a mint of a row that
   // already existed — v1's flat namespace, rebuilt by v2's own scope query.
-  const cleanedCandidates = candidates.map((c) => ({ candidate: c, name: stripPackaging(c.canonicalName).cleaned }));
+  const cleanedCandidates = compatible.map((c) => ({ candidate: c, name: stripPackaging(c.canonicalName).cleaned }));
 
+  // `numbersCompatible` and `packagingCompatible` USED TO BE LISTED HERE and are
+  // not gone — they moved into `leafBindingCompatible` above, which every
+  // candidate has already passed. Repeating them would be two places to keep in
+  // step about one question. What stays is what the guard deliberately does not
+  // answer: the trigram floor, the three-valued wrapper relation (whose
+  // `unstated` arm is a triage verdict rather than a refusal, decided below), and
+  // the COLUMN-level vitola check, which complements the guard's name-level one —
+  // a curated `vitola_name` can contradict a listing whose name states no size.
   const viable = cleanedCandidates.filter(
     ({ candidate: c, name }) =>
       c.sim >= SCOPED_MATCH_THRESHOLD &&
-      numbersCompatible(parse.cleanedName, name) &&
-      packagingCompatible(parse.cleanedName, name) &&
       variantRelation(parse.cleanedName, name) !== "different" &&
       vitolaAgrees(parse.vitolaName, c.vitolaName),
   );

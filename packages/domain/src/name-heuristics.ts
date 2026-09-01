@@ -489,6 +489,87 @@ export function strongLinkCompatible(query: string, candidate: string): boolean 
   );
 }
 
+// The sizes a NAME states, on the same comparison keys every other rule in this
+// file reads — so the spelling table, the phrase join and this scan cannot
+// disagree about what a token became (`Doble` is `double`, `Rothchilde` is
+// `rothschild`).
+//
+// THE NAME, NOT THE COLUMN, and that difference is the whole of #260. `cigars.
+// vitola_name` is null on essentially every freeform row this catalog holds —
+// 0026 minted no structure, so a leaf's size lives in its NAME and nowhere else.
+// `Tatuaje Skinny Monsters Chuck` states a size in the only place it can, and a
+// rule that reads the column alone sees an absence and calls it agreement.
+export function statedVitolas(name: string): Set<string> {
+  const found = new Set<string>();
+  for (const { key } of comparisonKeys(name)) if (VITOLA_TOKENS.has(key)) found.add(key);
+  return found;
+}
+
+// MAY THIS LISTING BIND THAT LEAF? — the matcher's own disqualifier, and a
+// different question from `strongLinkCompatible` above, which asks whether two
+// CATALOG ROWS are the same product. This one is asked of a vendor title against
+// a leaf of the brand the title already anchored, and it exists because the
+// answer "yes, because nothing positively contradicted it" was wrong 1 time in 3.
+//
+// Measured on prod, 2026-09-01: one Fox offers run wrote 1,067 crawler links; a
+// 60-link audit against the vendor's own listing names found the marca right
+// 60/60 and the LEAF right 40/60. Nineteen bound the wrong size and one the wrong
+// line. Two of them are the proof that this is a guard problem and not a ranking
+// one — the correct row EXISTED and a sibling was taken anyway (`CAO Flavours
+// Bella Vanilla Corona` bound `CAO Flavours Moontrance Corona`; `LFD Suave Maceo`
+// bound `… Gobernador`) — and the rest are lines holding exactly ONE leaf, which
+// swallowed every sibling SKU the vendor sells (`Tatuaje Skinny Monsters Frank`
+// into the line's only leaf `… Chuck`, `Rocky Patel Dark Star Toro` into
+// `… Sixty`, nine `Davidoff Grand Cru` SKUs into one row).
+//
+// THREE CLAUSES, AND THE THIRD IS THE ONE THE OTHERS CANNOT COVER.
+export function leafBindingCompatible(
+  query: string,
+  candidate: string,
+  candidateVitola: string | null | undefined,
+): boolean {
+  // 1. The identity rule the rest of the repo already runs. `coversAsk` (the
+  //    enrich drain) and `strongLinkCompatible` (the MCP link-vs-create verdict)
+  //    both refuse a mutual residue; the seed and offers walks did not, which is
+  //    the single largest hole here — `{bella, vanilla}` against `{moontrance}`
+  //    is two different identity claims under one brand and one line.
+  if (!numbersCompatible(query, candidate)) return false;
+  if (!packagingCompatible(query, candidate)) return false;
+  if (!identityTokensCompatible(query, candidate)) return false;
+
+  // A listing that states no size makes no size claim to contradict. This is the
+  // commonest shape in the catalog and the reason the rest of this is narrow: a
+  // blend-level title meeting a vitola-level row is a link, not a disagreement.
+  const stated = statedVitolas(query);
+  if (stated.size === 0) return true;
+
+  // 2. The size axis, read off the candidate's NAME as well as its column. The
+  //    column is consulted because a curated row may carry a size its name omits
+  //    (`Davidoff Grand Cru` carries `vitola_name = 'Toro'`), and that fact is
+  //    exactly what should keep `… Robusto` off it.
+  const carried = new Set([...statedVitolas(candidate), ...statedVitolas(candidateVitola ?? "")]);
+  if (carried.size > 0 && !mutuallyContained(stated, carried)) return false;
+
+  // 3. A SIZED LISTING MAY NOT ABSORB A LEAF THAT NAMES ITS OWN. The one-sided
+  //    residue allowance above is written for a query that says strictly LESS
+  //    than the row — `Liga Privada No. 9` meeting `… No. 9 Flying Pig`, the
+  //    shape of most of this catalog. It is not written for a query that is
+  //    SPECIFIC on the size axis while the row is specific in a way the vocabulary
+  //    cannot read: `Rocky Patel Dark Star Toro` against `Rocky Patel Dark Star
+  //    Sixty` leaves residue `{sixty}` on the row alone, and `Sixty` IS that
+  //    leaf's size — it is simply not a word any size list contains, and no list
+  //    ever will contain every house's private name for a 60-ring cigar.
+  //
+  //    So the allowance is withdrawn when the listing has pinned a size and the
+  //    row still reaches somewhere the listing does not. Scoped to a row that
+  //    states no size of its own, so it never fires on the case it would damage:
+  //    `Padrón 1964 Anniversary Torpedo` against `… Anniversary Series Torpedo`
+  //    has residue `{serie}` on the row, and both name the Torpedo, so clause 2
+  //    has already agreed and this clause stands down.
+  if (carried.size > 0) return true;
+  return identityResidues(query, candidate).candidate.size === 0;
+}
+
 // Two vitola labels agree when they fold to the same key. A NULL on either side
 // is unknown, not a disagreement — ADR-012's rule that absent is never inferred
 // applies to comparison as much as to storage.

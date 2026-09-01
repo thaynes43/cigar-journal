@@ -235,6 +235,8 @@ export {
   variantRelation,
   identityTokensCompatible,
   identityResidues,
+  leafBindingCompatible,
+  statedVitolas,
   VARIANT_TOKENS,
   SPELLING_VARIANTS,
   type VariantRelation,

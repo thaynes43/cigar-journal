@@ -28,7 +28,7 @@ import {
 } from "@cj/domain";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { runIngest, type IngestDeps } from "./core/ingest.js";
-import { resolveListing, upsertListingMatch } from "./core/match.js";
+import { existingCrawlerLink, resolveListing, upsertListingMatch } from "./core/match.js";
 import { pathOf } from "./core/product-url.js";
 import {
   markRunTerminated,
@@ -813,6 +813,287 @@ describe("crawler ingest (embedded Postgres)", () => {
         now: now(),
       }),
     ).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent" });
+  });
+
+  // --- the crawler never links a non-active cigar -----------------------------
+  //
+  // MEASURED ON PROD, 2026-09-01: 20 `listing_matches` rows with `status='auto'`
+  // and `decided_by='crawler'` pointing at cigars whose `catalog_status` is
+  // `excluded` — six of them Fox gift cards, one of which had the $50 card's URL
+  // linked to the $500 card's row. The candidate query was never the leak:
+  // `scopedLeafCandidates` has always filtered `catalog_status = 'active'`, so the
+  // resolver could not have SELECTED any of them.
+  //
+  // They are survivors. The links were written on 2026-08-28 while the cigars were
+  // still active, a curator excluded the cigars on 2026-08-29, and the offers run
+  // of 2026-09-01 found the stale link through `existingCrawlerLink` and used it to
+  // upgrade a silent `no_match` back to `auto` — the positive-evidence path, which
+  // exists to protect a link from registry SILENCE and was reading a deliberate
+  // exclusion as if it were silence. Left alone it resurrects on every crawl,
+  // forever. So: the prior link is no longer evidence when its cigar is retired,
+  // and the write itself refuses the link whatever the caller believes.
+  const excludedCigar = (name: string, status: "excluded" | "merged" = "excluded") =>
+    seedCigar(`${name} ${randomUUID().slice(0, 8)}`, null, { catalogStatus: status });
+
+  it("upsertListingMatch writes a triage row rather than a link into an excluded cigar (insert and update paths)", async () => {
+    const excluded = await excludedCigar("Guard Excluded");
+
+    // THE INSERT PATH: a listing this vendor has never been seen to carry.
+    const insertKey = `/shop/guard-excluded-insert-${randomUUID().slice(0, 8)}/`;
+    const inserted = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey: insertKey,
+      cigarId: excluded,
+      status: "auto",
+      now: now(),
+    });
+    expect(inserted).toMatchObject({
+      status: "unmatched",
+      cigarId: null,
+      unmatchedReason: "no_match",
+      decidedBy: "crawler",
+    });
+
+    // THE UPDATE PATH: an existing crawler-owned row the crawl now wants to link.
+    const updateKey = `/shop/guard-excluded-update-${randomUUID().slice(0, 8)}/`;
+    await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey: updateKey,
+      cigarId: null,
+      status: "unmatched",
+      unmatchedReason: "no_anchor",
+      now: now(),
+    });
+    const updated = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey: updateKey,
+      cigarId: excluded,
+      status: "auto",
+      now: now(),
+    });
+    expect(updated).toMatchObject({
+      status: "unmatched",
+      cigarId: null,
+      unmatchedReason: "no_match",
+      decidedBy: "crawler",
+    });
+  });
+
+  // `merged` is the other non-active state and is refused on the same terms: a row
+  // folded into another is not a catalog cigar either, and a listing pointed at one
+  // is a link the merge was supposed to have moved.
+  it("the same guard refuses a merged cigar, on both paths", async () => {
+    const merged = await excludedCigar("Guard Merged", "merged");
+
+    const insertKey = `/shop/guard-merged-insert-${randomUUID().slice(0, 8)}/`;
+    expect(
+      await upsertListingMatch(pg.db, { vendorId, listingKey: insertKey, cigarId: merged, status: "auto", now: now() }),
+    ).toMatchObject({ status: "unmatched", cigarId: null, unmatchedReason: "no_match" });
+
+    const updateKey = `/shop/guard-merged-update-${randomUUID().slice(0, 8)}/`;
+    await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey: updateKey,
+      cigarId: null,
+      status: "unmatched",
+      unmatchedReason: "no_match",
+      now: now(),
+    });
+    expect(
+      await upsertListingMatch(pg.db, { vendorId, listingKey: updateKey, cigarId: merged, status: "auto", now: now() }),
+    ).toMatchObject({ status: "unmatched", cigarId: null, unmatchedReason: "no_match" });
+  });
+
+  // The guard is an invariant, not a behaviour change: the ordinary link — which is
+  // 992 of prod's rows on the offers path alone — still lands, and still clears the
+  // reason it may have carried while it was unmatched.
+  it("an active cigar still links normally under the guard", async () => {
+    const active = await seedCigar(`Guard Active ${randomUUID().slice(0, 8)}`);
+    const listingKey = `/shop/guard-active-${randomUUID().slice(0, 8)}/`;
+
+    await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: null,
+      status: "unmatched",
+      unmatchedReason: "no_anchor",
+      now: now(),
+    });
+    expect(
+      await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: active, status: "auto", now: now() }),
+    ).toMatchObject({ status: "auto", cigarId: active, unmatchedReason: null, decidedBy: "crawler" });
+  });
+
+  // THE LEAK ITSELF. `existingCrawlerLink` is what the offers walk reads before it
+  // decides, so an excluded cigar's stale link has to stop being an answer HERE —
+  // one layer above the write — or the silent verdict is upgraded back to `auto`
+  // before the write is ever asked anything.
+  it("existingCrawlerLink reports no prior link when the linked cigar is excluded, and still reports an active one", async () => {
+    const active = await seedCigar(`Prior Link Active ${randomUUID().slice(0, 8)}`);
+    const activeKey = `/shop/prior-link-active-${randomUUID().slice(0, 8)}/`;
+    await upsertListingMatch(pg.db, { vendorId, listingKey: activeKey, cigarId: active, status: "auto", now: now() });
+    expect(await existingCrawlerLink(pg.db, vendorId, activeKey)).toBe(active);
+
+    // Excluded AFTER the link was written — the prod sequence exactly.
+    await pg.db.update(cigars).set({ catalogStatus: "excluded" }).where(eq(cigars.id, active));
+    expect(await existingCrawlerLink(pg.db, vendorId, activeKey)).toBeNull();
+
+    // And a crawler row that points nowhere still reads as "no prior link" rather
+    // than tripping over the join.
+    const bareKey = `/shop/prior-link-bare-${randomUUID().slice(0, 8)}/`;
+    await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey: bareKey,
+      cigarId: null,
+      status: "unmatched",
+      unmatchedReason: "no_anchor",
+      now: now(),
+    });
+    expect(await existingCrawlerLink(pg.db, vendorId, bareKey)).toBeNull();
+  });
+
+  // THE PROTECTIONS OUTRANK THE GUARD, and that ordering is deliberate. A confirmed
+  // link or a curator's link into an excluded cigar is a contradiction between two
+  // human verdicts; it is for a curator to resolve, and a crawler that quietly
+  // unlinked it would be overruling the confirm on the strength of the exclusion.
+  // The crawler's job is only to stop MAKING the link.
+  it("a confirmed row and a curator row keep their excluded link: the decided_by guard comes first", async () => {
+    const excluded = await excludedCigar("Guard Outranked");
+
+    const confirmedKey = `/shop/guard-outranked-confirmed-${randomUUID().slice(0, 8)}/`;
+    const confirmedSeed = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey: confirmedKey,
+      cigarId: null,
+      status: "unmatched",
+      now: now(),
+    });
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "confirmed", cigarId: excluded })
+      .where(eq(listingMatches.id, confirmedSeed.id));
+    expect(
+      await upsertListingMatch(pg.db, {
+        vendorId,
+        listingKey: confirmedKey,
+        cigarId: excluded,
+        status: "auto",
+        now: now(),
+      }),
+    ).toMatchObject({ status: "confirmed", cigarId: excluded });
+
+    const curatorKey = `/shop/guard-outranked-curator-${randomUUID().slice(0, 8)}/`;
+    const curatorSeed = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey: curatorKey,
+      cigarId: null,
+      status: "unmatched",
+      now: now(),
+    });
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "auto", cigarId: excluded, decidedBy: "curator" })
+      .where(eq(listingMatches.id, curatorSeed.id));
+    expect(
+      await upsertListingMatch(pg.db, {
+        vendorId,
+        listingKey: curatorKey,
+        cigarId: excluded,
+        status: "auto",
+        now: now(),
+      }),
+    ).toMatchObject({ status: "auto", cigarId: excluded, decidedBy: "curator" });
+  });
+
+  // A CLAIM WITH NOTHING TO INSTALL IS NOT A CLAIM (#245 meets this guard). The
+  // drain may supersede a reasonless agent unmatch only because it brings a link;
+  // the guard has already taken that link away, so the agent's row stands and
+  // nothing is audited as if it had moved.
+  it("the drain cannot claim an agent row on the strength of a link into an excluded cigar", async () => {
+    const excluded = await excludedCigar("Guard Claim");
+    const listingKey = `/shop/guard-claim-${randomUUID().slice(0, 8)}/`;
+    const seeded = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: null,
+      status: "unmatched",
+      now: now(),
+    });
+    await pg.db
+      .update(listingMatches)
+      .set({ status: "unmatched", cigarId: null, decidedBy: "agent", unmatchedReason: null })
+      .where(eq(listingMatches.id, seeded.id));
+
+    expect(
+      await upsertListingMatch(pg.db, {
+        vendorId,
+        listingKey,
+        cigarId: excluded,
+        status: "auto",
+        claimAgentUnmatched: true,
+        runId: "crawl-run-guard-claim",
+        now: now(),
+      }),
+    ).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent", unmatchedReason: null });
+
+    const audited = (await pg.db.select().from(auditLog).where(eq(auditLog.action, "listing_match.set_status"))).filter(
+      (a) => (a.before as { id?: string }).id === seeded.id,
+    );
+    expect(audited).toHaveLength(0);
+  });
+
+  // THE WHOLE SEQUENCE, IN THE ORDER PROD RAN IT. Link while active, exclude,
+  // re-crawl — and the row that used to come back as `auto` now comes back as the
+  // triage row it should have been on 2026-08-29, with the unlink attributable.
+  it("a crawler link whose cigar is later excluded is downgraded on the next crawl, not resurrected", async () => {
+    const cigar = await seedCigar(`Guard Resurrection ${randomUUID().slice(0, 8)}`);
+    const listingKey = `/shop/guard-resurrection-${randomUUID().slice(0, 8)}/`;
+
+    const linked = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+    expect(linked).toMatchObject({ status: "auto", cigarId: cigar });
+
+    // The curator's verdict, one day later.
+    await pg.db.update(cigars).set({ catalogStatus: "excluded" }).where(eq(cigars.id, cigar));
+
+    // The next offers run, as `ingestListing` runs it: read the prior link, then
+    // write. The read no longer answers, so the silent `no_match` is not upgraded…
+    const priorLink = await existingCrawlerLink(pg.db, vendorId, listingKey);
+    expect(priorLink).toBeNull();
+    const rewritten = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: priorLink,
+      status: priorLink != null ? "auto" : "unmatched",
+      unmatchedReason: priorLink != null ? null : "no_match",
+      runId: "crawl-run-guard-resurrection",
+      now: now(),
+    });
+    expect(rewritten).toMatchObject({
+      status: "unmatched",
+      cigarId: null,
+      unmatchedReason: "no_match",
+      decidedBy: "crawler",
+    });
+
+    // …and the unlink is attributable, like every other path that clears a link.
+    const audited = (await pg.db.select().from(auditLog).where(eq(auditLog.action, "listing_match.set_status"))).filter(
+      (a) => (a.before as { id?: string }).id === linked.id,
+    );
+    expect(audited).toHaveLength(1);
+    expect(audited[0]!.runId).toBe("crawl-run-guard-resurrection");
+    expect(audited[0]!.before).toMatchObject({ cigarId: cigar, status: "auto" });
+    expect(audited[0]!.after).toMatchObject({ cigarId: null, status: "unmatched" });
+
+    // Belt and braces: even a caller that ignored the read and asked for the link
+    // outright is refused, which is the invariant the write layer exists for.
+    const insisted = await upsertListingMatch(pg.db, {
+      vendorId,
+      listingKey,
+      cigarId: cigar,
+      status: "auto",
+      now: now(),
+    });
+    expect(insisted).toMatchObject({ status: "unmatched", cigarId: null, unmatchedReason: "no_match" });
   });
 
   // --- mode: enrich, per-vendor budgets (#158, migration 0023) ---------------

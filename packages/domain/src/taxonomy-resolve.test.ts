@@ -403,6 +403,145 @@ describe("taxonomy resolution", () => {
     });
   });
 
+  // EVERY CASE BELOW IS A REAL PAIR FROM PROD (#260). One Fox offers run on
+  // 2026-09-01 wrote 1,067 crawler links; a 60-link audit against the vendor's own
+  // listing names got the marca right 60/60 and the leaf right 40/60 — nineteen
+  // wrong sizes and one wrong line, ~355 bad links extrapolated. The names here
+  // are the audited ones, not invented fixtures, because the invented ones all
+  // passed.
+  describe("the leaf-binding guard", () => {
+    // The audited marcas overlap the ones this file already seeds — and one of
+    // them is registered under a different display name (`Tatuaje Cigars Inc.`),
+    // so a slug lookup would seed a SECOND row that the parser then never
+    // anchors. Ask the parser instead: whatever it anchors for this marca is the
+    // brand these fixtures have to hang off, which is the only answer that keeps
+    // the structural arm reachable.
+    const marca = async (name: string): Promise<string> => {
+      const probe = await parseListing(h.deps.db, `${name} Anchor Probe`);
+      return probe.brandId ?? (await seedBrand(name));
+    };
+
+    // THE PROOF THAT THIS IS A GUARD PROBLEM AND NOT A RANKING ONE: the correct
+    // row EXISTS and a sibling was taken anyway. Prod bound four `CAO Flavours
+    // … Corona` listings — Bella Vanilla, Cherrybomb, Gold Honey, Eileen's Dream
+    // — to `CAO Flavours Moontrance Corona`, because it was the one row in the
+    // line carrying `vitola_name = 'Corona'` and "an exact vitola beats an
+    // unknown one" promoted it over four rows naming the right flavour.
+    it("does not bind Bella Vanilla to Moontrance when Bella Vanilla exists", async () => {
+      const brandId = await marca("CAO");
+      const lineId = await seedLine(brandId, "Flavours");
+      const bella = await h.seedCigar({ canonicalName: "CAO Flavours Bella Vanilla", brandId, lineId });
+      const moontrance = await h.seedCigar({
+        canonicalName: "CAO Flavours Moontrance Corona",
+        brandId,
+        lineId,
+        vitolaName: "Corona",
+      });
+
+      const parse = await parseListing(h.deps.db, "CAO Flavours Bella Vanilla Corona");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("one");
+      expect(choice.kind === "one" && choice.candidate.cigarId).toBe(bella);
+      expect(choice.kind === "one" && choice.candidate.cigarId).not.toBe(moontrance);
+    });
+
+    // The same shape one line over: `LFD Suave Maceo` bound `… Gobernador`. Two
+    // house vitola names, neither of them in any size vocabulary — which is why
+    // the mutual-residue rule and not the size rule is what catches this one.
+    it("does not bind Suave Maceo to Suave Gobernador", async () => {
+      const brandId = await marca("LFD");
+      const lineId = await seedLine(brandId, "Suave");
+      await h.seedCigar({ canonicalName: "LFD Suave Gobernador", brandId, lineId });
+
+      const parse = await parseListing(h.deps.db, "LFD Suave Maceo");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("none");
+    });
+
+    // THE STRUCTURAL ARM, WHICH COMPARED NOTHING AT ALL. A line holding exactly
+    // one leaf reached `finalists.length === 1` without a single word of either
+    // name being read, so prod's only `Tatuaje Skinny Monsters` row swallowed
+    // eight sibling SKUs — Frank, Hyde, Tiff, Wolf, Face, Jekyll, Drac.
+    it("does not let a line's only leaf swallow a different sibling", async () => {
+      const brandId = await marca("Tatuaje");
+      const lineId = await seedLine(brandId, "Skinny Monsters");
+      await h.seedCigar({ canonicalName: "Tatuaje Skinny Monsters Chuck", brandId, lineId });
+
+      const parse = await parseListing(h.deps.db, "Tatuaje Skinny Monsters Frank");
+      expect(parse.lineId).toBe(lineId);
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("none");
+    });
+
+    // `Sixty` IS that leaf's size and no size list contains it — no list ever will
+    // contain every house's private name for a 60-ring cigar. So the one-sided
+    // residue allowance is withdrawn when the LISTING has pinned a size and the
+    // row still reaches somewhere the listing does not.
+    it("does not let an only-Sixty line take the Toro", async () => {
+      const brandId = await marca("Rocky Patel");
+      const lineId = await seedLine(brandId, "Dark Star");
+      await h.seedCigar({ canonicalName: "Rocky Patel Dark Star Sixty", brandId, lineId });
+
+      const parse = await parseListing(h.deps.db, "Rocky Patel Dark Star Toro");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("none");
+    });
+
+    // A TRUNCATED CANONICAL NAME IS A FUNNEL, and the column is what closes it.
+    // Prod's `Davidoff Grand Cru` names no size but carries `vitola_name='Toro'`,
+    // and all nine Grand Cru SKUs Fox sells sit on it today.
+    //
+    // A REGRESSION GUARD, NOT A REPRODUCTION, and the distinction is worth
+    // writing down. `chooseLeaf` already refused these — `numbersCompatible` on
+    // `No. 2`/`No. 5`, the column-level `vitolaAgrees` on `Robusto` — so the nine
+    // links were never this function's decision. They are STALE LINKS the
+    // positive-evidence rule restored: `existingCrawlerLink` handed the resolver's
+    // silence a prior `cigar_id` and `ingestListing` upgraded it back to `auto`,
+    // which is why the run stamped `updated_at` on links it never re-derived.
+    // Migration 0032 is what breaks that loop, by clearing the prior link the
+    // restoration reads. This test pins the guard's half so a later relaxation
+    // cannot re-open the funnel from the other side.
+    it("reads a curated vitola_name the canonical name omits", async () => {
+      const brandId = await marca("Davidoff");
+      const grandCru = await h.seedCigar({ canonicalName: "Davidoff Grand Cru", brandId, vitolaName: "Toro" });
+
+      const toro = await parseListing(h.deps.db, "Davidoff Grand Cru Toro");
+      const toroChoice = chooseLeaf(toro, await scopedLeafCandidates(h.deps.db, toro));
+      expect(toroChoice.kind).toBe("one");
+      expect(toroChoice.kind === "one" && toroChoice.candidate.cigarId).toBe(grandCru);
+
+      const robusto = await parseListing(h.deps.db, "Davidoff Grand Cru Robusto");
+      expect(chooseLeaf(robusto, await scopedLeafCandidates(h.deps.db, robusto)).kind).toBe("none");
+    });
+
+    // THE GUARD MUST NOT EAT THE COMMONEST CORRECT SHAPE. A title that says less
+    // than the row — no size at all — is the blend-level listing meeting a
+    // vitola-level leaf, which is most of this catalog and most of what a user
+    // says out loud. Refusing it would mint a second row for every casual name.
+    it("still binds a listing that names less than the leaf", async () => {
+      const brandId = await marca("Understated Marca");
+      const leaf = await h.seedCigar({ canonicalName: "Understated Marca Reserva Flying Pig", brandId });
+
+      const parse = await parseListing(h.deps.db, "Understated Marca Reserva");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("one");
+      expect(choice.kind === "one" && choice.candidate.cigarId).toBe(leaf);
+    });
+
+    // And the mirror: both sides name the SAME size, so an extra word on the row
+    // is the row saying more, not saying otherwise. This is the pair clause 3
+    // would have damaged had it not been scoped to a row that states no size.
+    it("still binds when both sides name the same size and the row says more", async () => {
+      const brandId = await marca("Padron");
+      const leaf = await h.seedCigar({ canonicalName: "Padron 1964 Anniversary Series Torpedo", brandId });
+
+      const parse = await parseListing(h.deps.db, "Padron 1964 Anniversary Torpedo");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("one");
+      expect(choice.kind === "one" && choice.candidate.cigarId).toBe(leaf);
+    });
+  });
+
   // The scope query can only see rows it can attribute to the anchored brand,
   // and 516 of prod's 570 unlinked rows are attributable to none — their names do
   // not begin with the marca. A mint on that blindness is the duplicate ADR-012
