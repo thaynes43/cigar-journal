@@ -1103,6 +1103,12 @@ export const setListingMatchStatusSchema = z
     status: z
       .enum(["confirmed", "unmatched"])
       .describe("confirmed keeps the auto-matched cigar; unmatched clears the link (the listing matched no catalog cigar)."),
+    unmatchedReason: z
+      .enum(["market_refusal", "no_match", "no_anchor", "ambiguous"])
+      .optional()
+      .describe(
+        "Why this listing carries no link, with status unmatched. no_match: nothing in the catalog is this product. no_anchor: the title names no brand the registry knows. ambiguous: a brand anchored but no single entry under it settled. market_refusal: the vendor's market contradicts the cigar's. Omitting it records an unmatch with no stated reason, which a later enrichment ask may supersede; a stated reason is preserved. Rejected alongside status confirmed.",
+      ),
     runId,
     confidence,
   })
@@ -1238,6 +1244,7 @@ export const setListingMatchStatusOutput = z
     matchId: z.string(),
     status: z.string(),
     cigarId: z.string().nullable(),
+    unmatchedReason: z.string().nullable(),
     replayed: z.boolean(),
   })
   .passthrough();

@@ -1308,7 +1308,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Set listing match status",
       description:
-        "Rule on a vendor listing→cigar auto-match from get_curation_queue match_triage: confirmed keeps the matched cigar, unmatched clears the link (the listing matched no catalog cigar). Applies to a `status` auto row only — an unmatched row points at no cigar, so there is nothing to confirm and it is already unmatched; report it instead. Admin only. Pass runId/confidence for the run audit.",
+        "Rule on a vendor listing→cigar auto-match from get_curation_queue match_triage: confirmed keeps the matched cigar, unmatched clears the link (the listing matched no catalog cigar). Applies to a `status` auto row only — an unmatched row points at no cigar, so there is nothing to confirm and it is already unmatched; report it instead. When unmatching, pass unmatchedReason: a stated reason is a verdict later enrichment preserves, while an unmatch with none may be superseded when the catalog grows. Admin only. Pass runId/confidence for the run audit.",
       inputSchema: setListingMatchStatusSchema,
       outputSchema: setListingMatchStatusOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, title: "Set listing match status" },
@@ -1320,6 +1320,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           clientRequestId: args.clientRequestId,
           matchId: args.matchId,
           status: args.status,
+          ...(args.unmatchedReason === undefined ? {} : { unmatchedReason: args.unmatchedReason }),
           attribution: curationAttribution(args),
           correlationId,
         });

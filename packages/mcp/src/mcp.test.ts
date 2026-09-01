@@ -2704,6 +2704,66 @@ describe("@cj/mcp adapter", () => {
     expect(audit?.runId).toBe(runId);
   });
 
+  // #245 / ADR-006 amendment 2026-09-01, over the wire. The enrich drain claims a
+  // reasonless agent unmatch and leaves a reasoned one alone; the curation lane
+  // reaches this row through this tool and nothing else, so if the argument does
+  // not survive the hop the two lanes overwrite each other on every night's run.
+  it("set_listing_match_status carries unmatchedReason onto the row, and refuses one on a confirm", async () => {
+    const { matchId } = await seedAutoMatch("Curation Reasoned Unmatch");
+    const confirmable = await seedAutoMatch("Curation Reason On Confirm");
+    const runId = "wo-cigar-curate-20260901";
+
+    await withClient(adminCuration, async (client) => {
+      const res = payloadOf(
+        await call(client, "set_listing_match_status", {
+          clientRequestId: randomUUID(),
+          matchId,
+          status: "unmatched",
+          unmatchedReason: "ambiguous",
+          runId,
+          confidence: 0.9,
+        }),
+      ) as { status: string; unmatchedReason: string | null };
+      expect(res.status).toBe("unmatched");
+      expect(res.unmatchedReason).toBe("ambiguous");
+
+      // A reason belongs to an unmatch. Refused, not quietly dropped — a caller
+      // that thinks it recorded one thinks its verdict is protected.
+      const refused = errorOf(
+        await call(client, "set_listing_match_status", {
+          clientRequestId: randomUUID(),
+          matchId: confirmable.matchId,
+          status: "confirmed",
+          unmatchedReason: "no_match",
+          runId,
+          confidence: 0.9,
+        }),
+      );
+      expect(refused.code).toBe("validation_error");
+
+      // Not in the enum is not a reason. The schema is strict, so this never
+      // reaches the domain.
+      expect(
+        (
+          await call(client, "set_listing_match_status", {
+            clientRequestId: randomUUID(),
+            matchId: confirmable.matchId,
+            status: "unmatched",
+            unmatchedReason: "looked_wrong",
+            runId,
+            confidence: 0.9,
+          })
+        ).isError,
+      ).toBe(true);
+    });
+
+    const rows = await h.pg.db.select().from(listingMatches);
+    const reasoned = rows.find((r) => r.id === matchId);
+    expect(reasoned).toMatchObject({ status: "unmatched", cigarId: null, decidedBy: "agent", unmatchedReason: "ambiguous" });
+    // The refusals left the second row exactly where it was.
+    expect(rows.find((r) => r.id === confirmable.matchId)).toMatchObject({ status: "auto", unmatchedReason: null });
+  });
+
   // Migration 0023 / ADR-011: the whole chain, over the wire. A second curation
   // credential for the SAME admin subject stands in for a leaked elevated
   // service token; it runs the exact scenario the threat row has to survive —

@@ -65,17 +65,26 @@ export const listingMatches = pgTable(
     // freely re-writable; a `curator`/`agent` verdict (setListingMatchStatus) is
     // preserved by the crawler on re-crawl. Backfilled 'crawler'.
     decidedBy: text("decided_by").$type<"crawler" | "curator" | "agent">().notNull().default("crawler"),
-    // WHY a crawler-unmatched row is unmatched (migration 0025, #170). Set only by
-    // the resolver, and only on a row it decided:
+    // WHY an unmatched row is unmatched (migration 0025, #170):
     //   market_refusal — a candidate cleared the similarity floor and was DECLINED
     //                    because this vendor's focus contradicts the cigar's
     //                    evidenced market. The actionable one.
     //   no_match       — nothing cleared the floor.
-    //   null           — nobody's guess: an 'auto'/'confirmed' link, a
-    //                    curator/agent verdict, or the excludeCigar cascade (#126),
-    //                    which the triage read must keep excluded.
+    //   null           — nobody said: an 'auto'/'confirmed' link, the excludeCigar
+    //                    cascade (#126) which the triage read must keep excluded,
+    //                    or a curator/agent unmatch that gave no reason.
     // Always written by upsertListingMatch, so a re-matched row cannot keep a
     // stale reason.
+    //
+    // WRITTEN BY THE RESOLVER, AND SINCE #245 BY A CURATOR/AGENT VERDICT TOO.
+    // setListingMatchStatus takes an optional reason and writes this column on the
+    // same always-write terms. That is not cosmetic: ADR-006's 2026-09-01
+    // amendment makes this column the line between a PROTECTED agent unmatch (a
+    // reason was recorded, so somebody had intent) and a SUPERSEDABLE one (no
+    // reason and no cigar — a report on the catalogue, which a later enrichment
+    // ask may claim). A reason here does not resurface the row in triage: that
+    // read admits reasoned unmatches only when decided_by='crawler', so a settled
+    // human/agent verdict stays settled.
     //   no_anchor      — matching v2 found no brand alias in the title at all
     //                    (0027). Seed mode used to MINT from exactly this state,
     //                    which is how every new vendor grew a parallel catalog;
