@@ -10,6 +10,7 @@ import {
   evidencedMarket,
   evidencedMarketSql,
   findUnlinkedNameCollision,
+  parseListing,
   mayWriteCatalogPhoto,
   mayWriteCatalogPhotoSql,
   photoAuthority,
@@ -25,11 +26,14 @@ import { filterProductUrls, pathOf, robotsGatePath } from "./product-url.js";
 import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
 import { isCigarListing, normalizeListing, type NormalizedListing } from "./normalize.js";
 import {
+  coversAsk,
   createCigarFromListing,
+  enrichAsk,
   existingCrawlerLink,
   resolveListing,
   toSuggestedParse,
   upsertListingMatch,
+  type EnrichAsk,
 } from "./match.js";
 import { parseRobots } from "./robots.js";
 import { openCrawlRun, reclaimStrandedRuns, type SignalHost } from "./run-record.js";
@@ -41,7 +45,21 @@ import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
 // bracketed by a crawl_runs row; a `--dry-run` fetches (bounded) and reports the
 // would-writes without touching the DB or the object store.
 
-const ENRICH_DEFAULT_LIMIT = 10;
+// HOW MANY ASKS ONE LANE DRAINS A NIGHT. Raised 10 → 50 (#233) now that a look
+// is decided structurally rather than by a trigram floor: at ten a night the
+// backlog outran the drain, and the ceiling was set when most looks were being
+// thrown away by the floor anyway.
+//
+// The politeness arithmetic, which is what actually bounds this. One look fetches
+// at most MAX_ENRICH_CANDIDATES product pages — 8, and in practice ~5, since the
+// slug-overlap prefilter rarely offers eight plausible URLs — plus the robots and
+// sitemap reads the whole run shares. So 50 looks is ~250 pages and at most 400,
+// against a seed/offers walk that reads every product URL a vendor publishes
+// (Fox's flat sitemap is ~2,035 locs) on the same 2.5s interval. The drain stays
+// the SMALL walk of the two; it is a targeted lookup lane, not a catalogue crawl.
+// The per-vendor safety cap (`adapter.maxPages`, wired to the fetcher in cli.ts)
+// still bounds a run whatever this says.
+const ENRICH_DEFAULT_LIMIT = 50;
 const MAX_ENRICH_CANDIDATES = 8;
 
 export type CrawlMode = "seed" | "offers" | "enrich";
@@ -756,9 +774,13 @@ async function drainEnrichment(
   // holds requests open forever.
   const open = await deps.db.execute(sql`
     SELECT r.id AS request_id, c.id AS cigar_id, c.canonical_name,
+           c.brand, c.line, c.brand_id, c.line_id, c.blend_id,
+           br.aliases AS brand_aliases, ln.aliases AS line_aliases,
            ${evidencedMarketSql(sql`c.id`)} AS market
     FROM enrichment_requests r
     JOIN cigars c ON c.id = r.cigar_id
+    LEFT JOIN brands br ON br.id = c.brand_id
+    LEFT JOIN lines ln ON ln.id = c.line_id
     LEFT JOIN enrichment_attempts a
            ON a.request_id = r.id AND a.vendor_id = ${options.vendorId}
     WHERE r.status IN ('pending', 'in_progress', 'exhausted')
@@ -771,6 +793,17 @@ async function drainEnrichment(
     request_id: string;
     cigar_id: string;
     canonical_name: string;
+    // The ask's STRUCTURE, read in the same query as its name. What the candidate
+    // comparison needs is the row's own taxonomy, not a re-parse of its name: the
+    // prod ask `HdM Epicure Especial` carries `brand_id` for Hoyo de Monterrey
+    // while its name abbreviates the marca to a spelling no alias holds.
+    brand: string | null;
+    line: string | null;
+    brand_id: string | null;
+    line_id: string | null;
+    blend_id: string | null;
+    brand_aliases: string[] | null;
+    line_aliases: string[] | null;
     market: CigarType | null;
   }[];
 
@@ -787,9 +820,19 @@ async function drainEnrichment(
   stats.enrich = enrich;
 
   for (const request of pending) {
-    const cigar = { id: request.cigar_id, canonicalName: request.canonical_name };
+    const ask = enrichAsk({
+      cigarId: request.cigar_id,
+      canonicalName: request.canonical_name,
+      brand: request.brand,
+      line: request.line,
+      brandId: request.brand_id,
+      lineId: request.line_id,
+      blendId: request.blend_id,
+      brandAliases: request.brand_aliases,
+      lineAliases: request.line_aliases,
+    });
 
-    const wanted = slugTokens(cigar.canonicalName);
+    const wanted = slugTokens(ask.canonicalName);
     const ranked = candidates
       .map((candidate) => ({ ...candidate, score: overlap(wanted, candidate.tokens) }))
       .filter((candidate) => candidate.score > 0)
@@ -801,7 +844,7 @@ async function drainEnrichment(
       options,
       focus,
       crawlRunId,
-      cigar,
+      ask,
       ranked,
       candidates.length,
       stats,
@@ -865,15 +908,36 @@ async function drainEnrichment(
 // empty enumeration, no candidate that answered 200, and candidates that answered
 // 200 with nothing a product parser could read.
 //
-// A parsed product that is an accessory, or that misses the similarity floor, is a
-// MISS and not an error: we did read the vendor's catalogue, and what it holds is
-// not this cigar.
+// A parsed product that is an accessory, or that does not structurally cover the
+// ask, is a MISS and not an error: we did read the vendor's catalogue, and what
+// it holds is not this cigar.
+//
+// THE COMPARISON RIDES MATCHING V2 (#233). It used to be one trigram call —
+// `similarity(cigars.canonical_name, listing.name) > 0.55` — which is the v1 rule
+// the seed and offers paths left behind in Wave 2, kept here only because nothing
+// had rewritten it. ADR-012 predicted exactly how it fails and prod's drain then
+// recorded it: a blend-level ask (`Drew Estate Liga Privada No. 9`) against a
+// vitola-level title (`Liga Privada No. 9 Corona Viva`) scores under the floor,
+// so Fox was recorded as not carrying a cigar it visibly stocks — a `miss` is
+// written to the ledger as evidence about that catalogue, so a matcher defect
+// was being laundered into a factual claim about a vendor.
+//
+// `coversAsk` (match.ts) now decides admission and TRIGRAM IS DEMOTED TO A
+// RANKER over the candidates it admits. That is the whole of its remaining job:
+// it never opens a door, it only chooses among doors already open, so the two
+// pathologies ADR-012 measured (distinct products scoring above true siblings)
+// can reorder a shortlist but can no longer create or refuse a link.
+//
+// Consequently the loop now READS EVERY RANKED CANDIDATE instead of stopping at
+// the first one over the floor — a ranker that cannot see the alternatives is not
+// a ranker. The page cost is unchanged in the worst case and bounded by
+// MAX_ENRICH_CANDIDATES either way; see ENRICH_DEFAULT_LIMIT for the arithmetic.
 async function tryEnrichCandidates(
   deps: IngestDeps,
   options: IngestOptions,
   focus: VendorFocus | null,
   crawlRunId: string | null,
-  cigar: { id: string; canonicalName: string },
+  ask: EnrichAsk,
   ranked: { url: string }[],
   enumerated: number,
   stats: IngestStats,
@@ -886,6 +950,8 @@ async function tryEnrichCandidates(
   // Did we actually READ this vendor's catalogue? A 200 is not enough — see the
   // header: a gate that admits non-product pages answers 200 and parses nothing.
   let parsed = false;
+  const admitted: { url: string; listing: NormalizedListing; product: JsonLdProduct; sim: number }[] = [];
+
   for (const candidate of ranked) {
     const { status, body } = await deps.fetcher.fetchText(candidate.url);
     if (status !== 200) {
@@ -903,11 +969,50 @@ async function tryEnrichCandidates(
       continue;
     }
 
-    const sim = await nameSimilarity(deps, cigar.canonicalName, listing.name);
-    if (sim <= 0.55) continue;
+    const parse = await parseListing(deps.db, listing.name);
+    if (!coversAsk(ask, parse)) continue;
+
+    // A LISTING THAT ALREADY RESOLVES TO A DIFFERENT CATALOG ROW IS NOT OURS TO
+    // REPOINT, and this guard is what keeps the fix from becoming a regression.
+    // Coverage is deliberately one-way, so Fox's `Liga Privada No. 9 Corona Viva`
+    // covers the blend-level ask — but a seed walk already linked that listing to
+    // the Corona Viva row, which is the MORE specific and therefore better answer
+    // for it. Letting the drain win that tug-of-war would move the link (and the
+    // offer history hanging off it) from the vitola row onto the blend row, and
+    // because the title anchors no brand the seed walk would read `no_anchor`
+    // next crawl, annotate, and leave the theft standing. A blend-level ask is
+    // not positive evidence against a vitola-level link — the same rule the seed
+    // path applies when it refuses to unlink on silence.
+    //
+    // Skipping it is not a lie about the catalogue: the look simply moves to the
+    // next candidate, and a vendor whose every covering listing belongs to other
+    // rows genuinely has no unclaimed listing to offer this ask.
+    const prior = await existingCrawlerLink(deps.db, options.vendorId, pathOf(candidate.url));
+    if (prior != null && prior !== ask.cigarId) continue;
+
+    admitted.push({
+      url: candidate.url,
+      listing,
+      product,
+      sim: await nameSimilarity(deps, ask.canonicalName, listing.name),
+    });
+  }
+
+  // Trigram's one remaining job: order the shortlist. Ties keep enumeration
+  // order, which is the slug-overlap rank the candidates arrived in.
+  admitted.sort((a, b) => b.sim - a.sim);
+  const best = admitted[0];
+  if (!best) return parsed ? "miss" : "error";
+
+  {
+    const candidate = { url: best.url };
+    const listing = best.listing;
+    const product = best.product;
 
     if (options.dryRun) {
-      report.push(`enrich ${pathOf(candidate.url)}  ${listing.name}  (sim=${sim.toFixed(2)}) → ${cigar.canonicalName}`);
+      report.push(
+        `enrich ${pathOf(candidate.url)}  ${listing.name}  (sim=${best.sim.toFixed(2)}) → ${ask.canonicalName}`,
+      );
       return "match";
     }
 
@@ -922,11 +1027,22 @@ async function tryEnrichCandidates(
     // Evaluated INSIDE the transaction that writes the match, so the check and the
     // write see one snapshot.
     const outcome = await deps.db.transaction(async (tx): Promise<"refused" | "declined" | "linked"> => {
-      if (!coversMarket(focus, await evidencedMarket(tx, cigar.id))) return "refused";
+      if (!coversMarket(focus, await evidencedMarket(tx, ask.cigarId))) return "refused";
+
+      // THE PRIOR LINK, RE-READ AT THE WRITE, for exactly the reason the market
+      // check above is re-read here: the admission scan is seconds of polite HTTP
+      // away, and a seed walk on another lane can link this listing to its own
+      // best leaf inside that window. Authority belongs at the write site; the
+      // check during admission is an optimization, not a guarantee. `declined` is
+      // the right arm — the row says something other than "linked to this cigar",
+      // which is precisely what that outcome already means.
+      const priorAtWrite = await existingCrawlerLink(tx, options.vendorId, pathOf(candidate.url));
+      if (priorAtWrite != null && priorAtWrite !== ask.cigarId) return "declined";
+
       const match = await upsertListingMatch(tx, {
         vendorId: options.vendorId,
         listingKey: pathOf(candidate.url),
-        cigarId: cigar.id,
+        cigarId: ask.cigarId,
         status: "auto",
         now,
         // The drain only ever LINKS, so any reason the row carried from a previous
@@ -946,7 +1062,7 @@ async function tryEnrichCandidates(
       // precisely the population the guard exists to protect. A declined upsert is
       // a miss: the row says something other than "linked to this cigar", and no
       // arithmetic on our side changes that.
-      const committed = match.status === "auto" && match.cigarId === cigar.id;
+      const committed = match.status === "auto" && match.cigarId === ask.cigarId;
       if (committed) stats.matchesAuto += 1;
 
       // The offer is written either way. It is a fact about the LISTING —
@@ -986,7 +1102,7 @@ async function tryEnrichCandidates(
 
     // A DECLINED UPSERT ENDS THE LOOK TOO, and it must end it BEFORE the photo.
     // The row belongs to a curator or an agent who pointed this listing somewhere
-    // else; capturing a catalogue photo for `cigar.id` on the strength of a link
+    // else; capturing a catalogue photo for `ask.cigarId` on the strength of a link
     // that was refused is the exact shape of #209, one path over. Not counted as a
     // market skip — nothing was refused on market grounds — and not an error: we
     // read the catalogue and a human had already answered the question.
@@ -1023,13 +1139,12 @@ async function tryEnrichCandidates(
     // make on its own.
     let captured: PhotoCapture = "skipped";
     try {
-      captured = await capturePhoto(deps, options.vendorId, focus, cigar.id, listing, stats);
+      captured = await capturePhoto(deps, options.vendorId, focus, ask.cigarId, listing, stats);
     } catch {
       stats.errors += 1;
     }
     return captured === "refused" ? "photo_refused" : "match";
   }
-  return parsed ? "miss" : "error";
 }
 
 // Write this vendor's verdict to the ledger, then RECOMPUTE the request's cached
