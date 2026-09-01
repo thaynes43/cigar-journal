@@ -50,7 +50,7 @@ function packagingTokens(name: string): Set<string> {
 // production: `Padron 1964 Anniversary Natural` is one row holding twelve vendor
 // listings that span both wrappers. `Maduro` and `Natural` share no digits and no
 // packaging token, so neither existing guard could tell them apart.
-const VARIANT_TOKENS = new Set([
+export const VARIANT_TOKENS = new Set([
   "maduro",
   "natural",
   "claro",
@@ -69,6 +69,116 @@ const VARIANT_TOKENS = new Set([
   "rosado",
 ]);
 
+// ==========================================================================
+// SPELLING-VARIANT EQUIVALENCE — one word, more than one spelling.
+//
+// Every rule in this file compares FOLDED TOKENS FOR EQUALITY, which is exact
+// where the trade is not. Two shops write one wrapper three ways, a Spanish word
+// and its English translation name the same release, and the catalog carries
+// outright misspellings — and each of those reads to an exact-token rule as two
+// different identity claims, so the guard refuses a link that is plainly right
+// and the ranking scores the same product twice.
+//
+// The table below is the ONE place a spelling is declared to be another
+// spelling. The first entry of each group is the canonical key; every other
+// entry folds onto it, and a multi-word entry folds onto it with its separator
+// dropped, exactly as `Sun Grown` already folds onto `sungrown`.
+//
+// EQUIVALENCE, NOT DISTANCE. Edit distance is not available to this rule and
+// must not be: over the live catalog's own tokens, distance 1 pairs `face` with
+// `farce`, `fuente` with `fuerte`, and `black` with `block`. Every entry here is
+// a spelling of one word attested in the live catalog or in vendor listing
+// titles, and nothing is equated because it merely looks close.
+//
+// Membership in the vocabulary sets is tested on the CANONICAL key, so a group
+// whose canonical key is vocabulary (`shade`, `double`, `rothschild`) carries
+// its variants into that vocabulary too, and a group whose canonical key is
+// identity (`ecuador`, `sanandres`) keeps its variants identity-bearing. That is
+// the difference between unifying two spellings and reclassifying a word.
+const SPELLING_VARIANT_GROUPS: readonly (readonly string[])[] = [
+  // Wrapper and shade vocabulary. `sun grown` is listed for completeness — it
+  // was pair-joined by `variantTokens` before this table existed and now reads
+  // from it, so the pair rule has one source. `shade grown` had no entry at all:
+  // the single `shade` was struck as a wrapper and the orphaned `grown` was left
+  // behind as identity, which is why `HC Series White Shade Grown Toro` and
+  // `… Shadegrown Toro` did not read as the same claim.
+  ["sungrown", "sun grown"],
+  ["shade", "shade grown", "shadegrown"],
+  // Identity-bearing, and deliberately so. `Camacho Ecuador` is a product line,
+  // not a wrapper note, so `ecuador` stays identity — the group unifies its
+  // spellings without letting `Camacho Ecuador` link to `Camacho Corojo`.
+  ["ecuador", "ecuadorian", "ecuadorean"],
+  // The Mexican wrapper region and the word vendors use instead of it.
+  ["san andres", "sanandres", "mexican"],
+  ["barber pole", "barberpole"],
+  // Spelling and language variants of identity words, each attested in the
+  // catalog or in live vendor listing titles.
+  ["aniversario", "anniversario", "anniversary"],
+  ["edicion", "edition"],
+  ["especial", "especiale", "especiales", "special"],
+  ["nicaragua", "nicaraguan"],
+  // Vitola vocabulary. `rothschild` and `double` are already vitola tokens, so
+  // the misspelling and the Spanish spelling become vocabulary with them.
+  ["rothschild", "rothchilde"],
+  ["double", "doble"],
+];
+
+// The table as a lookup: every spelling, folded and joined, to its canonical
+// key. Derived rather than typed twice so a group cannot half-apply.
+export const SPELLING_VARIANTS: ReadonlyMap<string, string> = new Map(
+  SPELLING_VARIANT_GROUPS.flatMap((group) => {
+    const canonical = foldTokens(group[0]!).join("");
+    return group.map((spelling) => [foldTokens(spelling).join(""), canonical] as const);
+  }),
+);
+
+// Trailing-`s` fold, for comparison only. `Monster`/`Monsters` and
+// `Serie`/`Series` are one word two vendors spell differently; `Face` and
+// `Bride` are not, and no stemming makes them one.
+//
+// THE FLOOR IS ON THE STEM, NOT THE TOKEN, and it was on the token until the
+// #235 verify pass measured it: a four-character floor read as "never truncate a
+// short word" while in fact truncating `opus` to `opu`, the exact outcome it was
+// written to prevent. Requiring the STEM to be four characters refuses `opus`
+// and still folds every plural the catalog actually carries — `series`→`serie`,
+// `monsters`→`monster`, `robustos`→`robusto`, `churchills`→`churchill`.
+//
+// `-ss` IS NEVER A PLURAL. English has no plural ending in a doubled s, so
+// `press`→`pres` and `dress`→`dres` were pure damage — `press` appears ten times
+// in live listing titles, and `dress box` is trade vocabulary
+// (docs/ddd/cigar-industry-vocabulary.md).
+//
+// What remains, stated rather than denied: a six-letter word ending in `s` still
+// folds, so `andres` folds to `andre`. Neither key occurs anywhere in the live
+// catalog or in vendor listing titles, so nothing collides today — and the one
+// place the word is expected, the `San Andrés` wrapper, is joined into
+// `sanandres` by the table above before this rule ever sees it.
+function singularKey(token: string): string {
+  if (!token.endsWith("s") || token.endsWith("ss")) return token;
+  const stem = token.slice(0, -1);
+  return stem.length >= 4 ? stem : token;
+}
+
+// A token's comparison key: its spelling variant if the table names one, else
+// the singular fold. The raw token is tried before the fold so a group may name
+// a plural spelling directly (`especiales`).
+function canonicalKey(token: string): string {
+  const direct = SPELLING_VARIANTS.get(token);
+  if (direct !== undefined) return direct;
+  const singular = singularKey(token);
+  return SPELLING_VARIANTS.get(singular) ?? singular;
+}
+
+// Two adjacent tokens read as one word — `Sun Grown`, `San Andres`, `Barber
+// Pole` — when the pair spells a key some table knows. Returns the canonical key
+// or null; null means the pair is not a phrase and each token stands alone.
+function joinedKey(a: string, b: string): string | null {
+  const joined = a + b;
+  const canonical = SPELLING_VARIANTS.get(joined);
+  if (canonical !== undefined) return canonical;
+  return VARIANT_TOKENS.has(joined) ? joined : null;
+}
+
 // A wrapper name is written three ways by three vendors — `Sun Grown`,
 // `sun-grown`, `sungrown` — and a token scan sees the third only. Reading
 // ADJACENT PAIRS as well as single tokens unifies them onto one key, because the
@@ -80,11 +190,12 @@ function variantTokens(name: string): Set<string> {
   const tokens = tokensOf(name);
   const found = new Set<string>();
   for (let i = 0; i < tokens.length; i++) {
-    const single = tokens[i]!;
+    const single = canonicalKey(tokens[i]!);
     if (VARIANT_TOKENS.has(single)) found.add(single);
-    if (i + 1 < tokens.length) {
-      const joined = single + tokens[i + 1]!;
-      if (VARIANT_TOKENS.has(joined)) found.add(joined);
+    const next = tokens[i + 1];
+    if (next !== undefined) {
+      const joined = joinedKey(tokens[i]!, next);
+      if (joined !== null && VARIANT_TOKENS.has(joined)) found.add(joined);
     }
   }
   return found;
@@ -155,8 +266,9 @@ export function variantCompatible(query: string, candidate: string): boolean {
 // linked: `add_cigar` for The Face returned `created: false` against The Bride's
 // row. Two different cigars, one id, no error, in production.
 //
-// The rule reads a name as identity plus vocabulary. Fold both names, then strike
-// from each side every token that is:
+// The rule reads a name as identity plus vocabulary. Fold both names onto their
+// comparison keys — accents dropped, plurals folded, alternative spellings
+// unified by the table above — then strike from each side every key that is:
 //
 //   shared     — both names say it, so it cannot distinguish them.
 //   a size     — `Robusto`, `Double Corona`. Vitolas are compared by
@@ -178,32 +290,44 @@ export function variantCompatible(query: string, candidate: string): boolean {
 // both names reach past their common ground and reach somewhere different.
 // ==========================================================================
 
-// Trailing-`s` fold, for comparison only. `Monster`/`Monsters` and
-// `Serie`/`Series` are one word two vendors spell differently; `Face` and
-// `Bride` are not, and no stemming makes them one. Held to four characters so a
-// short identity word is never truncated into a different one.
-function singularKey(token: string): string {
-  return token.length >= 4 && token.endsWith("s") ? token.slice(0, -1) : token;
+function isVocabularyKey(key: string): boolean {
+  return VITOLA_TOKENS.has(key) || PACKAGING_TOKENS.has(key) || VARIANT_TOKENS.has(key);
 }
 
-function isVocabularyToken(token: string): boolean {
-  return VITOLA_TOKENS.has(token) || PACKAGING_TOKENS.has(token) || VARIANT_TOKENS.has(token);
+interface NameKey {
+  key: string;
+  vocabulary: boolean;
 }
 
-function residueOf(tokens: string[], shared: ReadonlySet<string>): Set<string> {
-  const residue = new Set<string>();
+// A name as the comparison keys it contributes, in order. ONE PASS, so the
+// spelling table, the phrase join and the vocabulary strike cannot disagree
+// about what a token became: an adjacent pair that spells a known phrase
+// collapses into that phrase's canonical key and consumes both tokens; anything
+// else is canonicalized on its own.
+//
+// The pair is tried first because a two-word phrase is a stronger claim on the
+// text than either half — `Sun Grown` is a wrapper, `Sun` alone is not.
+function comparisonKeys(name: string): NameKey[] {
+  const tokens = foldTokens(name);
+  const keys: NameKey[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i]!;
-    const key = singularKey(token);
-    if (shared.has(key)) continue;
-    if (isVocabularyToken(token) || isVocabularyToken(key)) continue;
-    // A two-word wrapper (`Sun Grown`) is ONE variant token to `variantTokens`,
-    // which joins the pair. The residue has to drop both halves or half a
-    // wrapper name reads as identity.
     const next = tokens[i + 1];
-    const prev = tokens[i - 1];
-    if (next !== undefined && VARIANT_TOKENS.has(token + next)) continue;
-    if (prev !== undefined && VARIANT_TOKENS.has(prev + token)) continue;
+    const pair = next === undefined ? null : joinedKey(tokens[i]!, next);
+    if (pair !== null) {
+      keys.push({ key: pair, vocabulary: isVocabularyKey(pair) });
+      i++;
+      continue;
+    }
+    const key = canonicalKey(tokens[i]!);
+    keys.push({ key, vocabulary: isVocabularyKey(key) });
+  }
+  return keys;
+}
+
+function residueOf(keys: readonly NameKey[], shared: ReadonlySet<string>): Set<string> {
+  const residue = new Set<string>();
+  for (const { key, vocabulary } of keys) {
+    if (vocabulary || shared.has(key)) continue;
     residue.add(key);
   }
   return residue;
@@ -218,15 +342,13 @@ export interface IdentityResidues {
 // among siblings that share a brand and a line, the residue IS the differentiator
 // the whole-string trigram score drowns.
 export function identityResidues(query: string, candidate: string): IdentityResidues {
-  const queryTokens = foldTokens(query);
-  const candidateTokens = foldTokens(candidate);
-  const candidateKeys = new Set(candidateTokens.map(singularKey));
-  const shared = new Set(
-    queryTokens.map(singularKey).filter((key) => candidateKeys.has(key)),
-  );
+  const queryKeys = comparisonKeys(query);
+  const candidateKeys = comparisonKeys(candidate);
+  const candidateSet = new Set(candidateKeys.map(({ key }) => key));
+  const shared = new Set(queryKeys.map(({ key }) => key).filter((key) => candidateSet.has(key)));
   return {
-    query: residueOf(queryTokens, shared),
-    candidate: residueOf(candidateTokens, shared),
+    query: residueOf(queryKeys, shared),
+    candidate: residueOf(candidateKeys, shared),
   };
 }
 
@@ -236,7 +358,7 @@ export function identityResidues(query: string, candidate: string): IdentityResi
 const NOTHING_SHARED: ReadonlySet<string> = new Set<string>();
 
 function identityTokens(name: string): Set<string> {
-  return residueOf(foldTokens(name), NOTHING_SHARED);
+  return residueOf(comparisonKeys(name), NOTHING_SHARED);
 }
 
 // How much of what the QUERY claims a candidate accounts for, 0..1 — the share
@@ -269,13 +391,55 @@ export function identityCoverage(query: string, candidate: string): number {
   return overlap / q.size;
 }
 
-// Candidates ordered by IDENTITY FIRST, trigram second — the ordering ADR-012's
-// header warns the raw score gets wrong ("trigram similarity RANKS DISTINCT
-// PRODUCTS ABOVE TRUE SIBLINGS"). Whole-string similarity is kept as the
-// tiebreaker, not discarded: within one identity verdict it is still the best
-// signal there is. A query naming only a brand covers equally in every candidate
-// that carries the brand, so those tie here and the sort — being stable — hands
-// them back in the order SQL returned them.
+// How many trigram candidates the identity rank is given, as against how many
+// the caller returns. A FAMILY IS BIGGER THAN A PAGE: `Tatuaje Monster` is
+// fourteen live siblings whose names differ in one word out of six, so they
+// score nearly alike and a small `LIMIT` on the trigram order returns arbitrary
+// members of the fourteen — the one the user actually named as likely absent as
+// present. Ranking cannot recover a row the pool never held, so the pool is
+// drawn wide on similarity, ranked on identity, and only then cut.
+//
+// ONE POOL FOR BOTH READERS. `searchCigars` shows the candidates and
+// `resolveCigar` decides link-vs-create over the same catalog with the same
+// guard, so a row inside one's reach and outside the other's is a disagreement
+// with nothing behind it: the tool that offers a sibling would be the tool that
+// cannot see it a moment later, and `resolveCigar`'s ambiguity list — the list
+// the user picks from — would be drawn from a narrower slice than the search
+// that prompted them to pick.
+export const CANDIDATE_POOL = 50;
+
+// Coverage is a RATIO OF SMALL INTEGERS, so the arithmetic gap between two
+// candidates is often narrower than any claim either name makes: 4/5 against
+// 3/4 is a difference in token counts, not in what the names say. Quantizing
+// answers only the question the measure can answer — does this candidate account
+// for most of the name, some of it, or none — and hands everything finer back to
+// the trigram score.
+const IDENTITY_BANDS = 2;
+
+// Candidates ordered by the IDENTITY VERDICT FIRST, then by identity band, and
+// only then by trigram — the ordering ADR-012's header warns the raw score gets
+// wrong ("trigram similarity RANKS DISTINCT PRODUCTS ABOVE TRUE SIBLINGS").
+//
+// THE VERDICT IS THE GUARD'S OWN, and putting it first is what makes the rest
+// safe to relax. A candidate with a MUTUAL residue contradicts the name — it
+// says `Bride` where the query said `Creature` — and no trigram score should
+// promote a contradiction, so those sort below every candidate that merely says
+// more or less than the query. That is the whole of the fourteen-sibling case:
+// thirteen siblings contradict and the named one does not.
+//
+// COVERAGE IS NO LONGER AN ABSOLUTE PRIMARY, because it was demoting better
+// answers. It cannot see the candidate's own extra words, so a longer, more
+// specific catalog name that happens to contain every word of the query scores a
+// perfect 1 and outranked a near-exact match that dropped a single word —
+// `Padron 1964 Anniversary Series Diplomatico` above `Padron 1964 Anniversary
+// Torpedo` for a query naming the Torpedo. Banded, those two tie on identity and
+// the trigram score — which is emphatically better at whole-name closeness —
+// decides. A genuinely stronger identity claim still lands in a higher band and
+// still wins outright.
+//
+// A query naming only a brand covers equally in every candidate that carries the
+// brand, so those tie on all three keys and the sort — being stable — hands them
+// back in the order SQL returned them.
 export function rankByIdentity<T>(
   query: string,
   rows: readonly T[],
@@ -284,9 +448,14 @@ export function rankByIdentity<T>(
   return rows
     .map((row) => {
       const { name, sim } = read(row);
-      return { row, identity: identityCoverage(query, name), sim };
+      return {
+        row,
+        compatible: identityTokensCompatible(query, name) ? 1 : 0,
+        band: Math.round(identityCoverage(query, name) * IDENTITY_BANDS),
+        sim,
+      };
     })
-    .sort((a, b) => b.identity - a.identity || b.sim - a.sim)
+    .sort((a, b) => b.compatible - a.compatible || b.band - a.band || b.sim - a.sim)
     .map((scored) => scored.row);
 }
 

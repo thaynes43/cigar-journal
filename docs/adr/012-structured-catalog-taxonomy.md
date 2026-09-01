@@ -105,6 +105,27 @@ no brand anchor → triage with the suggested parse attached. The
 `numbersCompatible`/`packagingCompatible` string heuristics retire once
 structural comparison covers their cases.
 
+**The matching vocabulary lives in code, and the code is the authority.**
+Deciding whether a name word is a size, a container, a wrapper, an alternative
+spelling of one of those, or the product's own identity is a matching rule, and
+it is exercised on every listing and every described cigar. Four sets exported
+from `@cj/domain` are that decision, and nothing else is:
+
+| set | answers |
+|---|---|
+| `VITOLA_TOKENS` (`catalog-parse.ts`) | is this word a size? — derived from `VITOLA_TERMS`, including the modifiers (`petit`, `gran`, `double`, `short`, `extra`) that multi-word entries split into |
+| `PACKAGING_TOKEN_LABELS` (`catalog-parse.ts`) | is this word a container, and what does an offer record it as? |
+| `VARIANT_TOKENS` (`name-heuristics.ts`) | is this word a wrapper or shade a brand sells as a separate product? |
+| `SPELLING_VARIANTS` (`name-heuristics.ts`) | is this word another spelling of one of the above, or of an identity word? |
+
+`docs/ddd/cigar-industry-vocabulary.md` remains the reference for what the trade
+terms MEAN and which level they map to; it does not enumerate the tokens and is
+not expected to. Duplicating these tables into prose would produce two
+vocabularies that drift, which is the failure `PACKAGING_TOKEN_LABELS` was
+consolidated to end — a term strippable by one pass and unrecorded by the other.
+A word gains or loses vocabulary status by editing the set and the tests that
+pin it (issue #237).
+
 **Gate:** no new vendor is enabled (2 Guys, Small Batch) before matching v2 and
 the packaging fold land. Re-probes may proceed; enabling waits. Expanding the
 crawl first would pour thousands of listings through the matcher this ADR
