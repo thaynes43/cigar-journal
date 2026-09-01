@@ -54,6 +54,26 @@ model tokens conflict with the query's (e.g. "1964 Maduro" vs "1926 Maduro",
 "Liga Privada T52" vs "…No. 9") is disqualified from strong-linking even at a
 high trigram score, so it creates a new entry rather than mislinking.
 
+The same disqualification applies to **word** identity tokens, and nothing about
+the number rule was ever specific to digits. Each name is read as identity plus
+vocabulary: strike the tokens the two names share, then the sizes, containers and
+wrappers each judged by their own rule, and what remains is that name's identity
+residue. Two non-empty residues are two different products — "Tatuaje Monster
+Series The Face" is not "…The Bride", however many characters they share — and
+the pair may not strong-link (production, 2026-08-30: `add_cigar` for The Face
+returned `created: false` against The Bride). A residue on ONE side only is a
+name saying more, not saying something else ("Liga Privada No. 9 Flying Pig"
+against the blend-level "…No. 9"), and still links; that asymmetry is what keeps
+a casually named cigar from minting a second row.
+
+A near-match rejected by the identity rule ALONE is neither linked nor created:
+it raises `cigar_ambiguous` with the siblings as candidates, because the residue
+is too weak a signal to decide silently in either direction and the user is the
+one who knows. A number or packaging rejection still creates — those names state
+a structured difference, so there is nothing to adjudicate. Candidate lists are
+ordered by identity agreement before trigram score, so among fourteen siblings of
+one family the one the user named is offered first instead of buried.
+
 ## Failure modes
 
 - `cigar_ambiguous` at save time → model asks the user, retries with the
