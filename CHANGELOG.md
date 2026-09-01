@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.35.0](https://github.com/thaynes43/cigar-journal/compare/v0.34.0...v0.35.0) (2026-09-01)
+
+
+### Features
+
+* **mcp:** record_purchase_batch — one haul, per-item results ([#255](https://github.com/thaynes43/cigar-journal/issues/255)) ([bbae2e8](https://github.com/thaynes43/cigar-journal/commit/bbae2e853c0c67f764acb76a49bf94e152b33d70))
+* **mcp:** set_listing_match_status records why a listing was unmatched ([#254](https://github.com/thaynes43/cigar-journal/issues/254)) ([444d9fc](https://github.com/thaynes43/cigar-journal/commit/444d9fc881795686ee063aec802b17336cceb15e))
+
+
+### Bug Fixes
+
+* **crawler:** 2 Guys products are root-level product-code slugs, not /store/ ([#250](https://github.com/thaynes43/cigar-journal/issues/250)) ([4945cbe](https://github.com/thaynes43/cigar-journal/commit/4945cbec20b791aa4a67d3da7e54d35d1a2187f2)), closes [#217](https://github.com/thaynes43/cigar-journal/issues/217)
+* **domain:** the identity guard reads spellings, and the ranking stops demoting better matches ([#249](https://github.com/thaynes43/cigar-journal/issues/249)) ([67b0c1a](https://github.com/thaynes43/cigar-journal/commit/67b0c1ad22f3090cb8e15c613d468dcc24e71ac5)), closes [#237](https://github.com/thaynes43/cigar-journal/issues/237)
+* **web:** name the public journal index in an h1 ([#253](https://github.com/thaynes43/cigar-journal/issues/253)) ([4e384d1](https://github.com/thaynes43/cigar-journal/commit/4e384d1055adbcacb924fe82427127faac1c9ef2))
+* **web:** one hero plate for every cigar; honest empty-catalog line ([#256](https://github.com/thaynes43/cigar-journal/issues/256)) ([ebff43e](https://github.com/thaynes43/cigar-journal/commit/ebff43ecdf9f41e4a8e0e74b82599bdb237fc20a))
+
 ## [0.34.0](https://github.com/thaynes43/cigar-journal/compare/v0.33.0...v0.34.0) (2026-09-01)
 
 
