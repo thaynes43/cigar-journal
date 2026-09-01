@@ -84,6 +84,7 @@ import { liveEnrichMarkets } from "./enrichment-coverage.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
 import { CigarNotFoundError, PhotoNotFoundError, UnauthorizedError, ValidationError } from "./errors.js";
 import { isUuid } from "./uuid.js";
+import { isPgTimestamp } from "./cursor-keys.js";
 
 // Catalog hygiene — the curator's toolkit (ADR-006). Merge re-points every
 // reference off a duplicate and tombstones it (recording what moved, so unmerge
@@ -1996,19 +1997,14 @@ function encodeWorklistCursor(parts: [string, string]): string {
   return Buffer.from(JSON.stringify(parts), "utf8").toString("base64url");
 }
 
-// Postgres' own rendering of a timestamptz (`created_at::text`), which is what
-// the three time-ordered lanes put in the cursor's first slot — full microsecond
-// precision and a space rather than a T, so it is deliberately matched by shape
-// instead of Date.parse, whose acceptance of that spelling is not guaranteed.
-const PG_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?([+-]\d{2}(:?\d{2})?|Z)?$/;
-
 // Both halves are spent unquoted — every lane casts the second to ::uuid, and the
 // first to ::timestamptz except the duplicates lane, which pairs two cigar ids and
 // casts both to ::uuid. A well-formed envelope carrying junk therefore used to
 // reach the database and raise an untyped cast error (22P02, or 22007 for the
 // instant), which is a 500 rather than the graceful first page promised above.
 // Accepting only what the encoder can emit makes that promise true; anything else
-// is a cursor we did not issue, and absent is the honest reading (#206, ./uuid.ts).
+// is a cursor we did not issue, and absent is the honest reading (#206; the two
+// shape guards live in ./uuid.ts and ./cursor-keys.ts).
 //
 // The caller declares which shape ITS lane will cast the first half to, because
 // checking "uuid or instant" is not enough: cursors are opaque, so a client that
@@ -2030,7 +2026,7 @@ function decodeWorklistCursor(
       Array.isArray(parsed) &&
       typeof parsed[0] === "string" &&
       typeof parsed[1] === "string" &&
-      (head === "uuid" ? isUuid(parsed[0]) : PG_TIMESTAMP_RE.test(parsed[0])) &&
+      (head === "uuid" ? isUuid(parsed[0]) : isPgTimestamp(parsed[0])) &&
       isUuid(parsed[1])
     ) {
       return [parsed[0], parsed[1]];

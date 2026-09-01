@@ -36,6 +36,7 @@ import {
   lookupHierarchyEntity,
 } from "./catalog-hierarchy.js";
 import { isUuid } from "./uuid.js";
+import { isDecimal, isPgTimestamp } from "./cursor-keys.js";
 
 // The poster library reads (PRD-002 phase 2 / PRD-003 R-UNI). Browse descends
 // brand → line → cigar; the personal overlay (caller's smoke count + average
@@ -115,18 +116,21 @@ function encodeCursor(c: Cursor): string {
 // list) rather than an error — a stale share link, a sort switch or a direction
 // flip degrades to the first page.
 //
-// The id is shape-checked because every sort spends it unquoted as `${cur.id}::uuid`
-// (nine sites across the four sorts), so a well-formed envelope carrying junk
-// used to raise 22P02 and 500 instead of degrading — on the widest surface in the
-// app, since browse_catalog and catalog.browse both take the cursor as a bare
-// string (#206, ./uuid.ts).
+// BOTH halves are shape-checked, because both are spent unquoted. The id reaches
+// `${cur.id}::uuid` at nine sites across the four sorts (22P02 on junk), and the
+// ordering key is cast per sort — `::timestamptz` for recently-added (22007),
+// `Number()` for my-rating and price (NaN). Either way a well-formed envelope
+// carrying junk used to reach Postgres and 500 instead of degrading, on the
+// widest surface in the app: browse_catalog and catalog.browse both take the
+// cursor as a bare string (#206 for the id, #229 for the key; ./uuid.ts,
+// ./cursor-keys.ts).
 //
-// The ORDERING KEY is deliberately not validated here, and that is a known
-// remaining hole rather than an oversight: `key` is cast per sort — ::timestamptz
-// for recently-added, Number() for my-rating and price — so junk there raises a
-// cast error of a different class that this shape check would not catch. Closing
-// it needs the sort enum, not just its identity string; tracked separately.
-function decodeCursor(raw: string | null | undefined, identity: string): Cursor | null {
+// The key's type comes from the LANE rather than from this function, because the
+// identity is an opaque `field:dir` string here — mapping it back to a typing
+// would duplicate, in the decoder, knowledge that already lives beside each
+// lane's SQL, and the two would drift the first time a sort was added. The lane
+// that writes the cast is the lane that declares what it casts.
+function decodeCursor(raw: string | null | undefined, identity: string, keyType: CursorKeyType): Cursor | null {
   if (!raw) return null;
   try {
     const parsed: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
@@ -136,6 +140,7 @@ function decodeCursor(raw: string | null | undefined, identity: string): Cursor 
       typeof parsed[1] === "string" &&
       typeof parsed[2] === "string" &&
       parsed[0] === identity &&
+      keyMatchesType(parsed[1], keyType) &&
       isUuid(parsed[2])
     ) {
       return { sort: identity, key: parsed[1], id: parsed[2] };
@@ -143,6 +148,28 @@ function decodeCursor(raw: string | null | undefined, identity: string): Cursor 
     return null;
   } catch {
     return null;
+  }
+}
+
+// What a sort casts its cursor key to (declared per lane in sortSpec):
+//   text    — `name`, compared as text, so any string a name can hold is valid.
+//   number  — `my-rating`, spent as `Number(cur.key)`.
+//   price   — `price`, a number OR the NULL_PRICE_KEY sentinel that walks the
+//             unpriced tail; the sentinel is compared before the cast, so it is
+//             the one non-numeric key this lane can legitimately hold.
+//   instant — `recently-added`, spent as `${cur.key}::timestamptz`.
+type CursorKeyType = "text" | "number" | "price" | "instant";
+
+function keyMatchesType(key: string, keyType: CursorKeyType): boolean {
+  switch (keyType) {
+    case "text":
+      return true;
+    case "number":
+      return isDecimal(key);
+    case "price":
+      return key === NULL_PRICE_KEY || isDecimal(key);
+    case "instant":
+      return isPgTimestamp(key);
   }
 }
 
@@ -376,6 +403,9 @@ const RATING_KEY = sql`coalesce(round(avg(s.rating)), -1)`;
 interface SortSpec {
   orderBy: SQL;
   cursorKey: (row: CatalogTileRow) => string;
+  // What this lane casts an incoming cursor key to, so decodeCursor can refuse a
+  // key it could not have issued rather than handing it to the cast (#229).
+  keyType: CursorKeyType;
   // WHERE-form cursor condition (plain columns), or null when the sort keys off
   // an aggregate and uses `having` instead.
   where: ((c: Cursor) => SQL) | null;
@@ -398,6 +428,7 @@ function sortSpec(sort: CatalogSort, dir: CatalogSortDir): SortSpec {
       return {
         orderBy: asc ? sql`${RATING_KEY} ASC, c.id ASC` : sql`${RATING_KEY} DESC, c.id ASC`,
         cursorKey: (row) => String(row.user_rating != null ? Number(row.user_rating) : -1),
+        keyType: "number",
         where: null,
         having: (cur) =>
           asc
@@ -421,6 +452,7 @@ function sortSpec(sort: CatalogSort, dir: CatalogSortDir): SortSpec {
           : sql`max(co.best_pps_cents) DESC NULLS LAST, c.id ASC`,
         cursorKey: (row) =>
           row.best_pps_cents != null ? String(Number(row.best_pps_cents)) : NULL_PRICE_KEY,
+        keyType: "price",
         where: (cur) =>
           cur.key === NULL_PRICE_KEY
             ? sql`(co.best_pps_cents IS NULL AND c.id > ${cur.id}::uuid)`
@@ -440,6 +472,7 @@ function sortSpec(sort: CatalogSort, dir: CatalogSortDir): SortSpec {
       return {
         orderBy: asc ? sql`c.created_at ASC, c.id ASC` : sql`c.created_at DESC, c.id DESC`,
         cursorKey: (row) => String(row.created_at),
+        keyType: "instant",
         where: (cur) =>
           asc
             ? sql`(c.created_at, c.id) > (${cur.key}::timestamptz, ${cur.id}::uuid)`
@@ -451,6 +484,7 @@ function sortSpec(sort: CatalogSort, dir: CatalogSortDir): SortSpec {
       return {
         orderBy: asc ? sql`c.canonical_name ASC, c.id ASC` : sql`c.canonical_name DESC, c.id DESC`,
         cursorKey: (row) => row.canonical_name,
+        keyType: "text",
         where: (cur) =>
           asc
             ? sql`(c.canonical_name, c.id) > (${cur.key}, ${cur.id}::uuid)`
@@ -767,7 +801,7 @@ export async function browseCatalog(
   const sort: CatalogSort = args.sort ?? "name";
   const dir: CatalogSortDir = args.sortDir ?? DEFAULT_SORT_DIR[sort];
   const spec = sortSpec(sort, dir);
-  const cursor = decodeCursor(args.cursor, sortIdentity(sort, dir));
+  const cursor = decodeCursor(args.cursor, sortIdentity(sort, dir), spec.keyType);
 
   // q/brand/type filters, the exclusive ownership facet, the independent overlay
   // booleans and the hierarchy scope — shared by the page and the count query

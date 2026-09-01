@@ -276,6 +276,103 @@ describe("catalog browse", () => {
     expect(withForged).toEqual(clean);
   });
 
+  it("browseCatalog serves the first page for a forged ordering key on every sort", async () => {
+    // #229, the other half of the cursor. The id above is one cast; the ordering
+    // KEY is cast per sort — `::timestamptz` for recently-added (22007 on junk),
+    // `Number()` for my-rating and price (NaN) — so a forged envelope carrying a
+    // real uuid and a junk key reached Postgres by a different route to the same
+    // 500. Each sort must answer it exactly as it answers no cursor at all.
+    const brand = `ForgedKey ${tag}`;
+    const one = await h.seedCigar({ canonicalName: `${brand} One`, brand });
+    await h.seedCigar({ canonicalName: `${brand} Two`, brand });
+
+    // A well-formed envelope: right base64, right JSON, right arity, right sort
+    // identity, a real uuid — only the ordering key is a value we never issued.
+    const forge = (identity: string, key: string): string =>
+      Buffer.from(JSON.stringify([identity, key, one]), "utf8").toString("base64url");
+
+    // Each sort's own default direction, since the identity must match to reach
+    // the key check at all (a mismatch would reject the cursor for the wrong
+    // reason and prove nothing).
+    const lanes = [
+      { sort: "recently-added", identity: "recently-added:desc", junk: "not-a-timestamp" },
+      { sort: "my-rating", identity: "my-rating:desc", junk: "not-a-number" },
+      { sort: "price", identity: "price:asc", junk: "not-a-number" },
+    ] as const;
+
+    for (const lane of lanes) {
+      const clean = await browseCatalog(h.deps, userA, { q: brand, sort: lane.sort });
+      expect(clean.cigars).toHaveLength(2);
+      const withForged = await browseCatalog(h.deps, userA, {
+        q: brand,
+        sort: lane.sort,
+        cursor: forge(lane.identity, lane.junk),
+      });
+      expect(withForged).toEqual(clean);
+    }
+
+    // The price lane types its key as "a number OR the unpriced sentinel", so the
+    // sentinel is not junk there — but it is on the numeric-only my-rating lane,
+    // where nothing compares it before the cast.
+    const sentinelOnRating = await browseCatalog(h.deps, userA, {
+      q: brand,
+      sort: "my-rating",
+      cursor: forge("my-rating:desc", "~"),
+    });
+    expect(sentinelOnRating).toEqual(await browseCatalog(h.deps, userA, { q: brand, sort: "my-rating" }));
+  });
+
+  it("browseCatalog still round-trips its own cursor on every sort", async () => {
+    // The other side of the guard: rejecting junk must not reject a key we minted.
+    // Each lane pages a seeded set one row at a time, so every cursor it issues is
+    // handed straight back to the decoder — a key shape the guard refused would
+    // truncate the walk or restart it, and both show up as a wrong id sequence.
+    const brand = `RoundTrip ${tag}`;
+    const older = await h.seedCigar({
+      canonicalName: `${brand} A`,
+      brand,
+      createdAt: new Date("2020-01-01T00:00:00.000Z"),
+    });
+    const newer = await h.seedCigar({
+      canonicalName: `${brand} B`,
+      brand,
+      createdAt: new Date("2021-01-01T00:00:00.000Z"),
+    });
+    // A rating on one and a price on the other, so neither the my-rating nor the
+    // price walk pages a uniform column: my-rating issues a real average then the
+    // unrated -1 sentinel, price a cents key then the NULL_PRICE_KEY tail.
+    await saveSmoke(h.deps, userA, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId: older },
+      overallDescriptors: ["m"],
+      assessment: { rating: 90 },
+    });
+    await addAdhocOffer(newer, { pricePerStickCents: 1100 });
+
+    const walk = async (sort: "name" | "my-rating" | "recently-added" | "price"): Promise<string[]> => {
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      let pages = 0;
+      do {
+        const p: Awaited<ReturnType<typeof browseCatalog>> = await browseCatalog(h.deps, userA, {
+          q: brand,
+          sort,
+          limit: 1,
+          cursor,
+        });
+        for (const c of p.cigars) seen.push(c.cigarId);
+        cursor = p.nextCursor;
+        pages++;
+      } while (cursor && pages < 10);
+      return seen;
+    };
+
+    expect(await walk("name")).toEqual([older, newer]); // A, B
+    expect(await walk("my-rating")).toEqual([older, newer]); // rated 90, then unrated
+    expect(await walk("recently-added")).toEqual([newer, older]); // newest first
+    expect(await walk("price")).toEqual([newer, older]); // priced, then the null tail
+  });
+
   // --- ownership facet (PRD-003 R-UNI-2) -----------------------------------
 
   it("browseCatalog ownership facet partitions have / want / dont over the caller's overlay", async () => {
