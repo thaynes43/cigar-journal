@@ -13,8 +13,9 @@ import { createMockFetcher, fakeProcessPhoto, loadFixture, type MockFetcher, typ
 // mocked per the guardrail (NEVER live APIs) and the photo pipeline is stubbed,
 // so the harness needs neither network nor image bytes.
 
-// Synthetic QIDs — the shipped allowlists are empty until a crawl-pod --probe
-// seeds them (wikidata-taxonomy.ts); see wikidata.test.ts.
+// Synthetic QIDs — kept distinct from the real allowlists a crawl-pod --probe
+// seeded (wikidata-taxonomy.ts); see wikidata.test.ts. UNSEEDED below models a
+// taxonomy emptied by a bad edit, the state the run gate still has to refuse.
 const TAXONOMY: WikidataTaxonomy = {
   negative: ["Q9000900", "Q9000901", "Q9000902"],
   tobaccoClass: ["Q9000001", "Q9000002"],
@@ -294,7 +295,7 @@ describe("brand images job (embedded Postgres)", () => {
     expect(fetcher.requested.some((url) => url.includes("upload.wikimedia.org"))).toBe(false);
   });
 
-  it("refuses to run at all on an unseeded taxonomy rather than caching no_match for a month", async () => {
+  it("refuses to run at all on an emptied taxonomy rather than caching no_match for a month", async () => {
     await seedBrand();
     const fetcher = createMockFetcher(routes());
     const unseeded = { ...deps(fetcher, createMemoryPhotoStorage()), taxonomy: UNSEEDED };

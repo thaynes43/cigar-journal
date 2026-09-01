@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { loadFixture, createMockFetcher, type MockRoute } from "../testing/fixtures.js";
-import type { WikidataTaxonomy } from "./wikidata-taxonomy.js";
+import { WIKIDATA_TAXONOMY, taxonomyIsUnseeded, type WikidataTaxonomy } from "./wikidata-taxonomy.js";
 import {
   buildCreditLine,
   entitiesUrl,
@@ -17,7 +17,7 @@ import {
   WikimediaUnavailableError,
 } from "./wikidata.js";
 
-// The real QID allowlists ship EMPTY and are seeded by a crawl-pod `--probe` run
+// The real QID allowlists are seeded from crawl-pod `--probe` output
 // (wikidata-taxonomy.ts). These ids are deliberately synthetic — nine-digit Qs
 // that exist nowhere — so nobody can mistake a test constant for a verified
 // Wikidata value and paste it into the shipped taxonomy.
@@ -114,7 +114,34 @@ describe("qualifyCandidates", () => {
     expect(result.candidates.map((c) => c.qid)).toEqual(["Q9100040"]);
   });
 
-  it("fails safe on an unseeded taxonomy — every brand reads no_match", () => {
+  it("no longer ships unseeded: the committed taxonomy carries qualifying evidence", () => {
+    expect(taxonomyIsUnseeded(WIKIDATA_TAXONOMY)).toBe(false);
+    expect(WIKIDATA_TAXONOMY.tobaccoClass).toContain("Q110684031"); // cigar brand
+    expect(WIKIDATA_TAXONOMY.tobaccoIndustry).toContain("Q907703"); // tobacco industry
+    // Every list holds real Wikidata ids, never the synthetic nine-digit test Qs.
+    const all = [
+      ...WIKIDATA_TAXONOMY.negative,
+      ...WIKIDATA_TAXONOMY.tobaccoClass,
+      ...WIKIDATA_TAXONOMY.tobaccoIndustry,
+      ...WIKIDATA_TAXONOMY.tobaccoProduct,
+      ...WIKIDATA_TAXONOMY.genericBrand,
+      ...WIKIDATA_TAXONOMY.origin,
+    ];
+    expect(all.every((qid) => /^Q[1-9][0-9]*$/.test(qid))).toBe(true);
+    expect(all.some((qid) => /^Q9[0-9]{6}$/.test(qid))).toBe(false);
+    expect(new Set(all).size).toBe(all.length);
+    // The negative list must never overlap a qualifying list, or the gate would
+    // disqualify the very entities it is meant to accept.
+    const qualifying = new Set([
+      ...WIKIDATA_TAXONOMY.tobaccoClass,
+      ...WIKIDATA_TAXONOMY.tobaccoIndustry,
+      ...WIKIDATA_TAXONOMY.tobaccoProduct,
+      ...WIKIDATA_TAXONOMY.genericBrand,
+    ]);
+    expect(WIKIDATA_TAXONOMY.negative.some((qid) => qualifying.has(qid))).toBe(false);
+  });
+
+  it("fails safe on a hypothetically emptied taxonomy — every brand reads no_match", () => {
     const empty: WikidataTaxonomy = {
       negative: [],
       tobaccoClass: [],
