@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Thirty tools over the application services, client-neutral: any MCP client
+Thirty-one tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -32,8 +32,9 @@ ADR-005 (integration). Client capability differences live in
 
 Scopes: `catalog:read` (search_cigars, get_cigar, browse_catalog, get_offers),
 `journal:read` (get_my_smokes, get_smoke, get_my_inventory), `journal:write`
-(save_smoke, add_cigar, record_purchase, update_smoke, add_smoke_photo, set_want,
-set_favorite, request_cigar_enrichment, update_cigar, record_price — including
+(save_smoke, add_cigar, record_purchase, record_purchase_batch, update_smoke,
+add_smoke_photo, set_want, set_favorite, request_cigar_enrichment, update_cigar,
+record_price — including
 lazy catalog create inside save/add, the enrichment queue write, conversational
 catalog repair, and chat-submitted price observations). There is no
 `catalog:write` scope: catalog mutation rides `journal:write` by house precedent
@@ -112,6 +113,16 @@ also how the humidor count is corrected — the ledger is append-only and
 holdings are derived, so a miscount is fixed with a negative-quantity row (say
 why in notes), never an edit. Record only what the user stated: never invent a price, date, or
 vendor.
+
+Hauls. When the user acquires several cigars at once — a sampler, a box
+inventory, a shop run — record_purchase_batch takes the whole lot in one call:
+shared facts (date, vendor, packaging) go in defaults, each cigar is one item
+with its own clientRequestId, and every item reports its own result. An item
+whose name cannot be decided comes back ambiguous with candidates and costs the
+batch nothing; show that item's candidates, and when the user confirms none is
+theirs re-send the whole batch under a FRESH batch clientRequestId with
+confirmedDistinct added to just those items and every other item byte-identical
+— the items already recorded replay, so nothing is written twice.
 
 Humidor deduction. A saved smoke deducts one stick from the humidor only when the
 user says so. When the resolved cigar shows holdings, ask once at finish, "From
@@ -810,6 +821,8 @@ result:
     totalAcquired: 10            # sum of the caller's lot quantities for this cigar
     remaining: 7                 # max(0, totalAcquired − count(consumptions)) (ADR-008)
   wanted: true                 # the caller still has an active want mark on this cigar
+  cigarCreated: false          # whether THIS purchase created the catalog entry
+  enrichmentQueued: false      # implies cigarCreated — a link filled no gap
   replayed: false
 ```
 
@@ -841,6 +854,112 @@ part of the intent, so it must be repeated identically, like every other argumen
 Without it, a sampler of related-but-distinct sticks cost three calls each —
 `search_cigars` → `add_cigar(confirmedDistinct)` → `record_purchase(cigarId)` —
 because the flag existed only on `add_cigar`.
+
+## record_purchase_batch — write, idempotent
+
+One acquisition of several different cigars in one call: a sampler, a box
+inventory, a shop run, a retailer order. Every item is an ordinary
+`record_purchase` — the same resolver, the same `confirmedDistinct`, the same
+enrichment gate, the same audit attribution, its own idempotency envelope — so
+this tool adds no ledger semantics of its own and none can drift. What it adds
+is **per-item results**: an item the resolver cannot decide comes back
+`ambiguous` while the rest of the batch lands.
+
+```yaml
+arguments:
+  clientRequestId: 5f2b70a1-...   # the BATCH envelope; a corrected re-send takes a NEW id
+  defaults:                       # optional; the facts the whole lot shares
+    purchasedAt: "2026-08-31"
+    vendorName: Small Batch Cigar
+    packaging: sampler
+  items:                          # 1..50 entries, one per DISTINCT cigar
+    - clientRequestId: 0d3c81ee-...        # this item's own envelope, distinct from every other
+      cigar:                               # exactly one of cigarId / described (as record_purchase)
+        described: { canonicalName: Tatuaje Monster Smash The Mummy, brand: Tatuaje }
+      quantity: 1
+      confirmedDistinct: false             # optional; `described` refs only, per item
+    - clientRequestId: 9a17f240-...
+      cigar: { cigarId: cg_01j9x2 }
+      quantity: 2
+      pricePerStick: 11.0                  # any default is overridable per item
+
+result:
+  items:
+    - index: 0
+      clientRequestId: 0d3c81ee-...
+      status: created                      # created | existing | ambiguous | failed
+      purchaseId: pu_01kd
+      cigar: { cigarId: cg_01kf, canonicalName: Tatuaje Monster Smash The Mummy, verification: unverified }
+      holdingAfter: { totalAcquired: 1, remaining: 1 }
+      wanted: false
+      enrichmentQueued: true
+      replayed: false
+    - index: 1
+      clientRequestId: 9a17f240-...
+      status: ambiguous                    # nothing written for this line
+      error:
+        code: cigar_ambiguous
+        recoverable: true
+        action: { type: ask_user }
+        candidates: [ ... ]                # the ranked siblings, as record_purchase returns them
+  summary:
+    items: 2
+    recorded: 1                            # created + existing
+    created: 1
+    existing: 0
+    ambiguous: 1
+    failed: 0
+    replayed: 0                            # recorded items whose own envelope replayed
+    sticks: 1                              # net quantity across the recorded items
+  replayed: false                          # the BATCH envelope replayed
+```
+
+**Four statuses, one action each.** `created` — the ledger row landed and this
+item created the catalog entry (so its enrichment was queued). `existing` — the
+row landed against an entry the catalog already had. `ambiguous` — nothing was
+written; `error.candidates` are the siblings to show the user. `failed` —
+nothing was written; `error` says why (a `validation_error` with its field paths
+rewritten to `items[i].<field>`, an unknown `cigarId`, a spent key). There is no
+separate "inventory updated" status: every `created`/`existing` item appended its
+ledger row, and `holdingAfter` reports the count it produced.
+
+**Two envelope layers, and the item layer is the load-bearing one.** The batch
+key replays an identical re-send, doing no work at all. The item keys are what
+make a partial batch safe to re-issue **whole**: show the user the `ambiguous`
+items' candidates and, when they confirm none is theirs, re-send every item under
+a **fresh batch `clientRequestId`** with `confirmedDistinct: true` added to just
+those items and every other item byte-identical. The items already recorded
+replay (`replayed: true`, no second lot); only the corrected ones do new work.
+Do not add `confirmedDistinct` to an item that already succeeded — that changes
+its fingerprint and the line comes back `failed` with `idempotency_conflict`.
+The batch key and every item key share one `(user, clientRequestId)` namespace,
+so a duplicate among them is refused up front as a `validation_error` rather than
+spending a key.
+
+**`defaults` are the acquisition facts a haul shares** — `purchasedAt`,
+`vendorName`, `packaging`, `boxDate`, `humidorAt`, `pricePerStick`, `notes`. An
+item that sets the field wins, including an explicit `null` (how one line opts
+out of a default); an item that omits it inherits. The merged item is exactly the
+`record_purchase` a standalone call would carry, so its fingerprint is the same
+either way. **`confirmedDistinct` is deliberately not a default**: the flag
+records that the user was shown candidates for *one* cigar and said none is
+theirs, and a batch-wide default would let a single "no" authorize fourteen
+creates.
+
+**Not one transaction, deliberately.** Atomicity is the opposite of what a haul
+wants — the requirement is that one undecidable cigar isolates to its line while
+the others land — so each item commits in its own transaction and the batch key
+is written after them. A systemic fault (not a domain error) propagates and the
+batch key is never recorded, so the same batch id retries cleanly: the lines that
+committed replay through their own envelopes. Items run in order, never in
+parallel: the lines of one haul routinely name near-identical siblings, and each
+is resolved against the catalog as it then stands.
+
+At most 50 items, one entry per distinct cigar — repeats of the same stick are a
+`quantity`, not a repeated entry. The real case this was built for is a 14-cigar
+Tatuaje Monster Smash sampler that cost roughly three calls per stick
+(`search_cigars` → `add_cigar(confirmedDistinct)` → `record_purchase(cigarId)`);
+it is now one call, or two when the siblings need confirming.
 
 ## update_smoke — write, idempotent
 
@@ -1946,6 +2065,13 @@ error:
 
 Idempotent replay is not an error: same envelope returns the original result
 with `replayed: true`.
+
+**In `record_purchase_batch` these payloads arrive per item**, on the line that
+raised them, not as the call's own error result — one item's `cigar_ambiguous`
+or `validation_error` never fails the batch, and a `validation_error`'s
+`fields[].path` is rewritten to `items[i].<field>`. The call errors only for a
+failure of the whole batch: an unauthorized token, a malformed or colliding
+envelope, a conflicting batch `clientRequestId`.
 
 **Two validation layers.** Value violations the domain owns — rating range,
 `approximatePosition` bounds, malformed `smokedAt`/`smokedAfter` dates, empty

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ENRICHMENT_BACKLOG_MAX } from "@cj/domain";
+import { ENRICHMENT_BACKLOG_MAX, MAX_BATCH_ITEMS } from "@cj/domain";
 
 // Zod input schemas mirroring docs/mcp/tool-contract.md. Design rules:
 //
@@ -532,6 +532,104 @@ export const recordPurchaseSchema = z
   })
   .strict();
 
+// ---- record_purchase_batch (#231) ------------------------------------------
+//
+// The acquisition leaves a haul shares, defined once and used twice: as the
+// batch's `defaults` and as the per-item overrides. Every one is nullish, so a
+// line can null out a default it does not share (`vendorName: null` on the one
+// stick that came from somewhere else) while an omitted key inherits.
+
+const batchPurchasedAt = z
+  .string()
+  .nullish()
+  .describe("Purchase date as 'YYYY-MM-DD', only if stated. Never invent it.");
+const batchPackaging = z
+  .string()
+  .nullish()
+  .describe("How it was bought, e.g. box, 5-pack, single, sampler. Omit if unstated.");
+const batchBoxDate = z.string().nullish().describe("Box date/code as 'YYYY-MM-DD', if on the box.");
+const batchHumidorAt = z
+  .string()
+  .nullish()
+  .describe("Date it entered the humidor as 'YYYY-MM-DD', if stated.");
+const batchPricePerStick = z
+  .number()
+  .nullish()
+  .describe("Price per stick in dollars, only if stated. Never invent it.");
+const batchVendorName = z
+  .string()
+  .nullish()
+  .describe(
+    "Shop/vendor name as the user said it; matched to the registry case-insensitively, otherwise kept in notes. Omit if unstated.",
+  );
+const batchNotes = z
+  .string()
+  .nullish()
+  .describe(
+    "Free-text notes. REQUIRED on any item whose quantity is negative — record the reason for the correction.",
+  );
+
+const recordPurchaseBatchDefaults = z
+  .object({
+    purchasedAt: batchPurchasedAt,
+    packaging: batchPackaging,
+    boxDate: batchBoxDate,
+    humidorAt: batchHumidorAt,
+    pricePerStick: batchPricePerStick,
+    vendorName: batchVendorName,
+    notes: batchNotes,
+  })
+  .strict()
+  .describe(
+    "Facts shared by every item — the one date, vendor and packaging a haul was bought under. An item that sets the same field wins; one that omits it inherits this value.",
+  );
+
+const recordPurchaseBatchItem = z
+  .object({
+    clientRequestId: z
+      .string()
+      .describe(
+        "A UUID for THIS item, distinct from the batch id and from every other item's. It is what lets a partial batch be re-sent whole: an item already recorded replays instead of logging a second lot.",
+      ),
+    cigar: cigarRef,
+    confirmedDistinct: z
+      .boolean()
+      .optional()
+      .describe(
+        "Applies to a `described` cigar only. Set true ONLY on the items the user was shown candidates for AND confirmed none is theirs — never batch-wide and never on a first attempt. Defaults to false.",
+      ),
+    quantity: z
+      .number()
+      .int()
+      .describe(
+        "Sticks acquired, a positive integer. Use a NEGATIVE integer to correct an over-count; never zero. When negative, this item's notes MUST say why.",
+      ),
+    purchasedAt: batchPurchasedAt,
+    packaging: batchPackaging,
+    boxDate: batchBoxDate,
+    humidorAt: batchHumidorAt,
+    pricePerStick: batchPricePerStick,
+    vendorName: batchVendorName,
+    notes: batchNotes,
+  })
+  .strict();
+
+export const recordPurchaseBatchSchema = z
+  .object({
+    clientRequestId: z
+      .string()
+      .describe(
+        "A UUID for the batch as a whole; reuse EXACTLY to retry the identical batch. A corrected re-send is a new intent and takes a NEW id.",
+      ),
+    defaults: recordPurchaseBatchDefaults.optional(),
+    items: z
+      .array(recordPurchaseBatchItem)
+      .describe(
+        `One entry per distinct cigar, at most ${MAX_BATCH_ITEMS}; use quantity for repeats of the same stick rather than repeating the entry.`,
+      ),
+  })
+  .strict();
+
 // ---- photo intake ----------------------------------------------------------
 
 // The image is a HOST-FILLED file input, not model text. Per OpenAI's Apps SDK a
@@ -944,6 +1042,43 @@ export const recordPurchaseOutput = z
     purchaseId: z.string(),
     cigar: looseObject,
     holdingAfter: z.object({ totalAcquired: z.number(), remaining: z.number() }).passthrough(),
+    // Whether the purchase CREATED the catalog entry, and whether that created
+    // row's enrichment was queued — the pair save_smoke already publishes, and
+    // what record_purchase_batch reports per line. Optional because a replay of
+    // an envelope stored before they existed returns the original result.
+    cigarCreated: z.boolean().optional(),
+    enrichmentQueued: z.boolean().optional(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+// Per-item results, mirrored loosely for the same reason every other nested
+// payload is: an item carries either the purchase block or an error block, and a
+// schema that insisted on one shape would reject the other as a protocol error.
+export const recordPurchaseBatchOutput = z
+  .object({
+    items: z.array(
+      z
+        .object({
+          index: z.number(),
+          clientRequestId: z.string(),
+          // created | existing | ambiguous | failed — an enum in the contract,
+          // a string here so an added status is never a protocol error.
+          status: z.string(),
+          purchaseId: z.string().optional(),
+          cigar: looseObject.optional(),
+          holdingAfter: z
+            .object({ totalAcquired: z.number(), remaining: z.number() })
+            .passthrough()
+            .optional(),
+          wanted: z.boolean().optional(),
+          enrichmentQueued: z.boolean().optional(),
+          replayed: z.boolean().optional(),
+          error: looseObject.optional(),
+        })
+        .passthrough(),
+    ),
+    summary: looseObject,
     replayed: z.boolean(),
   })
   .passthrough();
@@ -1046,6 +1181,7 @@ export type SaveSmokeArgs = z.infer<typeof saveSmokeSchema>;
 export type UpdateSmokeArgs = z.infer<typeof updateSmokeSchema>;
 export type AddCigarArgs = z.infer<typeof addCigarSchema>;
 export type RecordPurchaseArgs = z.infer<typeof recordPurchaseSchema>;
+export type RecordPurchaseBatchArgs = z.infer<typeof recordPurchaseBatchSchema>;
 export type AddSmokePhotoArgs = z.infer<typeof addSmokePhotoSchema>;
 
 // ---- curation surface (admin only; DESIGN-003 wave 4a, issue #126) ----------

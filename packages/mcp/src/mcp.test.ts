@@ -283,7 +283,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the thirty tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
+  it("lists exactly the thirty-one tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -301,6 +301,7 @@ describe("@cj/mcp adapter", () => {
           "get_smoke",
           "record_price",
           "record_purchase",
+          "record_purchase_batch",
           "request_cigar_enrichment",
           "save_smoke",
           "search_cigars",
@@ -343,6 +344,7 @@ describe("@cj/mcp adapter", () => {
         "save_smoke",
         "add_cigar",
         "record_purchase",
+        "record_purchase_batch",
         "update_smoke",
         "add_smoke_photo",
         "set_want",
@@ -1409,6 +1411,189 @@ describe("@cj/mcp adapter", () => {
       };
       expect(inv.holdings.some((hh) => hh.cigar.cigarId === cigarId)).toBe(false);
     });
+  });
+
+
+  // ---- record_purchase_batch (#231) -----------------------------------------
+
+  interface BatchLine {
+    index: number;
+    clientRequestId: string;
+    status: string;
+    purchaseId?: string;
+    cigar?: { cigarId: string; canonicalName: string; verification: string };
+    holdingAfter?: { totalAcquired: number; remaining: number };
+    enrichmentQueued?: boolean;
+    replayed?: boolean;
+    error?: { code: string; candidates?: unknown[]; fields?: { path: string }[] };
+  }
+  interface BatchPayload {
+    items: BatchLine[];
+    summary: Record<string, number>;
+    replayed: boolean;
+  }
+
+  it("record_purchase_batch ingests a sampler in one call and reports every stick", async () => {
+    const sampler = [
+      "Ledger Sampler Alpha Robusto",
+      "Ledger Sampler Bravo Toro",
+      "Ledger Sampler Charlie Corona",
+    ];
+    await withClient(ownerFull, async (client) => {
+      const data = payloadOf(
+        await call(client, "record_purchase_batch", {
+          clientRequestId: randomUUID(),
+          defaults: { purchasedAt: "2026-08-31", vendorName: "Small Batch Cigar", packaging: "sampler" },
+          items: sampler.map((canonicalName) => ({
+            clientRequestId: randomUUID(),
+            cigar: { described: { canonicalName, brand: canonicalName.split(" ")[2]!, type: "NC" } },
+            quantity: 2,
+          })),
+        }),
+      ) as BatchPayload;
+
+      expect(data.replayed).toBe(false);
+      expect(data.summary).toMatchObject({ items: 3, recorded: 3, created: 3, ambiguous: 0, failed: 0, sticks: 6 });
+      expect(data.items.map((line) => line.status)).toEqual(["created", "created", "created"]);
+      for (const line of data.items) {
+        expect(line.cigar!.verification).toBe("unverified"); // described → auto-created
+        expect(line.holdingAfter).toEqual({ totalAcquired: 2, remaining: 2 });
+        // The created gate rides through the batch: each new row queued its
+        // specs-and-photo lookup, exactly as record_purchase would have.
+        expect(line.enrichmentQueued).toBe(true);
+        expect(await enrichmentRows(line.cigar!.cigarId)).toHaveLength(1);
+      }
+
+      // Six sticks are really in the humidor after ONE call.
+      const inv = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: { cigar: { cigarId: string }; remaining: number }[];
+      };
+      for (const line of data.items) {
+        expect(inv.holdings.find((hh) => hh.cigar.cigarId === line.cigar!.cigarId)!.remaining).toBe(2);
+      }
+    });
+  });
+
+  it("record_purchase_batch isolates an ambiguous stick and recovers by re-sending the whole batch", async () => {
+    // The Monster Smash shape: siblings a word apart, which the resolver refuses
+    // to decide alone. One undecidable stick must not cost the other two.
+    await h.seedCigar({ canonicalName: "Batch Monster Smash Alpha", brand: "Batch Monster" });
+    await h.seedCigar({ canonicalName: "Batch Monster Smash Beta", brand: "Batch Monster" });
+    const settled = await h.seedCigar({ canonicalName: "Batch Settled Sublime", brand: "Batch Settled" });
+
+    await withClient(ownerFull, async (client) => {
+      const items = [
+        { clientRequestId: randomUUID(), cigar: { cigarId: settled }, quantity: 1 },
+        {
+          clientRequestId: randomUUID(),
+          cigar: { described: { canonicalName: "Batch Monster Smash", brand: "Batch Monster" } },
+          quantity: 1,
+        },
+      ];
+
+      const first = payloadOf(
+        await call(client, "record_purchase_batch", { clientRequestId: randomUUID(), items }),
+      ) as BatchPayload;
+      expect(first.items.map((line) => line.status)).toEqual(["existing", "ambiguous"]);
+      expect(first.summary).toMatchObject({ recorded: 1, ambiguous: 1, failed: 0, sticks: 1 });
+      // The ambiguous line answers with the siblings to put to the user, and it
+      // wrote nothing.
+      expect(first.items[1]!.error!.code).toBe("cigar_ambiguous");
+      expect(first.items[1]!.error!.candidates!.length).toBeGreaterThan(0);
+      expect(first.items[1]!.purchaseId).toBeUndefined();
+
+      // The documented recovery: a FRESH batch id, confirmedDistinct on just the
+      // ambiguous line, every other item byte-identical.
+      const second = payloadOf(
+        await call(client, "record_purchase_batch", {
+          clientRequestId: randomUUID(),
+          items: [items[0]!, { ...items[1]!, confirmedDistinct: true }],
+        }),
+      ) as BatchPayload;
+      expect(second.items.map((line) => line.status)).toEqual(["existing", "created"]);
+      expect(second.summary).toMatchObject({ recorded: 2, ambiguous: 0, failed: 0, replayed: 1 });
+      // The line that already landed replayed — one lot, not two.
+      expect(second.items[0]!.replayed).toBe(true);
+      expect(second.items[0]!.purchaseId).toBe(first.items[0]!.purchaseId);
+      expect(second.items[1]!.cigar!.canonicalName).toBe("Batch Monster Smash");
+
+      const inv = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: { cigar: { cigarId: string }; remaining: number }[];
+      };
+      expect(inv.holdings.find((hh) => hh.cigar.cigarId === settled)!.remaining).toBe(1);
+    });
+  });
+
+  it("record_purchase_batch reports a bad line as that line's failure, with its index in the field path", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Batch Failure Fumas", brand: "BF" });
+    await withClient(ownerFull, async (client) => {
+      const data = payloadOf(
+        await call(client, "record_purchase_batch", {
+          clientRequestId: randomUUID(),
+          items: [
+            { clientRequestId: randomUUID(), cigar: { cigarId }, quantity: 2 },
+            // A correction with no reason — record_purchase's own rule, per line.
+            { clientRequestId: randomUUID(), cigar: { cigarId }, quantity: -1 },
+          ],
+        }),
+      ) as BatchPayload;
+
+      expect(data.items.map((line) => line.status)).toEqual(["existing", "failed"]);
+      expect(data.items[1]!.error!.code).toBe("validation_error");
+      expect(data.items[1]!.error!.fields![0]!.path).toBe("items[1].notes");
+      // The whole call is a SUCCESS result — a per-item failure is data, not an
+      // isError the model has to unwrap.
+      expect(data.summary).toMatchObject({ recorded: 1, failed: 1 });
+    });
+  });
+
+  it("record_purchase_batch replays the batch envelope, doing no work on an identical re-send", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Batch Envelope Emissary", brand: "BE" });
+    await withClient(ownerFull, async (client) => {
+      const args = {
+        clientRequestId: randomUUID(),
+        items: [{ clientRequestId: randomUUID(), cigar: { cigarId }, quantity: 3 }],
+      };
+      const first = payloadOf(await call(client, "record_purchase_batch", args)) as BatchPayload;
+      const replay = payloadOf(await call(client, "record_purchase_batch", args)) as BatchPayload;
+
+      expect(first.replayed).toBe(false);
+      expect(replay.replayed).toBe(true);
+      expect(replay.items).toEqual(first.items);
+
+      // One lot, not two.
+      const inv = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: { cigar: { cigarId: string }; totalAcquired: number }[];
+      };
+      expect(inv.holdings.find((hh) => hh.cigar.cigarId === cigarId)!.totalAcquired).toBe(3);
+    });
+  });
+
+  it("record_purchase_batch is closed to a token without journal:write", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${ownerCatalogOnly}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "record_purchase_batch",
+          arguments: {
+            clientRequestId: randomUUID(),
+            items: [
+              { clientRequestId: randomUUID(), cigar: { cigarId: primaryCigarId }, quantity: 1 },
+            ],
+          },
+        },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
   });
 
   // ---- set_want + record_purchase want flag ---------------------------------

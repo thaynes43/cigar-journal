@@ -1,4 +1,5 @@
 import type { Tobacco, SmokeContext, SmokePhotoKind, CigarNameSource, SuggestedParse } from "@cj/db";
+import type { ErrorPayload } from "./errors.js";
 
 // Domain vocabulary — mirrors docs/ddd/ubiquitous-language.md. Value objects are
 // plain interfaces; the Smoke aggregate is assembled by the services below.
@@ -212,7 +213,102 @@ export interface RecordPurchaseResult {
   // model asks). Independent of holdings; true here means "you bought something
   // you'd marked as wanted."
   wanted: boolean;
+  // Whether this purchase CREATED the catalog entry rather than linking to one
+  // that already existed — the same distinction save_smoke reports, and the
+  // reason record_purchase_batch can label an item `created` vs `existing`
+  // without a second read. `enrichmentQueued` implies `cigarCreated`: the queue
+  // is gated on a described ref that created its row (a link filled no gap).
+  // Both optional because an idempotent replay returns the ORIGINAL stored
+  // result, and envelopes written before these fields existed do not carry them.
+  cigarCreated?: boolean;
+  enrichmentQueued?: boolean;
   replayed: boolean;
+}
+
+// ---- record_purchase_batch (#231) ------------------------------------------
+//
+// One acquisition EVENT with many line items: a sampler, a box inventory, a
+// haul, a retailer order. Each item is an independent record_purchase — same
+// resolver, same `confirmedDistinct`, same enrichment gate, same audit row, its
+// own idempotency envelope — so an item that cannot be decided isolates to that
+// item instead of failing the batch.
+
+// The acquisition facts a haul shares. Applied to every item that does not carry
+// its own value for the field; an item's explicit `null` wins over a default.
+// `confirmedDistinct` is deliberately NOT here — the flag records that the user
+// was shown candidates for ONE cigar and said none is theirs, and a batch-wide
+// default would let a single "no" authorize fourteen creates.
+export interface RecordPurchaseBatchDefaults {
+  purchasedAt?: string | null;
+  packaging?: string | null;
+  boxDate?: string | null;
+  humidorAt?: string | null;
+  pricePerStick?: number | null;
+  vendorName?: string | null;
+  notes?: string | null;
+}
+
+export interface RecordPurchaseBatchItemInput extends RecordPurchaseBatchDefaults {
+  // The item's OWN envelope key, distinct from the batch key and from every
+  // other item's. It is what makes a partial batch re-issuable: an item already
+  // recorded replays instead of writing a second ledger row.
+  clientRequestId: string;
+  cigar: CigarRef;
+  confirmedDistinct?: boolean;
+  quantity: number;
+}
+
+export interface RecordPurchaseBatchInput {
+  // The BATCH envelope: one id per haul. A retry of the identical batch replays
+  // the stored result; a corrected re-issue is a new intent and takes a new id.
+  clientRequestId: string;
+  items: RecordPurchaseBatchItemInput[];
+  defaults?: RecordPurchaseBatchDefaults;
+  provenance?: ProvenanceInput;
+  correlationId?: string;
+}
+
+// What happened to one line item, and therefore what the model does next:
+//   created    the ledger row landed and this item created the catalog entry
+//   existing   the ledger row landed against an entry the catalog already had
+//   ambiguous  nothing written — `error.candidates` are the siblings to show the
+//              user; re-issue this item with `confirmedDistinct: true` if none is theirs
+//   failed     nothing written — `error` says why (validation, unknown id, a spent key)
+// "inventory updated" is not a fifth status: every `created`/`existing` item
+// appended its ledger row, and `holdingAfter` reports the count it produced.
+export type RecordPurchaseBatchItemStatus = "created" | "existing" | "ambiguous" | "failed";
+
+export interface RecordPurchaseBatchItemResult {
+  index: number; // position in the request's `items` array
+  clientRequestId: string; // echoed so a result correlates without counting
+  status: RecordPurchaseBatchItemStatus;
+  // created | existing — the record_purchase result for this line.
+  purchaseId?: string;
+  cigar?: SavedCigar;
+  holdingAfter?: { totalAcquired: number; remaining: number };
+  wanted?: boolean;
+  enrichmentQueued?: boolean;
+  replayed?: boolean;
+  // ambiguous | failed — the contract error payload, `cigar_ambiguous` carrying
+  // its ranked `candidates`. Field paths are rewritten to `items[i].<field>`.
+  error?: ErrorPayload;
+}
+
+export interface RecordPurchaseBatchSummary {
+  items: number;
+  recorded: number; // created + existing
+  created: number;
+  existing: number;
+  ambiguous: number;
+  failed: number;
+  replayed: number; // recorded items whose own envelope replayed (nothing rewritten)
+  sticks: number; // net quantity across the recorded items (a correction subtracts)
+}
+
+export interface RecordPurchaseBatchResult {
+  items: RecordPurchaseBatchItemResult[];
+  summary: RecordPurchaseBatchSummary;
+  replayed: boolean; // the BATCH envelope replayed; per-item replay is on the item
 }
 
 // The single want mark (PRD-003 R-WANT-1..3, DESIGN-002 §Want). A target-state

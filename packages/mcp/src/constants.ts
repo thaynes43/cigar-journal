@@ -5,7 +5,7 @@
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The tool surface. The first seventeen are the conversational journal contract
+// The tool surface. The first eighteen are the conversational journal contract
 // (reads annotated readOnlyHint). The final thirteen are the admin catalog-curation
 // surface (DESIGN-003 wave 4a/4b, issue #126; the taxonomy four from ADR-012 Wave 3,
 // issue #196): the ops-agent tools, gated on `curation:*` scope AND an admin-role
@@ -21,6 +21,7 @@ export const TOOL_NAMES = [
   "save_smoke",
   "add_cigar",
   "record_purchase",
+  "record_purchase_batch",
   "update_smoke",
   "add_smoke_photo",
   "set_want",
@@ -75,6 +76,10 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   save_smoke: ["journal:write"],
   add_cigar: ["journal:write"],
   record_purchase: ["journal:write"],
+  // The batch is record_purchase repeated, so it takes record_purchase's scope
+  // and nothing more: no token's reach widens because a haul can be sent in one
+  // call instead of fourteen.
+  record_purchase_batch: ["journal:write"],
   update_smoke: ["journal:write"],
   add_smoke_photo: ["journal:write"],
   set_want: ["journal:write"],
@@ -181,6 +186,16 @@ also how the humidor count is corrected — the ledger is append-only and
 holdings are derived, so a miscount is fixed with a negative-quantity row (say
 why in notes), never an edit. Record only what the user stated: never invent a price, date, or
 vendor.
+
+Hauls. When the user acquires several cigars at once — a sampler, a box
+inventory, a shop run — record_purchase_batch takes the whole lot in one call:
+shared facts (date, vendor, packaging) go in defaults, each cigar is one item
+with its own clientRequestId, and every item reports its own result. An item
+whose name cannot be decided comes back ambiguous with candidates and costs the
+batch nothing; show that item's candidates, and when the user confirms none is
+theirs re-send the whole batch under a FRESH batch clientRequestId with
+confirmedDistinct added to just those items and every other item byte-identical
+— the items already recorded replay, so nothing is written twice.
 
 Humidor deduction. A saved smoke deducts one stick from the humidor only when the
 user says so. When the resolved cigar shows holdings, ask once at finish, "From
