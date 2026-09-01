@@ -220,11 +220,19 @@ export {
   type LeafChoice,
   type DescribedTaxonomy,
 } from "./taxonomy-resolve.js";
+// The matching vocabulary, exported as the AUTHORITY over what a name word is
+// (ADR-012 §Decision). `VITOLA_TOKENS` and `PACKAGING_TOKEN_LABELS` above,
+// `VARIANT_TOKENS` and `SPELLING_VARIANTS` here: four sets that between them
+// decide whether a token is a size, a container, a wrapper, a spelling of one of
+// those, or the product's own identity. docs/ddd/cigar-industry-vocabulary.md
+// explains the trade terms; these sets are what the code actually reads.
 export {
   vitolaAgrees,
   variantRelation,
   identityTokensCompatible,
   identityResidues,
+  VARIANT_TOKENS,
+  SPELLING_VARIANTS,
   type VariantRelation,
   type IdentityResidues,
 } from "./name-heuristics.js";

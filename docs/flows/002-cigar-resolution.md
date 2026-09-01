@@ -66,13 +66,27 @@ name saying more, not saying something else ("Liga Privada No. 9 Flying Pig"
 against the blend-level "…No. 9"), and still links; that asymmetry is what keeps
 a casually named cigar from minting a second row.
 
+Residues are compared on SPELLINGS, not on strings. One word written two ways —
+`Ecuador`/`Ecuadorian`, `San Andres`/`Mexican`, `Shade Grown`/`Shadegrown`,
+`Anniversary`/`Aniversario`, `Edicion`/`Edition` — is one word, folded onto a
+single key by the equivalence table the vocabulary sets carry (ADR-012
+§Decision). Equivalence is a table and never a distance: over this catalog's own
+tokens, edit distance 1 pairs `Face` with `Farce`.
+
 A near-match rejected by the identity rule ALONE is neither linked nor created:
 it raises `cigar_ambiguous` with the siblings as candidates, because the residue
 is too weak a signal to decide silently in either direction and the user is the
 one who knows. A number or packaging rejection still creates — those names state
-a structured difference, so there is nothing to adjudicate. Candidate lists are
-ordered by identity agreement before trigram score, so among fourteen siblings of
-one family the one the user named is offered first instead of buried.
+a structured difference, so there is nothing to adjudicate.
+
+Candidate lists put the identity VERDICT first: a name that contradicts the query
+— a residue on both sides — sorts below every name that merely says more or less,
+whatever its trigram score, so among fourteen siblings of one family the one the
+user named is offered first instead of buried. Below that verdict the residue is
+a coarse signal and is treated as one, with trigram deciding between candidates
+whose identity claims are comparable. `search_cigars` and `resolveCigar` draw the
+same fifty-row candidate pool: ranking cannot recover a row the pool never held,
+and a family is bigger than a page.
 
 ## Failure modes
 

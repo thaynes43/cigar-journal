@@ -29,6 +29,7 @@ import {
   identityTokensCompatible,
   strongLinkCompatible,
   rankByIdentity,
+  CANDIDATE_POOL,
 } from "./name-heuristics.js";
 
 // Similarity at or above this counts as a strong catalog match — link rather
@@ -65,6 +66,13 @@ interface CandidateRow {
   sim: number;
 }
 
+// How many candidates a `cigar_ambiguous` error offers. The POOL is wide so the
+// decision is made over the whole family (`CANDIDATE_POOL`); the LIST is a page
+// the model reads out loud to a user, and fifty of those is not a question
+// anybody can answer. Ten is what `search_cigars` caps its own page at, so the
+// two surfaces offer the same size of list.
+const MAX_CANDIDATES = 10;
+
 // The candidate list a `cigar_ambiguous` error carries, ordered the way the
 // client reads it out: best identity agreement first, trigram breaking ties.
 // Ordering is the whole value of the list — with fourteen `Tatuaje Monster`
@@ -74,13 +82,15 @@ function rankedCandidates(name: string, rows: CandidateRow[]): CigarCandidate[] 
   return rankByIdentity(name, rows, (row) => ({
     name: row.canonical_name,
     sim: Number(row.sim),
-  })).map((row) => ({
-    cigarId: row.id,
-    canonicalName: row.canonical_name,
-    brand: row.brand,
-    vitola: row.vitola_name,
-    verification: row.verification,
-  }));
+  }))
+    .slice(0, MAX_CANDIDATES)
+    .map((row) => ({
+      cigarId: row.id,
+      canonicalName: row.canonical_name,
+      brand: row.brand,
+      vitola: row.vitola_name,
+      verification: row.verification,
+    }));
 }
 
 // Resolve a Smoke's cigar reference to a catalog id, upholding the catalog
@@ -130,12 +140,18 @@ export async function resolveCigar(
     throw new ValidationError([{ path: "cigar.described.canonicalName", message: "Required." }]);
   }
 
+  // THE SAME POOL `searchCigars` DRAWS, and for the same reason: every decision
+  // below — the strong-link filter, the sibling scan, the ambiguity list the user
+  // picks from — is made over the rows this query returned, so a family larger
+  // than the pool decides on an arbitrary slice of itself. `LIMIT 10` against
+  // fourteen live `Tatuaje Monster` siblings could not see four of them
+  // (`CANDIDATE_POOL`, name-heuristics.ts).
   const result = await tx.execute(sql`
     SELECT id, canonical_name, brand, vitola_name, verification, similarity(canonical_name, ${name}) AS sim
     FROM cigars
     WHERE canonical_name % ${name}
     ORDER BY sim DESC
-    LIMIT 10
+    LIMIT ${CANDIDATE_POOL}
   `);
   const candidates = result.rows as unknown as CandidateRow[];
 

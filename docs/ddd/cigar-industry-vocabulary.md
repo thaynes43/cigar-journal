@@ -11,6 +11,14 @@ Where a fact could not be confirmed it is omitted rather than guessed. Terms
 whose only definitions are vendor marketing are marked as such and must never
 be stored as provenance.
 
+**This page defines terms; it does not enumerate tokens.** Which words the
+matcher treats as a size, a container, a wrapper, or an alternative spelling of
+one of those is decided by four sets exported from `@cj/domain` —
+`VITOLA_TOKENS`, `PACKAGING_TOKEN_LABELS`, `VARIANT_TOKENS`,
+`SPELLING_VARIANTS` — and those sets are the authority (ADR-012 §Decision). A
+word is added or removed there, with the tests that pin it; restating them here
+would create a second vocabulary to drift against the first.
+
 ## Shared
 
 | Term | Meaning | Maps to |

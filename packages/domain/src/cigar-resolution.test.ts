@@ -13,7 +13,13 @@ import {
   variantCompatible,
   identityTokensCompatible,
 } from "./cigar-resolution.js";
-import { variantRelation, identityCoverage, rankByIdentity } from "./name-heuristics.js";
+import {
+  variantRelation,
+  identityCoverage,
+  identityResidues,
+  rankByIdentity,
+  CANDIDATE_POOL,
+} from "./name-heuristics.js";
 import { CigarAmbiguousError, CigarNotFoundError, IdempotencyConflictError } from "./errors.js";
 import type { Principal } from "./index.js";
 
@@ -112,6 +118,82 @@ describe("strong-link guard predicates", () => {
     expect(identityTokensCompatible("Oliva Serie V Melanio", "Oliva Series V Melanio")).toBe(true);
   });
 
+  // THE SPELLING-VARIANT TABLE (#237). Accents and plurals were the only two
+  // spellings the rule folded; the trade writes far more than two. Each pair
+  // below is one word written two ways in the live catalog or in live vendor
+  // listing titles, and each one read as two different identity claims before
+  // the table existed.
+  it("identityTokensCompatible: one wrapper, more than one spelling", () => {
+    expect(identityTokensCompatible("Camacho Ecuador Robusto", "Camacho Ecuadorian Robusto")).toBe(true);
+    expect(identityTokensCompatible("Sobremesa San Andres Maduro", "Sobremesa Mexican Maduro")).toBe(true);
+    expect(
+      identityTokensCompatible("Cavalier Prospektor Barber Pole", "Cavalier Prospektor Barberpole"),
+    ).toBe(true);
+    // `sun grown` was pair-joined and `shade grown` was not, so the orphaned
+    // `grown` read as identity against the one-word spelling.
+    expect(
+      identityTokensCompatible("HC Series White Shade Grown Toro", "HC Series White Shadegrown Toro"),
+    ).toBe(true);
+  });
+
+  it("identityTokensCompatible: one release word, more than one spelling", () => {
+    expect(
+      identityTokensCompatible("Padron 1964 Anniversary Exclusivo", "Padron 1964 Aniversario Exclusivo"),
+    ).toBe(true);
+    expect(
+      identityTokensCompatible("Drew Estate Liga Privada Anniversario 10", "Drew Estate Liga Privada Aniversario 10"),
+    ).toBe(true);
+    expect(
+      identityTokensCompatible("Aganorsa Leaf Aniversario 25 Edicion Limitada", "Aganorsa Leaf Aniversario 25 Edition Limitada"),
+    ).toBe(true);
+    expect(
+      identityTokensCompatible("Davidoff Aniversario Special R", "Davidoff Aniversario Especial R"),
+    ).toBe(true);
+    expect(identityTokensCompatible("Rocky Patel Nicaragua Toro", "Rocky Patel Nicaraguan Toro")).toBe(true);
+    // Both canonical keys are already vitola vocabulary, so the misspelling and
+    // the Spanish spelling become vocabulary with them.
+    expect(identityTokensCompatible("Henry Clay Rothchilde", "Henry Clay Rothschild")).toBe(true);
+    expect(identityTokensCompatible("Blackened S84 Corona Doble", "Blackened S84 Double Corona")).toBe(true);
+  });
+
+  // EQUIVALENCE IS A TABLE, NOT A DISTANCE, and this is why: over the live
+  // catalog's own tokens, edit distance 1 pairs `Face` with `Farce` and `Fuente`
+  // with `Fuerte`. A rule that equated near spellings would re-create the exact
+  // defect the identity guard was written for.
+  it("identityTokensCompatible: a near spelling is not an equivalence", () => {
+    expect(identityTokensCompatible("Tatuaje Monster Series The Face", "Tatuaje Monster Series The Farce")).toBe(false);
+    expect(identityTokensCompatible("Arturo Fuente Robusto", "Arturo Fuerte Robusto")).toBe(false);
+    // And a real wrapper claim is still a claim: unifying the spellings of
+    // `Ecuador` does not make Ecuador the same thing as Corojo.
+    expect(identityTokensCompatible("Camacho Ecuador Robusto", "Camacho Corojo Robusto")).toBe(true);
+    expect(identityResidues("Camacho Ecuador Robusto", "Camacho Corojo Robusto").query).toEqual(
+      new Set(["ecuador"]),
+    );
+  });
+
+  // THE STEMMING FLOOR, RE-MEASURED (#237). The floor was on the TOKEN, and the
+  // #235 verify pass proved it fired on identity words anyway: `opus` is four
+  // characters, so the rule that promised never to truncate a short word
+  // truncated it to `opu`. Measuring the STEM refuses that and keeps every
+  // plural the catalog actually carries.
+  it("identityResidues: the singular fold is measured on the stem, never on a doubled s", () => {
+    expect(identityResidues("Arturo Fuente Opus", "Arturo Fuente").query).toEqual(new Set(["opus"]));
+    // English has no plural ending in a doubled s — `press` is a live listing
+    // word and `dress box` is trade vocabulary, neither a plural of anything.
+    expect(identityResidues("Marca Dress Box Robusto", "Marca Robusto").query).toEqual(
+      new Set(["dress"]),
+    );
+    // Still folds the plurals it was written for.
+    expect(identityResidues("Oliva Series", "Oliva").query).toEqual(new Set(["serie"]));
+    expect(identityTokensCompatible("Tatuaje Monsters Smash", "Tatuaje Monster Smash")).toBe(true);
+    // What remains true, stated rather than denied: a six-letter word still
+    // folds, so `andres` folds to `andre`. Nothing in the live catalog collides
+    // with that stem, and the one place it mattered — the San Andrés wrapper —
+    // is joined by the spelling table before this rule sees the word.
+    expect(identityResidues("Marca Andres", "Marca").query).toEqual(new Set(["andre"]));
+    expect(identityResidues("Marca San Andres", "Marca Mexican").query).toEqual(new Set());
+  });
+
   // Ranking, not just admissibility: within a family the residue is the ONLY
   // signal that distinguishes members, so it has to outrank the whole-string
   // score rather than tie-break under it.
@@ -150,6 +232,48 @@ describe("strong-link guard predicates", () => {
     expect(rankByIdentity(query, rows, (row) => row).map((r) => r.name)).toEqual(
       rows.map((r) => r.name),
     );
+  });
+
+  // THE DEMOTION COVERAGE CAUSED (#237). Coverage is the share of the QUERY a
+  // candidate accounts for and is blind to the candidate's own extra words, so a
+  // longer, more specific catalog name that happens to contain every word of the
+  // query scored a perfect 1 — and, as an absolute primary key, outranked a
+  // near-exact match that dropped a single word. The user asking for the Torpedo
+  // was offered the Diplomatico.
+  it("rankByIdentity: a far better trigram match is not demoted by a marginal identity gain", () => {
+    const query = "Padron 1964 Anniversary Series Torpedo";
+    // Full coverage on the query, and a different vitola.
+    expect(identityCoverage(query, "Padron 1964 Anniversary Series Diplomatico")).toBe(1);
+    // One word short of full — and the cigar the query names.
+    expect(identityCoverage(query, "Padron 1964 Anniversary Torpedo")).toBeLessThan(1);
+
+    const ranked = rankByIdentity(
+      query,
+      [
+        { name: "Padron 1964 Anniversary Series Diplomatico", sim: 0.62 },
+        { name: "Padron 1964 Anniversary Torpedo", sim: 0.93 },
+      ],
+      (row) => row,
+    );
+    expect(ranked[0]!.name).toBe("Padron 1964 Anniversary Torpedo");
+  });
+
+  // WHAT STAYS ABSOLUTE. Banding coverage is safe only because the guard's own
+  // verdict is now the first key: a candidate that CONTRADICTS the name — a
+  // mutual residue, `Bride` where the query said `Creature` — sorts below every
+  // candidate that merely says more or less, whatever its trigram score. That is
+  // the fourteen-sibling case, and no band or blend may override it.
+  it("rankByIdentity: a contradicting name never outranks a compatible one", () => {
+    const query = "Tatuaje Monster Smash The Creature";
+    const ranked = rankByIdentity(
+      query,
+      [
+        { name: "Tatuaje Monster Smash The Bride", sim: 0.99 },
+        { name: "Tatuaje Monster Smash The Creature Especial Reserva", sim: 0.4 },
+      ],
+      (row) => row,
+    );
+    expect(ranked[0]!.name).toBe("Tatuaje Monster Smash The Creature Especial Reserva");
   });
 
   // TWO GUARDS, NOT THREE. Matching v2 added a wrapper-variant guard and it
@@ -550,5 +674,96 @@ describe("resolveCigar and search_cigars over a sibling family", () => {
     });
     expect(partial.matches[0]!.canonicalName).toBe("Tatuaje Monster Smash The Creature");
     expect(partial.guidance).toBe("multiple_matches");
+  });
+});
+
+// ONE POOL FOR BOTH READERS (#237). `searchCigars` drew fifty trigram candidates
+// and ranked them; `resolveCigar` drew TEN and decided link-vs-create over those.
+// Ranking cannot recover a row the pool never held, so on a family larger than
+// ten the resolver was deciding on an arbitrary slice of it — and the slice is
+// arbitrary in exactly the way ADR-012 warns about, since siblings that differ in
+// one word out of six score alike.
+//
+// The family below is built so the row the query names is TWELFTH on trigram: it
+// is the only candidate the identity guard admits, and every sibling above it
+// contradicts the name. Under `LIMIT 10` the resolver never saw it and asked;
+// with the shared pool it links.
+describe("resolveCigar draws the same candidate pool searchCigars does", () => {
+  let h: DomainHarness;
+  let user: Principal;
+  // Twelve contradicting siblings — every one of them a `The <word>` release
+  // that is not the one being named.
+  const CONTRADICTING = [
+    "The Chuck",
+    "The Tiff",
+    "The Hyde",
+    "The Mummy",
+    "The Drac",
+    "The Ghoul",
+    "The Bride",
+    "The Frank",
+    "The Krueger",
+    "The Michael",
+    "The Jekyll",
+    "The Wolfman",
+  ].map((edition) => `Tatuaje Monster Smash ${edition}`);
+  // The row the query names, spelled longer — a ONE-SIDED residue, which the
+  // guard admits, at a trigram score below every sibling above.
+  const NAMED = "Tatuaje Monster Smash The Creature Especial Reserva Toro";
+  const QUERY = "Tatuaje Monster Smash The Creature";
+  let namedId: string;
+
+  beforeAll(async () => {
+    h = await createHarness();
+    user = await h.createUser("candidate-pool@example.com");
+    for (const name of CONTRADICTING) {
+      await h.seedCigar({ canonicalName: name, brand: "Tatuaje", line: "Monster Smash" });
+    }
+    namedId = await h.seedCigar({ canonicalName: NAMED, brand: "Tatuaje", line: "Monster Smash" });
+  }, 60_000);
+
+  afterAll(async () => {
+    await h?.stop();
+  });
+
+  // The premise, asserted rather than assumed: if pg_trgm ever reorders this
+  // family the test below stops meaning what it says, and this is where that
+  // shows up.
+  it("puts the named row outside the first ten of the trigram order", async () => {
+    const ranked = await h.deps.db.execute(sql`
+      SELECT canonical_name, similarity(canonical_name, ${QUERY}) AS sim
+      FROM cigars
+      WHERE canonical_name % ${QUERY}
+      ORDER BY sim DESC
+    `);
+    const names = (ranked.rows as unknown as { canonical_name: string; sim: number }[]).map(
+      (row) => row.canonical_name,
+    );
+    expect(names.indexOf(NAMED)).toBeGreaterThanOrEqual(10);
+    expect(names.length).toBeLessThanOrEqual(CANDIDATE_POOL);
+  });
+
+  it("links the named row that the old ten-row pool could not see", async () => {
+    const result = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: QUERY, brand: "Tatuaje" },
+    });
+    expect(result.created).toBe(false);
+    expect(result.cigar.cigarId).toBe(namedId);
+  });
+
+  // The pool is a DECISION width, not a page width. A user cannot be read fifty
+  // candidates, so the ambiguity list stays the size `search_cigars` caps its own
+  // page at.
+  it("still offers a readable list when nothing in the pool is admissible", async () => {
+    const error = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Tatuaje Monster Smash The Banshee", brand: "Tatuaje" },
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(CigarAmbiguousError);
+    const candidates = (error as CigarAmbiguousError).candidates;
+    expect(candidates.length).toBe(10);
+    expect(candidates.length).toBeLessThan(CANDIDATE_POOL);
   });
 });

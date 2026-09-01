@@ -50,21 +50,13 @@ import { assessEnrichmentFields } from "./enrichment.js";
 import { validateQueryFilters } from "./validation.js";
 import { isUuid } from "./uuid.js";
 import { decodeSmokeCursor, encodeSmokeCursor, afterSmokeCursor } from "./smoke-cursor.js";
-import { rankByIdentity } from "./name-heuristics.js";
+import { rankByIdentity, CANDIDATE_POOL } from "./name-heuristics.js";
 
 const DEFAULT_SMOKE_LIMIT = 10;
 const MAX_SMOKE_LIMIT = 25;
 const DEFAULT_SEARCH_LIMIT = 5;
 const MAX_SEARCH_LIMIT = 10;
 
-// How many trigram candidates to consider before ranking, as against how many to
-// return. A FAMILY IS BIGGER THAN A PAGE: `Tatuaje Monster` is fourteen live
-// siblings whose names differ in one word out of six, so they score nearly alike
-// and `LIMIT 5` on the trigram order returned five arbitrary members of the
-// fourteen — the one the user actually named as likely absent as present. The
-// pool is drawn on similarity, ranked on identity (below), and only then cut to
-// the caller's limit.
-const SEARCH_POOL = 50;
 const BROWSE_CIGARS_LIMIT = 100;
 
 // Match-provenance snippet rendering. We use ts_headline per prose field (not
@@ -485,7 +477,7 @@ export async function searchCigars(
     WHERE c.catalog_status = 'active'
       AND (c.canonical_name % ${query} OR coalesce(c.brand, '') % ${query})
     ORDER BY sim DESC
-    LIMIT ${SEARCH_POOL}
+    LIMIT ${CANDIDATE_POOL}
   `);
   const matches: CigarMatch[] = rankByIdentity(
     query,
