@@ -46,6 +46,11 @@ Catalog and Curation (admin only); the right cluster carries the record
 action as an **icon-only** accent chip (no text at any width) and Sign out.
 Inventory is gone.
 
+> **Superseded (nav row only).** Curation and Sign out left the nav row for
+> the avatar-initials user menu; see DESIGN-003 §"Chrome: user menu" for the
+> shipped composition. The wordmark-is-Journal rule and the icon-only record
+> chip stand.
+
 - **Views:** Brands (default) · All · Ledger. Brands and All are the
   existing poster library. **Ledger** is the purchases-lots table moved from
   `/inventory?view=table`, plus a per-holding consumed/remaining column —
@@ -256,7 +261,8 @@ Implementers use these exactly or flag the gap; never invent alternates.
 
 | Surface | Proposed string |
 |---|---|
-| Nav row | wordmark (→ Journal) · `Catalog` · `Curation` (admin) · [record icon] · Sign out |
+| Nav row | wordmark (→ Journal) · `Catalog` · `Curation` (admin) · [record icon] · Sign out — superseded, see DESIGN-003 §"Chrome: user menu" |
+| Journal h1 (`/` and `/journal`) | `Journal` — approved and shipped |
 | Record icon button | pencil SVG (Feather edit-3), `aria-label`/`title` = `Record a smoke` |
 | View toggle | `Brands` · `All` · `Ledger` |
 | Ownership facet | `All` · `Have` · `Want` · `Don't have` |

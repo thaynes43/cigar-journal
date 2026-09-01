@@ -17,6 +17,12 @@ const SKELETON_COUNT = 6;
 // personal-inventory signals (the humidor tag and the strength meter) and minus
 // the owner-only empty-state prompt. Each card still links to the smoke's public
 // detail. An empty result renders nothing (the no-blurbs rule is absolute).
+//
+// The heading is the page's only <h1> — the wordmark is chrome on every route —
+// and lives here rather than in the page so it appears only with entries: a
+// public journal that exists but has no visible smokes still renders nothing
+// (issue 96 honest degradation, issue 219). The string matches the signed-in
+// root's.
 export function PublicJournalList() {
   const query = api.smokes.listPublic.useInfiniteQuery(
     {},
@@ -62,6 +68,9 @@ export function PublicJournalList() {
 
   return (
     <div className="flex flex-col gap-6">
+      <h1 className="mx-auto w-full max-w-3xl font-display text-2xl font-semibold text-ink">
+        Journal
+      </h1>
       <ul className={LIST}>
         {smokes.map((smoke) => (
           <li key={smoke.smokeId}>
