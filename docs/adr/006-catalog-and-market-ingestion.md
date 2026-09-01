@@ -739,3 +739,25 @@ LLM-created cigars accumulate until curated.
     Red Aroma`. This change makes both unreachable going forward and repairs
     neither; a curator ruling and a follow-up are required, or the fix will read
     as ineffective.
+
+- **2026-09-01 — the Wikidata taxonomy is seeded (issue #127).** A prod
+  `--brand-images --probe` (namespace `frontend`, image v0.33.0) over the
+  coverless brands produced the first observed QIDs, and they are now committed
+  in `packages/crawler/src/core/wikidata-taxonomy.ts` with the English label the
+  probe printed beside each: `tobaccoClass` `Q110684031` (cigar brand),
+  `tobaccoIndustry` `Q907703` (tobacco industry), three `genericBrand` classes,
+  seventeen `negative` classes, and `Q241` (Cuba) as the only origin the sample
+  contained. `tobaccoProduct` stays **empty**: no candidate carried a P1056
+  meaning cigars or tobacco, and inventing one would be the fabrication this
+  ADR's live-verification rule forbids. The lists are therefore deliberately
+  incomplete — a class no candidate carried cannot appear — and later probes are
+  expected to extend them.
+  - **This unblocks the job; it does not fill the wall.** `--brand-images` is now
+    runnable, and on that same probe it yields **zero covers** for the 17
+    coverless brands: best case 2 `no_image`, 2 `ambiguous`, 13 `no_match`. No
+    name-matching tobacco-qualifying entity with a P18 exists for any of them.
+    The seeding is future-brand plumbing, and the blank shelves need a different
+    source.
+  - **The refuse-to-run gate stays.** `taxonomyIsUnseeded` still guards the run,
+    because a later edit can empty the lists again and the `no_match` rows that
+    would follow are a 30-day negative cache.
