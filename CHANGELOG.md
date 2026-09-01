@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.33.0](https://github.com/thaynes43/cigar-journal/compare/v0.32.1...v0.33.0) (2026-09-01)
+
+
+### Features
+
+* **mcp:** record_purchase gains confirmedDistinct; photo guidance states the same-turn rule ([#232](https://github.com/thaynes43/cigar-journal/issues/232)) ([e89001b](https://github.com/thaynes43/cigar-journal/commit/e89001bc3077836870a3773901acda51f087ccd2))
+
+
+### Bug Fixes
+
+* **crawler:** enrich candidate matching rides matching v2; drain 10→50 ([#236](https://github.com/thaynes43/cigar-journal/issues/236)) ([b963954](https://github.com/thaynes43/cigar-journal/commit/b96395460b74b5fd7e5de9465e6a0d8894ae79ab))
+* **domain:** word identity tokens never silently strong-link (Face≠Bride) ([#235](https://github.com/thaynes43/cigar-journal/issues/235)) ([b0043ae](https://github.com/thaynes43/cigar-journal/commit/b0043aeed18abcdbe7160523a3180eb33cde5ccc))
+
 ## [0.32.1](https://github.com/thaynes43/cigar-journal/compare/v0.32.0...v0.32.1) (2026-08-31)
 
 
