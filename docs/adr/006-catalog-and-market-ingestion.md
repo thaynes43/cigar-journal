@@ -113,8 +113,36 @@ LLM-created cigars accumulate until curated.
     refused; one anchoring nothing is carried on key coverage alone. Same
     positive-evidence rule the seed path already applies when `no_anchor`
     annotates instead of unlinking. Line and blend are compatibility, not
-    coverage: the ask's line is struck from its required keys, but a candidate
-    resolving to a different line or blend id is refused (inert until Wave 3).
+    coverage: a candidate resolving to a different line or blend id is refused.
+  - **The line span is struck only when a `line_id` could catch the mistake.**
+    Striking it says "a vendor omitting the family is not naming a different
+    cigar" — true only while the `lineId` arm can refuse a candidate that names a
+    DIFFERENT family. Struck unconditionally against a registry with no lines in
+    it the two halves come apart, and the result is a cross-line admit: prod's
+    fourteen `Tatuaje Monster Smash` rows carry the free-text line, so `Monster
+    Smash Frank` reduces to `frank`, which Fox's `Tatuaje Skinny Monsters Frank`
+    covers exactly — nine live admits, a sibling family answering each other's
+    photo asks. So the strike waits for the guard that makes it safe: nothing is
+    struck until the Wave 3 backfill, and the pairing is the rule.
+  - **A candidate that anchors no brand must be earned by a real name.** With no
+    marca to agree on, coverage alone admits the pair, so an ask whose required
+    keys are grammar and ordinals admits nearly anything: `Diplomaticos No 2`
+    reduces to `no 2` and the live row `Mark Twain Memoir No. 2 Gordo` covers it
+    exactly. Such a candidate is refused unless the ask retains at least one
+    identity-bearing key — not a stopword, a bare ordinal, or trade vocabulary.
+  - **One identity language (#235), as an invariant rather than a filter.** The
+    drain refuses any pair `identityTokensCompatible` refuses; a matcher
+    admitting pairs the strong-link guard rejects would be a second opinion about
+    product identity, which is what the Face/Bride defect cost. It is recorded
+    here that the rule is SUBSUMED by one-way coverage today and cannot fire —
+    the compared query is the required keys, so coverage passing means every
+    query token is shared and the residue is empty. Deleting it fails no test,
+    measured. It is kept to stop the two rules diverging if coverage is ever
+    loosened. What the ordering does buy is real: the residue is taken AFTER the
+    brand span comes off, because raw, `Drew Estate Liga Privada No. 9` against
+    `Liga Privada No. 9 Corona Viva` leaves `{drew, estate}` — the marca the
+    title never states — and refusing that would kill the correct match this
+    amendment exists for.
   - **Trigram is demoted to a ranker** over candidates already admitted. It can
     reorder a shortlist; it can no longer open or close a door.
   - **The drain will not repoint a crawler link that already resolves
@@ -143,7 +171,24 @@ LLM-created cigars accumulate until curated.
     ~5) product pages, so 50 looks is ~250 pages and at most 400 — against a
     seed/offers walk that reads every product URL a vendor publishes (Fox's flat
     sitemap is ~2,035 locs) on the same interval. The drain remains the small
-    walk of the two.
+    walk of the two. The DEFAULT is inert on its own — the CronJobs pass
+    `--limit` explicitly — so the ceiling only moves when the ops side does, and
+    the arithmetic above is what licenses that change rather than this constant.
+  - **WHAT THE ENRICH PATH IS FOR, stated because fixing the matcher does not by
+    itself fill the ask that motivated it.** Both of Fox's covering listings for
+    `Drew Estate Liga Privada No. 9` are spoken for: the Corona Doble row is
+    `decided_by = agent`, so the write declines to it, and the Corona Viva row is
+    a crawler link to the more specific vitola, so the theft guard skips it. Both
+    refusals are correct. The ask still records a miss — the change is that the
+    miss is attributable to OWNERSHIP rather than manufactured by a threshold.
+    Across the two enabled vendors only **4 listings of 1,881** are
+    crawler-owned and unclaimed, the one state the drain can freshly link (Fox
+    930 `crawler/auto`, 865 `agent/unmatched`, 4 `crawler/unmatched`; Cuban Lou's
+    64 / 18 / 0). So the drain's job is UNCLAIMED-LISTING COVERAGE, plus listings
+    already pointing at the ask itself. A blend-level ask whose covering listings
+    all belong to other rows is structurally unfulfillable here, and its photo
+    comes from the Wave 3 structuring that gives the blend a `blend_id` and lets
+    its vitola siblings share one photo home — not from a bigger drain.
   - The #170/#192 market and photo-authority gates are untouched, and the
     `match | miss | error | photo_refused` outcome vocabulary is preserved.
 - **2026-08-31 — listing matching superseded by ADR-012 (matching v2).** The

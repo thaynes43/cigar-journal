@@ -198,6 +198,7 @@ export {
   tokenizeTitle,
   PACKAGING_TOKENS,
   PACKAGING_TOKEN_LABELS,
+  VITOLA_TOKENS,
   type ListingParse,
   type ParseRegistry,
   type PackagingFacts,
@@ -219,7 +220,14 @@ export {
   type LeafChoice,
   type DescribedTaxonomy,
 } from "./taxonomy-resolve.js";
-export { vitolaAgrees, variantRelation, type VariantRelation } from "./name-heuristics.js";
+export {
+  vitolaAgrees,
+  variantRelation,
+  identityTokensCompatible,
+  identityResidues,
+  type VariantRelation,
+  type IdentityResidues,
+} from "./name-heuristics.js";
 
 // Registry writes and name recomposition — the audited PRIMITIVES (Wave 2). The
 // enveloped curation services that wrap them are in taxonomy-curation.ts below;

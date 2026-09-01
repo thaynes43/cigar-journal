@@ -1983,6 +1983,96 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(await photosFor(vitolaId)).toHaveLength(0);
   });
 
+  // ...AND THE SAME GUARD IS CHECKED AGAIN INSIDE THE WRITE, because the first
+  // check cannot be authoritative. Admission and write are separated by the rest
+  // of the candidate sweep — seconds of polite HTTP — and a seed walk on another
+  // lane can link a listing to its own best leaf inside that window. The
+  // admission check is an optimization; `priorAtWrite` is the guarantee.
+  //
+  // THE RACE IS STAGED, NOT SIMULATED. The sitemap order is reversed so the
+  // candidate that WINS ranking (the Corona Doble — pinned two cases above, where
+  // trigram puts it top) is fetched FIRST and the Corona Viva is fetched LAST. The
+  // claim is then planted from inside the Viva fetch, which is strictly after the
+  // Doble cleared admission unclaimed and strictly before the transaction opens.
+  // Planting it during the winner's own fetch would prove nothing: that page is
+  // read at the top of the loop, before its own `existingCrawlerLink` call, so the
+  // admission check would catch it and the write site would never be exercised.
+  //
+  // A claim that lands in this window is NOT a skip-and-continue. The look has
+  // already chosen its candidate, so `declined` ends it — the ask goes unanswered
+  // this run rather than falling through to a sibling — and that is the correct
+  // conservative answer: the drain re-reads the world and finds it changed.
+  it("a listing claimed between admission and the write is declined, not stolen", async () => {
+    const lane = await makeVendor("Liga Race Lane", "NC");
+    await arrange([lane]);
+
+    const askId = await seedCigar(LIGA_BLEND_ASK, "NC", { brand: "Drew Estate" });
+    const requestId = await seedRequest(askId);
+    const vitolaId = await seedCigar("Liga Privada No. 9 Corona Doble", "NC", { brand: "Drew Estate" });
+
+    // Reversed enumeration: the winner first, so the loser's fetch is the last
+    // event before the write.
+    const racedRoutes = { ...ligaRoutes, [SITEMAP]: { body: urlsetXml([LIGA_DOBLE_URL, LIGA_VIVA_URL]) } };
+
+    const base = createMockFetcher(racedRoutes);
+    let planted = false;
+    const racing: MockFetcher = {
+      requested: base.requested,
+      get pagesFetched() {
+        return base.pagesFetched;
+      },
+      fetchText: async (url: string) => {
+        const response = await base.fetchText(url);
+        if (!planted && url === LIGA_VIVA_URL) {
+          planted = true;
+          // The competing seed walk, landing mid-sweep: it links the Doble
+          // listing — the one this drain is about to write — to the vitola row.
+          // Crawler-owned and unconfirmed, so `upsertListingMatch` would happily
+          // rewrite it and nothing but `priorAtWrite` says otherwise.
+          await upsertListingMatch(pg.db, {
+            vendorId: lane,
+            listingKey: pathOf(LIGA_DOBLE_URL),
+            cigarId: vitolaId,
+            status: "auto",
+            now: now(),
+          });
+        }
+        return response;
+      },
+      fetchBinary: base.fetchBinary,
+    };
+
+    const run = await runIngest(deps(racing, createMemoryPhotoStorage()), {
+      adapter: foxCigar,
+      vendorId: lane,
+      mode: "enrich",
+    });
+
+    // The claim was planted after the Doble had already been admitted — i.e. the
+    // race really was staged, and the admission check really did see it free.
+    expect(planted).toBe(true);
+
+    // THE LINK IS NOT REPOINTED. The Doble listing still names the vitola row.
+    expect(await matchFor(lane, pathOf(LIGA_DOBLE_URL))).toMatchObject({
+      cigarId: vitolaId,
+      status: "auto",
+      decidedBy: "crawler",
+    });
+
+    // THE LOOK IS A MISS, and nothing about the ask moved. `declined` ends the
+    // look, so the Viva is not linked as a consolation prize either.
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
+    expect(run.stats.matchesAuto).toBe(0);
+    expect(await matchFor(lane, pathOf(LIGA_VIVA_URL))).toBeUndefined();
+    expect((await matchesFor(lane)).filter((m) => m.cigarId === askId)).toHaveLength(0);
+
+    // The request survives to be retried, and the ask's one photo slot is empty.
+    expect((await requestRow(requestId)).status).toBe("pending");
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(await photosFor(askId)).toHaveLength(0);
+    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "miss" }]);
+  });
+
   // THE AUTHORITY GATE STILL BITES FIRST (#192/#170). A looser matcher must not
   // widen what a lane may be SHOWN — the market filter is evaluated in the open
   // set, one step ahead of any comparison, so a CC ask is never offered to an NC

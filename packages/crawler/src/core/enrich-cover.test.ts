@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { parseListingTitle, type ListingParse, type ParseRegistry } from "@cj/domain";
-import { coversAsk, enrichAsk, type EnrichAskRow } from "./match.js";
+import { identityTokensCompatible, parseListingTitle, type ListingParse, type ParseRegistry } from "@cj/domain";
+import { coversAsk, enrichAsk, type EnrichAsk, type EnrichAskRow } from "./match.js";
 
 // THE ENRICH DRAIN'S ADMISSION RULE, pure (#233, ADR-012). `coversAsk` is what
 // replaced `similarity(canonical_name, title) > 0.55` as the thing that decides
@@ -45,18 +45,32 @@ describe("enrichAsk", () => {
     ).toEqual(["liga", "privada", "no", "9"]);
   });
 
-  // Line as well as brand, and for the same reason: a vendor that omits `Monster
-  // Series` from its title is not naming a different cigar, it is naming the same
-  // one more briefly.
-  it("strikes the ask's line span too", () => {
-    expect(
-      ask({
-        canonicalName: "Tatuaje Monster Series The Bride",
-        brand: "Tatuaje",
-        line: "Monster Series",
-        brandId: "tat",
-      }).requiredKeys,
-    ).toEqual(["the", "bride"]);
+  // THE LINE STRIKE IS GATED ON `line_id`, AND THE GATE IS THE TEST. Striking the
+  // line says "a vendor that omits `Monster Series` is not naming a different
+  // cigar" — true only while the `lineId` contradiction arm in `coversAsk` can
+  // still refuse a candidate that names a DIFFERENT family. The two halves are one
+  // rule, and a registry with no lines in it holds only the permissive half: prod's
+  // fourteen `Tatuaje Monster Smash` rows carry the line as free text and no
+  // `line_id`, so an unconditional strike reduced `Monster Smash Frank` to `frank`,
+  // which Fox's `Tatuaje Skinny Monsters Frank` covers exactly (the nine live
+  // cross-line admits pinned in the `coversAsk` block below).
+  //
+  // So the strike WAITS for the guard that makes it safe. Both arms are asserted
+  // together because neither states the rule alone.
+  it("strikes the ask's line span only once a line_id can police it", () => {
+    const row = {
+      canonicalName: "Tatuaje Monster Series The Bride",
+      brand: "Tatuaje",
+      line: "Monster Series",
+      brandId: "tat",
+    } as const;
+
+    // No `line_id` — every catalog row until the Wave 3 backfill. The family stays
+    // a REQUIRED key, which is the conservative answer while nothing can check it.
+    expect(ask({ ...row, lineId: null }).requiredKeys).toEqual(["monster", "series", "the", "bride"]);
+
+    // With one, the contradiction arm is live and the strike is safe to make.
+    expect(ask({ ...row, lineId: "line-monster-series" }).requiredKeys).toEqual(["the", "bride"]);
   });
 
   // A ROW WHOSE NAME ABBREVIATES ITS OWN MARCA, which is a registry problem
@@ -122,8 +136,11 @@ describe("coversAsk", () => {
     expect(coversAsk(bride, parse("Tatuaje Skinny Monsters Tiff"))).toBe(false);
     expect(coversAsk(bride, parse("Tatuaje Skinny Monsters Frank"))).toBe(false);
     // The control, without which both zeros above are unfalsifiable: the ask is
-    // coverable, by a title that actually names it and adds a vitola.
-    expect(coversAsk(bride, parse("Tatuaje The Bride Churchill"))).toBe(true);
+    // coverable, by a title that actually names it and adds a vitola. It has to
+    // CARRY THE LINE to do so — with no `line_id` on the row, `monster series`
+    // is still required (see the gate above), and a title that drops the family
+    // is exactly the cross-line admit the gate exists to refuse.
+    expect(coversAsk(bride, parse("Tatuaje Monster Series The Bride Churchill"))).toBe(true);
   });
 
   // A MISS OF THIS SHAPE IS CLOSED BY A CURATOR ADDING AN ALIAS, NEVER BY
@@ -169,7 +186,11 @@ describe("coversAsk", () => {
       linesOfBrand: () => [],
       blendsOfLine: () => [],
     };
-    const anchored = parse("Tatuaje The Bride Churchill", registry);
+    // The candidate carries the line because the ask still requires it: the row
+    // has no `line_id`, so nothing is struck (the gate in the `enrichAsk` block).
+    // Coverage has to be satisfiable for the BRAND arm to be the thing deciding.
+    const title = "Tatuaje Monster Series The Bride Churchill";
+    const anchored = parse(title, registry);
     expect(anchored.brandId).toBe("brand-tatuaje");
 
     const row = { canonicalName: "Tatuaje Monster Series The Bride", brand: "Tatuaje", line: "Monster Series" };
@@ -178,7 +199,7 @@ describe("coversAsk", () => {
     // Silence on the candidate's side is NOT a contradiction — the same
     // positive-evidence rule the seed path applies when it refuses to unlink on a
     // `no_anchor`.
-    expect(coversAsk(ask({ ...row, brandId: "brand-drew-estate" }), parse("Tatuaje The Bride Churchill"))).toBe(true);
+    expect(coversAsk(ask({ ...row, brandId: "brand-drew-estate" }), parse(title))).toBe(true);
   });
 
   // The line arm of the same gate. Inert today — nothing carries a `line_id` yet
@@ -223,23 +244,196 @@ describe("coversAsk", () => {
   });
 
   // WRAPPER VARIANTS ARE SEPARATE PRODUCTS, so they are separate blends (ADR-012)
-  // — a Maduro's photo slot must not be filled with the Natural's picture. The
-  // line strike is what makes this gate visible on its own: with `1964
-  // Anniversary Maduro` accounted for as the line, all three titles below satisfy
-  // the required keys, and only the wrapper decides.
+  // — a Maduro's photo slot must not be filled with the Natural's picture.
+  //
+  // ISOLATING THAT GATE COSTS TWO PIECES OF STRUCTURE, and supplying them is the
+  // point rather than a convenience. The wrapper only gets to decide once every
+  // OTHER arm is satisfiable by all three titles, so the ask carries a `line_id`
+  // (which licenses the line strike, reducing the required keys to `torpedo`) and
+  // the registry anchors Padron (so the candidates clear the no-anchor rule
+  // below). Without both, `maduro` stays a required key and the `unstated` title
+  // fails on coverage — the wrapper never speaks, and the test would be pinning
+  // key coverage while claiming to pin wrapper semantics.
   it("refuses a contradicting wrapper and admits a title that states none", () => {
+    const registry: ParseRegistry = {
+      brands: [{ id: "brand-padron", name: "Padron", aliases: ["padron"] }],
+      linesOfBrand: () => [],
+      blendsOfLine: () => [],
+    };
     const maduro = ask({
       canonicalName: "Padron 1964 Anniversary Maduro Torpedo",
       brand: "Padron",
       line: "1964 Anniversary Maduro",
-      brandId: "pad",
+      brandId: "brand-padron",
+      lineId: "line-1964-anniversary-maduro",
     });
     expect(maduro.requiredKeys).toEqual(["torpedo"]);
 
-    expect(coversAsk(maduro, parse("Padron 1964 Anniversary Maduro Torpedo"))).toBe(true);
-    expect(coversAsk(maduro, parse("Padron 1964 Anniversary Natural Torpedo"))).toBe(false);
+    expect(coversAsk(maduro, parse("Padron 1964 Anniversary Maduro Torpedo", registry))).toBe(true);
+    expect(coversAsk(maduro, parse("Padron 1964 Anniversary Natural Torpedo", registry))).toBe(false);
     // `unstated` is not a disagreement: a vendor naming no wrapper has made no
     // claim, and refusing it would invent a distinction the vendor did not make.
-    expect(coversAsk(maduro, parse("Padron 1964 Anniversary Torpedo"))).toBe(true);
+    expect(coversAsk(maduro, parse("Padron 1964 Anniversary Torpedo", registry))).toBe(true);
+
+    // And the second piece of structure earns its place too: the SAME title, run
+    // against a registry that anchors nothing, is refused — `torpedo` alone is
+    // vitola vocabulary, not an identity claim (the no-anchor rule below).
+    expect(coversAsk(maduro, parse("Padron 1964 Anniversary Maduro Torpedo"))).toBe(false);
+  });
+
+  // ==========================================================================
+  // THE NINE LIVE CROSS-LINE ADMITS, measured in prod before the line strike was
+  // gated on `line_id`. Fourteen `Tatuaje Monster Smash <name>` rows carry
+  // `line = 'Monster Smash'` as free text and `line_id = NULL`; Fox stocks the
+  // adjacent `Tatuaje Skinny Monsters <name>` family. Struck unconditionally, the
+  // ask `Monster Smash Frank` reduced to `frank` — which `Tatuaje Skinny Monsters
+  // Frank` covers exactly — and a whole sibling family began answering each
+  // other's photo asks, permanently, into the one photo slot ADR-007 allows.
+  //
+  // Nine of those pairs were live. They are pinned individually rather than as a
+  // loop over names because each is a distinct production row, and a loop that
+  // silently iterated zero times would pass.
+  // ==========================================================================
+  const SMASH_SIBLINGS = ["Chuck", "Drac", "Face", "Frank", "Hyde", "Jekyll", "Tiff", "Wolf"] as const;
+
+  const smashAsk = (name: string) =>
+    ask({ canonicalName: `Tatuaje Monster Smash ${name}`, brand: "Tatuaje", line: "Monster Smash", brandId: "tat" });
+
+  it.each(SMASH_SIBLINGS)("Monster Smash %s is not covered by its Skinny Monsters namesake", (name) => {
+    expect(coversAsk(smashAsk(name), parse(`Tatuaje Skinny Monsters ${name}`))).toBe(false);
+  });
+
+  // Fox's real listing for the ninth, phrased as a sentence rather than a title.
+  it("does not admit Fox's `Creature from Tatuaje` against Monster Smash Creature", () => {
+    expect(coversAsk(smashAsk("Creature"), parse("Creature from Tatuaje"))).toBe(false);
+  });
+
+  // THE CONTROL FOR ALL NINE. Without it the zeros above are satisfied by a rule
+  // that refuses everything: the ask is coverable, by a title that names its own
+  // family and adds packaging and a vitola on top.
+  it("still admits a Monster Smash listing for the Monster Smash ask", () => {
+    expect(
+      coversAsk(smashAsk("Frank"), parse("Tatuaje Monster Smash Frank Box-Pressed Robusto Extra")),
+    ).toBe(true);
+  });
+
+  // A CANDIDATE THAT ANCHORS NO BRAND MUST BE EARNED BY A REAL NAME. Prod's ask
+  // `Diplomaticos No 2` is a Cuban torpedo; struck of its marca its required keys
+  // are `["no", "2"]` — one grammar word and one bare ordinal, which is not an
+  // identity claim at all. Coverage is the ONLY thing admitting a candidate that
+  // anchors nothing, so an ask that claims nothing admits nearly anything: the
+  // real prod row `Mark Twain Memoir No. 2 Gordo` covers `no 2` exactly, and a
+  // Cuban torpedo's one photo slot would have been filled by an unrelated bundle.
+  //
+  // This is why coverage alone cannot admit a no-anchor candidate. The rule is
+  // narrow on purpose — it asks whether the ASK said anything, not whether the
+  // candidate looks plausible — and a candidate that DOES anchor the ask's brand
+  // has already cleared a positive check and is never held to it.
+  it("refuses a no-anchor candidate when the ask's own keys claim no identity", () => {
+    const diplomaticos = ask({ canonicalName: "Diplomaticos No 2", brand: "Diplomaticos", brandId: "dip" });
+    expect(diplomaticos.requiredKeys).toEqual(["no", "2"]);
+
+    const markTwain = parse("Mark Twain Memoir No. 2 Gordo – Pack of 20");
+    expect(markTwain.brandId).toBeNull();
+    expect(coversAsk(diplomaticos, markTwain)).toBe(false);
+
+    // THE CONTROL, and it locates the rule precisely: the same ask, the same
+    // empty required keys, admitted the moment a candidate anchors the marca.
+    const registry: ParseRegistry = {
+      brands: [{ id: "brand-diplomaticos", name: "Diplomaticos", aliases: ["diplomaticos"] }],
+      linesOfBrand: () => [],
+      blendsOfLine: () => [],
+    };
+    const anchoredAsk = ask({ canonicalName: "Diplomaticos No 2", brand: "Diplomaticos", brandId: "brand-diplomaticos" });
+    const anchoredTitle = parse("Diplomaticos No. 2 Torpedo", registry);
+    expect(anchoredTitle.brandId).toBe("brand-diplomaticos");
+    expect(coversAsk(anchoredAsk, anchoredTitle)).toBe(true);
+  });
+
+  // ONE IDENTITY LANGUAGE FOR THE WHOLE REPO (#235). `coversAsk` and
+  // `identityTokensCompatible` must never disagree about product identity: a
+  // matcher that admitted a pair the strong-link guard refuses would be a second
+  // opinion, and the Face/Bride defect is what having two opinions costs. So the
+  // implication is asserted directly — incompatible ⟹ not covered — over a table
+  // of pairs that exercises both verdicts.
+  //
+  // The implication is ONE-WAY, and the last row is the proof. `coversAsk` holds
+  // rules `identityTokensCompatible` knows nothing about (the no-anchor rule
+  // above, the sampler flag, the id contradictions), so a COMPATIBLE pair may
+  // still be refused. The two rules are independent; what they may not do is
+  // contradict each other.
+  //
+  // THIS IS AN INVARIANT TEST, NOT A REGRESSION FIXTURE, and the distinction is
+  // worth stating because the invariant currently holds for free. Key coverage is
+  // strictly stricter than the guard on the query side — `identityName` IS
+  // `requiredKeys.join(" ")`, so coverage passing means every required key was
+  // shared, which means an empty query residue, which means compatible. No pair
+  // below is refused by the guard alone; deleting the guard from `coversAsk`
+  // fails nothing here. It earns its place by making the invariant explicit and
+  // by holding if coverage is ever loosened — not by fixing a live miss.
+  it("never admits a pair the shared identity guard calls incompatible", () => {
+    const liga = () => ask({ canonicalName: "Drew Estate Liga Privada No. 9", brand: "Drew Estate", brandId: "de" });
+    const cases: ReadonlyArray<{ ask: EnrichAsk; title: string; compatible: boolean; covers: boolean }> = [
+      // The flagship, both of its vitolas: the ask's residue is empty once its
+      // brand is struck, so the pair is compatible and coverage carries it.
+      { ask: liga(), title: "Liga Privada No. 9 Corona Viva", compatible: true, covers: true },
+      { ask: liga(), title: "Liga Privada No. 9 Corona Doble", compatible: true, covers: true },
+      // ...and the sibling blend trigram ranks ABOVE those two is refused by both.
+      { ask: liga(), title: "Liga Privada T52 Robusto", compatible: false, covers: false },
+      // The cross-line admits again, this time as an identity disagreement:
+      // `{smash}` against `{skinny}`, which is two different claims.
+      { ask: smashAsk("Frank"), title: "Tatuaje Skinny Monsters Frank", compatible: false, covers: false },
+      { ask: smashAsk("Tiff"), title: "Tatuaje Skinny Monsters Tiff", compatible: false, covers: false },
+      { ask: smashAsk("Creature"), title: "Creature from Tatuaje", compatible: false, covers: false },
+      {
+        ask: ask({ canonicalName: "Tatuaje Monster Series The Bride", brand: "Tatuaje", line: "Monster Series", brandId: "tat" }),
+        title: "Tatuaje Skinny Monsters Tiff",
+        compatible: false,
+        covers: false,
+      },
+      // The unaliased marca abbreviation: `hdm` survives into the residue and
+      // meets `classic`, so both rules read a disagreement.
+      {
+        ask: ask({
+          canonicalName: "HdM Epicure Especial",
+          brand: "Hoyo de Monterrey",
+          brandId: "hdm",
+          brandAliases: ["hoyo-de-monterrey"],
+        }),
+        title: "Hoyo De Monterrey Classic No. 450 EMS Robusto",
+        compatible: false,
+        covers: false,
+      },
+      // A vitola listing under a blend-level ask, agreed on by both.
+      {
+        ask: ask({ canonicalName: "Caldwell Long Live the King The Heater", brand: "Caldwell", brandId: "cw" }),
+        title: "Caldwell Long Live the King The Heater Robusto",
+        compatible: true,
+        covers: true,
+      },
+      // THE INDEPENDENCE PROOF. `no 2` against `Mark Twain Memoir No. 2 Gordo`
+      // leaves the ask no residue at all, so the shared guard is content — and
+      // `coversAsk` refuses anyway, on the no-anchor rule. Compatible does not
+      // imply covered, and only the reverse implication is asserted below.
+      {
+        ask: ask({ canonicalName: "Diplomaticos No 2", brand: "Diplomaticos", brandId: "dip" }),
+        title: "Mark Twain Memoir No. 2 Gordo – Pack of 20",
+        compatible: true,
+        covers: false,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const parsed = parse(testCase.title);
+      const compatible = identityTokensCompatible(testCase.ask.identityName, parsed.cleanedName);
+      expect({ title: testCase.title, compatible }).toEqual({ title: testCase.title, compatible: testCase.compatible });
+      expect({ title: testCase.title, covers: coversAsk(testCase.ask, parsed) }).toEqual({
+        title: testCase.title,
+        covers: testCase.covers,
+      });
+      // The invariant itself, stated once per pair rather than inferred from the
+      // table: nothing the guard refuses may ever be covered.
+      if (!compatible) expect(coversAsk(testCase.ask, parsed)).toBe(false);
+    }
   });
 });

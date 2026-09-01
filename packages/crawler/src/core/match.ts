@@ -9,6 +9,7 @@ import {
   evidencedMarket,
   extractDims,
   fold,
+  identityTokensCompatible,
   loadAncestryContext,
   parseListing,
   scopedLeafCandidates,
@@ -16,6 +17,8 @@ import {
   tokenizeTitle,
   variantRelation,
   MIN_ANCHOR_KEY_LENGTH,
+  PACKAGING_TOKENS,
+  VITOLA_TOKENS,
   type AliasAnchor,
   type AliasCandidate,
   type CigarType,
@@ -415,9 +418,16 @@ export interface EnrichAsk {
   lineId: string | null;
   blendId: string | null;
   // What a candidate MUST carry. The ask's name minus its brand span, minus its
-  // line span, minus packaging and dimensions — i.e. the words that say WHICH
-  // cigar this is once the marca and the family are accounted for.
+  // line span (only once a `line_id` can police it), minus packaging and
+  // dimensions — i.e. the words that say WHICH cigar this is once the marca and
+  // the family are accounted for.
   requiredKeys: string[];
+  // The same residue as a NAME, for the shared identity vocabulary in
+  // `coversAsk`. The ask's brand is struck out of it deliberately: vendor titles
+  // routinely omit the marca (`Liga Privada No. 9 Corona Viva` never says Drew
+  // Estate), and comparing raw names would read that omission as an identity
+  // disagreement and refuse the match this whole path exists for.
+  identityName: string;
 }
 
 export interface EnrichAskRow {
@@ -442,20 +452,54 @@ export function enrichAsk(row: EnrichAskRow): EnrichAsk {
   const brand = spanOf(keys, [row.brand, ...(row.brandAliases ?? [])], segmentStarts);
   if (brand) for (let i = brand.start; i < brand.start + brand.length; i++) consumed.add(i);
 
-  // Scoped to after the brand, exactly as `parseListingTitle` scopes its own line
-  // anchor — a line alias appearing inside the marca is not the line.
-  const from = brand ? brand.start + brand.length : 0;
-  const line = spanOf(keys, [row.line, ...(row.lineAliases ?? [])], segmentStarts, from);
-  if (line) for (let i = line.start; i < line.start + line.length; i++) consumed.add(i);
+  // THE LINE SPAN IS STRUCK ONLY WHEN A `line_id` COULD CATCH THE MISTAKE, and
+  // that pairing is the whole rule. Striking the line says "a vendor omitting the
+  // family is not naming a different cigar" — safe ONLY while the `lineId`
+  // contradiction arm in `coversAsk` can refuse a candidate that names a
+  // DIFFERENT family. Struck unconditionally, the two halves come apart on a
+  // registry that has no lines in it, and the result is a cross-line admit:
+  // prod's fourteen `Tatuaje Monster Smash` rows carry the free-text line, so
+  // `Monster Smash Frank` reduced to `frank` — and Fox's `Tatuaje Skinny Monsters
+  // Frank` covers `frank` exactly. Nine of those admits are live rows, a whole
+  // sibling family answering each other's photo asks.
+  //
+  // So the strike waits for the guard that makes it safe. `line_id` is null on
+  // every row until the Wave 3 backfill, which means nothing is struck today and
+  // `Monster Smash` stays a required key — the conservative answer while the
+  // structure that could check it does not exist yet. Scoped to after the brand,
+  // exactly as `parseListingTitle` scopes its own line anchor: a line alias
+  // appearing inside the marca is not the line.
+  if (row.lineId != null) {
+    const from = brand ? brand.start + brand.length : 0;
+    const line = spanOf(keys, [row.line, ...(row.lineAliases ?? [])], segmentStarts, from);
+    if (line) for (let i = line.start; i < line.start + line.length; i++) consumed.add(i);
+  }
 
+  const requiredKeys = keys.filter((_, i) => !consumed.has(i));
   return {
     cigarId: row.cigarId,
     canonicalName: row.canonicalName,
     brandId: row.brandId,
     lineId: row.lineId,
     blendId: row.blendId,
-    requiredKeys: keys.filter((_, i) => !consumed.has(i)),
+    requiredKeys,
+    identityName: requiredKeys.join(" "),
   };
+}
+
+// Words that name no product. A required key set made only of these carries no
+// identity claim at all: `Diplomaticos No 2` reduces to `no 2` once its marca is
+// struck, and `no` is grammar while `2` is a bare ordinal that a hundred
+// unrelated cigars also carry.
+const ASK_STOPWORDS: ReadonlySet<string> = new Set(["no", "the", "a", "de", "del", "la", "el", "los", "las", "of", "and", "y"]);
+
+// Does this key say WHICH cigar? Vocabulary is excluded on the same list #235's
+// identity residue uses, so the two rules cannot disagree about what a size or a
+// container word is.
+function isIdentityBearing(key: string): boolean {
+  if (ASK_STOPWORDS.has(key)) return false;
+  if (/^\d+$/.test(key)) return false;
+  return !VITOLA_TOKENS.has(key) && !PACKAGING_TOKENS.has(key);
 }
 
 // Does this parsed vendor listing structurally cover the ask?
@@ -473,6 +517,40 @@ export function coversAsk(ask: EnrichAsk, parse: ListingParse): boolean {
   // Wrapper variants are sold as separate products, so they are separate blends
   // (ADR-012). `unstated` is not a disagreement and stays eligible.
   if (variantRelation(ask.canonicalName, parse.cleanedName) === "different") return false;
+
+  // ONE IDENTITY LANGUAGE FOR THE WHOLE REPO (#235). Whatever
+  // `identityTokensCompatible` calls a disagreement is a disagreement here too —
+  // a matcher that admitted pairs the strong-link guard refuses would be a second
+  // opinion about product identity, and the Face/Bride defect is what having two
+  // opinions costs.
+  //
+  // IT IS SUBSUMED TODAY, AND THAT IS STATED RATHER THAN LEFT TO BE DISCOVERED.
+  // `identityName` is the required keys joined, so if the coverage test below
+  // passes then every query token was found in the candidate, every one of them
+  // is therefore SHARED, and the query residue is necessarily empty — which is
+  // compatible. One-way coverage is strictly stricter on the query side than this
+  // guard, so this line cannot refuse a pair coverage would admit: deleting it
+  // fails no test, which was measured rather than assumed. It is kept as an
+  // INVARIANT, not a working filter — it is what keeps the two rules from
+  // diverging if coverage is ever loosened, and the parity test pins the
+  // implication (incompatible ⟹ not covered) rather than isolating this line.
+  //
+  // Compared against the ask's IDENTITY RESIDUE and never its canonical name.
+  // Raw, the residue of `Drew Estate Liga Privada No. 9` against `Liga Privada
+  // No. 9 Corona Viva` is `{drew, estate}` — the marca the vendor's title simply
+  // never states — which reads as a mutual disagreement and would refuse a
+  // correct match. That is the trap this ordering avoids, and it is why the
+  // residue is taken after the brand span comes off.
+  if (!identityTokensCompatible(ask.identityName, parse.cleanedName)) return false;
+
+  // A CANDIDATE THAT ANCHORS NO BRAND MUST BE EARNED BY A REAL NAME. With no
+  // marca to agree on, coverage is the only thing admitting the pair, so an ask
+  // whose required keys are all grammar and ordinals admits nearly anything:
+  // prod's `Diplomaticos No 2` reduces to `no 2`, and `Mark Twain Memoir No. 2
+  // Gordo` covers it exactly — a Cuban torpedo answered by an unrelated bundle.
+  // A candidate that DOES anchor the ask's brand has already cleared a positive
+  // check and is not held to this.
+  if (parse.brandId == null && !ask.requiredKeys.some(isIdentityBearing)) return false;
 
   const candidate = new Set(identityKeys(parse.cleanedName).keys);
   return ask.requiredKeys.every((key) => candidate.has(key));
