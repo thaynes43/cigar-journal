@@ -8,6 +8,7 @@ import {
   CATALOG_GRID,
   CATALOG_PARENT_DIMENSION,
   UNFILED_SLUG,
+  catalogEmptyLine,
   catalogUrl,
   drillInto,
   type CatalogDimension,
@@ -90,7 +91,7 @@ export function CatalogGroupGrid({
     return (
       <div className="flex flex-col gap-6">
         {header ? <CatalogDrillHeader {...header} count={0} /> : null}
-        <p className="font-serif text-muted">No matches.</p>
+        <p className="font-serif text-muted">{catalogEmptyLine(state)}</p>
       </div>
     );
   }

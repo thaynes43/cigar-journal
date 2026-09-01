@@ -5,7 +5,13 @@ import { keepPreviousData } from "@tanstack/react-query";
 import type { CatalogCigarTile } from "@cj/domain";
 import { api } from "@/lib/trpc/react";
 import { ui } from "@/lib/ui";
-import { CATALOG_GRID, CATALOG_GROUP_STRINGS, levelOf, type CatalogState } from "./catalog-registry";
+import {
+  CATALOG_GRID,
+  CATALOG_GROUP_STRINGS,
+  catalogEmptyLine,
+  levelOf,
+  type CatalogState,
+} from "./catalog-registry";
 import { CatalogDrillHeader, type DrillHeaderProps } from "./catalog-drill-header";
 import { CigarStillTile } from "./cigar-still-tile";
 
@@ -100,7 +106,7 @@ export function CatalogAllGrid({
     return (
       <div className="flex flex-col gap-6">
         {header ? <CatalogDrillHeader {...header} count={0} /> : null}
-        <p className="font-serif text-muted">No matches.</p>
+        <p className="font-serif text-muted">{catalogEmptyLine(state)}</p>
       </div>
     );
   }
