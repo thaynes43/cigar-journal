@@ -1,0 +1,159 @@
+-- 0032_revert_offers_vitola_misbinds — hand back the 1,067 auto-links one Fox
+-- offers run wrote on 2026-09-01, while `chooseLeaf` could still bind a listing
+-- to a sibling whose vitola it never compared.
+--
+-- ONE STATEMENT. No table, no column, no index, no constraint. It takes a
+-- population defined entirely by WHO wrote it and WHEN, and returns it to the
+-- state the crawler would have written had the guard shipped a day earlier.
+--
+--
+-- THE DEFECT. Matching v2 anchors a listing on its brand and, where the title
+-- names one, on its line; `chooseLeaf` then picks a leaf beneath that anchor.
+-- Two of its arms picked without ever requiring the listing's own identity
+-- tokens — the vitola, the edition, the flavour word — to agree with the leaf's:
+--
+--   * the FREEFORM arm never called `identityTokensCompatible` at all. That
+--     mutual-residue check belongs to `coversAsk` and `strongLinkCompatible` —
+--     the drain and the MCP resolve path — and the offers walk does not call
+--     them (0031's header says the same thing from the other side). So a sibling
+--     that merely shared the anchor could win on brand and line alone.
+--   * the STRUCTURAL arm, when a line held exactly ONE leaf, linked to it with
+--     no name comparison whatsoever. A lone sibling was read as a certainty,
+--     when a lone sibling is precisely the case where the listing is most likely
+--     to be a vitola the catalogue has not learned yet.
+--
+-- Four proven cases, all from this run:
+--
+--   'CAO Flavours Bella Vanilla Corona'  ->  'CAO Flavours Moontrance Corona'
+--       — a different flavour, and the correct row 'CAO Flavours Bella Vanilla'
+--       existed in the catalogue the whole time.
+--   'Tatuaje Skinny Monsters Frank'      ->  'Tatuaje Skinny Monsters Chuck'
+--       — the line's only leaf, taken by the structural arm without a look.
+--   'Rocky Patel Dark Star Toro'         ->  'Rocky Patel Dark Star Sixty'
+--       — same line, different vitola.
+--   nine 'Davidoff Grand Cru *' SKUs     ->  the single row 'Davidoff Grand Cru'
+--       — No. 2, No. 3, No. 5, Robusto and Toro all on one leaf whose name states
+--       no size at all.
+--
+--
+-- AND THE FOURTH CASE IS THE REASON A CODE FIX ALONE WOULD NOT HAVE HELD. The
+-- Davidoff links were not `chooseLeaf`'s decision at all — it refuses them today
+-- and refused them then, on `numbersCompatible` for the numbered vitolas and on
+-- the column-level `vitolaAgrees` for the Robusto (that row carries
+-- `vitola_name='Toro'`). They are STALE LINKS the run RESTORED. When the resolver
+-- returns a silent verdict, `ingestListing` reads `existingCrawlerLink` and, if
+-- the row already points somewhere, upgrades it back to `status='auto'` on the
+-- old `cigar_id` under the positive-evidence rule — annotating rather than
+-- unlinking. That is why this run stamped `updated_at` on links it never
+-- re-derived, and why 20 links into cigars EXCLUDED two days earlier came back.
+--
+-- So the guard shipping beside this migration cannot fix these on its own: a
+-- better verdict is discarded in favour of the link already on the row. Clearing
+-- `cigar_id` is what breaks the loop. With no prior link to restore, the next
+-- walk has nothing to fall back on and must decide the listing on its merits —
+-- which is the entire point of re-deriving the batch rather than repairing it.
+-- (The other half of that loop, a prior link into a non-active cigar, is closed
+-- in code alongside this: `existingCrawlerLink` now declines to report one.)
+--
+--
+-- THE RUN, and it is the whole scope of this migration. `crawl_runs`
+-- 5eb6586b-83e5-4e23-9585-e9ee155dce74 — vendor 57cad36b-d25b-490f-a332-bf7f2d14b18c
+-- (Fox), kind 'offers', started 2026-09-01 15:32:06.893-04, finished
+-- 2026-09-01 17:04:14.866-04, status succeeded. Inside those bounds it wrote
+-- exactly 1,067 `status='auto' AND decided_by='crawler'` rows
+-- (min `updated_at` 15:32:37.571-04, max 17:04:09.191-04) into a table that then
+-- held 1,895: 209 agent `confirmed`, 1,135 crawler `auto`, 551 crawler
+-- `unmatched`.
+--
+-- THE 60-LINK AUDIT, which is why the whole batch goes rather than a hand-picked
+-- list. Sixty of the 1,067 links were read back against the vendor's own title
+-- (`offers.raw->'listing'->>'name'`). The marca was right 60 times out of 60 —
+-- the brand anchor was never the problem. The LINK was fully right only 40 times
+-- out of 60: 19 bound the wrong vitola, 1 the wrong line. Extrapolated across
+-- the batch that is roughly 355 wrong links and roughly 712 right ones. There is
+-- no predicate that separates them — the wrong ones are wrong in the same
+-- structural way the right ones are right, which is the definition of a batch
+-- that has to be re-derived rather than repaired.
+--
+-- 20 of the 1,067 point at cigars with `catalog_status='excluded'` — Fox gift
+-- cards, removed from the catalogue by #126. Those links are invisible on every
+-- catalogue surface, which is the whole hazard in miniature.
+--
+--
+-- THE RATIFICATION (coordinating session, 2026-09-01). Reverting all 1,067 is
+-- the cheap half of a decision that only looks expensive: the matcher is
+-- DETERMINISTIC, and the guard being added alongside this migration only ever
+-- REMOVES candidates. So on the fixed re-run the ~712 correct links re-form
+-- identically — the same titles, the same anchors, the same leaves — while the
+-- ~355 wrong ones fail to form at all and are recorded as honest `unmatched`,
+-- which is what routes a listing into enrichment and triage instead of into the
+-- catalogue. A wrong link is worse than an honest miss for one reason and it is
+-- sufficient: an honest miss is visible and a wrong link is not. It reads as a
+-- settled fact on the cigar's page, in its offers, and in the evidenced market
+-- computed from `listing_matches.cigar_id`, and nothing in the system is looking
+-- for it.
+--
+-- `unmatched_reason` is set to NULL, not to 'no_match'. These rows are not being
+-- given a verdict — they are having one taken away, and a reason invented here
+-- would assert a per-listing judgement nobody made. The crawler writes the real
+-- reason on the next offers walk, when it has actually re-decided the listing.
+-- The null also keeps the batch out of the curation queue at deploy:
+-- `matchTriagePage` (`packages/domain/src/curation.ts`) admits an unmatched row
+-- only when `decided_by='crawler' AND unmatched_reason IS NOT NULL`, so these
+-- 1,067 surface one at a time, after a crawl has re-decided one and recorded
+-- why. Same property 0031 leaned on, for the same reason.
+--
+-- `suggested_parse` and `category_path` are left exactly as they are: the parse
+-- and the vendor's breadcrumbs are evidence about the listing, and they were not
+-- what went wrong. `updated_at` is left alone too — it is the only surviving
+-- mark of which run wrote a row, and this statement's own WHERE clause is proof
+-- of how much that matters.
+--
+--
+-- WHAT IS NOT TOUCHED, and every clause below is one of these guarantees:
+--
+--   * `decided_by IN ('agent','curator')` — a verdict from the MCP curation lane
+--     or from the owner's own console. Never in scope, under any reading.
+--     Excluded by `decided_by = 'crawler'`.
+--   * `status='confirmed'` — 209 rows. "Yes, this listing is that cigar", said by
+--     a human or an agent; the crawler guards it separately and first at the
+--     write site. Excluded by `status = 'auto'`.
+--   * the 68 crawler `auto` rows whose `updated_at` is at or before this run's
+--     start. They were written by earlier walks, under other code, and this
+--     migration has no evidence about them. Excluded by the strict `>` on
+--     `started_at` — strict, because the run's own earliest write is 30 seconds
+--     after `started_at` and an inclusive bound would reach backwards for
+--     nothing.
+--   * anything written after the run finished. Excluded by the `<=` on
+--     `finished_at`. A revert with only a lower bound would swallow every link
+--     the FIXED matcher writes between this deploy and the next — the failure
+--     mode that turns a repair into a second outage.
+--
+-- PROVENANCE IS DERIVED, NOT TRANSCRIBED. The bounds come from the `crawl_runs`
+-- row itself rather than from two timestamp literals, so the statement names the
+-- run it is undoing and cannot drift from it. The join is on the run's id AND
+-- its vendor AND its kind: an id that turns up on some other lane's row is not
+-- this run. `finished_at IS NOT NULL` guards the upper bound — a still-running
+-- or abandoned row has no end, and a NULL comparison would silently match
+-- nothing while looking like it matched everything.
+--
+-- On a database with no such `crawl_runs` row — a fresh deploy, a restored
+-- backup, a developer's box, this package's own test database — the join
+-- produces no rows and the statement updates nothing. That is correct, not a
+-- degradation: outside prod there is no bad batch to revert.
+--
+-- Re-runnable: a second execution finds no `status='auto'` row in the window,
+-- because the first execution is what moved every one of them to 'unmatched'.
+UPDATE listing_matches lm
+   SET status = 'unmatched',
+       cigar_id = NULL,
+       unmatched_reason = NULL
+  FROM crawl_runs r
+ WHERE r.id = '5eb6586b-83e5-4e23-9585-e9ee155dce74'
+   AND r.vendor_id = '57cad36b-d25b-490f-a332-bf7f2d14b18c'
+   AND r.kind = 'offers'
+   AND r.finished_at IS NOT NULL
+   AND lm.status = 'auto'
+   AND lm.decided_by = 'crawler'
+   AND lm.updated_at > r.started_at
+   AND lm.updated_at <= r.finished_at;
