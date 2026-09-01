@@ -283,7 +283,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the thirty-one tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
+  it("lists exactly the thirty-two tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -322,6 +322,7 @@ describe("@cj/mcp adapter", () => {
           // taxonomy curation (ADR-012 Wave 3, issue #196)
           "register_taxonomy",
           "update_registry_aliases",
+          "rename_registry_entity",
           "assign_cigar_taxonomy",
           "split_cigar",
         ].sort(),
@@ -2742,6 +2743,7 @@ describe("@cj/mcp adapter", () => {
         runId: string | null;
         confidence: number | null;
         clientId: string | null;
+        before: unknown;
         after: unknown;
       }
     | undefined
@@ -2754,6 +2756,7 @@ describe("@cj/mcp adapter", () => {
           runId: row.runId,
           confidence: row.confidence,
           clientId: row.clientId,
+          before: row.before,
           after: row.after,
         }
       : undefined;
@@ -3112,10 +3115,10 @@ describe("@cj/mcp adapter", () => {
 
   // ---- taxonomy curation tools (ADR-012 Wave 3, issue #196) -----------------
   //
-  // The four registry verbs over the real wire: find-or-mint a brand → line →
-  // blend path, edit the spellings a registry row answers to, place a leaf in
-  // that structure, and split an entry that has been standing for several
-  // products. Same admin gate, same `actor: agent` stamp and same idempotency
+  // The five registry verbs over the real wire: find-or-mint a brand → line →
+  // blend path, edit the spellings a registry row answers to, correct the
+  // spelling it is displayed under, place a leaf in that structure, and split an
+  // entry that has been standing for several products. Same admin gate, same `actor: agent` stamp and same idempotency
   // envelope as the rest of the curation surface, so the tests below are shaped
   // like the ones above them.
 
@@ -3141,6 +3144,18 @@ describe("@cj/mcp adapter", () => {
       aliases: string[];
       added: string[];
       removed: string[];
+      replayed: boolean;
+    }
+    interface RenamePayload {
+      level: string;
+      id: string;
+      name: string;
+      previousName: string;
+      slug: string;
+      aliases: string[];
+      addedKeys: string[];
+      changed: boolean;
+      recomposedCigars: number;
       replayed: boolean;
     }
     interface AssignPayload {
@@ -3391,6 +3406,63 @@ describe("@cj/mcp adapter", () => {
       expect((await brandRow(brandId))?.aliases).toContain(ownKey);
     });
 
+    // The display-name fix over the wire (issue #196). The contract it has to keep
+    // is a boundary, not a value: the NAME moves, and the published slug and the
+    // keys vendor listings already hit stay exactly where they were.
+    it("rename_registry_entity corrects the display spelling, holding the slug and the matching keys still", async () => {
+      const t = tag();
+      const before = `H Upmann ${t}`;
+      const after = `H. Upmann ${t}`;
+      const brandId = (await register({ brand: { name: before } })).brand.id;
+      const slug = (await brandRow(brandId))!.slug;
+      const aliases = [...(await brandRow(brandId))!.aliases].sort();
+      const runId = randomUUID();
+
+      // A composed leaf under the marca, to prove the rename carries into the
+      // names composed from it rather than leaving them spelled the old way.
+      const cigarId = await h.seedCigar({
+        canonicalName: `${before} Connoisseur A`,
+        brandId,
+        vitolaName: "Connoisseur A",
+        nameSource: "composed",
+        verification: "unverified",
+      });
+
+      await withClient(adminCuration, async (client) => {
+        const res = payloadOf(
+          await call(client, "rename_registry_entity", {
+            clientRequestId: randomUUID(),
+            level: "brand",
+            id: brandId,
+            name: after,
+            runId,
+            confidence: 0.97,
+          }),
+        ) as RenamePayload;
+
+        expect(res.changed).toBe(true);
+        expect(res.name).toBe(after);
+        expect(res.previousName).toBe(before);
+        // The period folds away, so the corrected spelling introduces no key.
+        expect(res.addedKeys).toEqual([]);
+        expect(res.slug).toBe(slug);
+        expect([...res.aliases].sort()).toEqual(aliases);
+        expect(res.recomposedCigars).toBe(1);
+      });
+
+      const row = await brandRow(brandId);
+      expect(row?.name).toBe(after);
+      expect(row?.slug).toBe(slug);
+      expect([...row!.aliases].sort()).toEqual(aliases);
+      expect((await cigarById(cigarId))!.canonicalName).toBe(`${after} Connoisseur A`);
+
+      const audit = await auditFor("brand.rename", runId);
+      expect(audit?.actor).toBe("agent");
+      expect(audit?.runId).toBe(runId);
+      expect((audit?.before as Record<string, unknown>).name).toBe(before);
+      expect((audit?.after as Record<string, unknown>).name).toBe(after);
+    });
+
     it("assign_cigar_taxonomy attaches a line and recomposes the canonical name from the parts", async () => {
       const t = tag();
       const brandName = `Tatuaje ${t}`;
@@ -3600,8 +3672,14 @@ describe("@cj/mcp adapter", () => {
       expect(nulled.error?.issues[0]?.message).toContain("lineId");
     });
 
-    it("refuses all four taxonomy tools for a journal token without curation:write: 403", async () => {
-      const names = ["register_taxonomy", "update_registry_aliases", "assign_cigar_taxonomy", "split_cigar"] as const;
+    it("refuses all five taxonomy tools for a journal token without curation:write: 403", async () => {
+      const names = [
+        "register_taxonomy",
+        "update_registry_aliases",
+        "rename_registry_entity",
+        "assign_cigar_taxonomy",
+        "split_cigar",
+      ] as const;
 
       for (const name of names) {
         // ownerFull holds every journal/catalog scope and no curation scope: the
@@ -3622,7 +3700,7 @@ describe("@cj/mcp adapter", () => {
       }
     });
 
-    it("rejects all four taxonomy tools for a curation-scoped NON-admin principal: unauthorized", async () => {
+    it("rejects all five taxonomy tools for a curation-scoped NON-admin principal: unauthorized", async () => {
       const t = tag();
       const brandName = `Gate Marca ${t}`;
       const cigarId = await h.seedCigar({ canonicalName: `Taxonomy Gate ${t}`, verification: "unverified" });
@@ -3641,6 +3719,14 @@ describe("@cj/mcp adapter", () => {
           add: ["Anything"],
         });
         expect(errorOf(aliased).code).toBe("unauthorized");
+
+        const renamed = await call(client, "rename_registry_entity", {
+          clientRequestId: randomUUID(),
+          level: "brand",
+          id: randomUUID(),
+          name: "Anything",
+        });
+        expect(errorOf(renamed).code).toBe("unauthorized");
 
         const assigned = await call(client, "assign_cigar_taxonomy", {
           clientRequestId: randomUUID(),

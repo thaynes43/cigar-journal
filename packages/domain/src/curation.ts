@@ -2855,6 +2855,15 @@ function summarizeAudit(action: string, before: Record<string, unknown>, after: 
       ];
       return parts.length > 0 ? `${fmtValue(after.name)}: ${parts.join(" ")}` : null;
     }
+    // The display-name fix (issue #196). Same before→after line the cigar rename
+    // renders, over `name` rather than `canonicalName` — without it a spelling
+    // sweep would review as a run of blank rows, the defect the note above
+    // describes for the Wave 2 actions.
+    case "brand.rename":
+    case "line.rename":
+    case "blend.rename":
+    case "blender.rename":
+      return `${fmtValue(before.name)} → ${fmtValue(after.name)}`;
     case "blend.credit_blender":
       return "blender credited";
     case "cigar.assign_parts": {

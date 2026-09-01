@@ -19,6 +19,7 @@ import { createBlend, createLine } from "./taxonomy-writes.js";
 import {
   registerTaxonomy,
   updateRegistryAliases,
+  renameRegistryEntity,
   assignCigarTaxonomy,
   splitCigar,
 } from "./taxonomy-curation.js";
@@ -32,8 +33,8 @@ import {
 import type { Principal } from "./deps.js";
 
 // The enveloped curation surface over the Wave 2 registry primitives (ADR-012
-// Wave 3): get-or-create paths, alias edits, leaf assignment with a dry run, and
-// the bucket split.
+// Wave 3): get-or-create paths, alias edits, display-name fixes, leaf assignment
+// with a dry run, and the bucket split.
 
 describe("taxonomy curation", () => {
   let h: DomainHarness;
@@ -469,6 +470,217 @@ describe("taxonomy curation", () => {
         level: "blend",
         id: newRequestId(),
         add: ["Sweep Spelling"],
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([{ path: "id", message: "No such blend." }]);
+    });
+  });
+
+  // The display-name fix (issue #196). The registry shipped with marcas spelled
+  // for a keyboard — `H Upmann`, `Partagas`, `Rafael Gonzales` — and no verb to
+  // correct one. What this asserts, over and over, is the boundary: the NAME moves
+  // and the two things a rename must not break — the published slug and the
+  // matching keys vendor listings already hit — stay exactly where they were.
+  describe("renameRegistryEntity", () => {
+    const brandRow = async (id: string) =>
+      (await h.deps.db.select().from(brands).where(eq(brands.id, id)))[0]!;
+
+    it("corrects the display spelling and moves neither the slug nor the stored keys", async () => {
+      const id = await seedBrand("H Upmann");
+      const before = await brandRow(id);
+      expect(before.slug).toBe("h-upmann");
+      expect(before.aliases).toEqual(["h-upmann"]);
+
+      const result = await renameRegistryEntity(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "brand",
+        id,
+        name: "H. Upmann",
+        attribution: { actor: "agent", runId: "wo-cigar-curate-spellings" },
+      });
+
+      expect(result).toMatchObject({
+        level: "brand",
+        id,
+        name: "H. Upmann",
+        previousName: "H Upmann",
+        changed: true,
+        replayed: false,
+      });
+      // The two invariants, stated as the result reports them: `h-upmann` is a
+      // published address and a live matching key, and the period folds away, so
+      // the corrected spelling introduces no key at all.
+      expect(result.slug).toBe("h-upmann");
+      expect(result.addedKeys).toEqual([]);
+      expect(result.aliases).toEqual(["h-upmann"]);
+
+      const after = await brandRow(id);
+      expect(after.name).toBe("H. Upmann");
+      expect(after.slug).toBe("h-upmann");
+      expect(after.aliases).toEqual(["h-upmann"]);
+
+      const audit = (await auditsFor("brand.rename")).find((row) => (row.after as { id: string }).id === id);
+      expect(audit).toBeDefined();
+      expect(audit!.actor).toBe("agent");
+      expect(audit!.runId).toBe("wo-cigar-curate-spellings");
+      expect(audit!.before).toMatchObject({ name: "H Upmann", aliases: ["h-upmann"] });
+      expect(audit!.after).toMatchObject({ name: "H. Upmann", aliases: ["h-upmann"], addedKeys: [] });
+    });
+
+    // The one spelling in the sweep whose fold actually moves: `s` → `z` is not a
+    // combining mark, so `Rafael González` folds to a key the row does not hold.
+    // It is ADDED and the old one KEPT — a vendor writing `Rafael Gonzales` is
+    // precisely the traffic that key exists to catch.
+    it("adds the new name's key when the fold differs, and keeps the old one", async () => {
+      const id = await seedBrand("Rafael Gonzales");
+
+      const result = await renameRegistryEntity(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "brand",
+        id,
+        name: "Rafael González",
+      });
+
+      expect(result.addedKeys).toEqual(["rafael-gonzalez"]);
+      expect(result.aliases).toEqual(["rafael-gonzales", "rafael-gonzalez"]);
+      expect(result.slug).toBe("rafael-gonzales");
+      expect((await brandRow(id)).aliases).toEqual(["rafael-gonzales", "rafael-gonzalez"]);
+    });
+
+    // A registry name is a name PART (`loadCigarNameParts` prefers it over the
+    // free-text column), so a composed leaf that kept the old spelling would be a
+    // row that looks maintained and disagrees with its own parts.
+    it("recomposes the composed leaves under the renamed row and leaves freeform ones alone", async () => {
+      const id = await seedBrand("Upmann Recompose");
+      const composedId = await h.seedCigar({
+        canonicalName: "Upmann Recompose Connoisseur A",
+        brandId: id,
+        vitolaName: "Connoisseur A",
+        nameSource: "composed",
+      });
+      const freeformId = await h.seedCigar({
+        canonicalName: "Upmann Recompose Freeform",
+        brandId: id,
+        nameSource: "freeform",
+      });
+
+      // Fold-identical on purpose: no key moves, so the only thing under test here
+      // is the recomposition.
+      const result = await renameRegistryEntity(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "brand",
+        id,
+        name: "Upmann Récompose",
+      });
+
+      expect(result.addedKeys).toEqual([]);
+      expect(result.recomposedCigars).toBe(1);
+      expect((await cigarRow(composedId)).canonicalName).toBe("Upmann Récompose Connoisseur A");
+      // That string is the owner's, and nothing may rewrite it behind their back.
+      expect((await cigarRow(freeformId)).canonicalName).toBe("Upmann Recompose Freeform");
+    });
+
+    // The same rail the mint path runs on. A rename onto a spelling a sibling
+    // already answers to is a near-duplicate caught, not a rename to force.
+    it("refuses a name whose key another entity in the same scope claims, and names the holder", async () => {
+      const brandId = await seedBrand("Rename Collision Marca");
+      await createLine(h.deps, curator, { brandId, name: "Serie D" });
+      const other = await createLine(h.deps, curator, { brandId, name: "Serie E" });
+
+      const error = await renameRegistryEntity(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "line",
+        id: other.lineId,
+        name: "Serie D",
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]!.path).toBe("name");
+      expect((error as ValidationError).fields[0]!.message).toContain("Serie D");
+      const unchanged = (await h.deps.db.select().from(lines).where(eq(lines.id, other.lineId)))[0]!;
+      expect(unchanged.name).toBe("Serie E");
+    });
+
+    it("writes nothing when the trimmed name already matches", async () => {
+      const id = await seedBrand("Already Right");
+      const ledger = await auditCount();
+
+      const result = await renameRegistryEntity(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "brand",
+        id,
+        name: "  Already Right  ",
+      });
+
+      expect(result.changed).toBe(false);
+      expect(result.name).toBe("Already Right");
+      expect(result.recomposedCigars).toBe(0);
+      expect(await auditCount()).toBe(ledger);
+    });
+
+    it("refuses a name that folds to no matching key", async () => {
+      const id = await seedBrand("Punctuation Probe");
+      const error = await renameRegistryEntity(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "brand",
+        id,
+        name: "———",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]!.path).toBe("name");
+      expect((await brandRow(id)).name).toBe("Punctuation Probe");
+    });
+
+    it("replays an identical retry instead of renaming twice", async () => {
+      const id = await seedBrand("Diplomaticos");
+      const input = {
+        clientRequestId: newRequestId(),
+        level: "brand" as const,
+        id,
+        name: "Diplomáticos",
+      };
+
+      const first = await renameRegistryEntity(h.deps, curator, input);
+      expect(first.replayed).toBe(false);
+      expect(first.changed).toBe(true);
+
+      const ledger = await auditCount();
+      const second = await renameRegistryEntity(h.deps, curator, input);
+      expect(second.replayed).toBe(true);
+      // The ORIGINAL verdict verbatim — not a fresh "already right" no-op, which
+      // would tell a retrying lane that its first call had done nothing.
+      expect(second.changed).toBe(true);
+      expect(second.previousName).toBe("Diplomaticos");
+      expect(await auditCount()).toBe(ledger);
+      expect(await keysFor(input.clientRequestId)).toHaveLength(1);
+    });
+
+    it("is curator-only", async () => {
+      const id = await seedBrand("Denied Marca");
+      await expect(
+        renameRegistryEntity(h.deps, member, {
+          clientRequestId: newRequestId(),
+          level: "brand",
+          id,
+          name: "Denied Márca",
+        }),
+      ).rejects.toBeInstanceOf(UnauthorizedError);
+      expect((await brandRow(id)).name).toBe("Denied Marca");
+    });
+
+    it("answers a malformed id exactly as it answers an unknown one", async () => {
+      const malformed = await renameRegistryEntity(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "blend",
+        id: "not-a-uuid",
+        name: "Sweep Spelling",
+      }).catch((e: unknown) => e);
+      const unknown = await renameRegistryEntity(h.deps, curator, {
+        clientRequestId: newRequestId(),
+        level: "blend",
+        id: newRequestId(),
+        name: "Sweep Spelling",
       }).catch((e: unknown) => e);
       expect(malformed).toBeInstanceOf(ValidationError);
       expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());

@@ -12,6 +12,7 @@ import {
   restoreCigar,
   setProductPhotoRights,
   renameCigar,
+  renameRegistryEntity,
   queueEnrichmentBacklog,
   ENRICHMENT_BACKLOG_MAX,
   agentRuns,
@@ -156,6 +157,22 @@ export const curationRouter = router({
       }),
     )
     .mutation(({ ctx, input }) => renameCigar(ctx.deps, ctx.principal, input)),
+
+  // Correct the DISPLAY spelling of a brand, line, blend or blender (ADR-012,
+  // issue #196). The slug and the matching keys stay put — a published link and a
+  // vendor listing that matches today both keep working — so this is the identity
+  // edit at the registry levels, exactly as `rename` above is at the leaf. The
+  // curate agent presses the identical service through its MCP tool.
+  renameRegistryEntity: adminProcedure
+    .input(
+      z.object({
+        clientRequestId: z.string(),
+        level: z.enum(["brand", "line", "blend", "blender"]),
+        id: z.string().uuid(),
+        name: z.string(),
+      }),
+    )
+    .mutation(({ ctx, input }) => renameRegistryEntity(ctx.deps, ctx.principal, input)),
 
   // Bulk-enqueue the "Missing photos" worklist for the crawler's enrich runs
   // (#154) — the operator kickstart for the same list the section renders. The

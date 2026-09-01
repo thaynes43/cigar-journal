@@ -24,9 +24,11 @@ import {
   createLineWithinTx,
   creditBlenderWithinTx,
   editRegistryAliasesWithinTx,
+  editRegistryNameWithinTx,
   recomposeCigarName,
   registrySlugCandidates,
   type EditAliasesResult,
+  type EditRegistryNameResult,
   type RegistryAttribution,
   type RegistryLevel,
 } from "./taxonomy-writes.js";
@@ -445,6 +447,77 @@ export async function updateRegistryAliases(
       if (existing) {
         assertReplayable(existing, requestFingerprint);
         return { ...(existing.result as UpdateRegistryAliasesResult), replayed: true };
+      }
+    }
+    throw error;
+  }
+}
+
+// --------------------------------------------------------------------------
+// renameRegistryEntity — the enveloped display-name fix
+// --------------------------------------------------------------------------
+
+export interface RenameRegistryEntityInput {
+  clientRequestId: string;
+  level: RegistryLevel;
+  id: string;
+  name: string;
+  attribution?: RegistryAttribution;
+  correlationId?: string;
+}
+
+export type RenameRegistryEntityResult = EditRegistryNameResult & { replayed: boolean };
+
+// Correct the spelling a registry row is DISPLAYED under, leaving its slug and its
+// matching keys where they are (`editRegistryName` carries the argument for why).
+// The counterpart to `updateRegistryAliases`: that one changes what the row can be
+// FOUND by, this one changes what it is CALLED — and the alias editor's own refusal
+// message points here, because dropping an identity key is a rename wearing the
+// wrong verb.
+export async function renameRegistryEntity(
+  deps: Deps,
+  principal: Principal,
+  input: RenameRegistryEntityInput,
+): Promise<RenameRegistryEntityResult> {
+  assertCurator(principal);
+  // The enveloped renamer reaches the row only after the replay lookup, so the
+  // core's own guard would fire on a transaction that has already read. Same
+  // refusal, taken before the transaction opens (./uuid.ts).
+  if (!isUuid(input.id)) throw new ValidationError([{ path: "id", message: `No such ${input.level}.` }]);
+  const requestFingerprint = fingerprint(input);
+
+  const run = async (tx: Tx): Promise<RenameRegistryEntityResult> => {
+    const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
+    if (existing) {
+      assertReplayable(existing, requestFingerprint);
+      return { ...(existing.result as RenameRegistryEntityResult), replayed: true };
+    }
+    const result = await editRegistryNameWithinTx(tx, deps, principal, {
+      level: input.level,
+      id: input.id,
+      name: input.name,
+      attribution: { ...input.attribution, correlationId: input.correlationId ?? input.clientRequestId },
+    });
+    const payload: RenameRegistryEntityResult = { ...result, replayed: false };
+    await recordIdempotency(tx, {
+      userId: principal.userId,
+      clientRequestId: input.clientRequestId,
+      tool: "rename_registry_entity",
+      requestFingerprint,
+      smokeId: null,
+      result: payload,
+    });
+    return payload;
+  };
+
+  try {
+    return await deps.db.transaction(run);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
+      if (existing) {
+        assertReplayable(existing, requestFingerprint);
+        return { ...(existing.result as RenameRegistryEntityResult), replayed: true };
       }
     }
     throw error;

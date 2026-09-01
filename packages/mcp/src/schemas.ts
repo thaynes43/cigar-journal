@@ -1551,6 +1551,36 @@ export const updateRegistryAliasesOutput = z
   })
   .passthrough();
 
+export const renameRegistryEntitySchema = z
+  .object({
+    clientRequestId: curationClientRequestId,
+    level: z.enum(["brand", "line", "blend", "blender"]).describe("Which registry the id belongs to."),
+    id: z.string().describe("The entity's id, from a register_taxonomy result or a get_curation_queue row."),
+    name: z
+      .string()
+      .describe("The corrected DISPLAY spelling, as the trade writes it, e.g. 'H. Upmann', 'Partagás'. The slug and the matching keys it already holds do not move."),
+    runId,
+    confidence,
+  })
+  .strict();
+
+export type RenameRegistryEntityArgs = z.infer<typeof renameRegistryEntitySchema>;
+
+export const renameRegistryEntityOutput = z
+  .object({
+    level: z.string(),
+    id: z.string(),
+    name: z.string(),
+    previousName: z.string(),
+    slug: z.string(),
+    aliases: z.array(z.string()),
+    addedKeys: z.array(z.string()),
+    changed: z.boolean(),
+    recomposedCigars: z.number(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
 export const assignCigarTaxonomySchema = z
   .object({
     clientRequestId: curationClientRequestId,

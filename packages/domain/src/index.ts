@@ -255,11 +255,15 @@ export {
   assignCigarPartsWithinTx,
   editRegistryAliases,
   editRegistryAliasesWithinTx,
+  editRegistryName,
+  editRegistryNameWithinTx,
   assertAliasesFree,
   type CreateBrandInput,
   type CreateBrandResult,
   type EditAliasesInput,
   type EditAliasesResult,
+  type EditRegistryNameInput,
+  type EditRegistryNameResult,
   type RegistryLevel,
   type AliasScope,
   createLine,
@@ -300,13 +304,15 @@ export {
   type RegistryAttribution,
 } from "./taxonomy-writes.js";
 
-// THE TAXONOMY CURATION SURFACE (ADR-012 Wave 3, issue #196). The four enveloped
+// THE TAXONOMY CURATION SURFACE (ADR-012 Wave 3, issue #196). The five enveloped
 // services behind the MCP curation tools: find-or-mint a registry path, edit the
-// keys a registry row answers to, structure one leaf (with a dry run), and split a
-// collapse bucket into the leaves it should always have been.
+// keys a registry row answers to, correct the name it is displayed under,
+// structure one leaf (with a dry run), and split a collapse bucket into the leaves
+// it should always have been.
 export {
   registerTaxonomy,
   updateRegistryAliases,
+  renameRegistryEntity,
   assignCigarTaxonomy,
   splitCigar,
   type RegisterTaxonomyInput,
@@ -318,6 +324,8 @@ export {
   type RegisteredBlender,
   type UpdateRegistryAliasesInput,
   type UpdateRegistryAliasesResult,
+  type RenameRegistryEntityInput,
+  type RenameRegistryEntityResult,
   type AssignCigarTaxonomyInput,
   type AssignCigarTaxonomyResult,
   type SplitCigarInput,

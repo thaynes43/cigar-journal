@@ -451,6 +451,203 @@ export async function editRegistryAliases(
 }
 
 // --------------------------------------------------------------------------
+// Display names — one renamer for all four levels
+// --------------------------------------------------------------------------
+
+export interface EditRegistryNameInput {
+  level: RegistryLevel;
+  id: string;
+  // The DISPLAY spelling, as the trade writes it. Nothing else moves.
+  name: string;
+  attribution?: RegistryAttribution;
+}
+
+export interface EditRegistryNameResult {
+  level: RegistryLevel;
+  id: string;
+  name: string;
+  previousName: string;
+  // Reported precisely BECAUSE it does not change — see the note below. A caller
+  // that expected the URL to follow the name can see in the result that it did not.
+  slug: string;
+  aliases: string[];
+  addedKeys: string[];
+  changed: boolean;
+  recomposedCigars: number;
+}
+
+interface NameRow {
+  id: string;
+  name: string;
+  slug: string;
+  aliases: string[];
+  scope_value: string | null;
+}
+
+// The `cigars` column each registry level is the parent through. A blender has
+// none: nobody's name is part of a cigar's, so renaming one recomposes nothing.
+const LEVEL_CIGAR_COLUMN: Record<RegistryLevel, "brand_id" | "line_id" | "blend_id" | null> = {
+  brand: "brand_id",
+  line: "line_id",
+  blend: "blend_id",
+  blender: null,
+};
+
+// Every `composed` leaf under a renamed level, recomposed. `loadCigarNameParts`
+// prefers the REGISTRY spelling at every level that has one, so a registry name
+// is a name part — and `recomposeCigarName`'s own rule is that every path
+// changing a part calls it, or the catalog carries composed names that no longer
+// reflect the parts they claim to be composed from.
+async function recomposeUnderRegistryRow(
+  tx: Tx,
+  level: RegistryLevel,
+  id: string,
+  now: Date,
+): Promise<number> {
+  const column = LEVEL_CIGAR_COLUMN[level];
+  if (column === null) return 0;
+  // Scoped to `composed` in the query rather than left to the per-row guard: a
+  // freeform row is authoritative and would be skipped anyway, and a marca with
+  // six hundred leaves should not cost six hundred no-op round trips to find out.
+  const affected = await tx.execute(sql`
+    SELECT id::text AS id FROM cigars
+    WHERE name_source = 'composed' AND ${sql.identifier(column)} = ${id}::uuid
+  `);
+  let recomposed = 0;
+  for (const leaf of affected.rows as unknown as { id: string }[]) {
+    if ((await recomposeCigarName(tx, leaf.id, now)).changed) recomposed += 1;
+  }
+  return recomposed;
+}
+
+// Correct the DISPLAY spelling of one registry row. ONE renamer for all four
+// levels, for the reason the alias editor is one editor: the rule is identical at
+// every level and the levels differ only in data.
+//
+// The registry shipped with seven marcas spelled for a keyboard rather than for a
+// reader — `H Upmann`, `Partagas`, `Por Larranaga` — and until now there was no
+// verb to fix one. `create*` mints, `editRegistryAliases` edits keys, and
+// `assignCigarParts` moves leaves; none of them touches `name`, so the only way
+// to correct a spelling was raw SQL, unaudited.
+//
+// WHAT MOVES IS THE NAME, AND AS LITTLE ELSE AS POSSIBLE:
+//
+//   the SLUG DOES NOT MOVE. It is a published address — today's brand URL and
+//   `brand_images.brand_slug` resolve through `brands.slug` — so re-minting it
+//   from the new name would break live links to rename `Partagas` to `Partagás`,
+//   and the folded slug is IDENTICAL for six of the seven anyway (fold drops the
+//   accent). Slug renames with redirects are Wave 5's job, deliberately separate.
+//
+//   the MATCHING KEYS DO NOT MOVE EITHER, except to gain one. The stored keys are
+//   what vendor titles are probed against, and a vendor writing `Por Larranaga`
+//   is exactly the traffic the key exists to catch — dropping it because the
+//   display name grew a tilde would un-match the listings the rename is meant to
+//   make readable. So the old key stays and the new name's fold is ADDED if the
+//   row does not already hold it, on the same get-or-create terms every other
+//   registry path uses. For six of the seven the fold is unchanged and nothing is
+//   added at all; `Rafael Gonzales` → `Rafael González` is the one that gains
+//   `rafael-gonzalez` beside the `rafael-gonzales` it keeps.
+//
+// The added key goes through `assertAliasesFree` like any other claim, so a
+// rename onto a spelling another entity at this level already answers to is
+// refused, naming the holder — which is a near-duplicate caught, exactly as it is
+// on the mint path. A rename to the name the row already carries is a no-op and
+// writes no audit row, the same shape `renameCigar` uses.
+export async function editRegistryNameWithinTx(
+  tx: Tx,
+  deps: Deps,
+  principal: Principal,
+  input: EditRegistryNameInput,
+): Promise<EditRegistryNameResult> {
+  // As in the alias editor: a malformed id answers the same "no such row" the
+  // miss answers, before a cast can raise 22P02 on the caller's transaction
+  // (./uuid.ts).
+  if (!isUuid(input.id)) throw new ValidationError([{ path: "id", message: `No such ${input.level}.` }]);
+
+  const name = requireName(input.name, "name");
+  // The same floor `requireSlug` applies at mint time, stated against the key
+  // rather than the slug because this path does not mint one: a name that folds
+  // to nothing is a name no probe can ever reach the row by.
+  const key = fold(name);
+  if (key === "") {
+    throw new ValidationError([
+      { path: "name", message: "This name has no matching key — it is punctuation only." },
+    ]);
+  }
+
+  const scopeColumn = aliasScopeColumn(input.level);
+  const scopeSelect = scopeColumn === null ? sql`NULL` : sql`${sql.identifier(scopeColumn)}::text`;
+  const found = await tx.execute(sql`
+    SELECT id::text AS id, name, slug, aliases, ${scopeSelect} AS scope_value
+    FROM ${LEVEL_TABLE[input.level]} WHERE id = ${input.id}::uuid LIMIT 1
+  `);
+  const row = (found.rows as unknown as NameRow[])[0];
+  if (!row) throw new ValidationError([{ path: "id", message: `No such ${input.level}.` }]);
+
+  const unchanged: EditRegistryNameResult = {
+    level: input.level,
+    id: row.id,
+    name: row.name,
+    previousName: row.name,
+    slug: row.slug,
+    aliases: row.aliases,
+    addedKeys: [],
+    changed: false,
+    recomposedCigars: 0,
+  };
+  if (row.name === name) return unchanged;
+
+  const scope: AliasScope =
+    scopeColumn === null || row.scope_value === null ? null : { column: scopeColumn, value: row.scope_value };
+
+  const addedKeys = row.aliases.includes(key) ? [] : [key];
+  await assertAliasesFree(tx, input.level, scope, addedKeys, "name", row.id);
+  const aliases = [...new Set([...row.aliases, ...addedKeys])].sort();
+
+  await tx.execute(sql`
+    UPDATE ${LEVEL_TABLE[input.level]}
+    SET name = ${name}, aliases = ${sql.param(aliases)}::text[], updated_at = ${deps.now()}
+    WHERE id = ${row.id}::uuid
+  `);
+
+  const recomposedCigars = await recomposeUnderRegistryRow(tx, input.level, row.id, deps.now());
+
+  await tx.insert(auditLog).values({
+    userId: principal.userId,
+    ...auditAttribution(principal, input.attribution),
+    action: `${input.level}.rename`,
+    smokeId: null,
+    before: { id: row.id, name: row.name, aliases: row.aliases },
+    after: { id: row.id, name, aliases, addedKeys, recomposedCigars },
+    correlationId: input.attribution?.correlationId ?? null,
+  });
+
+  return {
+    level: input.level,
+    id: row.id,
+    name,
+    previousName: row.name,
+    slug: row.slug,
+    aliases,
+    addedKeys,
+    changed: true,
+    recomposedCigars,
+  };
+}
+
+export async function editRegistryName(
+  deps: Deps,
+  principal: Principal,
+  input: EditRegistryNameInput,
+): Promise<EditRegistryNameResult> {
+  assertCurator(principal);
+  // Refused before the transaction opens, like every other entry point in this
+  // module (./uuid.ts). Same path, same message, one literal.
+  if (!isUuid(input.id)) throw new ValidationError([{ path: "id", message: `No such ${input.level}.` }]);
+  return deps.db.transaction((tx) => editRegistryNameWithinTx(tx, deps, principal, input));
+}
+
+// --------------------------------------------------------------------------
 // Lines
 // --------------------------------------------------------------------------
 

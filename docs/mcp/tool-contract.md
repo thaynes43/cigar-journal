@@ -173,8 +173,8 @@ Field conventions:
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - Combine related corrections into one update_smoke call rather than several.
 
-Catalog curation (admin only). The get_curation_queue read and the twelve curation
-write tools are for an operations agent maintaining the catalog — not for
+Catalog curation (admin only). The get_curation_queue read and the thirteen
+curation write tools are for an operations agent maintaining the catalog — not for
 conversational journaling; a normal chat session never uses them. get_curation_queue
 pages the work by kind (unverified, duplicates, match_triage, unbranded, unlined,
 unblended, untyped, missing_photos); drain a kind with its nextCursor. A
@@ -221,6 +221,10 @@ before the flip. update_registry_aliases is what closes a no_anchor listing: add
 the spelling as a key on the entity it names, never loosen the match. A key some
 other entity already claims is refused and that entity is named — use it rather
 than working around it, because the refusal is usually a near-duplicate caught.
+rename_registry_entity corrects the spelling an entity is DISPLAYED under (H
+Upmann to H. Upmann) and moves nothing else: the slug and the matching keys it
+already holds stay, so listings that match today keep matching, and the new
+spelling becomes a key only when it folds to one the entity does not hold.
 split_cigar breaks an entry that has been standing for several products into the
 leaves it should have been and moves each product's listings onto its own; split
 only on unambiguous listing evidence, leave the rest, and expect a partial split.
@@ -1484,11 +1488,12 @@ never mint registry vendor rows. Scope `journal:write`.
 
 ## Curation surface (admin only)
 
-`get_curation_queue` (read, `curation:read`) plus twelve writes on `curation:write`:
+`get_curation_queue` (read, `curation:read`) plus thirteen writes on `curation:write`:
 `set_listing_match_status`, `set_cigar_facts`, `verify_cigar`, `exclude_cigar`,
 `restore_cigar`, `set_product_photo_rights`, `rename_cigar`,
-`queue_enrichment_backlog`, and the four taxonomy verbs `register_taxonomy`,
-`update_registry_aliases`, `assign_cigar_taxonomy`, `split_cigar` (ADR-012 Wave 3).
+`queue_enrichment_backlog`, and the five taxonomy verbs `register_taxonomy`,
+`update_registry_aliases`, `rename_registry_entity`, `assign_cigar_taxonomy`,
+`split_cigar` (ADR-012 Wave 3).
 These are for an operations agent maintaining the
 catalog (DESIGN-003 §Curation); a conversational session never uses them. Every
 write carries the mutation envelope plus `runId` and `confidence`, and the adapter
@@ -1816,10 +1821,66 @@ Two removals are refused, and both protect findability rather than tidiness:
 
 | refusal | why |
 | --- | --- |
-| the key derived from the entity's own name | it is how the anchor reaches the row by its own name; dropping it leaves an entity that exists and cannot be found. Rename it instead — a different, audited act |
+| the key derived from the entity's own name | it is how the anchor reaches the row by its own name; dropping it leaves an entity that exists and cannot be found. Rename it with `rename_registry_entity` instead — a different, audited act |
 | the last remaining key | an empty alias array is a row no probe can ever return |
 
 Scope `curation:write`, admin only.
+
+### rename_registry_entity — write, idempotent
+
+Correct the spelling a registry entity is **displayed** under. The registry shipped
+with marcas spelled for a keyboard rather than for a reader — `H Upmann`,
+`Partagas`, `Por Larranaga` — and until this verb there was no audited path to fix
+one: `register_taxonomy` mints, `update_registry_aliases` edits keys, and
+`assign_cigar_taxonomy` moves leaves. None of them touches `name`.
+
+```yaml
+arguments:
+  clientRequestId: 9f2c...
+  level: brand                    # brand | line | blend | blender
+  id: br_01j9x2
+  name: H. Upmann                 # the corrected DISPLAY spelling
+  runId: wo-cigar-curate-20260901
+  confidence: 0.97
+
+result:
+  level: brand
+  id: br_01j9x2
+  name: H. Upmann
+  previousName: H Upmann
+  slug: h-upmann                  # unchanged — reported precisely because it did not move
+  aliases: [h-upmann]             # the key set after the rename
+  addedKeys: []                   # the fold is identical, so nothing was claimed
+  changed: true                   # false when the name already read that way
+  recomposedCigars: 4             # composed leaves whose canonical name followed
+  replayed: false
+```
+
+**The name moves and, as far as possible, nothing else does.** Two things a rename
+must not break, and neither of them does:
+
+| stays put | why |
+| --- | --- |
+| the `slug` | it is a published address — today's brand URL and `brand_images.brand_slug` resolve through it — so re-minting it from the new name would break live links in order to add an accent. Slug renames with redirects are a separate, later act |
+| every matching key the entity already holds | those are what vendor titles are probed against, and a vendor writing `Por Larranaga` is exactly the traffic the key exists to catch. Dropping it because the display name grew a tilde would unmatch the listings the rename is meant to make readable |
+
+**The new spelling becomes a key only when it folds to one the entity does not
+already answer to.** Six of the seven marcas in the display sweep fold identically
+before and after (`fold` drops combining marks, so `Partagás` and `Partagas` are
+one key) and claim nothing. `Rafael Gonzales` → `Rafael González` is the exception:
+`s` → `z` is not a combining mark, so `rafael-gonzalez` is **added** beside the
+`rafael-gonzales` the row keeps. That claim goes through the same collision rail as
+a mint — a key another entity at the same level holds is refused, naming the holder,
+which is a near-duplicate caught.
+
+**Composed names follow.** A registry name is a name part, so every catalog entry
+under the renamed level whose `nameSource` is `composed` is recomposed in the same
+transaction and `recomposedCigars` counts the ones that moved. A `freeform` entry is
+left alone — that string is the owner's. Renaming a blender recomposes nothing: no
+cigar's name is composed from it.
+
+Renaming an entity to the name it already carries writes nothing, records no audit
+row, and reports `changed: false`. Scope `curation:write`, admin only.
 
 ### assign_cigar_taxonomy — write, idempotent
 
