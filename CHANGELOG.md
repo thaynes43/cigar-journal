@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.34.0](https://github.com/thaynes43/cigar-journal/compare/v0.33.0...v0.34.0) (2026-09-01)
+
+
+### Features
+
+* **crawler:** seed the Wikidata taxonomy from the 2026-09-01 prod probe ([#246](https://github.com/thaynes43/cigar-journal/issues/246)) ([648ff3c](https://github.com/thaynes43/cigar-journal/commit/648ff3c01fe8a24bd80a7a1c252122d63a5a79b6)), closes [#127](https://github.com/thaynes43/cigar-journal/issues/127)
+
+
+### Bug Fixes
+
+* **crawler:** the enrich drain may claim a reasonless agent unmatch ([#247](https://github.com/thaynes43/cigar-journal/issues/247)) ([e3d5607](https://github.com/thaynes43/cigar-journal/commit/e3d5607a240825284ca20c17bfac2c1813e09b3f)), closes [#245](https://github.com/thaynes43/cigar-journal/issues/245)
+* **crawler:** the enrich prefilter joins matching v2; a zero-fetch look stops spending the vendor budget ([#244](https://github.com/thaynes43/cigar-journal/issues/244)) ([6bbd136](https://github.com/thaynes43/cigar-journal/commit/6bbd136aed6a7d48bc45cc6c2a3e79fa59e4c06a))
+* **db:** ambient pool swallows teardown races like the test harness ([#174](https://github.com/thaynes43/cigar-journal/issues/174)) ([#238](https://github.com/thaynes43/cigar-journal/issues/238)) ([63b23a1](https://github.com/thaynes43/cigar-journal/commit/63b23a1a17454dc17c87f473cdf7b5f8a373b6ff))
+* **domain:** the catalog cursor's ordering key is typed by its sort ([#229](https://github.com/thaynes43/cigar-journal/issues/229)) ([#242](https://github.com/thaynes43/cigar-journal/issues/242)) ([0e74318](https://github.com/thaynes43/cigar-journal/commit/0e743185c8ef84361af01bd740b8748903d8475c))
+* **taxonomy:** resolve brandId in the ancestry check so an unknown marca is a field error ([#243](https://github.com/thaynes43/cigar-journal/issues/243)) ([da44fe4](https://github.com/thaynes43/cigar-journal/commit/da44fe4ffbfa71e4eff74ebaa78f87ed795af864))
+* **web:** edge gate 307s the product-photo and brand-image routes ([#241](https://github.com/thaynes43/cigar-journal/issues/241)) ([f2b5284](https://github.com/thaynes43/cigar-journal/commit/f2b52843a1457cc48d9450651f4ea73fe5801d8a))
+* **web:** the five independent [#219](https://github.com/thaynes43/cigar-journal/issues/219) deltas — offerHistory, journal h1, admin labels, dead tile, redirect test ([#248](https://github.com/thaynes43/cigar-journal/issues/248)) ([bbdb1d1](https://github.com/thaynes43/cigar-journal/commit/bbdb1d1f435aa0eb1dc468659ad68f5188c23f27))
+
 ## [0.33.0](https://github.com/thaynes43/cigar-journal/compare/v0.32.1...v0.33.0) (2026-09-01)
 
 
