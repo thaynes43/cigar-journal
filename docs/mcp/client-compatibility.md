@@ -341,6 +341,27 @@ as always — the two new queue kinds reach an in-flight conversation only after
 connector refresh and a new chat, and until then `kind: unlined` fails schema
 validation client-side rather than reaching the server.
 
+## 2026-09-01 — additive: `set_listing_match_status` takes a reason (admin only)
+
+`set_listing_match_status` gained one **optional** enum argument,
+`unmatchedReason` (`market_refusal` | `no_match` | `no_anchor` | `ambiguous`),
+and its result gained the matching field (issue 245). No new tool, no new scope,
+no change to any journal/catalog schema.
+
+**Additive in the strict sense** (R-MCP-4): omitting it is the behavior that
+shipped before — the unmatch is recorded with no reason. What is new is that
+omission is now *meaningful* rather than the only option, since ADR-006's
+2026-09-01 amendment lets the enrich drain supersede a reasonless agent unmatch
+and never a reasoned one. A caller that never learns the argument exists keeps
+working exactly as it did.
+
+The ChatGPT per-conversation schema cache applies as always, and for once it
+costs nothing: the only caller is the dev-env-ops curation lane, which registers
+this server per session and so always holds the current schema. A stale in-flight
+conversation would reject `unmatchedReason` client-side rather than reach the
+server — but the tool needs `curation:write` plus an admin principal, which no
+connector token carries.
+
 ## Workflows
 
 **Primary (shipped, in daily use):** the user talks to ChatGPT normally for the
