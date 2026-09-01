@@ -12,6 +12,7 @@ import {
   LEAF_SORTS,
   NO_STORED_PREFERENCES,
   UNFILED_SLUG,
+  catalogEmptyLine,
   catalogUrl,
   chipsFor,
   cleanSwitch,
@@ -606,6 +607,25 @@ describe("active-filter signals", () => {
 });
 
 describe("strings (§Strings)", () => {
+  it("empties honestly: a refined grid answers No matches., an unrefined one No cigars yet.", () => {
+    // Owner-approved 2026-09-01: "No matches." presumes a query, so it renders
+    // only when something narrowed the grid; an untouched catalog root coming
+    // back empty means the catalog itself is empty.
+    expect(catalogEmptyLine(state())).toBe("No cigars yet.");
+    const refinements: Partial<CatalogState>[] = [
+      { q: "toro" },
+      { own: "have" },
+      { type: "CC" },
+      { hierarchy: { brand: "padron" } },
+      { inStock: true },
+      { smoked: true },
+      { favorites: true },
+    ];
+    for (const over of refinements) {
+      expect(catalogEmptyLine(state(over))).toBe("No matches.");
+    }
+  });
+
   it("counts one cigar in the singular", () => {
     expect(CATALOG_GROUP_STRINGS.subtitle(1)).toBe("1 cigar");
     expect(CATALOG_GROUP_STRINGS.subtitle(0)).toBe("0 cigars");

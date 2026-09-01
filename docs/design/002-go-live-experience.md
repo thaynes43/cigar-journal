@@ -93,7 +93,10 @@ page is name + chip + photo; under this design it is photo + vitals + price
 1. **Hero.** ProductPhoto in the parchment plate (or BandTile), name,
    verification chip, **Want toggle**, and the **Record a smoke** action
    (links `/smokes/new?cigarId=…`, which pre-resolves the picker — PRD-002
-   R-INV-3's missing half).
+   R-INV-3's missing half). The plate is one 3:4 framed box for both arms —
+   the photo contained on the plate ground, the BandTile filling the
+   identical frame — so the hero's structure never varies with photo luck
+   (`HeroPlate`, shipped 2026-09-01; closes the #218 two-heroes finding).
 2. **Vitals + blend.** As today.
 3. **Price.** One row per vendor with a current offer: vendor · per-stick
    price (normalized when packaging is known, else the raw price labeled
@@ -242,7 +245,9 @@ showing "Have" would be noise; the count is the information).
 
 **Honest degradation, restated for the new surfaces:** no offers → no price
 section; no holdings → no humidor panel; no photo → BandTile, never a
-broken image; facet with zero matches → the standard "No matches." line;
+broken image; facet with zero matches → the standard "No matches." line
+(an unrefined catalog root that is empty says `No cigars yet.` instead —
+"matches" presumes a query);
 price history below threshold → text, not chart.
 
 **Mobile:** the toolbar stays one fixed-height row that pans; facet
@@ -287,6 +292,16 @@ Implementers use these exactly or flag the gap; never invent alternates.
 | Favorite toggle (unset/set) | `Favorite` (same label both states; ember-heart fill signals state — the second cigar-level mark, owner-approved 2026-08-28) |
 | Lot picker | label `Lot`; `—` is the unattributed option |
 | Type facet (Brands + All) | `Both` · `NC` · `CC` (owner-approved on Brands too) |
+| Empty grid (refined) | `No matches.` |
+| Empty catalog root (unrefined) | `No cigars yet.` — approved 2026-09-01 |
+
+**Empty-state grammar (owner-approved 2026-09-01):** accumulating surfaces
+say `No ‹thing› yet.` (`No smokes yet.`, `No inventory yet.`, `No cigars
+yet.`, `Not in the catalog yet.`); refined views say `No matches.`;
+worklists that drain to done say `Nothing ‹state›.` (`Nothing unverified.`).
+One predicate separates the grid families: any refinement present — search,
+facet, type, chip, or drill — selects the matches grammar
+(`catalogEmptyLine` in the catalog registry).
 
 ## Owner decisions (2026-08-28)
 

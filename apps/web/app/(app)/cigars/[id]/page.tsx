@@ -8,7 +8,7 @@ import { formatPrice, formatSeenDate } from "@/lib/format";
 import { isPricedOffer, priceSectionState } from "@/lib/price-panel";
 import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
-import { BandTile } from "../../_components/band-tile";
+import { HeroPlate } from "../../_components/hero-plate";
 import { RatingSeal } from "../../_components/rating-seal";
 import { StrengthMeter } from "../../_components/strength-meter";
 import { VitalsBlock } from "../../_components/vitals-block";
@@ -205,24 +205,13 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-8">
-      {hasProductPhoto ? (
-        <img
-          src={`/api/product-photos/${id}?v=${productPhotoId}`}
-          alt=""
-          className="max-h-80 w-full rounded-card border border-line object-contain"
-        />
-      ) : null}
       <header className="flex flex-col gap-5 sm:flex-row sm:gap-6">
-        {hasProductPhoto ? null : (
-          <div className="w-40 shrink-0 sm:w-52">
-            <BandTile
-              name={cigar.canonicalName}
-              vitola={cigar.vitola.name}
-              type={cigar.type}
-              size="hero"
-            />
-          </div>
-        )}
+        <div className="w-40 shrink-0 sm:w-52">
+          <HeroPlate
+            photoUrl={hasProductPhoto ? `/api/product-photos/${id}?v=${productPhotoId}` : null}
+            name={cigar.canonicalName}
+          />
+        </div>
         <div className="flex min-w-0 flex-1 flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <h1 className="font-display text-2xl leading-tight font-semibold text-ink">

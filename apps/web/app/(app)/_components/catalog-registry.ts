@@ -460,6 +460,24 @@ export function hasActiveChip(
   );
 }
 
+// The empty grid's one line (DESIGN-002 §strings, owner-approved 2026-09-01):
+// "No matches." presumes a query, so it answers only a REFINED grid that came
+// back empty. An unrefined catalog root with nothing in it means the catalog
+// itself is empty and says so — the accumulating-surface grammar ("No ‹thing›
+// yet."). One entry point for both grids, for the same reason the count line
+// has one: two renderings of the same sentence is what a strings table
+// prevents.
+export function catalogEmptyLine(
+  state: Pick<
+    CatalogState,
+    "q" | "own" | "type" | "hierarchy" | "inStock" | "smoked" | "favorites"
+  >,
+): string {
+  const refined =
+    state.q !== "" || state.own !== "all" || state.type !== undefined || hasActiveChip(state);
+  return refined ? "No matches." : "No cigars yet.";
+}
+
 // What `Clear all` counts and what it clears: the chips ACTUALLY ON SCREEN —
 // `chipsFor` plus the three toggles — and nothing else.
 //
