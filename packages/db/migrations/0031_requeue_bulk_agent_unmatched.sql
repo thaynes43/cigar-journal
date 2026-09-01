@@ -1,0 +1,127 @@
+-- 0031_requeue_bulk_agent_unmatched — hand the reasonless bulk `unmatched`
+-- verdicts back to the crawler, so a lane that can re-decide them is allowed to
+-- (issue 245, option 3).
+--
+-- ONE STATEMENT. No table, no column, no index, no constraint. It moves
+-- `decided_by` on rows whose verdict is, by its own shape, an absence of one.
+--
+--
+-- WHAT THESE ROWS ARE. A curation sweep once walked the whole Fox catalogue and
+-- wrote `status='unmatched'` on everything it could not place. It recorded no
+-- `unmatched_reason` and no `cigar_id`, because it had neither: the sweep was a
+-- bulk pass, not a per-listing judgement. 881 of prod's 1,881 listing rows are
+-- still in exactly that shape on 2026-09-01.
+--
+-- A row like that says nothing about the listing. It says only that a lane
+-- looked once, in bulk, and moved on — and `decided_by='agent'` is what turns
+-- that non-statement into an owner.
+--
+--
+-- WHY THE OWNER MATTERS, which is the whole of this migration. The crawler
+-- declines to rewrite a row another actor decided:
+--
+--     if (row.decidedBy !== "crawler" && !claimable) return row;
+--       -- packages/crawler/src/core/match.ts, upsertListingMatch
+--
+-- That guard is right, and it is not being weakened here. But its effect on
+-- these particular rows is that no lane can revisit them. There is no SELECT-side
+-- skip anywhere in the crawler: the seed and offers walks re-parse every listing
+-- they enumerate and only then discover, at the write, that the row belongs to
+-- someone else. So these 881 are re-read every night and handed straight back
+-- untouched — frozen under an authority that never decided anything about them.
+--
+-- Matching v2 (#196, migration 0027) is why this is now worth undoing: the walk
+-- that would re-decide them is materially better than the one that ran when they
+-- were written. Its guards are `chooseLeaf`'s brand-anchor structural scope and,
+-- in the freeform fallback, `numbersCompatible` + `packagingCompatible` +
+-- `variantRelation() !== "different"` + `vitolaAgrees()`
+-- (`packages/domain/src/taxonomy-resolve.ts`). Note what it is NOT: the mutual-
+-- residue check `identityTokensCompatible` belongs to `coversAsk` and
+-- `strongLinkCompatible` — the drain and the MCP resolve path — and the seed and
+-- offers walks do not call it. This migration is handing these rows to a walk
+-- guarded by the first list, not the second.
+--
+-- AND THIS DOES NOT FLOOD TRIAGE. The obvious fear — 881 rows appearing in the
+-- curation queue at deploy — does not happen, and it is worth saying why rather
+-- than trusting it. `matchTriagePage` (`packages/domain/src/curation.ts`) admits
+-- an unmatched row only when `decided_by='crawler' AND unmatched_reason IS NOT
+-- NULL`. These rows have no reason, and this migration writes none. They surface
+-- in triage only after a crawl has actually re-decided one and the resolver has
+-- recorded WHY — which is the point, and is one listing at a time.
+--
+--
+-- WHY A MIGRATION AND NOT MORE CODE. The code half already shipped. #236 gave
+-- `upsertListingMatch` a `claimAgentUnmatched` opt-in whose row-side predicate
+-- is character-for-character the WHERE clause below:
+--
+--     row.decidedBy === "agent" && row.status === "unmatched" &&
+--     row.unmatchedReason == null && row.cigarId == null
+--
+-- but only ONE call site asks for it — the enrich drain (`core/ingest.ts`) —
+-- and only when it already holds a positive match to write. So a row is
+-- reclaimed only if the drain happens to look at that listing AND succeeds.
+-- That is a per-listing trickle: it cleared 2 of 883 rows on 2026-09-01.
+--
+-- Option 3 is the same claim taken in bulk and taken up front, so the offers and
+-- seed walks — which have no such flag and want none — can do the re-deciding.
+-- The predicate is unchanged, so nothing here reaches a row the shipped code
+-- would not already have been entitled to claim.
+--
+--
+-- THE OWNER'S RULING (issue 245, relayed 2026-09-01). The bulk requeue was
+-- authorised STAGED, against a measured quality bar rather than on the argument
+-- above, in three steps: (1) #196 Wave 3 renames/aliases land, (2) a drain on
+-- v0.34.0+ verifies match quality on the fixed code, (3) then this migration.
+--
+-- THE EVIDENCE ACTUALLY USED, and one honest deviation. The ruling named a
+-- CUBAN LOU'S drain as step 2. The evidence this shipped against is a FOX drain
+-- instead, and the substitution is deliberate: Cuban Lou's holds 82 listings
+-- against Fox's 1,799, its adapter still declares `crawlEnabled: false`
+-- (`packages/crawler/src/adapters/cuban-lous.ts`), and its corpus carries no
+-- Habanos single-stick pages — so a Cuban Lou's drain cannot produce a
+-- meaningful sample of the thing step 2 asks to measure. What was measured:
+--
+--   * the 2026-09-01 11:44 Fox enrich run made two claims under the shipped
+--     per-listing path, both hand-audited marca-correct —
+--       undercrown-10-corona-doble-2 -> Drew Estate Undercrown 10
+--       opus-x-lost-city-piramide-2  -> Arturo Fuente OpusX Lost City
+--     (they are exactly why prod reads 881 here and 883 in the ADR's census);
+--   * the 14:37 gate run produced ZERO false autos across 24 looks.
+--
+-- That is a smaller sample than "a drain", and it is a different vendor. It is
+-- recorded here in those terms so a later reader weighing a bad link against
+-- this migration can see precisely what was and was not established.
+--
+-- ADR-006's 2026-09-01 amendment (the #245 entry, top of `## Amendments`)
+-- carries the standing rule this sits under, including the census these 881 rows
+-- come from: 883 `listing_match.set_status` audit rows, every one `actor='agent'`,
+-- across three curation-lane run ids on 2026-08-29/30/31 — roughly nine verdicts
+-- a second, which is what "bulk, not a judgement" means concretely.
+--
+--
+-- WHAT IS NOT TOUCHED, and every clause below is one of these guarantees:
+--
+--   * `status='confirmed'` — 209 rows on prod. A confirmed row is a human or
+--     agent saying "yes, this listing is that cigar". It is untouchable, and the
+--     crawler guards it separately and first, before any claim is even
+--     considered. Excluded by `status='unmatched'`.
+--   * an agent row holding a `cigar_id` — a link, whatever its status. A link is
+--     a judgement. Excluded by `cigar_id IS NULL`.
+--   * an agent row carrying an `unmatched_reason` — 'no_match', 'ambiguous',
+--     'no_anchor', 'market_refusal'. A reason IS the per-listing judgement whose
+--     absence defines this population. Excluded by `unmatched_reason IS NULL`.
+--   * `decided_by='curator'` — the owner's own verdicts, never in scope.
+--     Excluded by `decided_by='agent'`.
+--
+-- Nothing is destroyed either way: `status` and `cigar_id` and the parse
+-- evidence are all left exactly as they are. The only fact that changes is which
+-- lane is allowed to look again.
+--
+-- Re-runnable: a second execution finds no `decided_by='agent'` row in this
+-- shape, because the first execution is what removed them all.
+UPDATE listing_matches
+   SET decided_by = 'crawler'
+ WHERE decided_by = 'agent'
+   AND status = 'unmatched'
+   AND unmatched_reason IS NULL
+   AND cigar_id IS NULL;
