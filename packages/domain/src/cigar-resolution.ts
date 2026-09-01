@@ -2,7 +2,12 @@ import { sql, eq } from "drizzle-orm";
 import { cigars } from "@cj/db";
 import type { Tx } from "./deps.js";
 import type { CigarRef, Verification } from "./types.js";
-import { CigarNotFoundError, CigarAmbiguousError, ValidationError } from "./errors.js";
+import {
+  CigarNotFoundError,
+  CigarAmbiguousError,
+  ValidationError,
+  type CigarCandidate,
+} from "./errors.js";
 import { assertCigarAncestry } from "./cigar-ancestry.js";
 import { loadAncestryContext, resolveDescribedTaxonomy } from "./taxonomy-resolve.js";
 import { isUuid } from "./uuid.js";
@@ -15,9 +20,16 @@ export {
   numbersCompatible,
   packagingCompatible,
   variantCompatible,
+  identityTokensCompatible,
   strongLinkCompatible,
 } from "./name-heuristics.js";
-import { strongLinkCompatible } from "./name-heuristics.js";
+import {
+  numbersCompatible,
+  packagingCompatible,
+  identityTokensCompatible,
+  strongLinkCompatible,
+  rankByIdentity,
+} from "./name-heuristics.js";
 
 // Similarity at or above this counts as a strong catalog match — link rather
 // than create. Tuned against pg_trgm on canonical names; the `%` prefilter
@@ -51,6 +63,24 @@ interface CandidateRow {
   vitola_name: string | null;
   verification: Verification;
   sim: number;
+}
+
+// The candidate list a `cigar_ambiguous` error carries, ordered the way the
+// client reads it out: best identity agreement first, trigram breaking ties.
+// Ordering is the whole value of the list — with fourteen `Tatuaje Monster`
+// siblings in the pool the raw score sorts them almost arbitrarily, so the
+// sibling the user actually named could be offered last.
+function rankedCandidates(name: string, rows: CandidateRow[]): CigarCandidate[] {
+  return rankByIdentity(name, rows, (row) => ({
+    name: row.canonical_name,
+    sim: Number(row.sim),
+  })).map((row) => ({
+    cigarId: row.id,
+    canonicalName: row.canonical_name,
+    brand: row.brand,
+    vitola: row.vitola_name,
+    verification: row.verification,
+  }));
 }
 
 // Resolve a Smoke's cigar reference to a catalog id, upholding the catalog
@@ -124,9 +154,8 @@ export async function resolveCigar(
       };
     }
   } else {
-    const strong = candidates.filter(
-      (c) => Number(c.sim) >= STRONG_MATCH && strongLinkCompatible(name, c.canonical_name),
-    );
+    const nearby = candidates.filter((c) => Number(c.sim) >= STRONG_MATCH);
+    const strong = nearby.filter((c) => strongLinkCompatible(name, c.canonical_name));
 
     if (strong.length === 1) {
       const match = strong[0]!;
@@ -138,16 +167,31 @@ export async function resolveCigar(
       };
     }
     if (strong.length > 1) {
-      throw new CigarAmbiguousError(
-        name,
-        strong.map((c) => ({
-          cigarId: c.id,
-          canonicalName: c.canonical_name,
-          brand: c.brand,
-          vitola: c.vitola_name,
-          verification: c.verification,
-        })),
-      );
+      throw new CigarAmbiguousError(name, rankedCandidates(name, strong));
+    }
+
+    // NEITHER LINK NOR CREATE — ASK. A candidate this close (≥ STRONG_MATCH) that
+    // the identity guard alone rejected is the Face/Bride shape: one word apart,
+    // and that word decides whether this is the same cigar under a fuller name or
+    // a sibling the catalog has never seen. Creating silently is the mirror of
+    // the bug this guard fixes — the catalog gains a second row for a cigar it
+    // already holds — so both outcomes go to the user, which is exactly what
+    // `confirmedDistinct` answers (the client shows these candidates, asks, and
+    // re-issues with the flag only if the user says none of them is it).
+    //
+    // A number or packaging rejection deliberately does NOT come here and still
+    // creates. Those names make an explicit, structured claim of difference —
+    // `No. 9` is not `T52`, a Tubos Pack is not the stick — so there is nothing
+    // for a user to adjudicate. A word residue is the weaker signal, and only the
+    // weaker signal needs the question.
+    const siblings = nearby.filter(
+      (c) =>
+        !identityTokensCompatible(name, c.canonical_name) &&
+        numbersCompatible(name, c.canonical_name) &&
+        packagingCompatible(name, c.canonical_name),
+    );
+    if (siblings.length > 0) {
+      throw new CigarAmbiguousError(name, rankedCandidates(name, siblings));
     }
   }
 

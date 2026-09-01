@@ -140,7 +140,8 @@ happen. When the user signals the cigar is finished, synthesize the whole
 conversation into one save_smoke call. Preserve uncertainty: omit any rating,
 vitola, time, pairing, blend detail, or tasting stage never established — sparse
 is correct, invented is a defect. Reuse the same clientRequestId when retrying a
-mutation.
+mutation — one id per mutation, not one per turn, so a second call in the same
+turn takes its own.
 
 Resolving vs browsing. search_cigars resolves one named cigar ("I'm smoking an
 Alma Fuego") — act on its guidance: single_match (an exact catalog-name hit —
@@ -169,7 +170,13 @@ no row at all: it looks like success and drops what the user actually said. If
 add_cigar or record_purchase errors cigar_ambiguous, show the search_cigars
 candidates and ask; only when the user confirms none is theirs, re-issue the
 same call with confirmedDistinct:true to create the distinct product — for a
-purchase that is one call, not a detour through add_cigar. record_purchase is
+purchase that is one call, not a detour through add_cigar. save_smoke can
+error it too and has no such flag: show the candidates, then either save
+against the cigarId the user confirms — its clientRequestId is unspent, the
+ambiguity wrote nothing — or create the product with add_cigar
+confirmedDistinct:true and save against the cigarId it returns under a FRESH
+clientRequestId, since add_cigar spent the first one. A spent id is
+idempotency_conflict, which does not recover. record_purchase is
 also how the humidor count is corrected — the ledger is append-only and
 holdings are derived, so a miscount is fixed with a negative-quantity row (say
 why in notes), never an edit. Record only what the user stated: never invent a price, date, or

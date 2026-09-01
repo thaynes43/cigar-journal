@@ -1474,8 +1474,12 @@ describe("curation", () => {
     });
 
     it("removes the pair from the queue regardless of input order, and audits", async () => {
+      // A pair the queue is willing to call duplicates: same identity, one row
+      // merely more specific. Two DIFFERENT differentiators (`… Uno` vs `… Dos`)
+      // are distinct products and the strong-link guard now says so, so they
+      // would never reach this worklist to be dismissed from it.
       const natural = await seedUnverified("Dismissal Queue Candidate Robusto Uno");
-      const maduro = await seedUnverified("Dismissal Queue Candidate Robusto Dos");
+      const maduro = await seedUnverified("Dismissal Queue Candidate Robusto");
 
       // Surfaced before the verdict.
       const before = await curationQueue(h.deps, admin);

@@ -272,6 +272,15 @@ const VITOLA_TERMS = new Map<string, string>([
   ["regalia", "Regalia"],
 ]);
 
+// The same vocabulary as a TOKEN membership test, for callers comparing two
+// names token by token rather than scanning windows over one. Derived, never
+// re-typed: multi-word keys (`double-corona`, `petit-robusto`) split back into
+// their parts, so a size word is recognized wherever it appears and the two
+// spellings of a size cannot drift apart in two lists.
+export const VITOLA_TOKENS = new Set(
+  [...VITOLA_TERMS.keys()].flatMap((key) => key.split("-")),
+);
+
 // `torpedo` is the least reliable shape label a crawler meets: strictly it means
 // closed foot, pointed head, bulged middle, but modern usage has drifted to any
 // tapered head, so most "torpedoes" sold are actually pirámides
