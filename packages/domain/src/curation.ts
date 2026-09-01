@@ -1187,6 +1187,24 @@ async function dismissWithinTx(
 // reversibility. Idempotent via the ADR-003 envelope; audits in-transaction.
 // (The crawler protects only a `confirmed` row from re-matching — match.ts — so an
 // unmatched verdict may be re-proposed as `auto` on a later crawl, by design.)
+//
+// AN UNMATCH MAY NOW SAY WHY, AND THE SAYING IS LOAD-BEARING (#245). ADR-006's
+// 2026-09-01 amendment split agent unmatches in two: one carrying an
+// `unmatched_reason` is intent — somebody wrote down a judgement — and the enrich
+// drain leaves it alone; a reasonless one is a report on the catalogue at the
+// moment it was swept, which a later enrichment ask may supersede. That rule was
+// shipped in `upsertListingMatch` with no way for a caller to land on the
+// protected side of it: this verb never touched the column, so every one of the
+// 883 agent verdicts on prod was reasonless whether or not its author had a
+// reason. The optional `unmatchedReason` is that way.
+//
+// THE COLUMN IS ALWAYS WRITTEN, on the crawler's own terms and for the crawler's
+// own stated purpose: "a re-matched row cannot keep a stale reason". An unmatch
+// without a reason writes null — which is the deliberate supersedable shape, not
+// an omission — and a confirm writes null because a row that points at a cigar
+// has no reason for not pointing at one. Leaving the column alone instead would
+// let a crawler's `no_match` survive under an agent's decided_by, silently
+// promoting a sweep to a protected verdict nobody wrote.
 export async function setListingMatchStatus(
   deps: Deps,
   principal: Principal,
@@ -1204,11 +1222,19 @@ export async function setListingMatchStatus(
       const existing = await loadIdempotency(deps.db, principal.userId, input.clientRequestId);
       if (existing) {
         assertReplayable(existing, requestFingerprint);
-        return { ...(existing.result as SetListingMatchStatusResult), replayed: true };
+        return replayedListingMatchStatus(existing.result as SetListingMatchStatusResult);
       }
     }
     throw error;
   }
+}
+
+// A replay of a verdict recorded BEFORE `unmatchedReason` existed has no such key
+// in its stored result, and a field the type promises must not come back
+// undefined. Absent means the verdict carried no reason — which is the truth of
+// every row written before this shipped — so it reads as null.
+function replayedListingMatchStatus(stored: SetListingMatchStatusResult): SetListingMatchStatusResult {
+  return { ...stored, unmatchedReason: stored.unmatchedReason ?? null, replayed: true };
 }
 
 async function setListingMatchStatusWithinTx(
@@ -1221,7 +1247,7 @@ async function setListingMatchStatusWithinTx(
   const existing = await loadIdempotency(tx, principal.userId, input.clientRequestId);
   if (existing) {
     assertReplayable(existing, requestFingerprint);
-    return { ...(existing.result as SetListingMatchStatusResult), replayed: true };
+    return replayedListingMatchStatus(existing.result as SetListingMatchStatusResult);
   }
 
   const match = await loadListingMatch(tx, input.matchId);
@@ -1235,9 +1261,18 @@ async function setListingMatchStatusWithinTx(
   if (input.status === "confirmed" && match.cigarId == null) {
     throw new ValidationError([{ path: "matchId", message: "A match with no cigar cannot be confirmed." }]);
   }
+  // A reason on a confirm is refused rather than dropped. Accepting and ignoring it
+  // would let a caller believe it recorded a judgement the row does not carry —
+  // and under the #245 rule that belief is about whether the verdict is protected.
+  if (input.status === "confirmed" && input.unmatchedReason != null) {
+    throw new ValidationError([
+      { path: "unmatchedReason", message: "A reason applies only to an unmatch; a confirmed match has no reason." },
+    ]);
+  }
 
   const before = listingMatchSnapshot(match);
   const nextCigarId = input.status === "unmatched" ? null : match.cigarId;
+  const nextReason = input.status === "unmatched" ? (input.unmatchedReason ?? null) : null;
   // Stamp provenance so a later crawl preserves this verdict (ADR-006, migration
   // 0017). The agent curation surface passes attribution.actor='agent'; the web
   // console leaves it absent → 'curator'. Actor is server-derived (see
@@ -1245,7 +1280,13 @@ async function setListingMatchStatusWithinTx(
   const decidedBy = input.attribution?.actor === "agent" ? "agent" : "curator";
   await tx
     .update(listingMatches)
-    .set({ status: input.status, cigarId: nextCigarId, decidedBy, updatedAt: deps.now() })
+    .set({
+      status: input.status,
+      cigarId: nextCigarId,
+      decidedBy,
+      unmatchedReason: nextReason,
+      updatedAt: deps.now(),
+    })
     .where(eq(listingMatches.id, match.id));
 
   await tx.insert(auditLog).values({
@@ -1254,7 +1295,12 @@ async function setListingMatchStatusWithinTx(
     action: "listing_match.set_status",
     smokeId: null,
     before,
-    after: { ...before, status: input.status, cigarId: nextCigarId, decidedBy },
+    // The reason is in the after-snapshot for the same reason `decidedBy` is: it is
+    // half of what decides whether the drain may later claim this row, so a
+    // reviewer asking "what did this verdict actually assert?" must not have to
+    // join the live table to find out. The undo path already restores it from
+    // `before` (listingMatchSnapshot has carried it since split_cigar needed it).
+    after: { ...before, status: input.status, cigarId: nextCigarId, decidedBy, unmatchedReason: nextReason },
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 
@@ -1262,6 +1308,7 @@ async function setListingMatchStatusWithinTx(
     matchId: match.id,
     status: input.status,
     cigarId: nextCigarId,
+    unmatchedReason: nextReason,
     replayed: false,
   };
 

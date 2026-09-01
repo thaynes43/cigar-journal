@@ -177,7 +177,12 @@ verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
 non-cigar pollution, restore_cigar to undo; set_product_photo_rights
 approved/suppressed); low-confidence cases are skipped and
 reported, never guessed — leave an uncertain brand or type null rather than invent
-one. exclude_cigar never applies to a cigar anybody holds: a worklist row whose
+one. Every unmatch states its reason: pass unmatchedReason (no_match, no_anchor,
+ambiguous, market_refusal) whenever you call set_listing_match_status unmatched. A
+stated reason is a verdict later enrichment preserves; an unmatch with none is read
+as a report on the catalog at that moment, which a later enrichment ask may
+supersede by linking the listing anyway.
+exclude_cigar never applies to a cigar anybody holds: a worklist row whose
 heldLots is above zero has purchase lots pointing at it, and the server refuses the
 exclude outright — enforced, not advised, and there is no override. Skip such a row
 or rename it; a sampler someone bought is a catalog entry, not pollution.
@@ -1409,6 +1414,64 @@ matches:
       cleanedName: Padrón 1964 Anniversary Series Maduro Exclusivo
       residue: ""                # ...and nothing left unexplained
 ```
+
+### set_listing_match_status — write, idempotent
+
+Rule on one `match_triage` row: `confirmed` keeps the cigar the resolver linked,
+`unmatched` clears the link. Confirming a row that points at no cigar is a
+`validation_error` — there is nothing to confirm.
+
+```yaml
+arguments:
+  clientRequestId: 9f2c...
+  matchId: lm_01
+  status: unmatched
+  unmatchedReason: no_anchor      # optional, and only with `unmatched`
+  runId: wo-cigar-curate-20260901
+  confidence: 0.9
+
+result:
+  matchId: lm_01
+  status: unmatched
+  cigarId: null                   # kept on confirm, cleared on unmatch
+  unmatchedReason: no_anchor      # null when none was given
+  replayed: false
+```
+
+**An unmatch should say why, and the saying is what protects it.** ADR-006's
+2026-09-01 amendment splits agent unmatches in two. One carrying an
+`unmatchedReason` is a **judgement** — somebody worked the row and concluded
+something — and the enrich drain leaves it alone. One carrying none is a **report
+on the catalog at the moment it was swept**, and a later enrichment ask is catalog
+state that moment did not have, so the drain may link the listing anyway. Both are
+legitimate; they are not the same verdict, and this argument is the only thing that
+tells them apart. An operations lane working the triage queue should state a reason
+on every unmatch, because a nightly sweep and a nightly drain that disagree about
+the same rows will otherwise overwrite each other indefinitely.
+
+The vocabulary is the resolver's own, so a curator's account of a row reads the
+same way the crawler's does:
+
+| value | means |
+| --- | --- |
+| `no_match` | nothing in the catalog is this product |
+| `no_anchor` | the title names no brand the registry knows — the fix is an alias (`update_registry_aliases`), not a link |
+| `ambiguous` | a brand anchored but no single entry under it settled |
+| `market_refusal` | the vendor's market contradicts the cigar's evidenced market |
+
+**The column is always written.** An unmatch with no reason writes null — the
+supersedable shape, deliberately — and a confirm writes null, because a row that
+points at a cigar has no reason for not pointing at one. A reason sent alongside
+`confirmed` is a `validation_error` on `unmatchedReason` rather than a silently
+dropped argument: under this rule a caller that believes it recorded a reason
+believes its verdict is protected.
+
+Recording a reason does **not** put the row back in the queue. `match_triage`
+admits a reasoned `unmatched` row only when `decided_by` is `crawler`, so a curator
+or agent verdict stays settled whatever it says. The write is audited as
+`listing_match.set_status` with the reason in both snapshots, and the console's
+Undo restores it along with the cigar, status and decider. Scope `curation:write`,
+admin only.
 
 ### The structural ladder (ADR-012 Wave 3)
 

@@ -246,7 +246,12 @@ verify_cigar; set_listing_match_status confirmed/unmatched; exclude_cigar for
 non-cigar pollution, restore_cigar to undo; set_product_photo_rights
 approved/suppressed); low-confidence cases are skipped and
 reported, never guessed — leave an uncertain brand or type null rather than invent
-one. exclude_cigar never applies to a cigar anybody holds: a worklist row whose
+one. Every unmatch states its reason: pass unmatchedReason (no_match, no_anchor,
+ambiguous, market_refusal) whenever you call set_listing_match_status unmatched. A
+stated reason is a verdict later enrichment preserves; an unmatch with none is read
+as a report on the catalog at that moment, which a later enrichment ask may
+supersede by linking the listing anyway.
+exclude_cigar never applies to a cigar anybody holds: a worklist row whose
 heldLots is above zero has purchase lots pointing at it, and the server refuses the
 exclude outright — enforced, not advised, and there is no override. Skip such a row
 or rename it; a sampler someone bought is a catalog entry, not pollution.

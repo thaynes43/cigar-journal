@@ -1532,6 +1532,12 @@ export type CatalogStatus = "active" | "excluded" | "merged";
 // a curator/agent confirms or unmatches it via setListingMatchStatus.
 export type ListingMatchStatus = "auto" | "confirmed" | "unmatched";
 
+// WHY a listing carries no link — `listing_matches.unmatched_reason` (migrations
+// 0025, 0027), whose CHECK constraint is exactly these four values. Written by the
+// resolver on rows it decides, and — since #245 — by a curator/agent verdict that
+// says why (see SetListingMatchStatusInput.unmatchedReason).
+export type ListingUnmatchedReason = "market_refusal" | "no_match" | "no_anchor" | "ambiguous";
+
 // Product-photo display gating (ADR-007). `suppressed` is a takedown — never
 // served or shown (DESIGN-003 §Curation).
 export type ProductPhotoRights = "pending" | "approved" | "suppressed";
@@ -1544,6 +1550,16 @@ export interface SetListingMatchStatusInput {
   clientRequestId: string;
   matchId: string;
   status: "confirmed" | "unmatched";
+  // WHY this listing is being unmatched, in the resolver's own vocabulary (#245).
+  // Optional, and the difference is a rule rather than a nicety: ADR-006's
+  // 2026-09-01 amendment makes a REASONED agent unmatch a protected verdict and a
+  // REASONLESS one supersedable by the enrich drain, so passing this is how a
+  // caller says "this is a judgement, not a sweep". Omitted, the reason is
+  // written null — the column is always written, exactly as the crawler writes
+  // it, so a re-decided row can never keep a stale reason from an older verdict.
+  // Only meaningful with `status: 'unmatched'`; sending it alongside `confirmed`
+  // is a validation_error rather than a silently ignored argument.
+  unmatchedReason?: ListingUnmatchedReason;
   attribution?: CurationAttribution;
   correlationId?: string;
 }
@@ -1554,6 +1570,10 @@ export interface SetListingMatchStatusResult {
   // The linked cigar after the verdict: kept on confirm, null on unmatch. The
   // prior value rides the audit `before` for reversibility.
   cigarId: string | null;
+  // The reason as it was stored: the value passed on an unmatch, else null. Echoed
+  // so a caller can read back whether its verdict is the protected shape or the
+  // supersedable one without a second query.
+  unmatchedReason: ListingUnmatchedReason | null;
   replayed: boolean;
 }
 
@@ -1898,7 +1918,7 @@ export interface WorklistMatch {
   //                    "several candidates"; both shapes are the same instruction
   //                    to the queue: a human chooses, nothing is minted.
   // Absent means the row is an `auto` proposal, which needs no reason.
-  reason?: "market_refusal" | "no_match" | "no_anchor" | "ambiguous";
+  reason?: ListingUnmatchedReason;
   // THE RESOLVER'S OWN PARSE of this listing (migration 0027), surfaced so a
   // curator inherits it instead of re-deriving it by eye — which is what 0027
   // persisted it for, and what this read failed to do until ADR-012 Wave 3 needed

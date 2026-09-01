@@ -1714,6 +1714,165 @@ describe("curation", () => {
       const [web] = await h.deps.db.select().from(auditLog).where(eq(auditLog.correlationId, correlationId));
       expect(web!.clientId).toBeNull();
     });
+
+    // --- the reason on an unmatch (#245, ADR-006 amendment 2026-09-01) --------
+    //
+    // The column already decided who wins between the curation lane and the
+    // enrich drain: `upsertListingMatch` claims a reasonless agent unmatch and
+    // leaves a reasoned one alone. Until this verb could write the column, every
+    // agent verdict landed on the claimable side of that line whatever its author
+    // had actually concluded — so the lane and the drain overwrote each other
+    // nightly with no way for either to be right.
+
+    it("records the reason an unmatch was given, on the row and in the audit", async () => {
+      const cigarId = await seedUnverified("LM Reasoned Unmatch");
+      const matchId = await addMatch(cigarId);
+      const correlationId = newRequestId();
+      const result = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "unmatched",
+        unmatchedReason: "no_anchor",
+        attribution: { actor: "agent", runId: "wo-cigar-curate-20260901", confidence: 0.9 },
+        correlationId,
+      });
+      expect(result.unmatchedReason).toBe("no_anchor");
+
+      // THE PROTECTED SHAPE, as the drain's claim guard reads it: agent-decided,
+      // unmatched, no cigar — and a reason, which is the clause that stops it.
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(row!.decidedBy).toBe("agent");
+      expect(row!.status).toBe("unmatched");
+      expect(row!.cigarId).toBeNull();
+      expect(row!.unmatchedReason).toBe("no_anchor");
+
+      // A reviewer asking what this verdict asserted must not have to join the
+      // live table, which by then may have been re-decided.
+      const [audit] = await h.deps.db.select().from(auditLog).where(eq(auditLog.correlationId, correlationId));
+      expect((audit!.before as { unmatchedReason?: string | null }).unmatchedReason).toBeNull();
+      expect((audit!.after as { unmatchedReason?: string | null }).unmatchedReason).toBe("no_anchor");
+    });
+
+    // The column is ALWAYS written, on the crawler's own terms — "a re-matched row
+    // cannot keep a stale reason". Leaving it alone would let the resolver's
+    // `no_match` survive under an agent's decided_by, silently promoting a sweep
+    // to a verdict the drain must respect and that nobody wrote.
+    it("an unmatch with no reason writes null, clearing a reason it did not author", async () => {
+      const matchId = await addMatch(null, "unmatched");
+      await h.deps.db
+        .update(listingMatches)
+        .set({ decidedBy: "crawler", unmatchedReason: "no_match" })
+        .where(eq(listingMatches.id, matchId));
+
+      const result = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "unmatched",
+        attribution: { actor: "agent", runId: "wo-cigar-curate-20260901", confidence: 0.9 },
+      });
+      expect(result.unmatchedReason).toBeNull();
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(row!.decidedBy).toBe("agent");
+      expect(row!.unmatchedReason).toBeNull();
+    });
+
+    it("a confirm clears any reason — a row that points at a cigar has none", async () => {
+      const cigarId = await seedUnverified("LM Confirm Clears Reason");
+      const matchId = await addMatch(cigarId);
+      await h.deps.db
+        .update(listingMatches)
+        .set({ unmatchedReason: "ambiguous" })
+        .where(eq(listingMatches.id, matchId));
+
+      await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "confirmed",
+      });
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(row!.status).toBe("confirmed");
+      expect(row!.unmatchedReason).toBeNull();
+    });
+
+    // Refused rather than dropped: under the #245 rule a caller believing it
+    // recorded a reason is a caller believing its verdict is protected.
+    it("refuses a reason alongside a confirm", async () => {
+      const cigarId = await seedUnverified("LM Reason On Confirm");
+      const matchId = await addMatch(cigarId);
+      const error = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "confirmed",
+        unmatchedReason: "no_match",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields[0]?.path).toBe("unmatchedReason");
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(row!.status).toBe("auto");
+    });
+
+    // The reason is part of the request, so re-sending one client request id with
+    // a different reason is a contradiction, not a retry — the envelope's job.
+    it("refuses a retry that changes the reason", async () => {
+      const cigarId = await seedUnverified("LM Reason Replay");
+      const matchId = await addMatch(cigarId);
+      const clientRequestId = newRequestId();
+      const first = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId,
+        matchId,
+        status: "unmatched",
+        unmatchedReason: "ambiguous",
+      });
+      expect(first.replayed).toBe(false);
+      const replay = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId,
+        matchId,
+        status: "unmatched",
+        unmatchedReason: "ambiguous",
+      });
+      expect(replay.replayed).toBe(true);
+      expect(replay.unmatchedReason).toBe("ambiguous");
+
+      const error = await setListingMatchStatus(h.deps, admin, {
+        clientRequestId,
+        matchId,
+        status: "unmatched",
+        unmatchedReason: "no_match",
+      }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      const [row] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, matchId));
+      expect(row!.unmatchedReason).toBe("ambiguous");
+    });
+
+    // A settled verdict stays settled whatever it says: the triage read admits a
+    // reasoned unmatch only from the crawler, so recording WHY does not hand the
+    // row back to the queue that produced it.
+    it("does not resurface a reasoned agent unmatch in match_triage", async () => {
+      const cigarId = await seedUnverified("LM Reason Not Resurfaced");
+      const matchId = await addMatch(cigarId);
+      await setListingMatchStatus(h.deps, admin, {
+        clientRequestId: newRequestId(),
+        matchId,
+        status: "unmatched",
+        unmatchedReason: "market_refusal",
+        attribution: { actor: "agent", runId: "wo-cigar-curate-20260901", confidence: 0.9 },
+      });
+      // Paged to exhaustion rather than one page deep: the row is the newest in
+      // the table and this read orders oldest-first, so a single page would pass
+      // whether the guard held or not.
+      let cursor: string | null = null;
+      const seen: string[] = [];
+      do {
+        const page: Awaited<ReturnType<typeof curationWorklist>> = await curationWorklist(h.deps, admin, {
+          kind: "match_triage",
+          limit: 100,
+          ...(cursor === null ? {} : { cursor }),
+        });
+        seen.push(...(page.matches ?? []).map((m) => m.matchId));
+        cursor = page.nextCursor;
+      } while (cursor !== null);
+      expect(seen).not.toContain(matchId);
+    });
   });
 
   // --- excludeCigar / restoreCigar (DESIGN-003 §Curation) -------------------
@@ -2671,15 +2830,23 @@ describe("curation", () => {
     // The undo's before-snapshot was widened to carry `unmatchedReason` and
     // `suggestedParse` for splitCigar's sake — it clears both when it settles a
     // link, so an undo that left them out would restore a listing to the bucket
-    // with the split's erasure still on it. Nothing about that is supposed to
-    // reach setListingMatchStatus, whose forward write names only status,
-    // cigarId and decidedBy: the widened undo hands back the same values it
-    // found, which is no change at all. This is the pin on that "no change".
+    // with the split's erasure still on it. This is the pin on the undo being a
+    // TRUE INVERSE of a verdict for both columns, whatever the forward write did
+    // to them.
+    //
+    // The two columns part company on the forward write, and #245 is why. The
+    // parse stays the RESOLVER'S: a curator unmatching a row does not get to
+    // restate how the title parsed, so `suggested_parse` is untouched. The reason
+    // is now the VERDICT'S — ADR-006's 2026-09-01 amendment reads it as whether
+    // this decision was a judgement or a sweep — so an unmatch that states none
+    // writes null rather than inheriting the resolver's word. Leaving it would
+    // stamp the agent as having concluded `ambiguous` when it concluded nothing,
+    // and would protect the row from the enrich drain on a sentence nobody wrote.
     //
     // The fixture populates BOTH evidence columns on a linked row — louder than
     // the resolver would write — because a null could not tell a value preserved
     // from a value cleared.
-    it("undo of a listing_match verdict leaves the evidence fields exactly as it found them", async () => {
+    it("undo of a listing_match verdict restores the evidence fields exactly as it found them", async () => {
       const runId = `${RUN}-${newRequestId().slice(0, 8)}`;
       const cigarId = await h.seedCigar({ canonicalName: "Undo Match Evidence" });
       const parse: SuggestedParse = {
@@ -2717,14 +2884,14 @@ describe("curation", () => {
         status: "unmatched",
         attribution: { actor: "agent", runId, confidence: 1 },
       });
-      // Forward: the verdict moved status/cigarId/decidedBy and nothing else. A
-      // curator unmatching a row does not get to state WHY the resolver did —
-      // both evidence fields are the resolver's to write.
+      // Forward: status/cigarId/decidedBy move, the parse is left alone because it
+      // is the resolver's account of the title, and the reason goes null because
+      // this verdict gave none (#245).
       const [decided] = await h.deps.db.select().from(listingMatches).where(eq(listingMatches.id, m!.id));
       expect(decided!.status).toBe("unmatched");
       expect(decided!.cigarId).toBeNull();
       expect(decided!.decidedBy).toBe("agent");
-      expect(decided!.unmatchedReason).toBe("ambiguous");
+      expect(decided!.unmatchedReason).toBeNull();
       expect(decided!.suggestedParse).toEqual(parse);
 
       const auditId = await agentAudit(runId, "listing_match.set_status");

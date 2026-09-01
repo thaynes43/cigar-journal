@@ -89,6 +89,12 @@ export const curationRouter = router({
         clientRequestId: z.string(),
         matchId: z.string().uuid(),
         status: z.enum(["confirmed", "unmatched"]),
+        // Optional, and only with `unmatched` (#245): a stated reason makes the
+        // verdict one the enrich drain preserves. The console does not offer it
+        // yet — a curator working one row at a time is the case the drain's
+        // supersession rule was never about — but the API takes it so the two
+        // callers of this procedure stay one procedure.
+        unmatchedReason: z.enum(["market_refusal", "no_match", "no_anchor", "ambiguous"]).optional(),
       }),
     )
     .mutation(({ ctx, input }) => setListingMatchStatus(ctx.deps, ctx.principal, input)),

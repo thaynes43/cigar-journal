@@ -14,9 +14,18 @@ import {
   enrichmentRequests,
   enrichmentAttempts,
   auditLog,
+  users,
   type NewCigarRow,
 } from "@cj/db";
-import { brandSlug, curationWorklist, enrichmentCoverageForCigar, enrichVendorFleet, fold } from "@cj/domain";
+import {
+  brandSlug,
+  curationWorklist,
+  enrichmentCoverageForCigar,
+  enrichVendorFleet,
+  fold,
+  setListingMatchStatus,
+  type Principal,
+} from "@cj/domain";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { runIngest, type IngestDeps } from "./core/ingest.js";
 import { resolveListing, upsertListingMatch } from "./core/match.js";
@@ -683,6 +692,76 @@ describe("crawler ingest (embedded Postgres)", () => {
     // A confirmed row is untouchable ahead of every other test, whoever owns it.
     const confirmed = await plant("confirmed", { status: "confirmed", cigarId: cigar, decidedBy: "agent" });
     expect(await claim(confirmed)).toMatchObject({ status: "confirmed", decidedBy: "agent" });
+  });
+
+  // THE TWO SHAPES, PRODUCED BY THE LANE THAT ACTUALLY WRITES THEM. Every case
+  // above plants its row with a raw UPDATE, which proves the guard reads the
+  // column and proves nothing about whether the curation lane can land on either
+  // side of it. Until `setListingMatchStatus` took a reason it could not: the verb
+  // never wrote the column, so every agent verdict was claimable whatever its
+  // author had concluded, and the lane's nightly sweep and the drain undid each
+  // other. This is the seam, exercised end to end through the real verb.
+  it("a lane unmatch that states a reason survives the drain; the same unmatch without one does not", async () => {
+    const [operator] = await pg.db
+      .insert(users)
+      .values({ email: `curation-lane-${randomUUID().slice(0, 8)}@example.com`, role: "admin" })
+      .returning({ id: users.id });
+    const principal: Principal = { userId: operator!.id, role: "admin" };
+    const deps = { db: pg.db, now };
+    const laneAttribution = { actor: "agent" as const, runId: "wo-cigar-curate-20260901", confidence: 0.9 };
+
+    // Two identical listings, each an ordinary crawler `auto` link the lane then
+    // rules on — the state the triage queue hands it.
+    const cigar = await seedCigar(`Lane Seam ${randomUUID().slice(0, 8)}`);
+    const plant = async (slug: string): Promise<{ listingKey: string; matchId: string }> => {
+      const listingKey = `/shop/lane-seam-${slug}-${randomUUID().slice(0, 8)}/`;
+      const row = await upsertListingMatch(pg.db, { vendorId, listingKey, cigarId: cigar, status: "auto", now: now() });
+      return { listingKey, matchId: row.id };
+    };
+    const reasoned = await plant("reasoned");
+    const reasonless = await plant("reasonless");
+
+    await setListingMatchStatus(deps, principal, {
+      clientRequestId: randomUUID(),
+      matchId: reasoned.matchId,
+      status: "unmatched",
+      unmatchedReason: "no_anchor",
+      attribution: laneAttribution,
+    });
+    await setListingMatchStatus(deps, principal, {
+      clientRequestId: randomUUID(),
+      matchId: reasonless.matchId,
+      status: "unmatched",
+      attribution: laneAttribution,
+    });
+
+    const claim = (listingKey: string) =>
+      upsertListingMatch(pg.db, {
+        vendorId,
+        listingKey,
+        cigarId: cigar,
+        status: "auto",
+        claimAgentUnmatched: true,
+        now: now(),
+      });
+
+    // A REASON IS INTENT, so the drain declines and the lane's verdict stands
+    // through the night's crawl.
+    expect(await claim(reasoned.listingKey)).toMatchObject({
+      status: "unmatched",
+      cigarId: null,
+      decidedBy: "agent",
+      unmatchedReason: "no_anchor",
+    });
+
+    // ...and the reasonless sweep is still exactly what the ruling says it is: a
+    // report on the catalogue, superseded by an ask the catalogue has since grown
+    // an answer for.
+    expect(await claim(reasonless.listingKey)).toMatchObject({
+      status: "auto",
+      cigarId: cigar,
+      decidedBy: "crawler",
+    });
   });
 
   // THE TRANSITION IS `unmatched` → `auto` AND NOTHING ELSE. The flag says the
