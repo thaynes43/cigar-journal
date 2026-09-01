@@ -1,14 +1,23 @@
 import { and, eq } from "drizzle-orm";
 import { auditLog, cigars, listingMatches, type ListingMatchRow, type SuggestedParse } from "@cj/db";
 import {
+  anchorByAlias,
   assertCigarAncestry,
   auditActor,
   chooseLeaf,
   coversMarket,
   evidencedMarket,
+  extractDims,
+  fold,
   loadAncestryContext,
   parseListing,
   scopedLeafCandidates,
+  stripPackaging,
+  tokenizeTitle,
+  variantRelation,
+  MIN_ANCHOR_KEY_LENGTH,
+  type AliasAnchor,
+  type AliasCandidate,
   type CigarType,
   type LeafCandidate,
   type ListingParse,
@@ -314,4 +323,157 @@ export async function createCigarFromListing(db: Queryer, parse: ListingParse): 
     })
     .returning({ id: cigars.id });
   return inserted[0]!.id;
+}
+
+// --- enrich: does a vendor listing COVER the ask? ---------------------------
+//
+// THE ENRICH DRAIN ASKS A DIFFERENT QUESTION FROM THE SEED/OFFERS WALK, and that
+// is why it cannot simply call `resolveListing`. The walk asks "which catalog row
+// IS this listing?" and answers with one leaf. The drain already knows the row —
+// the ask names it — and asks "does this listing depict it?". Those come apart on
+// the case ADR-012 documented and #233 measured in production: an ask row is
+// blend-level (`Drew Estate Liga Privada No. 9`) while every vendor title is
+// vitola-level (`Liga Privada No. 9 Corona Viva`). `resolveListing` resolves that
+// title to the Corona Viva LEAF, which is not the ask, so identity-equality says
+// no; raw trigram between the two names scores 0.42, under the old hardcoded 0.55
+// floor, so the string said no too. Both answers are wrong: a blend-level ask
+// wants a photo of ANY of its vitolas, which is the entire point of one catalogue
+// photo per row (ADR-007).
+//
+// So the drain compares STRUCTURE, in the direction the question is asked:
+//
+//   COVERAGE IS ONE-WAY. Every identity key the ask carries must appear in the
+//   candidate; the candidate may carry MORE. A vitola listing under a blend-level
+//   ask is therefore a match (it adds `corona viva`), and a blend-level listing
+//   under a vitola-level ask is NOT (it is missing `corona viva`). This is the
+//   asymmetric form of `numbersCompatible`, which is mutually contained and would
+//   reject the very case this exists for — `Signature 2000` vs `Signature` is a
+//   symmetric question about two catalog rows, and this is not.
+//
+//   THE BRAND GATE IS A CONTRADICTION TEST, NOT AN ANCHOR REQUIREMENT, and that
+//   is forced by the registry rather than chosen. Prod's registry holds 96 brands
+//   and — until the Wave 3 backfill — zero lines and zero blends, so `Liga
+//   Privada No. 9 Corona Viva` anchors NO brand at all: the marca is Drew Estate
+//   and the title never says so. Requiring the candidate to self-anchor the ask's
+//   brand would leave the flagship miss exactly as broken as the trigram floor
+//   left it. So a candidate that anchors a DIFFERENT brand is refused (positive
+//   evidence of a different product) and a candidate that anchors NOTHING is
+//   carried on its key coverage alone — the same positive-evidence rule the
+//   seed path applies at ingest.ts, where `no_anchor` annotates and never unlinks.
+//
+//   LINE AND BLEND ARE COMPATIBILITY, NOT COVERAGE. The ask's line is struck from
+//   its required keys (a vendor that omits `Monster Series` is not naming a
+//   different cigar), but a candidate that resolves to a DIFFERENT line or blend
+//   id is refused. Both id arms are inert today — nothing carries a line_id yet —
+//   and go live with the Wave 3 backfill without another edit here.
+//
+// What this deliberately does NOT read is `cigars.vitola_name`. The prod ask
+// `Drew Estate Liga Privada No. 9` carries `vitola_name = 'Toro'` while its name
+// is blend-level, so gating on `vitolaAgrees` would refuse the Corona Viva that
+// is the correct answer. The NAME states the row's specificity; the facts column
+// is a guess a curator may not have made.
+
+// The folded identity keys of a name: packaging stripped, dimensions blanked,
+// everything else in title order. Both sides of the comparison are built by this
+// one function so a vendor's `Box of 25` and a catalog row's `6 x 50` cannot
+// register as identity on one side and vocabulary on the other.
+function identityKeys(name: string): { keys: string[]; segmentStarts: ReadonlySet<number> } {
+  const { remainder } = extractDims(stripPackaging(name).cleaned);
+  const { keys, segmentStarts } = tokenizeTitle(remainder);
+  return { keys, segmentStarts };
+}
+
+// Where the ask's own brand (or line) sits in the ask's own name, or null.
+//
+// THE REGISTRY'S ALIASES ARE READ HERE, not just the free-text spelling, and that
+// is what keeps this a curation problem rather than a matcher problem. Prod's ask
+// `HdM Epicure Especial` carries `brand = 'Hoyo de Monterrey'`, which appears
+// nowhere in its own name — so without aliases `hdm` survives as a REQUIRED key
+// and no vendor title on earth can cover the ask. With them, a curator adding
+// `hdm` to that brand's aliases fixes it as data, with no code change and no
+// loosening of the rule. `fold` is the same projection that produced every key in
+// `brands.aliases`, so a match here is the match the registry would have made.
+function spanOf(
+  keys: string[],
+  names: readonly (string | null)[],
+  segmentStarts: ReadonlySet<number>,
+  from = 0,
+): AliasAnchor<AliasCandidate> | null {
+  const aliases = [...new Set(names.flatMap((n) => (n == null ? [] : [fold(n)])))].filter((k) => k !== "");
+  if (aliases.length === 0) return null;
+  return anchorByAlias(keys, [{ id: aliases[0]!, name: aliases[0]!, aliases }], {
+    from,
+    segmentStarts,
+    minKeyLength: MIN_ANCHOR_KEY_LENGTH,
+  });
+}
+
+export interface EnrichAsk {
+  cigarId: string;
+  canonicalName: string;
+  brandId: string | null;
+  lineId: string | null;
+  blendId: string | null;
+  // What a candidate MUST carry. The ask's name minus its brand span, minus its
+  // line span, minus packaging and dimensions — i.e. the words that say WHICH
+  // cigar this is once the marca and the family are accounted for.
+  requiredKeys: string[];
+}
+
+export interface EnrichAskRow {
+  cigarId: string;
+  canonicalName: string;
+  brand: string | null;
+  line: string | null;
+  brandId: string | null;
+  lineId: string | null;
+  blendId: string | null;
+  // `brands.aliases` / `lines.aliases` for the ask's own registry rows, when it
+  // has them. Null for a row that carries no `brand_id` yet — most of the catalog
+  // until the Wave 3 backfill — in which case only the free-text spelling anchors.
+  brandAliases?: readonly string[] | null;
+  lineAliases?: readonly string[] | null;
+}
+
+export function enrichAsk(row: EnrichAskRow): EnrichAsk {
+  const { keys, segmentStarts } = identityKeys(row.canonicalName);
+  const consumed = new Set<number>();
+
+  const brand = spanOf(keys, [row.brand, ...(row.brandAliases ?? [])], segmentStarts);
+  if (brand) for (let i = brand.start; i < brand.start + brand.length; i++) consumed.add(i);
+
+  // Scoped to after the brand, exactly as `parseListingTitle` scopes its own line
+  // anchor — a line alias appearing inside the marca is not the line.
+  const from = brand ? brand.start + brand.length : 0;
+  const line = spanOf(keys, [row.line, ...(row.lineAliases ?? [])], segmentStarts, from);
+  if (line) for (let i = line.start; i < line.start + line.length; i++) consumed.add(i);
+
+  return {
+    cigarId: row.cigarId,
+    canonicalName: row.canonicalName,
+    brandId: row.brandId,
+    lineId: row.lineId,
+    blendId: row.blendId,
+    requiredKeys: keys.filter((_, i) => !consumed.has(i)),
+  };
+}
+
+// Does this parsed vendor listing structurally cover the ask?
+export function coversAsk(ask: EnrichAsk, parse: ListingParse): boolean {
+  // A mixed box is not one cigar, so it depicts no single row (the same ruling
+  // `chooseLeaf` makes first, and for the same reason).
+  if (parse.sampler) return false;
+
+  // Positive contradiction only — see the header. Silence on either side is not
+  // evidence of a different brand.
+  if (ask.brandId != null && parse.brandId != null && parse.brandId !== ask.brandId) return false;
+  if (ask.lineId != null && parse.lineId != null && parse.lineId !== ask.lineId) return false;
+  if (ask.blendId != null && parse.blendId != null && parse.blendId !== ask.blendId) return false;
+
+  // Wrapper variants are sold as separate products, so they are separate blends
+  // (ADR-012). `unstated` is not a disagreement and stays eligible.
+  if (variantRelation(ask.canonicalName, parse.cleanedName) === "different") return false;
+
+  const candidate = new Set(identityKeys(parse.cleanedName).keys);
+  return ask.requiredKeys.every((key) => candidate.has(key));
 }

@@ -82,6 +82,70 @@ LLM-created cigars accumulate until curated.
 
 ## Amendments
 
+- **2026-08-31 — the enrich drain rides matching v2, and its open set is 50
+  (issue #233).** The amendment below retired the trigram resolver for the
+  seed and offers walks and left the drain behind: `tryEnrichCandidates` was
+  still comparing the ask's flat `canonical_name` to a vendor title with a
+  hardcoded `similarity(...) <= 0.55`. That is not a tuning miss, it is the
+  inversion ADR-012 names, and the 2026-08-31 bootstrap drains recorded it —
+  `Drew Estate Liga Privada No. 9` was written to the ledger as a **miss at
+  Fox**, a shop stocking `Liga Privada No. 9 Corona Viva` and `Corona Doble`.
+  A `miss` is stored as evidence *about a catalogue*, so a matcher defect was
+  being laundered into a false claim about a vendor — the exact laundering the
+  per-vendor ledger amendment below forbids.
+  - **The drain asks a different question from the walk, so it does not call
+    `resolveListing`.** The walk asks "which row IS this listing?" and answers
+    with one leaf. The drain already knows the row and asks "does this listing
+    DEPICT it?". `resolveListing` resolves the Corona Viva title to the Corona
+    Viva leaf, which is not the blend-level ask, so identity-equality says no
+    while the right answer is yes: one catalogue photo per row (ADR-007) means
+    a blend-level ask wants a photo of any of its vitolas.
+  - **Coverage is one-way.** Every identity key the ask carries must appear in
+    the candidate; the candidate may carry more. So a vitola listing under a
+    blend-level ask matches, and a blend-level listing under a vitola-level ask
+    does not. This is deliberately the asymmetric form of `numbersCompatible`,
+    which is mutually contained and would reject the very case at issue.
+  - **The brand gate is a contradiction test, not an anchor requirement**, and
+    the registry forces that rather than taste choosing it: prod holds 96 brands
+    and — until the Wave 3 backfill — zero lines and zero blends, so `Liga
+    Privada No. 9 Corona Viva` anchors no brand at all (the marca is Drew Estate
+    and the title never says so). A candidate anchoring a DIFFERENT brand is
+    refused; one anchoring nothing is carried on key coverage alone. Same
+    positive-evidence rule the seed path already applies when `no_anchor`
+    annotates instead of unlinking. Line and blend are compatibility, not
+    coverage: the ask's line is struck from its required keys, but a candidate
+    resolving to a different line or blend id is refused (inert until Wave 3).
+  - **Trigram is demoted to a ranker** over candidates already admitted. It can
+    reorder a shortlist; it can no longer open or close a door.
+  - **The drain will not repoint a crawler link that already resolves
+    elsewhere.** Coverage being one-way makes the drain a *worse* authority on
+    "which row is this listing?" than the walk, so without this the looser rule
+    would migrate vitola links — and the offer history hanging off them — onto
+    blend rows, silently and stickily (the title anchors no brand, so the next
+    walk reads `no_anchor`, annotates, and leaves the theft standing). Such a
+    candidate is skipped; the look moves on. Scored `miss`, on the same footing
+    as the declined-upsert case: we read the catalogue and a previous walk had
+    already answered the question.
+  - **A miss stays a miss where a miss is true.** Fox carries eight `Tatuaje
+    Skinny Monsters` and no Bride; Cuban Lou's only Hoyo is the *non-Cuban*
+    `Classic No. 450 EMS Robusto` against a `CC` ask. Both are pinned as
+    negative tests, because `product_photos` is `UNIQUE(cigar_id)`, first write
+    wins, and nothing in the crawler deletes one — a looser matcher that put a
+    sibling monster's picture in The Bride's only slot would be unrecoverable.
+  - **Registry gaps are closed with aliases, never with a looser rule.** The ask
+    `HdM Epicure Especial` names a marca no alias holds, so `hdm` survives as a
+    required key and nothing can cover it. `enrichAsk` reads `brands.aliases`,
+    so a curator adding `hdm` fixes it as data with no code change.
+  - **`ENRICH_DEFAULT_LIMIT` 10 → 50**, `ORDER BY created_at` unchanged. At ten
+    asks a night the backlog outran the drain, and the ceiling was set when most
+    looks were being discarded by the floor anyway. The bound that matters is
+    politeness: one look reads at most `MAX_ENRICH_CANDIDATES` (8, in practice
+    ~5) product pages, so 50 looks is ~250 pages and at most 400 — against a
+    seed/offers walk that reads every product URL a vendor publishes (Fox's flat
+    sitemap is ~2,035 locs) on the same interval. The drain remains the small
+    walk of the two.
+  - The #170/#192 market and photo-authority gates are untouched, and the
+    `match | miss | error | photo_refused` outcome vocabulary is preserved.
 - **2026-08-31 — listing matching superseded by ADR-012 (matching v2).** The
   "normalized canonical name + trigram similarity" resolver above is retired:
   it inverts at scale (distinct blends outscore true sibling vitolas), so

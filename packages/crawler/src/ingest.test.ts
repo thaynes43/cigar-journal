@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
 import {
   createDatabase,
@@ -20,6 +20,7 @@ import { brandSlug, curationWorklist, enrichmentCoverageForCigar, enrichVendorFl
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { runIngest, type IngestDeps } from "./core/ingest.js";
 import { resolveListing, upsertListingMatch } from "./core/match.js";
+import { pathOf } from "./core/product-url.js";
 import {
   markRunTerminated,
   openCrawlRun,
@@ -1827,12 +1828,19 @@ describe("crawler ingest (embedded Postgres)", () => {
     // THE CONTROL, and without it every zero above is unfalsifiable: a drain that
     // never reached the write at all — a candidate that failed to rank, a market
     // guard refusing the slot on its own account — produces exactly the same
-    // numbers. So hand the SAME listing back to the crawler and change nothing
-    // else. Everything fires, which means the zeros above were the committed row's
-    // doing and nothing else's.
+    // numbers. So hand the SAME listing back to the crawler unclaimed. Everything
+    // fires, which means the zeros above were the committed row's doing and
+    // nothing else's.
+    //
+    // `cigarId` is released along with the ownership because #233 added a second,
+    // independent reason this listing would be skipped: the drain will not repoint
+    // a crawler link that already resolves to a DIFFERENT catalog row. Leaving it
+    // aimed at `elsewhere` would make the control pass its zeros on that guard's
+    // account instead of the human's — the very confusion this control exists to
+    // rule out.
     await pg.db
       .update(listingMatches)
-      .set({ status: "auto", decidedBy: "crawler" })
+      .set({ status: "unmatched", decidedBy: "crawler", cigarId: null })
       .where(eq(listingMatches.id, decided.id));
 
     const control = await enrichRun(lane, hitRoutes, createMemoryPhotoStorage());
@@ -1840,6 +1848,285 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(control.stats.photosCaptured).toBe(1);
     expect(await photosFor(wanted)).toHaveLength(1);
     expect((await requestRow(requestId)).status).toBe("fulfilled");
+  });
+
+  // --- #233: the drain admits on STRUCTURE, and trigram only ranks -------------
+  //
+  // The drain's admission rule used to be `similarity(canonical_name, title) >
+  // 0.55` — v1's rule, left standing here after Wave 2 rewrote the seed and offers
+  // paths, and the last place in the crawler where a threshold decided identity.
+  // ADR-012 predicted how it fails and prod's own drain then recorded it. These
+  // cases are that recording, replayed: the flagship miss now matches, and each of
+  // the three misses beside it stays a miss for a reason that is stated rather
+  // than numeric.
+
+  const LIGA_VIVA_URL = "https://foxcigar.com/shop/cigars/liga-privada-no-9-corona-viva-2/";
+  const LIGA_DOBLE_URL = "https://foxcigar.com/shop/cigars/liga-privada-no-9-corona-doble-2/";
+  const LIGA_VIVA_IMG = "https://foxcigar.com/wp-content/uploads/liga-privada-no-9-corona-viva.jpg";
+  const LIGA_DOBLE_IMG = "https://foxcigar.com/wp-content/uploads/liga-privada-no-9-corona-doble.jpg";
+  const LIGA_BLEND_ASK = "Drew Estate Liga Privada No. 9";
+
+  // Fox's actual Liga shelf: two vitolas of one blend, no listing named after the
+  // blend itself. That absence IS the case — a blend-level ask has nothing to be
+  // equal to, only things to be covered by.
+  const ligaRoutes = {
+    [ROBOTS]: { body: loadFixture("robots.txt") },
+    [SITEMAP]: { body: urlsetXml([LIGA_VIVA_URL, LIGA_DOBLE_URL]) },
+    [LIGA_VIVA_URL]: { body: loadFixture("product-liga-corona-viva.html") },
+    [LIGA_DOBLE_URL]: { body: loadFixture("product-liga-corona-doble.html") },
+    [LIGA_VIVA_IMG]: { binary: Buffer.from("liga-viva-image"), contentType: "image/jpeg" },
+    [LIGA_DOBLE_IMG]: { binary: Buffer.from("liga-doble-image"), contentType: "image/jpeg" },
+  };
+
+  const matchFor = async (vendor: string, listingKey: string) =>
+    (
+      await pg.db
+        .select()
+        .from(listingMatches)
+        .where(and(eq(listingMatches.vendorId, vendor), eq(listingMatches.listingKey, listingKey)))
+    )[0];
+
+  // THE MISS PROD RECORDED ON 2026-08-31, now a match. The ask is blend-level
+  // (`Drew Estate Liga Privada No. 9`) and every Fox title is vitola-level, so
+  // identity-equality says no and the string said no too — the sub-assertion below
+  // measures the trigram between the two names against the floor that used to
+  // decide this, so the premise of the whole issue is checked rather than
+  // asserted in a comment. A blend-level ask wants a photo of ANY of its vitolas:
+  // one catalogue photo per row is what an enrichment request exists to fill
+  // (ADR-007), and a Corona Viva IS a picture of Liga Privada No. 9.
+  it("a blend-level ask is fulfilled by a vitola listing, with the photo the ask exists for", async () => {
+    const lane = await makeVendor("Liga Blend Lane", "NC");
+    await arrange([lane]);
+
+    const askId = await seedCigar(LIGA_BLEND_ASK, "NC", { brand: "Drew Estate" });
+    const requestId = await seedRequest(askId);
+
+    // The premise, in the database that used to enforce it: under the old
+    // hardcoded floor this pair was refused on the strength of this number.
+    const scored = await pg.db.execute(
+      sql`SELECT similarity(${LIGA_BLEND_ASK}, ${"Liga Privada No. 9 Corona Viva"}) AS sim`,
+    );
+    expect(Number((scored.rows as unknown as { sim: number }[])[0]!.sim)).toBeLessThan(0.55);
+
+    const run = await enrichRun(lane, ligaRoutes, createMemoryPhotoStorage());
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 1, errored: 0 });
+    expect(run.stats.matchesAuto).toBe(1);
+    expect(run.stats.offersWritten).toBe(1);
+
+    // THE ARTIFACT, not just the link. A drain that links and does not photograph
+    // has not answered the ask (#209).
+    expect(run.stats.photosCaptured).toBe(1);
+    expect(await photosFor(askId)).toHaveLength(1);
+
+    const row = await requestRow(requestId);
+    expect(row.status).toBe("fulfilled");
+    expect(row.resolvedAt).not.toBeNull();
+    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "match" }]);
+    // Exactly one of the two vitolas is linked — the drain acts on the best
+    // candidate, it does not sweep the shelf. WHICH one is trigram's remaining
+    // job: it no longer admits anything, it only orders a shortlist structure has
+    // already admitted, and on this shelf it puts the Corona Doble first. The next
+    // case takes that listing away and watches the look fall through to the other.
+    expect((await matchesFor(lane)).filter((m) => m.cigarId === askId)).toHaveLength(1);
+    expect(await matchFor(lane, pathOf(LIGA_DOBLE_URL))).toMatchObject({ cigarId: askId, status: "auto" });
+    expect(await matchFor(lane, pathOf(LIGA_VIVA_URL))).toBeUndefined();
+  });
+
+  // THE GUARD THAT KEEPS THE FIX FROM BECOMING A REGRESSION. Coverage is
+  // deliberately one-way, so `Liga Privada No. 9 Corona Viva` covers the
+  // blend-level ask — but if a seed walk has already linked that listing to the
+  // Corona Viva ROW, that row is the more specific and therefore better answer for
+  // it. Letting the drain win the tug-of-war would migrate the link, and the offer
+  // history hanging off it, from the vitola row onto the blend row; and because
+  // the title anchors no brand the seed walk would read `no_anchor` next crawl,
+  // annotate, and leave the theft standing. A blend-level ask is not positive
+  // evidence against a vitola-level link.
+  it("the drain never repoints a listing another catalog row already holds", async () => {
+    const lane = await makeVendor("Liga Theft Lane", "NC");
+    await arrange([lane]);
+
+    const askId = await seedCigar(LIGA_BLEND_ASK, "NC", { brand: "Drew Estate" });
+    const requestId = await seedRequest(askId);
+
+    // The vitola row, and the crawler-owned link a seed walk left pointing at it.
+    // Crawler-owned and not confirmed, so `upsertListingMatch` would happily
+    // rewrite it — nothing but the drain's own refusal protects this row.
+    //
+    // It is deliberately the CORONA DOBLE that is claimed: the case above pins it
+    // as the listing this drain ranks FIRST, so the guard is what makes the look
+    // pass over its own best candidate. Claiming the other one would prove nothing
+    // — the drain would have taken the Doble anyway, and every assertion below
+    // would pass with the guard deleted.
+    const vitolaId = await seedCigar("Liga Privada No. 9 Corona Doble", "NC", { brand: "Drew Estate" });
+    const claimed = await upsertListingMatch(pg.db, {
+      vendorId: lane,
+      listingKey: pathOf(LIGA_DOBLE_URL),
+      cigarId: vitolaId,
+      status: "auto",
+      now: now(),
+    });
+
+    const run = await enrichRun(lane, ligaRoutes, createMemoryPhotoStorage());
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 1, errored: 0 });
+
+    // The claimed listing still names the vitola row, at the same match id.
+    const after = (await pg.db.select().from(listingMatches).where(eq(listingMatches.id, claimed.id)))[0]!;
+    expect(after).toMatchObject({ cigarId: vitolaId, status: "auto", decidedBy: "crawler" });
+
+    // ...and the look did not stop there. Skipping a claimed candidate is not a
+    // verdict about the catalogue, it is a move to the next one — so the UNCLAIMED
+    // sibling answers the ask, and the ask is answered.
+    expect(await matchFor(lane, pathOf(LIGA_VIVA_URL))).toMatchObject({ cigarId: askId, status: "auto" });
+    expect((await requestRow(requestId)).status).toBe("fulfilled");
+    expect(await photosFor(askId)).toHaveLength(1);
+    // The vitola row's own slot is untouched: this drain was never about it.
+    expect(await photosFor(vitolaId)).toHaveLength(0);
+  });
+
+  // THE AUTHORITY GATE STILL BITES FIRST (#192/#170). A looser matcher must not
+  // widen what a lane may be SHOWN — the market filter is evaluated in the open
+  // set, one step ahead of any comparison, so a CC ask is never offered to an NC
+  // lane whatever its title would have covered.
+  it("a CC ask is never offered to an NC lane, however well the listing covers it", async () => {
+    const lane = await makeVendor("Liga Market Lane", "NC");
+    await arrange([lane]);
+
+    const askId = await seedCigar(LIGA_BLEND_ASK, "CC", { brand: "Drew Estate" });
+    const requestId = await seedRequest(askId);
+
+    const run = await enrichRun(lane, ligaRoutes, createMemoryPhotoStorage());
+    expect(run.stats.enrich!.requests).toBe(0);
+    expect(await ledgerRows(requestId)).toHaveLength(0);
+    expect((await requestRow(requestId)).status).toBe("pending");
+    expect(await photosFor(askId)).toHaveLength(0);
+  });
+
+  const TATUAJE_URL = "https://foxcigar.com/shop/cigars/tatuaje-skinny-monsters-tiff/";
+  const TATUAJE_IMG = "https://foxcigar.com/wp-content/uploads/tatuaje-skinny-monsters-tiff.jpg";
+  const tatuajeRoutes = {
+    [ROBOTS]: { body: loadFixture("robots.txt") },
+    [SITEMAP]: { body: urlsetXml([TATUAJE_URL]) },
+    [TATUAJE_URL]: { body: loadFixture("product-tatuaje-tiff.html") },
+    [TATUAJE_IMG]: { binary: Buffer.from("tatuaje-image"), contentType: "image/jpeg" },
+  };
+
+  // A MISS IS THE CORRECT VERDICT HERE, and pinning it is the other half of
+  // #233. Fox demonstrably stocks Monster-series listings and demonstrably does
+  // not stock The Bride, so the ask must come back empty — the failure mode a
+  // looser rule invites is a sibling monster's picture landing in The Bride's one
+  // permanent photo slot, which nothing in the crawler can ever undo.
+  it("a sibling release under the same line does not cover the ask, and takes no photo slot", async () => {
+    const lane = await makeVendor("Monster Lane", "NC");
+    await arrange([lane]);
+
+    const askId = await seedCigar("Tatuaje Monster Series The Bride", "NC", {
+      brand: "Tatuaje",
+      line: "Monster Series",
+    });
+    const requestId = await seedRequest(askId);
+
+    const run = await enrichRun(lane, tatuajeRoutes, createMemoryPhotoStorage());
+    // The candidate ranked and was READ — this is the matcher's verdict on a
+    // parsed product, not a prefilter's silence, which is what makes it a miss
+    // rather than an error.
+    expect(run.stats.listingsParsed).toBe(1);
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
+    expect(run.stats.matchesAuto).toBe(0);
+
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(await photosFor(askId)).toHaveLength(0);
+    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "miss" }]);
+    const row = await requestRow(requestId);
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(1);
+  });
+
+  const HOYO_URL = "https://foxcigar.com/shop/cigars/hoyo-de-monterrey-classic-no-450-ems-robusto/";
+  const HOYO_IMG = "https://foxcigar.com/wp-content/uploads/hoyo-de-monterrey-classic-no-450-ems-robusto.jpg";
+  const hoyoRoutes = {
+    [ROBOTS]: { body: loadFixture("robots.txt") },
+    [SITEMAP]: { body: urlsetXml([HOYO_URL]) },
+    [HOYO_URL]: { body: loadFixture("product-hoyo-classic-450.html") },
+    [HOYO_IMG]: { binary: Buffer.from("hoyo-image"), contentType: "image/jpeg" },
+  };
+
+  // THE CUBAN LOU'S SHAPE. The ask is the Habanos `Hoyo de Monterrey Epicure
+  // Especial`; the shop's only Hoyo listing is the General Cigar bundle — a
+  // different market and a different blend that happens to share the marca's
+  // words. Two independent things refuse it, and the ask stays open for a vendor
+  // that might actually carry it:
+  //   * the slug prefilter offers no candidate at all, because the ask's stored
+  //     name abbreviates the marca to `HdM` and shares no token with the listing's
+  //     slug — hence `listingsParsed` 0, a completed look over an enumerated
+  //     catalogue and therefore an honest miss (never an error, #158);
+  //   * and had it been fetched, `hdm` is still a REQUIRED key, so the structural
+  //     rule refuses it too. That arm is pinned pure in core/enrich-cover.test.ts,
+  //     along with the curator's fix: an alias, never a looser matcher.
+  it("a Cuban Hoyo ask is not answered by the non-Cuban Hoyo bundle", async () => {
+    const lane = await makeVendor("Cuban Lous Hoyo", "both");
+    await arrange([lane]);
+
+    const askId = await seedCigar("HdM Epicure Especial", "CC", { brand: "Hoyo de Monterrey" });
+    const requestId = await seedRequest(askId);
+
+    const run = await enrichRun(lane, hoyoRoutes, createMemoryPhotoStorage());
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
+    expect(run.stats.listingsParsed).toBe(0);
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(await photosFor(askId)).toHaveLength(0);
+    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "miss" }]);
+    expect((await requestRow(requestId)).status).toBe("pending");
+  });
+
+  // The plainest miss of all, and the one that says the rule did not simply become
+  // "yes": a marca this catalogue does not carry at all. Nothing here shares so
+  // much as a word with the Padron shelf.
+  it("an ask for a marca the catalogue does not carry misses", async () => {
+    const lane = await makeVendor("Caldwell Lane", "NC");
+    await arrange([lane]);
+
+    const askId = await seedCigar("Caldwell Long Live the King The Heater", "NC", { brand: "Caldwell" });
+    const requestId = await seedRequest(askId);
+
+    const run = await enrichRun(lane, missRoutes, createMemoryPhotoStorage());
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
+    expect(run.stats.matchesAuto).toBe(0);
+    expect(await photosFor(askId)).toHaveLength(0);
+    expect(await ledgerRows(requestId)).toMatchObject([{ attempts: 1, errors: 0, lastOutcome: "miss" }]);
+  });
+
+  // HOW DEEP THE NIGHTLY DRAIN GOES, raised 10 → 50 with #233. At ten a night the
+  // backlog outran the drain, and the old ceiling was set when most looks were
+  // being thrown away by the trigram floor anyway. The politeness arithmetic that
+  // actually bounds this is in ingest.ts; what a test can pin is the number and
+  // the ORDER — oldest first, so the queue drains rather than churns its head.
+  it("the drain takes 50 open requests a night, oldest first", async () => {
+    const lane = await makeVendor("Drain Depth", "NC");
+    await arrange([lane]);
+
+    // Names that share no slug token with the Padron fixture, so every look is a
+    // zero-candidate miss: this case is about selection, and a fetch per request
+    // would make it about politeness instead.
+    const ids: string[] = [];
+    for (let i = 0; i < 51; i++) {
+      const cigarId = await seedCigar(`Phantom Depth Zeta ${i}`, "NC");
+      ids.push(await seedRequest(cigarId, new Date(Date.UTC(2026, 7, 26, 0, i))));
+    }
+
+    const run = await enrichRun(lane, missRoutes);
+    expect(run.stats.enrich).toMatchObject({ requests: 50, looked: 50, matched: 0, errored: 0 });
+
+    // The oldest was looked at, and so was the 50th...
+    expect(await ledgerRows(ids[0]!)).toMatchObject([{ attempts: 1, lastOutcome: "miss" }]);
+    expect((await requestRow(ids[0]!)).attempts).toBe(1);
+    expect(await ledgerRows(ids[49]!)).toHaveLength(1);
+
+    // ...and the 51st was not touched at all: no ledger row, no attempt, still
+    // pending, waiting for tomorrow at the head of the queue.
+    expect(await ledgerRows(ids[50]!)).toHaveLength(0);
+    const newest = await requestRow(ids[50]!);
+    expect(newest.status).toBe("pending");
+    expect(newest.attempts).toBe(0);
   });
 
   // §2c, THE COUPLING. The drain's open set has to be the exact complement of the
