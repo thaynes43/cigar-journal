@@ -1,29 +1,44 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- HAND-WRITTEN representative fixture (ADR-006): the dev pod cannot fetch the
-     live sitemap. Shaped from the 2026-08-30 in-cluster probe, which found the
-     `/store/` prefix dominated by a CONTIGUOUS, id-ordered block of
-     `/store/go/registry/<n>/` gift-registry pages sitting AHEAD of the products.
+<!-- LIVE-DERIVED, 2026-09-01 (issue #217). Every loc below is a REAL loc from
+     https://www.2guyscigars.com/sitemap.xml, fetched by an in-cluster Job; the
+     live file has 6,356 of them and this is a 21-loc downsample that preserves
+     every shape in it, in sitemap order.
 
-     The block is 12 entries, ids placed so the fixture reproduces the live false
-     verdict exactly: with the exclusion removed, 14 locs pass the gate and
-     spreadIndices(14, 3) picks 2/7/11 — registry ids 1059, 4401 and 8079, the
-     three URLs that probe really sampled, none of which carries Product JSON-LD.
-     With the exclusion, only the two products remain. -->
+     The live proportions, for scale:
+       1 root · 4,888 one-segment slugs · 1,467 `/store/go/registry/<n>/`
+       of the one-segment slugs, 3,841 end in a `-<product-code>` and 1,047 do not
+
+     The nine accepted locs are ordered so spreadIndices(9, 3) = [1, 4, 7] draws
+     the three products this directory has captured pages for. Change the order
+     and the probe tests sample something with no route.
+
+     Traps deliberately included:
+       `gold-star-gordo-072817`  a product whose slug starts with `go` — a `\b`
+                                 anchor after a reserved word would eat it
+       `cigars-byron-1850`       a CATEGORY page ending in digits: one of the nine
+                                 the gate knowingly admits
+       `gift-certificates-...-web25`  a real product with an alphanumeric code:
+                                 the one the gate knowingly drops -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://www.2guyscigars.com/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/612/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/840/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/1059/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/1783/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/2450/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/3117/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/3760/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/4401/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/5502/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/6390/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/7233/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/go/registry/8079/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/padron-1926-serie-no-9-maduro/</loc></url>
-  <url><loc>https://www.2guyscigars.com/store/xikar-xi3-cutter/</loc></url>
   <url><loc>https://www.2guyscigars.com/about-us/</loc></url>
+  <url><loc>https://www.2guyscigars.com/Cigars/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/239/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/242/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/1059/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/4401/</loc></url>
+  <url><loc>https://www.2guyscigars.com/store/go/registry/8079/</loc></url>
+  <url><loc>https://www.2guyscigars.com/gold-star-gordo-072817/</loc></url>
+  <url><loc>https://www.2guyscigars.com/perdomo-30th-robusto-sg-s-165681/</loc></url>
+  <url><loc>https://www.2guyscigars.com/crowned-heads/</loc></url>
+  <url><loc>https://www.2guyscigars.com/2-guys-birch-beer-710009/</loc></url>
+  <url><loc>https://www.2guyscigars.com/cigars-byron-1850/</loc></url>
+  <url><loc>https://www.2guyscigars.com/cigars-perdomo-30th-maduro/</loc></url>
+  <url><loc>https://www.2guyscigars.com/romacraft-steel-porcupine-184527/</loc></url>
+  <url><loc>https://www.2guyscigars.com/20-acre-farm-robusto-017902/</loc></url>
+  <url><loc>https://www.2guyscigars.com/zino-nicaragua-cigars/</loc></url>
+  <url><loc>https://www.2guyscigars.com/zino-nicaragua-toro-260256/</loc></url>
+  <url><loc>https://www.2guyscigars.com/smoke-exterm-candle-orange-734366037362/</loc></url>
+  <url><loc>https://www.2guyscigars.com/gift-certificates-25-giftcard-web25/</loc></url>
+  <url><loc>https://www.2guyscigars.com/la-galera-hab-chaveta-s-127401/</loc></url>
 </urlset>

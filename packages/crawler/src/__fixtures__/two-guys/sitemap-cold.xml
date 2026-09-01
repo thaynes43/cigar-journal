@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- HAND-WRITTEN fixture for the OTHER response 2 Guys serves for the SAME
-     sitemap URL (live 2026-08-29): a large enumeration with ZERO /store/ product
-     locs. Paired with sitemap.xml in a sequenced mock route, it reproduces the
-     content variance sitemapSampling exists to absorb. -->
+<!-- The OTHER response 2 Guys served for the SAME sitemap URL on 2026-08-29
+     (live): an enumeration carrying ZERO product locs. Paired with sitemap.xml in
+     a sequenced mock route, it reproduces the content variance sitemapSampling
+     exists to absorb.
+
+     Still cold under the 2026-09-01 gate, for a different reason than when it was
+     written: back then it was "no `/store/` locs", now it is "no slug ends in a
+     product code". Both readings are the same three real locs. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://www.2guyscigars.com/</loc></url>
   <url><loc>https://www.2guyscigars.com/about-us/</loc></url>

@@ -155,6 +155,68 @@ LLM-created cigars accumulate until curated.
     already pointing at another cigar. Those still cost a fetch before the refusal
     (the `existingCrawlerLink` asymmetry is unchanged) — an honest miss bought at
     the price of one page, and prod holds no row of the last kind today.
+
+- **2026-09-01 — 2 Guys' product gate is re-derived from a live read, and the
+  vendor is blocked on something else entirely (issue #217).** The 2026-08-31
+  re-probe of the #179 build returned `product-locs=0`: all 1,466 `/store/` locs
+  are the `/store/go/` registry family, so the prefix was not merely polluted, it
+  was wrong. In-cluster Jobs then fetched robots.txt, the sitemap and 18 pages
+  from it. Three rulings come out of that read.
+  - **The shape, measured.** 6,356 distinct locs = 1 root + 4,888 ONE-segment
+    slugs + 1,467 `/store/go/registry/<n>/`. No other depth, no query strings, no
+    file extensions. Of the one-segment slugs, **3,841 end in `-<digits>` and
+    1,047 do not**, and that suffix is the NitroSell product code — it is
+    repeated as `og:upc` on every product page sampled. Five sampled slugs WITH a
+    code: all 200, all `og:type=product`. Thirteen WITHOUT: six 404 (the sitemap
+    enumerates dead slugs), six category/brand/site pages, and one real product
+    carrying a non-numeric code.
+  - **The gate is Mode B, and it does NOT enumerate families — it requires the
+    product code.** `productPathSegments: {min:1,max:1}` plus
+    `/^\/store(?:\/|$)|^\/(?![^/]*-\d+\/?$)/i`. Enumerating brand/promo families
+    was the obvious move and the measurement refuses it: ~500 of the 1,047 are
+    arbitrary line-landing slugs (`perdomo-30th-maduro`) that no keyword
+    separates from a product slug, and the keywords that look usable are traps —
+    `^\/cigars-` would drop nine URLs that DO carry a product code. A negative
+    lookahead is unusual in a field named for rejection; it is the same statement
+    as the positive finding, and it keeps the standing pattern requirements
+    (every top-level branch anchored, segment boundaries not `\b`, no `g`/`y`).
+    Two imprecisions are accepted and recorded in the adapter: it admits nine
+    category pages whose title ends in a number, and it drops a product whose
+    code is alphanumeric. Both sit on the cheap side of the asymmetry the
+    2026-08-30 amendment states, except the second — which is why the accepted
+    count (3,841 of 4,888) is the number to watch on the next probe.
+  - **The vendor's real blocker is the PARSER, and it is not fixed here.**
+    2 Guys serves **no `application/ld+json` at all** — zero blocks in all 18
+    pages fetched, product pages included. What a product page carries instead:
+    `og:type=product`, `product:price:amount` + `product:price:currency`,
+    `og:availability`, `og:upc`, `og:brand`, and a
+    `<div itemscope itemtype="https://schema.org/Product">` whose only itemprop is
+    `name`. Its breadcrumb is deliberately "Home / <brand>" with no category
+    trail (the page says so: *"ticket 126909: Home and brand URL instead of
+    Breadcrumbs on product pages"*); CATEGORY pages keep a real
+    `Home > Cigars > <line>`. So a probe on the corrected gate reads
+    `sampled=3 parsed=0` with "no schema.org Product JSON-LD" — now a TRUE and
+    correctly-attributed line, where the same words were misattributed on
+    2026-08-30. **This ADR does not yet rule on whether OG/microdata is an
+    acceptable structured source**, nor on where a category comes from when the
+    product page states none; both are open, and until they are answered
+    `crawl_enabled` for this vendor cannot go true whatever the gate says.
+  - **robots, read live for the first time.** Two `User-agent: *` groups (RFC
+    9309: combined, which `parseRobots` does) — one `Disallow: /store/filtered/`,
+    one **`Crawl-delay: 5`** — plus a long named-bot blocklist we are not on. The
+    parser ignores crawl-delay by design, so the ask is honored in the adapter:
+    `minIntervalMs: 5000`. Rate asked for by a vendor's own robots.txt wins over
+    our 2.5s floor, always upward.
+  - **Registration reconciles by REPORT (the #179 rider).** `resolveVendor` stays
+    insert-if-absent — the registry is admin-managed and a crawl must not
+    overwrite an admin's decision — so flipping a posture constant in an adapter
+    still changes nothing for a vendor that already has a row, which is every
+    vendor we ship. A run that resolves an existing row now COMPARES the six
+    posture fields it would have seeded and prints what differs, naming the row
+    value, the adapter value, and the fact that the row wins. The operator still
+    performs the change; they are no longer told about it by a crawl that quietly
+    did nothing.
+
 - **2026-09-01 — the drain's prefilter joins matching v2, and a look that read
   nothing stops claiming it did (issue #240).** The amendment below put the
   drain's *comparison* on matching v2 and left the step in front of it alone: a

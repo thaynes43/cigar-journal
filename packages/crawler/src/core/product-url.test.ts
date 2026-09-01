@@ -52,40 +52,47 @@ describe("prefix gate (mode A)", () => {
   });
 });
 
-// The 2 Guys defect (live probe 2026-08-30): `/store/` is the right prefix and
-// still admits `/store/go/registry/<n>/`, gift-registry pages with no Product
-// JSON-LD. Mode A therefore subtracts a pattern after the prefix.
+// Mode A + pattern (#179). No REGISTERED adapter uses it any more — 2 Guys moved
+// to Mode B on the 2026-09-01 live read — so it is exercised through a synthetic
+// adapter rather than dropped: the capability is still in `isProductUrl`, and an
+// untested branch is how `^\/cart\b` shipped.
+const modeAWithExclusion: VendorAdapter = {
+  ...foxCigar,
+  productPathPrefix: "/store/",
+  nonProductPathPattern: /^\/store\/go(?:\/|$)/i,
+};
+
 describe("prefix gate with exclusion (mode A + pattern)", () => {
   const accepts = [
-    "https://www.2guyscigars.com/store/padron-1926-serie-no-9-maduro/",
-    "https://www.2guyscigars.com/store/gold-label-toro/",
+    "https://vendor.example/store/padron-1926-serie-no-9-maduro/",
+    "https://vendor.example/store/gold-label-toro/",
     // The hyphen trap, re-armed for Mode A: a `\b` anchor after `go` would match
     // at the hyphen and drop this product silently — the Small Batch
     // `/cart-blanche-robusto/` bug. `(?:\/|$)` is a full segment boundary.
-    "https://www.2guyscigars.com/store/go-big-or-go-home-robusto/",
+    "https://vendor.example/store/go-big-or-go-home-robusto/",
   ];
   const rejects = [
-    // The three URLs the live probe sampled, verbatim.
-    "https://www.2guyscigars.com/store/go/registry/1059/",
-    "https://www.2guyscigars.com/store/go/registry/4401/",
-    "https://www.2guyscigars.com/store/go/registry/8079/",
+    // The three URLs the 2026-08-30 live probe sampled, by path.
+    "https://vendor.example/store/go/registry/1059/",
+    "https://vendor.example/store/go/registry/4401/",
+    "https://vendor.example/store/go/registry/8079/",
     // The segment itself, with and without the trailing slash.
-    "https://www.2guyscigars.com/store/go/",
-    "https://www.2guyscigars.com/store/go",
+    "https://vendor.example/store/go/",
+    "https://vendor.example/store/go",
     // Siblings we have not sampled: the gate excludes the FAMILY, not one member.
-    "https://www.2guyscigars.com/store/go/wishlist/",
-    "https://www.2guyscigars.com/store/go/anything-we-have-not-seen/",
+    "https://vendor.example/store/go/wishlist/",
+    "https://vendor.example/store/go/anything-we-have-not-seen/",
     // Still outside the prefix — the prefix does this work, not the pattern.
-    "https://www.2guyscigars.com/about-us/",
-    "https://www.2guyscigars.com/",
+    "https://vendor.example/about-us/",
+    "https://vendor.example/",
   ];
 
   it("accepts products under the prefix, including slugs that merely start with `go`", () => {
-    for (const url of accepts) expect(isProductUrl(url, twoGuysCigars), url).toBe(true);
+    for (const url of accepts) expect(isProductUrl(url, modeAWithExclusion), url).toBe(true);
   });
 
   it("rejects the whole /store/go/ family and everything outside the prefix", () => {
-    for (const url of rejects) expect(isProductUrl(url, twoGuysCigars), url).toBe(false);
+    for (const url of rejects) expect(isProductUrl(url, modeAWithExclusion), url).toBe(false);
   });
 
   it("changes nothing for a prefix adapter that sets no pattern", () => {
@@ -152,6 +159,96 @@ describe("exclusion gate (mode B)", () => {
   });
 });
 
+// 2 Guys, re-derived on the 2026-09-01 live read (#217): the sitemap is 1 root +
+// 4,888 one-segment slugs + 1,467 `/store/go/registry/<n>/`, and a product slug
+// is the one that ends in a NitroSell product code. Every URL below is a real loc
+// from that fetch.
+describe("exclusion gate (mode B) — 2 Guys product-code slugs", () => {
+  const two = (path: string): string => `https://www.2guyscigars.com${path}`;
+
+  const accepts = [
+    // Products, live-fetched: 200, og:type=product, itemtype schema.org/Product.
+    two("/perdomo-30th-robusto-sg-s-165681/"),
+    two("/romacraft-steel-porcupine-184527/"),
+    two("/smoke-exterm-candle-orange-734366037362/"),
+    two("/la-galera-hab-chaveta-s-127401/"),
+    // The hyphen trap in its live form: a real product whose slug starts with the
+    // letters of a path word. Nothing in the pattern may anchor on `\b`.
+    two("/gold-star-gordo-072817/"),
+    // A non-cigar product. The gate's job is "is this a product page", not "is
+    // this a cigar" — `isCigarListing` answers the second one.
+    two("/2-guys-birch-beer-710009/"),
+    // A product whose slug merely CONTAINS `store`: the /store/ branch must end
+    // at a segment boundary.
+    two("/store-brand-robusto-123456/"),
+    // Both forms the enumeration and a link can produce.
+    two("/zino-nicaragua-toro-260256"),
+  ];
+
+  const rejects = [
+    // The registry family: 1,467 locs, the whole reason #179 existed.
+    two("/store/go/registry/1059/"),
+    two("/store/go/registry/8079/"),
+    two("/store/filtered/"), // the one path this vendor's robots.txt disallows
+    two("/store/"),
+    two("/store"),
+    // Category and brand landing pages — live 200s with no product markup.
+    two("/cigars-perdomo-30th-maduro/"),
+    two("/crowned-heads/"),
+    two("/aganorsa-leaf/"),
+    two("/Cigars/"),
+    // Site pages.
+    two("/about-us/"),
+    two("/privacy-policy/"),
+    two("/"),
+    // A sitemap loc that 404s — six of the eleven non-code slugs sampled did.
+    two("/zino-nicaragua-cigars/"),
+    // Depth: nothing on this site is two or three segments deep, and if that
+    // changes the depth bound answers before the pattern does.
+    two("/cigars/padron-1926-123456/"),
+  ];
+
+  it("accepts a one-segment slug ending in a product code", () => {
+    for (const url of accepts) expect(isProductUrl(url, twoGuysCigars), url).toBe(true);
+  });
+
+  it("rejects the /store/ subtree, landing pages, site pages and deeper paths", () => {
+    for (const url of rejects) expect(isProductUrl(url, twoGuysCigars), url).toBe(false);
+  });
+
+  // Both imprecisions are measured and deliberate; they are recorded here so a
+  // future change that alters either one has to say so.
+  it("knowingly admits the nine category pages whose title ends in a number", () => {
+    for (const url of [two("/cigars-byron-1850/"), two("/cigars-topper-1894/")]) {
+      expect(isProductUrl(url, twoGuysCigars), url).toBe(true);
+    }
+  });
+
+  it("knowingly drops a product whose code is not numeric", () => {
+    // og:upc=GiftCard-Web25 — a real product, and the only one of its shape in
+    // the live enumeration. A cigar with an alphanumeric code would be lost the
+    // same way, silently, which is why the accepted count is worth watching.
+    expect(isProductUrl(two("/gift-certificates-25-giftcard-web25/"), twoGuysCigars)).toBe(false);
+  });
+
+  it("filters the recorded live sitemap down to the product-code slugs", () => {
+    const locs = parseSitemap(loadFixture("sitemap.xml", "two-guys")).locs;
+    expect(locs).toHaveLength(21);
+    const kept = filterProductUrls(locs, twoGuysCigars);
+    expect(kept.map((url) => pathOf(url))).toEqual([
+      "/gold-star-gordo-072817/",
+      "/perdomo-30th-robusto-sg-s-165681/",
+      "/2-guys-birch-beer-710009/",
+      "/cigars-byron-1850/",
+      "/romacraft-steel-porcupine-184527/",
+      "/20-acre-farm-robusto-017902/",
+      "/zino-nicaragua-toro-260256/",
+      "/smoke-exterm-candle-orange-734366037362/",
+      "/la-galera-hab-chaveta-s-127401/",
+    ]);
+  });
+});
+
 describe("gate metadata", () => {
   it("names the robots gate path per mode", () => {
     expect(robotsGatePath(foxCigar)).toBe("/shop/");
@@ -159,20 +256,27 @@ describe("gate metadata", () => {
     // Mode B has no prefix — robotsProbePath, else the site root.
     expect(robotsGatePath(smallBatchCigar)).toBe("/");
     expect(robotsGatePath({ ...smallBatchCigar, robotsProbePath: "/catalog/" })).toBe("/catalog/");
+    // 2 Guys asks about `/` since 2026-09-01: its products are root-level slugs,
+    // so `/store/` — the path it used to ask about — is now a subtree it never
+    // fetches. The live robots.txt allows `/` and disallows only /store/filtered/.
+    expect(robotsGatePath(twoGuysCigars)).toBe("/");
   });
 
   it("renders a label for both modes", () => {
     expect(productGateLabel(foxCigar)).toBe("prefix /shop/");
     expect(productGateLabel(smallBatchCigar)).toMatch(/^not \/.*\/i segments 1\.\.1$/);
-    // The subtraction is printed: the probe line is how the coordinator tells a
-    // rebuilt image from a cached one.
-    expect(productGateLabel(twoGuysCigars)).toBe("prefix /store/ minus /^\\/store\\/go(?:\\/|$)/i");
+    // The gate line is how the coordinator tells a rebuilt probe image from a
+    // cached one, so it prints the pattern verbatim — and this string is what the
+    // next in-cluster probe must echo back.
+    expect(productGateLabel(twoGuysCigars)).toBe(
+      "not /^\\/store(?:\\/|$)|^\\/(?![^/]*-\\d+\\/?$)/i segments 1..1",
+    );
   });
 
   it("does not let a Mode-A exclusion narrow the ROBOTS gate path", () => {
     // robots is asked about the coarse prefix; subtracting a subtree from the URL
     // filter must not change which path we check permission for.
-    expect(robotsGatePath(twoGuysCigars)).toBe("/store/");
+    expect(robotsGatePath(modeAWithExclusion)).toBe("/store/");
   });
 });
 
@@ -303,12 +407,19 @@ describe("registry invariant", () => {
   });
 
   // These run on ANY adapter carrying a pattern, in EITHER mode. Scoping them to
-  // Mode B is what would let the new Mode-A pattern ship unguarded — precisely
-  // the gap that let `^\/cart\b` eat `/cart-blanche-robusto/`.
+  // Mode B is what would let a Mode-A pattern ship unguarded — precisely the gap
+  // that let `^\/cart\b` eat `/cart-blanche-robusto/`. Every REGISTERED pattern
+  // is Mode B today (2 Guys left Mode A on 2026-09-01), so the synthetic Mode-A
+  // adapter is guarded alongside them rather than the guard losing that mode.
   it("guards every non-product pattern, whichever mode declares it", () => {
-    const withPattern = Object.entries(adapters).filter(([, a]) => a.nonProductPathPattern !== undefined);
+    const withPattern = [
+      ...Object.entries(adapters).filter(([, a]) => a.nonProductPathPattern !== undefined),
+      ["synthetic-mode-a", modeAWithExclusion] as [string, VendorAdapter],
+    ];
     // If this ever reads 1 the guard has quietly stopped covering a mode.
     expect(withPattern.length).toBeGreaterThanOrEqual(2);
+    expect(withPattern.some(([, a]) => a.productPathPrefix !== undefined)).toBe(true);
+    expect(withPattern.some(([, a]) => a.productPathPrefix === undefined)).toBe(true);
     for (const [slug, adapter] of withPattern) {
       const pattern = adapter.nonProductPathPattern!;
       // EVERY top-level branch anchored, not just the first — an unanchored
