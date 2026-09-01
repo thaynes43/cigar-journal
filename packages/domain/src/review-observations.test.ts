@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { auditLog, blends, brands, lines, reviewObservations, vendors } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { brandSlug } from "./catalog-browse.js";
@@ -441,6 +441,62 @@ describe("review observations", () => {
       await expect(
         recordReviewObservation(h.deps.db, { ...base, cigarId, blendId }),
       ).rejects.toThrow(ValidationError);
+    });
+
+    // #230, the FK-on-insert half. Both target columns are extractor-supplied and
+    // went into the INSERT unchecked, so an id naming no row raised 23503 and a
+    // malformed one 22P02 — untyped either way, and outside the ValidationError
+    // contract this writer documents.
+    it("refuses a target that resolves to no row, malformed and unknown alike", async () => {
+      const base = {
+        source: `ghost-${tag}`,
+        url: "https://ghost.example/review/one",
+        nativeScale: "0-100",
+        nativeScore: 90,
+        seenAt,
+      };
+      const fieldsOf = async (input: Parameters<typeof recordReviewObservation>[1]) =>
+        recordReviewObservation(h.deps.db, input).catch((e: unknown) => (e as ValidationError).fields);
+
+      expect(await fieldsOf({ ...base, cigarId: newRequestId() })).toEqual([
+        { path: "cigarId", message: "No such cigar." },
+      ]);
+      expect(await fieldsOf({ ...base, cigarId: "not-a-uuid" })).toEqual([
+        { path: "cigarId", message: "No such cigar." },
+      ]);
+      expect(await fieldsOf({ ...base, blendId: newRequestId() })).toEqual([
+        { path: "blendId", message: "No such blend." },
+      ]);
+      expect(await fieldsOf({ ...base, blendId: "not-a-uuid" })).toEqual([
+        { path: "blendId", message: "No such blend." },
+      ]);
+
+      // Nothing was written for any of them.
+      const rows = await h.deps.db
+        .select({ id: reviewObservations.id })
+        .from(reviewObservations)
+        .where(eq(reviewObservations.source, `ghost-${tag}`));
+      expect(rows).toHaveLength(0);
+    });
+
+    // The writer runs on the CALLER'S transaction by design, so a malformed id
+    // must never be the thing that poisons it: a batch ingest would lose every
+    // good row alongside the bad one.
+    it("leaves the caller's transaction usable after refusing a malformed target", async () => {
+      const stillQueryable = await h.deps.db.transaction(async (tx) => {
+        await expect(
+          recordReviewObservation(tx, {
+            source: `poison-${tag}`,
+            url: "https://poison.example/review/one",
+            nativeScale: "0-100",
+            nativeScore: 90,
+            cigarId: "not-a-uuid",
+            seenAt,
+          }),
+        ).rejects.toBeInstanceOf(ValidationError);
+        return (await tx.select({ id: brands.id }).from(brands).limit(1)).length;
+      });
+      expect(stillQueryable).toBe(1);
     });
 
     it("refuses an over-long excerpt rather than truncating it", async () => {

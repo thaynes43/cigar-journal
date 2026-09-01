@@ -1057,5 +1057,41 @@ describe("taxonomy writes", () => {
         { path: "lineId", message: "The referenced line could not be resolved." },
       ]);
     });
+
+    // #230. `brandId` was the sibling the guard did not cover, because nothing
+    // resolved it at all: a well-formed but unknown marca rode into the cigar
+    // UPDATE and came back as FK 23503 on `cigars_brand_id_fkey` — untyped, so a
+    // 500. It is now the same refusal `createLine` makes, and the malformed id
+    // is indistinguishable from it.
+    it("assignCigarParts answers an unknown brandId as no such brand, and a malformed one the same", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Sweep Unknown Brand Row" });
+      const malformed = await assignCigarParts(h.deps, curator, { cigarId, brandId: bad }).catch(
+        (e: unknown) => e,
+      );
+      const unknown = await assignCigarParts(h.deps, curator, {
+        cigarId,
+        brandId: newRequestId(),
+      }).catch((e: unknown) => e);
+      expect(malformed).toBeInstanceOf(ValidationError);
+      expect((malformed as ValidationError).toPayload()).toEqual((unknown as ValidationError).toPayload());
+      expect((malformed as ValidationError).fields).toEqual([
+        { path: "brandId", message: "No such brand." },
+      ]);
+
+      // Refused BEFORE the write: the row is untouched, where it used to be the
+      // UPDATE itself that failed.
+      const row = (
+        await h.deps.db.select({ brandId: cigars.brandId }).from(cigars).where(eq(cigars.id, cigarId))
+      )[0]!;
+      expect(row.brandId).toBeNull();
+    });
+
+    // The marca a brand ACTUALLY owns still passes, so the new check refuses
+    // only what it is meant to.
+    it("assignCigarParts still accepts a brandId the registry knows", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Sweep Known Brand Row" });
+      const result = await assignCigarParts(h.deps, curator, { cigarId, brandId: padronId });
+      expect(result.changedFields).toEqual(["brandId"]);
+    });
   });
 });

@@ -1,9 +1,10 @@
-import { sql } from "drizzle-orm";
-import { auditLog, type NewAuditLogRow } from "@cj/db";
+import { eq, sql } from "drizzle-orm";
+import { auditLog, blends, cigars, type NewAuditLogRow } from "@cj/db";
 import type { Principal, Queryer } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
 import { ValidationError, type FieldError } from "./errors.js";
 import { normalizeReviewScore, nativeScoreText } from "./review-scores.js";
+import { isUuid } from "./uuid.js";
 
 // The single review-observation writer (ADR-013 §2) — the ADR-009
 // price-observation pattern applied to reviews, and the only path that writes
@@ -195,6 +196,41 @@ function validate(input: ReviewObservationInput, errors: FieldError[]): void {
   }
 }
 
+// THE TARGET IS AN FK AND NOTHING RESOLVED IT (#230). `cigar_id` and `blend_id`
+// are extractor-supplied and went straight into the INSERT, so an id naming no
+// row raised 23503 and a malformed one 22P02. Both are untyped, so both escape
+// this writer's documented ValidationError contract as an opaque failure — and
+// the 22P02 is worse than a failed statement here, because this runs on the
+// CALLER'S transaction by design (a crawl ingesting a page's whole batch), which
+// it would poison. A misread id is a statement that the extractor read the wrong
+// thing, which is exactly what the other field errors here report.
+//
+// Malformed skips the query and takes the miss's refusal, so the two are
+// indistinguishable to the caller — the same contract every other id-taking
+// entry point in this domain keeps (./uuid.ts) — and the wording is the registry
+// writes' own, so one condition reads one way across the surface.
+//
+// `validate` has already established that exactly one of the two is set, so at
+// most one lookup runs.
+async function assertObservationTarget(
+  db: Queryer,
+  cigarId: string | null,
+  blendId: string | null,
+): Promise<void> {
+  if (cigarId != null) {
+    const rows = isUuid(cigarId)
+      ? await db.select({ id: cigars.id }).from(cigars).where(eq(cigars.id, cigarId)).limit(1)
+      : [];
+    if (!rows[0]) throw new ValidationError([{ path: "cigarId", message: "No such cigar." }]);
+  }
+  if (blendId != null) {
+    const rows = isUuid(blendId)
+      ? await db.select({ id: blends.id }).from(blends).where(eq(blends.id, blendId)).limit(1)
+      : [];
+    if (!rows[0]) throw new ValidationError([{ path: "blendId", message: "No such blend." }]);
+  }
+}
+
 // The stored row's content, as the comparison that decides whether anything
 // moved. Deliberately excludes `last_seen_at` (that is liveness, which moves
 // every crawl) and `raw` (the extractor's payload can churn on an irrelevant
@@ -218,10 +254,11 @@ interface PriorRow {
  * "has anything changed" and the write that acts on it are one atomic step —
  * the same reason `recordPriceObservation` takes a `Queryer`.
  *
- * Refuses (ValidationError) an unknown scale, an unmappable score, a missing or
- * doubled target, and an over-long excerpt. Every one of those is a statement
- * that the extractor misread the page, and a misread score is worse than a
- * missing one: once averaged it is indistinguishable from a real one.
+ * Refuses (ValidationError) an unknown scale, an unmappable score, a missing,
+ * doubled or unresolvable target, and an over-long excerpt. Every one of those
+ * is a statement that the extractor misread the page, and a misread score is
+ * worse than a missing one: once averaged it is indistinguishable from a real
+ * one.
  */
 export async function recordReviewObservation(
   db: Queryer,
@@ -253,6 +290,10 @@ export async function recordReviewObservation(
   const cigarId = trimmed(input.cigarId);
   const blendId = trimmed(input.blendId);
   const raw = input.raw == null ? null : JSON.stringify(input.raw);
+
+  // Before the dedupe read, so the refusal costs one indexed lookup instead of
+  // riding all the way to the INSERT's foreign key.
+  await assertObservationTarget(db, cigarId, blendId);
 
   const prior = await db.execute(sql`
     SELECT id, reviewer, native_scale, native_score, normalized_score,

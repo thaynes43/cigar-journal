@@ -508,15 +508,13 @@ async function namesForAncestry(
 ): Promise<PartNames> {
   const names: PartNames = { brand: brandText, line: lineText, blend: null };
   if (ancestry.brandId != null) {
-    // The MARCA is the one level that arrives here unresolved: `lineId` and
-    // `blendId` have just been through `assertCigarAncestry` over
-    // `loadAncestryContext`, which carries the shape guard for both, while
-    // nothing looks a brand up before this — so a malformed `brandId` would
-    // raise 22P02 on the caller's transaction right here. Skipping the query
-    // falls back to `brandText`, which is exactly what a brandId no row answers
-    // to already does (./uuid.ts). What happens next — the FK the write raises
-    // on a brandId that does not exist — is then the same for both, and is a
-    // separate bug from this one.
+    // Every level arrives here RESOLVED: `assertCigarAncestry` has just run over
+    // `loadAncestryContext`, which since #230 loads the marca alongside the line
+    // and the blend, so a brandId that is malformed or names no row has already
+    // been refused as "No such brand." rather than reaching the UPDATE's FK.
+    // The shape guard stays as the second line — this function composes a name
+    // and must never be the thing that raises 22P02 on the caller's transaction
+    // if it is ever called before the assertion (./uuid.ts).
     const rows = isUuid(ancestry.brandId)
       ? await tx.select({ name: brands.name }).from(brands).where(eq(brands.id, ancestry.brandId)).limit(1)
       : [];

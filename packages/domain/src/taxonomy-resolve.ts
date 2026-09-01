@@ -105,12 +105,25 @@ export async function parseListing(db: Queryer, title: string): Promise<ListingP
 // leaves the level to the same `?? null` a miss takes, so `assertCigarAncestry`
 // reports the identical violation and every caller keeps its own established
 // refusal without knowing the guard exists (./uuid.ts). One check here covers
-// lineId and blendId for `assignCigarTaxonomy`, `splitCigar` and
+// brandId, lineId and blendId for `assignCigarTaxonomy`, `splitCigar` and
 // `assignCigarParts` alike — and all three read on a transaction a 22P02 would
 // abort, so it has to happen instead of the query rather than around it.
+//
+// THE BRAND IS LOADED FOR THE SAME REASON THE LINE IS (#230). It was the level
+// this loader skipped, so an unknown `brandId` was the one FK no write path
+// checked: it reached the cigar UPDATE and raised 23503, which is untyped and
+// therefore a 500 rather than the field error its siblings produce. Resolving it
+// here rather than guarding it in each caller is what keeps the three write paths
+// from drifting on what "a brand that does not exist" answers.
 export async function loadAncestryContext(db: Queryer, ancestry: CigarAncestry): Promise<CigarAncestryContext> {
   const context: CigarAncestryContext = {};
 
+  if (ancestry.brandId != null) {
+    const rows = isUuid(ancestry.brandId)
+      ? await db.select({ id: brands.id }).from(brands).where(eq(brands.id, ancestry.brandId)).limit(1)
+      : [];
+    context.brand = rows[0] ?? null;
+  }
   if (ancestry.lineId != null) {
     const rows = isUuid(ancestry.lineId)
       ? await db

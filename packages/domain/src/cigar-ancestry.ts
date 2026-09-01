@@ -27,7 +27,8 @@ import { ValidationError, type FieldError } from "./errors.js";
 //
 // The rules, in full:
 //   - All null is valid. Unknown ancestry stays NULL and is never invented.
-//   - `brandId` alone is valid: a cigar whose line is unknown hangs off its brand.
+//   - `brandId` alone is valid — a cigar whose line is unknown hangs off its
+//     brand — provided the brand resolves.
 //   - `lineId` requires `brandId`, and the line must belong to that brand.
 //   - `blendId` requires `lineId`, and the blend must belong to that line.
 //   - Brand agreement at the blend level follows transitively from those two.
@@ -43,6 +44,7 @@ export interface CigarAncestry {
 // the row whose id the cigar claims; a missing one is itself a violation, since
 // it means the caller could not resolve the level it is asserting.
 export interface CigarAncestryContext {
+  brand?: { id: string } | null;
   line?: { id: string; brandId: string } | null;
   blend?: { id: string; lineId: string } | null;
 }
@@ -55,6 +57,23 @@ export function checkCigarAncestry(
 ): FieldError[] {
   const { brandId, lineId, blendId } = ancestry;
   const errors: FieldError[] = [];
+
+  // THE MARCA RESOLVES LIKE THE LEVELS ABOVE IT (#230). It used to be the one FK
+  // this rule carried and never checked: `lineId` and `blendId` came back null
+  // from the loader and were reported here, while a `brandId` naming no row went
+  // all the way to the UPDATE and raised FK 23503 — untyped, so a 500 rather than
+  // a field error, on exactly the surfaces (`update_cigar`, `assign_cigar_taxonomy`)
+  // where every id is a caller-supplied string.
+  //
+  // Absent and wrong are ONE refusal, deliberately. A context that does not hold
+  // the row this ancestry names has not resolved the marca — whether it looked
+  // and found nothing or carries some other brand's row — and "there is no such
+  // brand" is what the caller has to act on either way. Same wording the registry
+  // writes already use for it (taxonomy-writes.ts, taxonomy-curation.ts), so one
+  // condition keeps one message across the whole surface.
+  if (brandId != null && context.brand?.id !== brandId) {
+    errors.push({ path: "brandId", message: "No such brand." });
+  }
 
   if (lineId != null) {
     // A line implies a brand: the line's own row carries one, so a cigar that
