@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.36.0](https://github.com/thaynes43/cigar-journal/compare/v0.35.0...v0.36.0) (2026-09-01)
+
+
+### Features
+
+* **mcp:** rename_registry_entity — an audited display-name fix for the registry ([#257](https://github.com/thaynes43/cigar-journal/issues/257)) ([b7cab36](https://github.com/thaynes43/cigar-journal/commit/b7cab36f0c0fcea0939d511ea86fc30f62c87787)), closes [#196](https://github.com/thaynes43/cigar-journal/issues/196)
+
+
+### Bug Fixes
+
+* **db:** 0031 returns the reasonless bulk agent verdicts to the crawler ([#245](https://github.com/thaynes43/cigar-journal/issues/245)) ([#259](https://github.com/thaynes43/cigar-journal/issues/259)) ([ddac78b](https://github.com/thaynes43/cigar-journal/commit/ddac78bb259f59828d015e307d60d4fdffd77889))
+
 ## [0.35.0](https://github.com/thaynes43/cigar-journal/compare/v0.34.0...v0.35.0) (2026-09-01)
 
 
