@@ -13,6 +13,7 @@ import { QueueEnrichmentButton } from "./queue-enrichment-button";
 import { RecentAgentRuns } from "./recent-agent-runs";
 import { UnmergeButton } from "./unmerge-button";
 import { BrandImagery } from "./brand-imagery";
+import { MOVED_LABELS } from "./labels";
 import { LocalDate } from "../../_components/local-date";
 
 // Catalog review console (ADR-006, DESIGN-003 §Chrome), admin-only: a non-admin
@@ -167,22 +168,6 @@ export default async function CatalogReviewPage() {
     </div>
   );
 }
-
-// Reader-facing names for the ledger slots a merge moved — the domain returns its
-// own keys, and `listingMatches 1` is not console copy (DESIGN-003 §Copy).
-const MOVED_LABELS: Record<string, string> = {
-  smokes: "Smokes",
-  purchases: "Purchases",
-  listingMatches: "Listing matches",
-  offers: "Offers",
-  // "Review scores", not "Reviews": these rows hold a score, a link and at most a
-  // sentence — never the review — and the console should not promise otherwise.
-  reviewObservations: "Review scores",
-  productPhotos: "Photos",
-  enrichmentRequests: "Gap-fill requests",
-  wants: "Wants",
-  favorites: "Favorites",
-};
 
 // The action or state for one merge row. Undone and chain-blocked merges render
 // as state, never as a button that would error — and an undone one names its skip

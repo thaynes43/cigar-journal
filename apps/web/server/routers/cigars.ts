@@ -3,6 +3,7 @@ import {
   searchCigars,
   getCigar,
   getCigarOffers,
+  getCigarOfferHistory,
   getCigarPriceHistory,
   browseCigars,
   setWant,
@@ -29,6 +30,17 @@ export const cigarsRouter = router({
   offers: authedProcedure
     .input(z.object({ cigarId: z.string() }))
     .query(({ ctx, input }) => getCigarOffers(ctx.deps, input)),
+
+  // The whole observation series in summary — span, per-stick range, count
+  // (ADR-009). It is the "offers existed before" signal DESIGN-002 §Price splits
+  // its two no-offer cases on: an absent section for a seeded cigar nothing ever
+  // priced, `No current offers.` once something did. `priceHistory` cannot answer
+  // that — it counts only observations carrying a per-stick figure, so a cigar
+  // whose offers were all package-only reads as never-offered. Catalog/market-
+  // only, like `offers`.
+  offerHistory: authedProcedure
+    .input(z.object({ cigarId: z.string() }))
+    .query(({ ctx, input }) => getCigarOfferHistory(ctx.deps, input)),
 
   // The cigar's per-stick price observations over time — the detail page's
   // price-history line (DESIGN-002 §Price). Catalog/market-only, like `offers`.

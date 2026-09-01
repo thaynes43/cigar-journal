@@ -6,6 +6,7 @@ import type { BrandImageAdminRow, BrandImageQueueResult } from "@cj/domain";
 import { api } from "@/lib/trpc/react";
 import { actionErrorMessage } from "@/lib/trpc/error";
 import { ui } from "@/lib/ui";
+import { RIGHTS_LABELS } from "./labels";
 
 // Brand imagery (issue 127): the Wikidata/Commons wall covers a curator still
 // has to decide on. Ambiguous lookups need an entity picked; resolved rows need
@@ -78,7 +79,7 @@ function ResolvedRow({ row }: { row: BrandImageAdminRow }) {
     <div className="flex min-w-0 flex-col gap-1">
       <span className="font-display font-semibold text-ink">{row.brandName}</span>
       <span className="label-caps">
-        {row.rights}
+        {RIGHTS_LABELS[row.rights] ?? row.rights}
         {row.hasImage ? "" : " · awaiting download"}
       </span>
       {row.creditLine && row.sourceUrl ? (

@@ -5,6 +5,7 @@ import type { CigarHierarchy, CigarView, GetCigarResult, Tobacco } from "@cj/dom
 import { getServerCaller } from "@/lib/trpc/server";
 import { requireAuth } from "@/lib/require-auth";
 import { formatPrice, formatSeenDate } from "@/lib/format";
+import { isPricedOffer, priceSectionState } from "@/lib/price-panel";
 import { ui } from "@/lib/ui";
 import { Chips } from "../../_components/chips";
 import { BandTile } from "../../_components/band-tile";
@@ -175,9 +176,10 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
 
   const { cigar, personalProfile, hasProductPhoto, productPhotoId, wanted, wantNote, favorited, favoriteNote, hierarchy } =
     data;
-  const [{ smokes }, offers, priceHistory, holding] = await Promise.all([
+  const [{ smokes }, offers, offerHistory, priceHistory, holding] = await Promise.all([
     caller.smokes.list({ cigarId: id, limit: 50 }),
     caller.cigars.offers({ cigarId: id }),
+    caller.cigars.offerHistory({ cigarId: id }),
     caller.cigars.priceHistory({ cigarId: id }),
     caller.inventory.forCigar({ cigarId: id }),
   ]);
@@ -194,13 +196,12 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
   // "One row per vendor with a current offer" (DESIGN-002 §Price): both price
   // columns are nullable, and a row carrying neither is not an offer — it used
   // to render as a bare "—" under the Price heading, which reads as a price.
-  const pricedOffers = offers.filter((o) => o.pricePerStick != null || o.price != null);
+  const pricedOffers = offers.filter(isPricedOffer);
   // The section speaks whenever there is anything true to say about price:
   // current offers, or — when they have all lapsed — the fact that there were
-  // some. Observation history is the "existed before" signal, so the two cases
-  // are distinguishable rather than both collapsing to an absent section.
-  const hadOffers = priceHistory.length > 0;
-  const showPrice = pricedOffers.length > 0 || hadOffers;
+  // some. The whole observation series is the "existed before" signal, so the two
+  // cases are distinguishable rather than both collapsing to an absent section.
+  const priceSection = priceSectionState(pricedOffers.length, offerHistory.observationCount);
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-8">
@@ -276,10 +277,10 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
         </section>
       ) : null}
 
-      {showPrice ? (
+      {priceSection !== "absent" ? (
         <section className="flex flex-col gap-3">
           <h2 className="label-caps">Price</h2>
-          {pricedOffers.length === 0 ? (
+          {priceSection === "lapsed" ? (
             <p className="text-sm text-muted">No current offers.</p>
           ) : (
           <ul className="flex flex-col gap-2">
