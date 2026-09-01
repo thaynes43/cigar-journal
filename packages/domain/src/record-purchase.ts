@@ -145,9 +145,8 @@ async function recordWithinTx(
   //     takes no enrichment reads at all.
   // Unlike save_smoke there is no provenance gate: record_purchase queues under
   // every provenance, deliberately — no legacy importer writes purchases.
-  if (cigar.created && describedRef) {
-    await queueEnrichmentSafely(tx, cigar.cigarId, principal.userId);
-  }
+  const enrichmentQueued =
+    cigar.created && describedRef ? await queueEnrichmentSafely(tx, cigar.cigarId, principal.userId) : false;
 
   // Derived stock picture AFTER this row lands (same formula as getMyInventory).
   const holdingAfter = await deriveHoldingSummary(tx, principal.userId, cigar.cigarId);
@@ -162,6 +161,11 @@ async function recordWithinTx(
     cigar: { cigarId: cigar.cigarId, canonicalName: cigar.canonicalName, verification: cigar.verification },
     holdingAfter,
     wanted,
+    // Reported, not inferred: `record_purchase_batch` labels each line `created`
+    // or `existing` from this flag, and a caller cannot derive it — an
+    // auto-created row and a linked unverified row look identical in `cigar`.
+    cigarCreated: cigar.created,
+    enrichmentQueued,
     replayed: false,
   };
 

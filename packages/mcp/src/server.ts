@@ -5,6 +5,7 @@ import {
   saveSmoke,
   addCigar,
   recordPurchase,
+  recordPurchaseBatch,
   updateSmoke,
   getSmoke,
   queryMySmokes,
@@ -43,6 +44,7 @@ import {
   type UpdateSmokeInput,
   type AddCigarInput,
   type RecordPurchaseInput,
+  type RecordPurchaseBatchInput,
   type UpdateCigarInput,
   type RecordPriceInput,
   type CurationAttribution,
@@ -70,6 +72,7 @@ import {
   updateSmokeSchema,
   addCigarSchema,
   recordPurchaseSchema,
+  recordPurchaseBatchSchema,
   addSmokePhotoSchema,
   setWantSchema,
   setWantOutput,
@@ -115,11 +118,13 @@ import {
   updateSmokeOutput,
   addCigarOutput,
   recordPurchaseOutput,
+  recordPurchaseBatchOutput,
   addSmokePhotoOutput,
   type SaveSmokeArgs,
   type UpdateSmokeArgs,
   type AddCigarArgs,
   type RecordPurchaseArgs,
+  type RecordPurchaseBatchArgs,
   type UpdateCigarArgs,
   type RecordPriceArgs,
 } from "./schemas.js";
@@ -137,7 +142,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl, uploadUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The thirty-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The thirty-one-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -489,6 +494,24 @@ function toRecordPurchaseInput(
     pricePerStick: args.pricePerStick,
     vendorName: args.vendorName,
     notes: args.notes,
+    provenance: { source: "llm-conversation", client: clientId },
+    correlationId,
+  };
+}
+
+// The batch's own envelope plus the provenance every item inherits. The items
+// pass through UNSHAPED: their leaves are the record_purchase leaves the domain
+// already re-validates, and a reshape here would be a second place for the two
+// tools' semantics to drift.
+function toRecordPurchaseBatchInput(
+  args: RecordPurchaseBatchArgs,
+  clientId: string,
+  correlationId: string,
+): RecordPurchaseBatchInput {
+  return {
+    clientRequestId: args.clientRequestId,
+    defaults: args.defaults,
+    items: args.items as unknown as RecordPurchaseBatchInput["items"],
     provenance: { source: "llm-conversation", client: clientId },
     correlationId,
   };
@@ -908,8 +931,43 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           // Acquisition never auto-clears a want (R-WANT-2); this flag lets the
           // model OFFER the clear via set_want. Never silent.
           wanted: result.wanted,
+          // Whether the purchase created the catalog row and queued its
+          // enrichment — the pair save_smoke already reports. Undefined (and so
+          // absent) on a replay of an envelope stored before they existed.
+          cigarCreated: result.cigarCreated,
+          enrichmentQueued: result.enrichmentQueued,
           replayed: result.replayed,
         });
+      }),
+  );
+
+  server.registerTool(
+    "record_purchase_batch",
+    {
+      title: "Record purchase batch",
+      description:
+        "Log one acquisition of several different cigars — a sampler, a box inventory, a shop run, a retailer order — in a single call. Shared facts go in `defaults` (the one date, vendor and packaging the lot was bought under); each distinct cigar is one `items` entry with its own clientRequestId and quantity, and may override any default. Every item is an ordinary record_purchase: a described cigar with no catalog match is auto-created and its enrichment queued, and each item carries its own confirmedDistinct. Results are PER ITEM — `created` (the ledger row landed and this item created the catalog entry), `existing` (it landed against an entry the catalog already had), `ambiguous` (nothing written; `error.candidates` are the siblings to show the user), `failed` (nothing written; `error` says why) — so one undecidable cigar never fails the batch. To recover: show the user the ambiguous items' candidates and, when they confirm none is theirs, re-send the WHOLE batch under a fresh batch clientRequestId with `confirmedDistinct: true` on just those items and every other item unchanged — items already recorded replay, so nothing is logged twice.",
+      inputSchema: recordPurchaseBatchSchema,
+      outputSchema: recordPurchaseBatchOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Record purchase batch",
+      },
+    },
+    (args, extra) =>
+      run("record_purchase_batch", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+        const result = await recordPurchaseBatch(
+          deps,
+          principal,
+          toRecordPurchaseBatchInput(args, clientId, correlationId),
+        );
+        // The domain result IS the contract payload — items, summary, replayed —
+        // so unlike the single tools there is nothing to reshape here. Passing it
+        // through whole also keeps a replayed batch byte-identical to its first
+        // response, since that response is what the envelope stored.
+        return jsonResult(result);
       }),
   );
 

@@ -21,6 +21,10 @@ export { isUuid } from "./uuid.js";
 export { saveSmoke } from "./save-smoke.js";
 export { addCigar } from "./add-cigar.js";
 export { recordPurchase } from "./record-purchase.js";
+// Batch acquisition ingestion (#231): one haul, many lines, each an ordinary
+// record_purchase with its own idempotency envelope, so an undecidable cigar
+// isolates to its line instead of failing the batch.
+export { recordPurchaseBatch, MAX_BATCH_ITEMS } from "./record-purchase-batch.js";
 export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
 export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, getCigarOfferHistory, getCigarPricing, getCigarPriceHistory, browseCigars } from "./reads.js";
