@@ -161,7 +161,9 @@ export interface AddCigarInput {
   // Escape hatch (default false = unchanged behavior): set only after the user,
   // shown search_cigars candidates, confirmed none is their cigar. Skips the
   // strong-link/ambiguity guard and creates, except a case-insensitive exact
-  // canonical_name match still links. add_cigar-only; never on save/purchase.
+  // canonical_name match still links. record_purchase carries the same hatch on
+  // its described branch; save_smoke does not (it is the safety net, not the
+  // documented action, so it has no confirmation to act on).
   confirmedDistinct?: boolean;
   provenance?: ProvenanceInput;
   correlationId?: string;
@@ -181,6 +183,13 @@ export interface AddCigarResult {
 export interface RecordPurchaseInput {
   clientRequestId: string;
   cigar: CigarRef;
+  // The same escape hatch add_cigar carries, on the described branch only —
+  // without it a sampler of related-but-distinct sticks could not be logged in
+  // one call and had to detour through add_cigar for every one. Set it only
+  // after the user, shown search_cigars candidates, confirmed none is theirs.
+  // Ignored for a cigarId ref (already resolved); a case-insensitive exact
+  // canonical_name match still links even under the override.
+  confirmedDistinct?: boolean;
   quantity: number; // integer, non-zero; negative corrects the count (requires notes)
   purchasedAt?: string | null; // ISO date (YYYY-MM-DD)
   packaging?: string | null;

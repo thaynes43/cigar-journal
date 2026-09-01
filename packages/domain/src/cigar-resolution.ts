@@ -31,12 +31,15 @@ export interface ResolvedCigar {
 }
 
 export interface ResolveCigarOptions {
-  // The add_cigar escape hatch. Set ONLY after search_cigars showed candidates
-  // and the user explicitly confirmed none is their cigar (never preemptively):
-  // skip strong-link AND ambiguity entirely and create the described entry — with
-  // ONE exception, a case-insensitive EXACT canonical_name match still links
-  // (created:false), since minting a literal duplicate is never right. Applies
-  // only to add_cigar's resolve path; save_smoke / record_purchase never set it.
+  // The confirmed-distinct escape hatch. Set ONLY after search_cigars showed
+  // candidates and the user explicitly confirmed none is their cigar (never
+  // preemptively): skip strong-link AND ambiguity entirely and create the
+  // described entry — with ONE exception, a case-insensitive EXACT
+  // canonical_name match still links (created:false), since minting a literal
+  // duplicate is never right. Set by the two tools that have a user
+  // confirmation to act on, add_cigar and record_purchase (2026-08-31); never by
+  // save_smoke, whose described branch is the safety net for a client that
+  // skipped the gap-fill prelude, not a path the user was asked about.
   confirmedDistinct?: boolean;
 }
 
@@ -53,9 +56,9 @@ interface CandidateRow {
 // invariant (ADR-002): a resolved id links; `described` links on a single
 // strong match, errors `cigar_ambiguous` when it can't decide, and otherwise
 // creates an `unverified` entry — all inside the caller's transaction. With
-// `options.confirmedDistinct` (add_cigar's escape hatch) strong-link and
-// ambiguity are skipped and it creates, except a case-insensitive exact-name
-// match still links.
+// `options.confirmedDistinct` (the add_cigar / record_purchase escape hatch)
+// strong-link and ambiguity are skipped and it creates, except a
+// case-insensitive exact-name match still links.
 export async function resolveCigar(
   tx: Tx,
   ref: CigarRef,

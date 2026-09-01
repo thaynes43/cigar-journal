@@ -5,7 +5,7 @@ import { createHarness, newRequestId, type DomainHarness } from "./testing/harne
 import { recordPurchase } from "./record-purchase.js";
 import { getMyInventory } from "./inventory.js";
 import type { Principal } from "./index.js";
-import { ValidationError } from "./errors.js";
+import { CigarAmbiguousError, ValidationError } from "./errors.js";
 
 describe("recordPurchase", () => {
   let h: DomainHarness;
@@ -287,5 +287,113 @@ describe("recordPurchase", () => {
       await h.deps.db.execute(sql`drop trigger cj_test_block_enrichment on enrichment_requests`);
       await h.deps.db.execute(sql`drop function cj_test_block_enrichment()`);
     }
+  });
+
+  // ---- confirmedDistinct: the one-call cigar_ambiguous recovery --------------
+  //
+  // The flag lived only on add_cigar, so a sampler of related-but-distinct sticks
+  // cost three calls each — search_cigars → add_cigar(confirmedDistinct) →
+  // record_purchase(cigarId). These pin the semantics as IDENTICAL to add_cigar's
+  // (add-cigar.test.ts carries the mirror cases), because a hatch that behaves
+  // differently on the two tools is worse than no hatch at all.
+
+  it("confirmedDistinct breaks a cigar_ambiguous deadlock and lands the purchase in ONE call", async () => {
+    // Two same-number, non-packaging siblings that both strong-match — the guard
+    // cannot separate them, so the naked query is ambiguous by design.
+    await h.seedCigar({ canonicalName: "Meridian Sampler 1998 Alpha", brand: "Meridian" });
+    await h.seedCigar({ canonicalName: "Meridian Sampler 1998 Beta", brand: "Meridian" });
+
+    const clientRequestId = newRequestId();
+    const described = { canonicalName: "Meridian Sampler 1998", brand: "Meridian" };
+
+    const deadlock = await recordPurchase(h.deps, user, {
+      clientRequestId,
+      cigar: { described },
+      quantity: 3,
+    }).catch((e: unknown) => e);
+    expect(deadlock).toBeInstanceOf(CigarAmbiguousError);
+
+    // The user, shown the candidates, confirmed neither is theirs. The SAME
+    // clientRequestId is reused deliberately: the ambiguous call rolled back and
+    // recorded no envelope, so the recovery is a true re-issue of one intent.
+    const result = await recordPurchase(h.deps, user, {
+      clientRequestId,
+      cigar: { described },
+      confirmedDistinct: true,
+      quantity: 3,
+      pricePerStick: 9.5,
+    });
+
+    expect(result.cigar.canonicalName).toBe("Meridian Sampler 1998");
+    expect(result.cigar.verification).toBe("unverified"); // created from their words
+    expect(result.holdingAfter).toEqual({ totalAcquired: 3, remaining: 3 });
+    expect(result.replayed).toBe(false);
+
+    // A distinct row, not one of the siblings — and exactly one of it.
+    const created = await h.deps.db
+      .select()
+      .from(cigars)
+      .where(eq(cigars.canonicalName, "Meridian Sampler 1998"));
+    expect(created).toHaveLength(1);
+    expect(created[0]!.id).toBe(result.cigar.cigarId);
+
+    // The ledger row landed on the same call — the whole point of the change.
+    const rows = await h.deps.db.select().from(purchases).where(eq(purchases.id, result.purchaseId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.cigarId).toBe(result.cigar.cigarId);
+    expect(rows[0]!.quantity).toBe(3);
+
+    // Enrichment gating is untouched: the override CREATED the row, so the gap it
+    // opened is queued, exactly as an unflagged described purchase would be.
+    const queued = await h.deps.db
+      .select()
+      .from(enrichmentRequests)
+      .where(eq(enrichmentRequests.cigarId, result.cigar.cigarId));
+    expect(queued).toHaveLength(1);
+  });
+
+  it("confirmedDistinct still LINKS a case-insensitive exact name — an override never mints a literal duplicate", async () => {
+    const existingId = await h.seedCigar({ canonicalName: "Zenith Ledger Prime 2020", brand: "Zenith" });
+
+    const result = await recordPurchase(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "zenith ledger prime 2020", brand: "Zenith" } },
+      confirmedDistinct: true,
+      quantity: 5,
+    });
+
+    expect(result.cigar.cigarId).toBe(existingId);
+    expect(result.cigar.verification).toBe("verified"); // the seeded row, not a new one
+    expect(
+      await h.deps.db.select().from(cigars).where(sql`lower(${cigars.canonicalName}) = 'zenith ledger prime 2020'`),
+    ).toHaveLength(1);
+
+    // created:false, so the cigar.created gate holds and nothing is queued — a
+    // link filled no gap, override or not.
+    expect(
+      await h.deps.db.select().from(enrichmentRequests).where(eq(enrichmentRequests.cigarId, existingId)),
+    ).toHaveLength(0);
+  });
+
+  it("replays a confirmedDistinct purchase — one ledger row, one cigar", async () => {
+    const input = {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "Vela Ledger Distinct 3000", brand: "Vela" } },
+      confirmedDistinct: true,
+      quantity: 2,
+    };
+    const first = await recordPurchase(h.deps, user, input);
+    const second = await recordPurchase(h.deps, user, input);
+
+    expect(first.replayed).toBe(false);
+    expect(second.replayed).toBe(true);
+    expect(second.purchaseId).toBe(first.purchaseId);
+    expect(second.cigar.cigarId).toBe(first.cigar.cigarId);
+    expect(
+      await h.deps.db.select().from(purchases).where(eq(purchases.cigarId, first.cigar.cigarId)),
+    ).toHaveLength(1);
+    expect(
+      await h.deps.db.select().from(cigars).where(eq(cigars.canonicalName, "Vela Ledger Distinct 3000")),
+    ).toHaveLength(1);
   });
 });

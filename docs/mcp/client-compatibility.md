@@ -78,7 +78,9 @@ thirteenth–fifteenth tools `request_cigar_enrichment` / `update_cigar` /
 catalog repair, ADR-009; the sixteenth–seventeenth tools `browse_catalog` /
 `get_offers`, browse_catalog's personal-overlay + price-at-a-glance tiles, and the
 consolidated server instructions added with the unified-catalog MCP surface,
-PRD-003 R-MCP-1/-2) reach
+PRD-003 R-MCP-1/-2; the optional `confirmedDistinct` on `add_cigar` and then on
+`record_purchase`, and the same-turn sentence in `add_smoke_photo`'s description)
+reach
 a client **only after the user refreshes the connector in ChatGPT settings, then
 starts a new chat** (schema cache is per-conversation — see below). The often-noted
 "`ersonal cigar journal…`" text is neither a truncation bug nor our string:
@@ -110,6 +112,16 @@ case-insensitive exact-name match still links. Additive and backward-compatible,
 but per the per-conversation schema cache above it reaches ChatGPT only after a
 **connector refresh AND a new chat** — an in-flight conversation keeps serving
 the pre-change schema and cannot pass the new field.
+
+**2026-08-31 — additive `record_purchase` schema change.** `record_purchase`
+gained the same optional boolean `confirmedDistinct` (default false = unchanged
+behavior), on its `described` branch, with `add_cigar`'s semantics exactly. It
+removes the detour that made a sampler of related-but-distinct sticks cost a
+`search_cigars` → `add_cigar(confirmedDistinct)` → `record_purchase(cigarId)`
+triple each: on `cigar_ambiguous` the model confirms with the user and re-issues
+the purchase itself. Additive and backward-compatible, and subject to the same
+per-conversation schema cache — a retest needs a **connector refresh and a new
+chat**, or ChatGPT keeps serving the pre-change schema and cannot pass the field.
 
 ## 2026-08-29 — additive curation tool surface (admin only, DESIGN-003 wave 4a)
 
@@ -171,6 +183,15 @@ photo with their next message — which states an unverified guess as fact and, 
 guess is wrong, costs the user a pointless round trip before they are offered the
 link that actually works. So **the link leads** in every branch, and
 `delivery.status` is used to say something true about why, not to withhold it.
+
+*Amended 2026-08-31.* The turn-recency hypothesis is now stated model-facing after
+all — one sentence in the tool description and one in `INSTRUCTIONS` — but as odds,
+not as fact, and never ahead of the link (tool-contract.md, "Amended 2026-08-31").
+The distinction that made the earlier draft wrong survives intact: that one fired
+on `no_image_received` and delayed the link; this one is standing advice about how
+to attach a photo, and ends by naming the link as the path that works either way.
+The prompt was a session on 2026-08-31 where the user's photo was attached several
+turns before the call and nothing was forwarded.
 
 The `photo_intake_request` record (tool-contract.md, "Intake diagnostics") is what
 settled it: written before input validation, on the raw JSON-RPC body, describing

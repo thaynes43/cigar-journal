@@ -480,6 +480,7 @@ function toRecordPurchaseInput(
     clientRequestId: args.clientRequestId,
     // cigarRef union mirrors CigarRef; quantity/date/price leaves are domain-checked.
     cigar: args.cigar as unknown as RecordPurchaseInput["cigar"],
+    confirmedDistinct: args.confirmedDistinct,
     quantity: args.quantity,
     purchasedAt: args.purchasedAt,
     packaging: args.packaging,
@@ -883,7 +884,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Record purchase",
       description:
-        "Append an acquisition to the humidor ledger, or correct the count. quantity is a positive integer for a purchase; it may be NEGATIVE to correct an over-count — say why in notes. Record only stated facts (never invent a price, date, or vendor); a described cigar with no catalog match is auto-created and its enrichment queued. Corrections are rows too — holdings stay derived. Output: purchaseId, cigar, holdingAfter { totalAcquired, remaining }, and wanted — when wanted is true the user just bought something on their want list, so offer to clear it with set_want (never clear it silently).",
+        "Append an acquisition to the humidor ledger, or correct the count. quantity is a positive integer for a purchase; it may be NEGATIVE to correct an over-count — say why in notes. Record only stated facts (never invent a price, date, or vendor); a described cigar with no catalog match is auto-created and its enrichment queued. If it errors cigar_ambiguous — or you fear a silent link to a near-match (a number or packaging variant) — show the user the search_cigars candidates; when they confirm none is theirs, re-issue this same call with confirmedDistinct:true, which creates the distinct product and lands the purchase in one call rather than a detour through add_cigar. Corrections are rows too — holdings stay derived. Output: purchaseId, cigar, holdingAfter { totalAcquired, remaining }, and wanted — when wanted is true the user just bought something on their want list, so offer to clear it with set_want (never clear it silently).",
       inputSchema: recordPurchaseSchema,
       outputSchema: recordPurchaseOutput,
       annotations: {
@@ -955,13 +956,24 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // that works everywhere. Leading with a mode that has never fired taught the
       // model to treat the working path as a consolation prize.
       //
+      // THE SAME-TURN SENTENCE (owner, 2026-08-31) is the one thing the model is
+      // now told about attachment beyond "it may happen". Tonight's session is the
+      // evidence: the user's photo was attached SEVERAL TURNS BEFORE the call and
+      // nothing was forwarded. Every integration that does receive files receives
+      // the invoking turn's attachment, so current-turn-only is the plausible
+      // contract — and it is phrased as maximizing the chance, never as fact,
+      // because forwarding has never once been observed here (#202). It does NOT
+      // reinstate the withdrawn "ask them to re-send" instruction: that one fired
+      // on no_image_received and delayed the link. This one is standing advice
+      // that ends by naming the link as the path that always works.
+      //
       // Attachment stays declared and stays implemented — it costs nothing to keep
       // and it is how this works the day a host forwards a file — but it is now
       // described as the opportunistic branch it is. `delivery.status` keeps its own
       // vocabulary (below): it earns its place by telling the model the truth about
       // what arrived, which is exactly what the probe was built to learn.
       description:
-        "Add a photo to a smoke. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. If the client forwarded an attached image with the call, the photo is stored directly instead and no link is needed (delivery reports which happened). Never fill the image argument yourself — no URLs, ids, or invented fields.",
+        "Add a photo to a smoke. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. If the client forwarded an attached image with the call, the photo is stored directly instead and no link is needed (delivery reports which happened). A client that forwards anything is understood to forward only an image attached to the message that triggered the call, so to give direct storage its best chance ask the user to attach — or re-attach — the photo in the same message as the request; the link is the path that always works. Never fill the image argument yourself — no URLs, ids, or invented fields.",
       inputSchema: addSmokePhotoSchema,
       outputSchema: addSmokePhotoOutput,
       // Declare `image` as a file input so ChatGPT forwards the attached photo.

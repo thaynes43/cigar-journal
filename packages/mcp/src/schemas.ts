@@ -488,6 +488,12 @@ export const recordPurchaseSchema = z
         "A UUID minted once per user intent; reuse EXACTLY on retries so replays are recognized.",
       ),
     cigar: cigarRef,
+    confirmedDistinct: z
+      .boolean()
+      .optional()
+      .describe(
+        "Applies to a `described` cigar only (a cigarId already resolved). Set true ONLY after search_cigars returned candidates AND the user explicitly confirmed none is their cigar — it overrides the near-match guard so the purchase lands against a distinct new product instead of erroring or silently linking. Never set it preemptively or on a first attempt; a case-insensitive exact-name match still links regardless. Defaults to false.",
+      ),
     quantity: z
       .number()
       .int()
