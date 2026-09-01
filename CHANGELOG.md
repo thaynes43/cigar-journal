@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.1](https://github.com/thaynes43/cigar-journal/compare/v0.36.0...v0.36.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **crawler:** a listing may not bind a sibling whose vitola it never compared ([#260](https://github.com/thaynes43/cigar-journal/issues/260)) ([0f487c3](https://github.com/thaynes43/cigar-journal/commit/0f487c3c480b704b63a0c8d1d1428f7462a3d583))
+
 ## [0.36.0](https://github.com/thaynes43/cigar-journal/compare/v0.35.0...v0.36.0) (2026-09-01)
 
 
