@@ -82,6 +82,79 @@ LLM-created cigars accumulate until curated.
 
 ## Amendments
 
+- **2026-09-01 — "curator outranks crawler" was written about a HUMAN, and a
+  reasonless bulk agent unmatch is not one (issue #245).** The amendment above
+  fixed which pages the drain fetches. This one fixes what it is allowed to write
+  when it gets there, and the two together are what make an enrich look capable
+  of finishing. `upsertListingMatch` returned any `decided_by != 'crawler'` row
+  untouched, so the drain read `match.status === 'auto' && match.cigarId ===
+  ask.cigarId` as false and returned `declined` → scored `miss`. Note the
+  asymmetry that hid it: `existingCrawlerLink` returns null for a non-crawler
+  row, so the candidate cleared admission, the page WAS fetched and parsed, and
+  the refusal landed at the last step — a miss that burns one of
+  `ATTEMPTS_PER_VENDOR` with the vendor genuinely read, which is a *plausible*
+  verdict rather than an obviously false one and therefore worse to spot.
+  - **What the 883 rows actually are, checked before the rule was changed.**
+    `audit_log`, action `listing_match.set_status`, 2026-08-29 16:17 → 2026-08-31
+    10:22: **883 rows, every one `actor='agent'`**, zero `curator`, across exactly
+    three `run_id`s — `wo-cigar-curate-20260829` (291 rows in 33 s),
+    `wo-cigar-curate-20260830` (300 in 71 s), `wo-cigar-curate-20260831` (292 in
+    36 s). Roughly nine verdicts a second: three curation-lane bulk batches, not a
+    human working one at a time. Each `before`/`after` pair shows a crawler `auto`
+    link being cleared to `unmatched` with `cigar_id` null and **no
+    `unmatched_reason`** — nobody wrote down why, because there was nothing to
+    write down. Prod's whole `listing_matches` table is three shapes: 994
+    `crawler/auto`, 883 `agent/unmatched` (reason null, cigar null), 4
+    `crawler/unmatched`. **There is not one `decided_by='curator'` row on prod.**
+  - **The ruling: scope the guard to the verdict's MEANING** (issue #245 option
+    1). An agent `unmatched` carrying neither a reason nor a cigar says "nothing
+    in the catalogue explained this listing" — a report on the catalogue at the
+    moment it was swept, not a refusal of a link that did not exist yet. A later
+    enrichment ask is catalogue state that moment did not have, so the enrich
+    drain — **only the drain, only on `unmatched` → `auto`, and only into a row of
+    exactly that shape** — may claim it. Everything else stays untouchable, and
+    each for its own reason: a `decided_by='curator'` row because the original
+    rule is about human authority and still holds; an agent row carrying a reason
+    because someone recorded WHY, which is intent; an agent row carrying a
+    `cigar_id` because it points somewhere, and repointing it is the theft
+    `existingCrawlerLink` already guards against one authority over; any
+    `confirmed` row, ahead of all of it. The entitlement is an explicit
+    `claimAgentUnmatched` flag passed by the single call site in
+    `tryEnrichCandidates` — the seed and offers walks pass nothing and are
+    refused exactly as before, so a re-crawl still cannot touch an agent verdict.
+  - **A claim RETURNS THE ROW TO THE CRAWLER** (`decided_by='crawler'`), rather
+    than writing a link under an authority that did not write it. That is what
+    keeps the claim from being a one-way door: an ordinary crawler-owned row is
+    re-decided by matching v2 on every re-crawl and re-annotated by the seed walk,
+    where a claimed row left as `agent` would be frozen forever. It also
+    incidentally converges with option 3's data outcome, one row at a time and
+    only where an ask paid for the evidence, with no migration.
+  - **The supersession is audited, because it is the only write in `match.ts`
+    that overrides another actor.** It emits `listing_match.set_status` with the
+    crawler's established shape — `actor='import'`, null `user_id`, the
+    `crawl_runs` id in `run_id` — and the `before` snapshot carries
+    `decided_by='agent'`, `status='unmatched'` and the null `cigar_id`, which is
+    the whole of the verdict being replaced. It cannot ride the existing unlink
+    condition (`row.cigar_id != null && changed`): a claim's prior `cigar_id` is
+    null by definition, which is precisely what that test excludes.
+  - **What this does to the amendment below.** That one measured the drain's
+    reach as "only **4 listings of 1,881** are crawler-owned and unclaimed" (Fox
+    930 `crawler/auto` / 865 `agent/unmatched` / 4 `crawler/unmatched`; Cuban
+    Lou's 64 / 18 / 0) and concluded the drain's job is UNCLAIMED-LISTING
+    COVERAGE. The census was right and the conclusion was drawn one ruling too
+    early: 883 of those 887 claimed-and-unreachable rows were never a verdict of
+    the kind the guard exists to protect. The drain's job is now unclaimed
+    listings **plus reasonless agent unmatches** — 887 of 1,881 rather than 4.
+    Its flagship example changes with it: Fox's Corona Doble listing was
+    `decided_by = agent` and is now claimable, so `Drew Estate Liga Privada No. 9`
+    is fulfillable from Fox tonight. The Corona Viva half of that example is
+    unchanged and still correct — a crawler link to the more specific vitola,
+    skipped by the theft guard.
+  - **`declined` survives, narrower and honest.** It now means a genuinely
+    protected row: a curator's verdict, a reasoned agent unmatch, or an agent row
+    already pointing at another cigar. Those still cost a fetch before the refusal
+    (the `existingCrawlerLink` asymmetry is unchanged) — an honest miss bought at
+    the price of one page, and prod holds no row of the last kind today.
 - **2026-09-01 — the drain's prefilter joins matching v2, and a look that read
   nothing stops claiming it did (issue #240).** The amendment below put the
   drain's *comparison* on matching v2 and left the step in front of it alone: a
@@ -254,6 +327,12 @@ LLM-created cigars accumulate until curated.
     all belong to other rows is structurally unfulfillable here, and its photo
     comes from the Wave 3 structuring that gives the blend a `blend_id` and lets
     its vitola siblings share one photo home — not from a bigger drain.
+    *Superseded 2026-09-01 by the #245 ruling — see the top amendment. The census
+    holds; the conclusion drawn from it does not. The 883 `agent/unmatched` rows
+    counted here as claimed were a curation-lane bulk sweep carrying no reason and
+    no cigar, which is not the verdict this guard exists to protect, and the drain
+    may now claim them. The Corona Doble in the sentence above is one of them, so
+    this very ask is fulfillable; the Corona Viva half is unchanged.*
   - The #170/#192 market and photo-authority gates are untouched, and the
     `match | miss | error | photo_refused` outcome vocabulary is preserved.
     (Extended with `no_candidate` on 2026-09-01 — see the top amendment.)

@@ -1058,15 +1058,28 @@ async function tryEnrichCandidates(
         // Evidence about the listing, kept regardless of the verdict (0027).
         categoryPath: listing.categoryPath,
         runId: crawlRunId,
+        // THE CLAIM, and this call site is the only one that asks for it (#245).
+        // A reasonless agent `unmatched` is the catalogue's state at the moment
+        // a curation lane swept it, and this ask is catalogue state it did not
+        // have; 883 of prod's 1,881 listing rows are in exactly that shape, and
+        // they are the ones the open asks name. The guard decides whether this
+        // row is one of them — the flag only says the drain is entitled to ask.
+        claimAgentUnmatched: true,
       });
       // THE COMMITTED ROW, NOT THIS RUN'S VERDICT — the same distinction the seed
       // path and the photo path (#209) both had to learn. `upsertListingMatch`
-      // DECLINES to rewrite a row a curator or an agent decided and returns it
-      // untouched (591 such rows on prod), so counting a match here reported a
-      // link that was never written, on every drain, forever — and against
-      // precisely the population the guard exists to protect. A declined upsert is
-      // a miss: the row says something other than "linked to this cigar", and no
-      // arithmetic on our side changes that.
+      // still DECLINES to rewrite a protected row and returns it untouched, so
+      // counting a match here would report a link that was never written — and
+      // against precisely the population the guard exists to protect. A declined
+      // upsert is a miss: the row says something other than "linked to this
+      // cigar", and no arithmetic on our side changes that.
+      //
+      // Narrower than it was, and still the authority (#245). The claim above
+      // hands the guard one more row shape it may rewrite; it does not make this
+      // read optional. What survives `declined` now is a genuinely protected row
+      // — a curator's verdict, a reasoned agent unmatch, an agent row already
+      // pointing elsewhere — which is what makes the miss honest rather than
+      // arithmetic about half the vendor's catalogue.
       const committed = match.status === "auto" && match.cigarId === ask.cigarId;
       if (committed) stats.matchesAuto += 1;
 
@@ -1106,11 +1119,12 @@ async function tryEnrichCandidates(
     }
 
     // A DECLINED UPSERT ENDS THE LOOK TOO, and it must end it BEFORE the photo.
-    // The row belongs to a curator or an agent who pointed this listing somewhere
-    // else; capturing a catalogue photo for `ask.cigarId` on the strength of a link
-    // that was refused is the exact shape of #209, one path over. Not counted as a
-    // market skip — nothing was refused on market grounds — and not an error: we
-    // read the catalogue and a human had already answered the question.
+    // The row belongs to someone who answered this question differently — a
+    // curator, or an agent who gave a reason or pointed the listing at another
+    // cigar; capturing a catalogue photo for `ask.cigarId` on the strength of a
+    // link that was refused is the exact shape of #209, one path over. Not counted
+    // as a market skip — nothing was refused on market grounds — and not an error:
+    // we read the catalogue and someone had already answered the question.
     if (outcome === "declined") return "miss";
 
     // THE PHOTO IS THE ASK, so its refusal cannot be reported as the ask fulfilled

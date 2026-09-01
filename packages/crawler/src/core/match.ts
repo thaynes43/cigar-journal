@@ -155,6 +155,13 @@ export function toSuggestedParse(parse: ListingParse, reason?: SuggestedParse["r
 // `upsertListingMatch` gives at length: a curator's or an agent's verdict is
 // returned untouched by the write anyway, so annotating one would be a promise
 // the write path does not keep.
+//
+// The #245 claim does not change this answer. The one non-crawler row the write
+// may now supersede has `cigar_id` null by definition, so "no prior link" is the
+// truthful reading of it and the null this returns is the same null. What the
+// restriction still costs is a wasted look at an agent row that DOES hold a
+// cigar_id: the page is fetched, and the write declines it — an honest miss,
+// bought at the price of one fetch. Prod holds no such row today.
 export async function existingCrawlerLink(
   db: Queryer,
   vendorId: string,
@@ -190,6 +197,12 @@ export interface UpsertMatchInput {
   // The `crawl_runs` row this write belongs to, stamped on the audit row a
   // downgrade emits. Null on a dry run and in unit callers.
   runId?: string | null;
+  // THE ENRICH DRAIN'S CLAIM, and nothing else (#245). Opt-in because the
+  // supersession below is scoped to one caller making one transition: the seed
+  // and offers walks never set it, so a re-crawl still cannot touch an
+  // agent-decided row. See the guard for what the flag actually licenses — it
+  // permits a claim, it does not perform one.
+  claimAgentUnmatched?: boolean;
 }
 
 // Upsert the (vendorId, listingKey) match. The crawler NEVER overwrites a
@@ -206,6 +219,18 @@ export interface UpsertMatchInput {
 // (decided_by='crawler', not confirmed) is freely re-written, including the
 // legitimate `unmatched`→`auto` upgrade the enrich path relies on, and stays
 // decided_by='crawler' (the update leaves the column alone).
+//
+// ONE VERDICT IS NOT A REFUSAL, AND THE DRAIN MAY SUPERSEDE IT (#245, ruling of
+// 2026-09-01). "Curator outranks crawler" was written about a HUMAN. An agent
+// row carrying `status='unmatched'` with BOTH `unmatched_reason` and `cigar_id`
+// null says "nothing in the catalogue explained this listing" — a statement
+// about the catalogue at the moment it was made, not a refusal of a link that
+// did not exist yet. A later enrichment ask is new catalogue state, so the
+// drain — and only the drain, and only on `unmatched`→`auto` — may claim such a
+// row. Everything else stays untouchable: a `decided_by='curator'` row whatever
+// it says, an agent row carrying a reason (someone wrote down WHY, which is
+// intent), an agent row carrying a `cigar_id` (it points somewhere, which is a
+// link and not an absence), and any confirmed row.
 export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): Promise<ListingMatchRow> {
   const existing = await db
     .select()
@@ -215,7 +240,25 @@ export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): 
 
   const row = existing[0];
   if (row) {
-    if (row.decidedBy !== "crawler" || row.status === "confirmed") return row;
+    // Checked first and on its own: a confirmed row is untouchable whoever owns
+    // it, and that includes the legacy confirms backfilled to 'crawler'. No
+    // claim reaches past this line.
+    if (row.status === "confirmed") return row;
+
+    // The reasonless agent unmatch described in the header, and every clause is
+    // load-bearing. `input.cigarId != null` is not redundant with `status ===
+    // "auto"`: a claim exists to WRITE a link, and an `auto` row pointing at
+    // nothing would be a worse verdict than the one it replaced.
+    const claimable =
+      input.claimAgentUnmatched === true &&
+      row.decidedBy === "agent" &&
+      row.status === "unmatched" &&
+      row.unmatchedReason == null &&
+      row.cigarId == null &&
+      input.status === "auto" &&
+      input.cigarId != null;
+
+    if (row.decidedBy !== "crawler" && !claimable) return row;
     const reason = input.unmatchedReason ?? null;
     const updated = await db
       .update(listingMatches)
@@ -224,6 +267,13 @@ export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): 
         status: input.status,
         unmatchedReason: reason,
         suggestedParse: input.suggestedParse ?? null,
+        // A CLAIMED ROW RETURNS TO THE CRAWLER'S LIFECYCLE. The crawler wrote
+        // this link, so the crawler owns it and says so — which is also what
+        // keeps the claim from being a one-way door: an ordinary crawler-owned
+        // row is re-decided on every re-crawl by matching v2 and re-annotated by
+        // the seed walk, where leaving `decided_by='agent'` would freeze a link
+        // no lane could ever revisit under an authority that never wrote it.
+        ...(claimable ? { decidedBy: "crawler" as const } : {}),
         ...(input.categoryPath === undefined ? {} : { categoryPath: input.categoryPath }),
         updatedAt: input.now,
       })
@@ -241,7 +291,17 @@ export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): 
     // 'import'` with a null `user_id` is the crawler's established shape; the
     // action is shared with setListingMatchStatus so one query answers "what
     // moved this link?" whoever moved it.
-    if (row.cigarId != null && row.cigarId !== input.cigarId) {
+    //
+    // A CLAIM (#245) IS AUDITED ON THE SAME TERMS, and for a stronger reason: it
+    // is the only write in this file that overrides another actor's verdict, so
+    // the row it replaces has to stay recoverable somewhere. The `before`
+    // snapshot is that record — it carries `decided_by='agent'`,
+    // `status='unmatched'` and the null `cigar_id`, which is the whole of the
+    // verdict being superseded — and the `after` names the crawler as the new
+    // owner. It cannot ride the unlink condition below: a claim's prior
+    // `cigar_id` is null by definition, which is exactly what that test excludes.
+    const unlinked = row.cigarId != null && row.cigarId !== input.cigarId;
+    if (unlinked || claimable) {
       const before = {
         id: row.id,
         vendorId: row.vendorId,
@@ -256,7 +316,13 @@ export async function upsertListingMatch(db: Queryer, input: UpsertMatchInput): 
         action: "listing_match.set_status",
         smokeId: null,
         before,
-        after: { ...before, cigarId: input.cigarId, status: input.status, unmatchedReason: reason },
+        after: {
+          ...before,
+          cigarId: input.cigarId,
+          status: input.status,
+          decidedBy: updated[0]!.decidedBy,
+          unmatchedReason: reason,
+        },
         correlationId: input.runId ?? null,
         runId: input.runId ?? null,
       });
