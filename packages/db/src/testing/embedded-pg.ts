@@ -37,6 +37,60 @@ function freePort(): Promise<number> {
 // on the happy path and removes the failure class.
 const START_ATTEMPTS = 5;
 
+// How long a cluster gets to answer SIGINT before it is taken by force. Generous,
+// because a loaded runner shutting down thirty Postgres instances at once is slow
+// and killing a healthy one early would leave a half-written data directory.
+const STOP_TIMEOUT_MS = 20_000;
+
+// Only what `stopSafely` needs, so its own test can hand it a stub. `process` is
+// `private` on EmbeddedPostgres, hence the cast at the call sites: reading a
+// child's exit state is the whole fix, and there is no public accessor for it.
+export interface StoppableCluster {
+  stop: () => Promise<void>;
+  process?: {
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill: (signal?: NodeJS.Signals) => boolean;
+  };
+}
+
+// `EmbeddedPostgres.stop()` CAN NEVER RETURN once its child is already gone.
+//
+// It waits on an 'exit' event that it registers AFTER sending SIGINT — and on a
+// ChildProcess that has already exited, that event has fired and will not fire
+// again, so the promise never settles. The retry path below reaches exactly that
+// state: `start()` rejects from its own `close` handler, which means the process
+// is gone by definition. A `beforeAll` that loses the port race then hangs on the
+// cleanup rather than retrying, and reports the whole FILE as failed at vitest's
+// 60 s hook timeout — the flake seen on
+// apps/web/app/api/photos/[id]/thumb/route.test.ts.
+//
+// So ask the child before waiting on it, and bound the wait either way: a cluster
+// that will not answer SIGINT must not hold a hook open either. Exported for its
+// own test.
+export async function stopSafely(
+  cluster: StoppableCluster,
+  timeoutMs: number = STOP_TIMEOUT_MS,
+): Promise<void> {
+  const child = cluster.process;
+  // Never started, or already dead: there is nothing to wait for, and waiting is
+  // the bug.
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = await Promise.race([
+    cluster.stop().then(
+      () => false,
+      () => false,
+    ),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (timedOut) child.kill("SIGKILL");
+}
+
 // A throwaway Postgres 16 instance with NO migrations applied — the empty
 // substrate. Tests that need to observe a specific migration (e.g. the 0008
 // consumption backfill running against pre-seeded rows) migrate a subset
@@ -73,8 +127,13 @@ export async function startRawTestPostgres(): Promise<TestPostgres> {
       await pg.initialise();
       await pg.start();
     } catch (error) {
-      lastError = error;
-      await pg.stop().catch(() => {});
+      // `start()` rejects with NO argument — its `close` handler calls a bare
+      // `reject()` — so the honest report of a lost port race is a message this
+      // harness writes, not the `undefined` the library hands over.
+      lastError =
+        error ??
+        new Error(`embedded Postgres exited before it was ready (port ${port} was probably taken)`);
+      await stopSafely(pg as unknown as StoppableCluster);
       rmSync(dir, { recursive: true, force: true });
       continue;
     }
@@ -105,7 +164,10 @@ export async function startRawTestPostgres(): Promise<TestPostgres> {
       stop: async () => {
         stopping = true;
         await pool.end().catch(() => {});
-        await pg.stop().catch(() => {});
+        // Not `pg.stop()`: a server that died on its own during the file — OOM,
+        // a crashed backend — would otherwise hang this hook to its timeout and
+        // report a passing file as failed.
+        await stopSafely(pg as unknown as StoppableCluster);
         rmSync(dir, { recursive: true, force: true });
       },
     };
