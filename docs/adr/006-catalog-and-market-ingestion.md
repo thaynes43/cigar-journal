@@ -101,6 +101,41 @@ LLM-created cigars accumulate until curated.
   create brand/line/leaf rows under matching v2's alias-anchored resolution. See
   ADR-015 for the decision and its alternatives.
 
+- **2026-09-02 — structured product markup beyond JSON-LD, and a category
+  a page does not state (issue #252).** The 2026-09-01 live read (#217)
+  settled that 2 Guys Cigars serves no `application/ld+json` anywhere; its
+  product pages carry OpenGraph product tags (`og:type=product`, `og:title`,
+  `og:image`, `product:price:amount`/`currency`, `og:availability`, `og:upc`,
+  `og:brand`) and a bare `itemtype="schema.org/Product"`, and no breadcrumb.
+  Two rulings:
+  - **OpenGraph + schema.org microdata are acceptable structured sources.**
+    They are the same public product markup the vendor publishes for every
+    reader, at the same sitemap-enumerated URLs, under the same robots
+    posture — the contract's "JSON-LD Product parsing" was a description of
+    the first four vendors, not a boundary. The contract is now *sitemap
+    enumeration + structured product markup*: JSON-LD where a vendor serves
+    it, OpenGraph/microdata where it does not. The extractor is **declared
+    per adapter** (a field beside the product gate), never sniffed from the
+    page, so a vendor's shape is stated where the rest of its shape is and a
+    silent format change fails loudly at the probe. Both extractors feed the
+    one `NormalizedListing`; nothing downstream knows which ran.
+  - **A category the page does not state comes from the vendor's own
+    taxonomy tags, declared per adapter, or the listing is refused.** For
+    2 Guys that is the `keywords` meta list, which carries a literal `Cigars`
+    token on cigar pages and names `Accessories` on the rest; `og:brand`
+    supplies the brand. A listing with no derivable category is **not
+    admitted** — `isCigarListing` fails it, exactly as an unmatched category
+    path fails today. That costs coverage on pages whose tags are thin and
+    never admits a candle or a soda as a cigar; the crawler's posture has
+    always been to refuse rather than guess. A second enumeration pass over
+    category pages (which do carry `Home > Cigars > <line>`) is rejected for
+    now: it is a larger change to `ingest` than the gap justifies while the
+    tag route is untested at scale, and it can be added if the probe shows
+    the tags under-admit.
+  Enabling 2 Guys still requires its own in-cluster `--probe` passing the
+  #179 seven-point bar on the new extractor (`product-locs` 3,841,
+  `parsed>=2`, `cigars>=1`), a controller pair in haynes-ops, and a seed run.
+
 - **2026-09-01 — "curator outranks crawler" was written about a HUMAN, and a
   reasonless bulk agent unmatch is not one (issue #245).** The amendment above
   fixed which pages the drain fetches. This one fixes what it is allowed to write
@@ -220,6 +255,10 @@ LLM-created cigars accumulate until curated.
     acceptable structured source**, nor on where a category comes from when the
     product page states none; both are open, and until they are answered
     `crawl_enabled` for this vendor cannot go true whatever the gate says.
+    *Both were ruled on 2026-09-02 (#252) — see the top amendment. OG/microdata
+    is an acceptable source, the category comes from the `keywords` tag list, and
+    the parser blocker is gone; `crawl_enabled` now waits on the in-cluster probe
+    alone.*
   - **robots, read live for the first time.** Two `User-agent: *` groups (RFC
     9309: combined, which `parseRobots` does) — one `Disallow: /store/filtered/`,
     one **`Crawl-delay: 5`** — plus a long named-bot blocklist we are not on. The
@@ -235,6 +274,52 @@ LLM-created cigars accumulate until curated.
     value, the adapter value, and the fact that the row wins. The operator still
     performs the change; they are no longer told about it by a crawl that quietly
     did nothing.
+
+- **2026-09-02 — Small Batch is read live, and a zero price becomes an unknown
+  price everywhere (issue #270).** In-cluster Jobs fetched robots.txt, the
+  sitemap, both policy pages and 20 product pages. The adapter's six standing
+  assumptions are all now findings, recorded in its header and in
+  `vendor-sources.md`: nopCommerce behind Cloudflare, no product API, a FLAT
+  `urlset` of 11,288 locs with no child sitemap to sharpen, and a gate that
+  accepts 10,955 / rejects 333 once the six non-product ROOT slugs (`/contactus`,
+  `/blog`, `/boards`, `/shop-by-brand`, `/accessories`, `/gift-card`) are named.
+  Two rulings come out of it.
+  - **A price of zero is a PLACEHOLDER, and `normalizeListing` reads it as
+    UNKNOWN for every vendor.** The guard sits below the markup abstraction the
+    amendment above introduced, so it holds for an OpenGraph price as much as a
+    JSON-LD one. `offers.price` is `"0.00"` on 20 of 20 cigar
+    pages, because a nopCommerce GROUPED product has no single price: the real
+    per-pack figures live in HTML `variant-overview` blocks (single-SKU
+    accessories on the same store do carry a real price). This is a platform
+    property, not a Small Batch one, so the guard is vendor-neutral and sits in
+    `normalize.ts`: `priceCents` goes null and `priceIsPlaceholder` records that
+    the vendor stated something. The rest of the listing is kept, and the offer
+    row is still written — availability is a real observation and the listing
+    match hangs off it — with **no price** rather than a $0.00 one. `$0.00` is
+    not a missing price, it is a false one, and it would have sorted first in
+    every cheapest-per-stick view the market lane has.
+  - **The probe bar gains two conditions, because the old one green-lit this
+    vendor.** An `ok` verdict now also requires `cigars >= 1` among the parsed
+    samples and ZERO parsed samples whose price parsed to zero. Small Batch
+    cleared every previous condition — robots, enumeration, three clean parses —
+    while its brand-first taxonomy (`SHOP BY BRAND / <brand> / [<line>]`, the
+    word "cigars" nowhere in it) meant `/cigar/i` matched 4 of 20 real cigars,
+    and while publishing a placeholder price on all of them. The verdict is a
+    pre-enablement gate; a bar that passes a vendor whose crawl writes ~8,000
+    priceless rows is not one. `--probe` also prints each sample's breadcrumb
+    trail now, so a `cigars=0` is diagnosable as a taxonomy mismatch from the
+    output alone. The vendor's own category gate is widened to `/./` — any
+    taxonomy at all — with `excludePattern` carrying the load, which the live
+    read licenses: `Accessories` is the only non-cigar bucket the store has.
+  - **Still `crawl_enabled = false`, and not for a fixable reason.** Offers are
+    not worth writing until an HTML price extractor exists (ADR-015 work, out of
+    scope here); the enrich drain, which links listings and needs no price, is
+    what this unblocks. A full seed is ~11k fetches ≈ 9h at the adapter's
+    discretionary 3s interval — the live robots.txt asks for no Crawl-delay at
+    all — which is well over `maxPages: 500`, and the fetcher THROWS at that cap
+    rather than stopping cleanly. So a seed needs a raised cap AND a deadline
+    that fits it; resume/chunking so a capped run is restartable is tracked under
+    #270.
 
 - **2026-09-01 — the drain's prefilter joins matching v2, and a look that read
   nothing stops claiming it did (issue #240).** The amendment below put the

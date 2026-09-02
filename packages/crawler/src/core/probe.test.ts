@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { runProbe, formatProbe, probeFetchBudget, MAX_PROBE_CHILDREN } from "./probe.js";
+import { runProbe, formatProbe, probeFetchBudget, MAX_PROBE_CHILDREN, REQUIRED_PARSED_SAMPLES } from "./probe.js";
 import { cubanLous } from "../adapters/cuban-lous.js";
 import { twoGuysCigars } from "../adapters/two-guys-cigars.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
+import { smallBatchCigar } from "../adapters/small-batch-cigar.js";
 import {
   createMockFetcher,
   loadFixture,
@@ -59,7 +60,7 @@ describe("runProbe", () => {
     expect(result.sitemap.varied).toBe(false);
     expect(result.sitemap.samples).toHaveLength(1);
     // Three spread samples: two real products parse, the /about/ page 404s.
-    expect(result.productSummary).toEqual({ sampled: 3, parsed: 2, cigars: 2 });
+    expect(result.productSummary).toEqual({ sampled: 3, parsed: 2, cigars: 2, placeholderPrices: 0 });
     expect(result.products[0]!.name).toBe("Montecristo No. 4");
     expect(result.products[0]!.priceCents).toBe(1800);
     expect(result.products[0]!.isCigar).toBe(true);
@@ -131,7 +132,7 @@ describe("runProbe", () => {
     const result = await runProbe(fetcher, cubanLous);
 
     expect(result.verdict).toBe("ok");
-    expect(result.productSummary).toEqual({ sampled: 3, parsed: 3, cigars: 3 });
+    expect(result.productSummary).toEqual({ sampled: 3, parsed: 3, cigars: 3, placeholderPrices: 0 });
     expect(result.products.map((p) => p.url)).not.toContain(NON_PRODUCT);
     expectWithinBudget(fetcher, cubanLous);
   });
@@ -147,7 +148,7 @@ describe("runProbe", () => {
 
     // 3 sampled, 1 parsed → short of the floor of 2.
     const oneOfThree = await build(1, 3);
-    expect(oneOfThree.productSummary).toEqual({ sampled: 3, parsed: 1, cigars: 1 });
+    expect(oneOfThree.productSummary).toEqual({ sampled: 3, parsed: 1, cigars: 1, placeholderPrices: 0 });
     expect(oneOfThree.verdict).toBe("needs-attention");
     expect(oneOfThree.notes.filter((n) => n.startsWith("sample product"))).toHaveLength(2);
 
@@ -157,8 +158,48 @@ describe("runProbe", () => {
 
     // A one-product catalog can still pass — the floor is min(2, sampled).
     const oneOfOne = await build(1, 1);
-    expect(oneOfOne.productSummary).toEqual({ sampled: 1, parsed: 1, cigars: 1 });
+    expect(oneOfOne.productSummary).toEqual({ sampled: 1, parsed: 1, cigars: 1, placeholderPrices: 0 });
     expect(oneOfOne.verdict).toBe("ok");
+  });
+
+  // The two bars added for #270. Both describe a vendor the old verdict called
+  // healthy: everything up to and including "the JSON-LD parses" was true, and a
+  // seed would still have written thousands of rows worth nothing.
+  it("FAILS a vendor whose JSON-LD publishes a placeholder price of zero", async () => {
+    const fetcher = createMockFetcher({
+      [ROBOTS]: { body: ALLOW_ALL },
+      [SITEMAP]: { body: urlsetXml([PRODUCT, PRODUCT2]) },
+      [PRODUCT]: { body: productHtml("Montecristo No. 4", "0.00") },
+      [PRODUCT2]: { body: productHtml("Partagas Serie D No. 4", "0.00") },
+    });
+
+    const result = await runProbe(fetcher, cubanLous);
+
+    // Parsed, gated as cigars, and still not crawlable for offers.
+    expect(result.productSummary).toEqual({ sampled: 2, parsed: 2, cigars: 2, placeholderPrices: 2 });
+    expect(result.products.every((p) => p.priceIsPlaceholder && p.priceCents === null)).toBe(true);
+    expect(result.verdict).toBe("needs-attention");
+    expect(result.notes.join(" ")).toMatch(/PLACEHOLDER price of 0/);
+    expect(formatProbe(result)).toContain("placeholder-prices=2");
+    expect(formatProbe(result)).toContain("price=0.00 PLACEHOLDER");
+  });
+
+  it("FAILS a vendor whose samples all parse but none passes the cigar gate", async () => {
+    const fetcher = createMockFetcher({
+      [ROBOTS]: { body: ALLOW_ALL },
+      [SITEMAP]: { body: urlsetXml([PRODUCT, PRODUCT2]) },
+      [PRODUCT]: { body: productHtml("Peterson Irish Flake", "18.00", "Pipe Tobacco") },
+      [PRODUCT2]: { body: productHtml("Rattray's Old Gowrie", "22.00", "Pipe Tobacco") },
+    });
+
+    const result = await runProbe(fetcher, cubanLous);
+
+    expect(result.productSummary).toEqual({ sampled: 2, parsed: 2, cigars: 0, placeholderPrices: 0 });
+    expect(result.verdict).toBe("needs-attention");
+    expect(result.notes.join(" ")).toMatch(/no sampled product passed the cigar gate/);
+    // The stated taxonomy is on the operator's screen, so the note is actionable
+    // without a second Job: it names the taxonomy the gate was asked about.
+    expect(formatProbe(result)).toContain("category=Home / Pipe Tobacco / Peterson Irish Flake");
   });
 
   // Child-coverage regression. A positional midpoint pick over N children is
@@ -424,7 +465,7 @@ describe("mode-A product gate — a non-product subtree under the prefix", () =>
     ]);
     // Byte-for-byte the live line: 200, but nothing to parse.
     expect(result.products.every((p) => p.status === 200 && !p.hasProduct)).toBe(true);
-    expect(result.productSummary).toEqual({ sampled: 3, parsed: 0, cigars: 0 });
+    expect(result.productSummary).toEqual({ sampled: 3, parsed: 0, cigars: 0, placeholderPrices: 0 });
     expect(result.verdict).toBe("needs-attention");
     expect(result.notes.join(" ")).toMatch(/no schema\.org Product JSON-LD/);
     expectWithinBudget(fetcher, unfixed);
@@ -436,7 +477,7 @@ describe("mode-A product gate — a non-product subtree under the prefix", () =>
 
     expect(result.sitemap.productLocs).toBe(2);
     expect(result.products.map((p) => p.url)).toEqual([PADRON, CUTTER]);
-    expect(result.productSummary).toEqual({ sampled: 2, parsed: 2, cigars: 1 });
+    expect(result.productSummary).toEqual({ sampled: 2, parsed: 2, cigars: 1, placeholderPrices: 0 });
     expect(result.verdict).toBe("ok");
     expect(result.gate).toBe("prefix /store/ minus /^\\/store\\/go(?:\\/|$)/i");
     expectWithinBudget(fetcher, modeA);
@@ -491,15 +532,15 @@ describe("mode-A product gate — a non-product subtree under the prefix", () =>
 });
 
 
-// 2 Guys as it actually is, from the 2026-09-01 in-cluster read (#217). The gate
-// now selects the right URLs — and the probe still says needs-attention, for a
-// reason that is finally the true one: this vendor serves NO JSON-LD. Every
-// fixture below is a real response.
+// 2 Guys as it actually is, from the 2026-09-01 in-cluster read (#217), now read
+// by the extractor its pages actually need (#252). Every fixture below is a real
+// response. This describe replaces the characterization of a blocked vendor that
+// stood here until `parsed` went non-zero — deliberately, as that block asked.
 //
-// These assertions are a CHARACTERIZATION of a blocked vendor, not an aspiration.
-// When the OG/microdata extractor lands they must be rewritten, deliberately, by
-// whoever makes `parsed` non-zero.
-describe("2 Guys, live shape — the gate is right and the parser still has nothing", () => {
+// What it can and cannot prove: the PIPELINE parses this vendor's real markup and
+// gates it. The catalog-wide numbers (`product-locs` 3,841) still need the
+// in-cluster probe, because the fixture sitemap is a trimmed capture.
+describe("2 Guys, live shape — the OG/microdata extractor reads it", () => {
   const two = (path: string): string => `https://www.2guyscigars.com${path}`;
   const PERDOMO = two("/perdomo-30th-robusto-sg-s-165681/");
   const ROMACRAFT = two("/romacraft-steel-porcupine-184527/");
@@ -541,16 +582,41 @@ describe("2 Guys, live shape — the gate is right and the parser still has noth
     expectWithinBudget(fetcher, twoGuysCigars);
   });
 
-  it("reports needs-attention because the pages carry no JSON-LD at all", async () => {
+  it("parses all three sampled pages and admits the two cigars", async () => {
     const result = await runProbe(createMockFetcher(liveRoutes()), twoGuysCigars);
 
-    // 200s, real product pages, nothing to parse: og:type=product and
-    // itemtype="https://schema.org/Product" are not what extractJsonLd reads.
+    // Requirements 4 and 5 of the #179 bar, the two this vendor was stuck on:
+    // parsed >= REQUIRED_PARSED_SAMPLES and at least one cigar.
     expect(result.products.every((p) => p.status === 200)).toBe(true);
-    expect(result.products.every((p) => !p.hasProduct)).toBe(true);
-    expect(result.productSummary).toEqual({ sampled: 3, parsed: 0, cigars: 0 });
-    expect(result.verdict).toBe("needs-attention");
-    expect(result.notes.join(" ")).toMatch(/no schema\.org Product JSON-LD/);
+    expect(result.products.every((p) => p.hasProduct)).toBe(true);
+    expect(result.productSummary).toEqual({ sampled: 3, parsed: 3, cigars: 2, placeholderPrices: 0 });
+    expect(result.productSummary.parsed).toBeGreaterThanOrEqual(REQUIRED_PARSED_SAMPLES);
+    expect(result.verdict).toBe("ok");
+    // Nothing left to say about the markup — the notes carry no parse failure.
+    expect(result.notes.join(" ")).not.toMatch(/parsing yields nothing/);
+  });
+
+  it("reads price, stock and category off the OG tags, and refuses the candle", async () => {
+    const result = await runProbe(createMockFetcher(liveRoutes()), twoGuysCigars);
+    const [perdomo, romacraft, candle] = result.products;
+
+    expect(perdomo!.name).toBe("Perdomo 30th Robusto SG S");
+    expect(perdomo!.priceCents).toBe(1379);
+    expect(perdomo!.currency).toBe("USD");
+    expect(perdomo!.isCigar).toBe(true);
+    // The category is the vendor's keywords tag list, not a breadcrumb trail.
+    expect(perdomo!.category).toEqual(["30 nick anniversary nicaragua", "Cigars", "Perdomo 30th Sun Grown"]);
+
+    expect(romacraft!.priceCents).toBe(10799); // out of stock, still a parsed listing
+    expect(romacraft!.isCigar).toBe(true);
+
+    // The accessory the URL gate cannot tell from a cigar: parsed, then refused
+    // on its own tags. This is the whole cost of admitting a vendor whose slugs
+    // carry no taxonomy.
+    expect(candle!.name).toBe("Smoke Exterm Candle Orange");
+    expect(candle!.parsed).toBe(true);
+    expect(candle!.isCigar).toBe(false);
+    expect(candle!.category).toEqual(["Air Freshening", "Air Freshening Accessories"]);
   });
 
   it("prints the gate and both census sides so a probe log identifies the build", async () => {
@@ -564,6 +630,91 @@ describe("2 Guys, live shape — the gate is right and the parser still has noth
     // under nine distinct keys, one each — the per-product tail of a catalog,
     // not a few fat non-product families.
     expect(out).toMatch(/in {2}(?:\/[^ ]+ 1 · ){4}\/[^ ]+ 1 \(\+4 keys, 4 urls\)/);
+  });
+});
+
+// Small Batch as it actually is, from the 2026-09-02 in-cluster read (#270). The
+// gate, the sitemap shape and the category patterns are all now the live ones,
+// three pages parse cleanly — and the probe says needs-attention for the reason
+// that is true: nopCommerce publishes `"0.00"` on every grouped cigar, so a seed
+// here would write an offer per listing with no price in it.
+//
+// A CHARACTERIZATION of a blocked vendor, not an aspiration. Whoever lands the
+// `variant-overview` price extractor (ADR-015) rewrites these deliberately; until
+// then this is the honest verdict, and it is why Small Batch is not in the
+// `cases` harness in `adapters-parse.test.ts`.
+describe("Small Batch, live shape — the gate is right and every cigar price is a placeholder", () => {
+  const sb = (path: string): string => `https://www.smallbatchcigar.com${path}`;
+  const EASTERN = sb("/eastern-standard-sungrown-toro-extra");
+  const TATUAJE = sb("/tatuaje-black-label-petite-lancero");
+  const CALDWELL = sb("/caldwell");
+  const CUTTER = sb("/xikar-xi3-cutter");
+
+  const liveRoutes = (): Record<string, MockRoute> => ({
+    [sb("/robots.txt")]: { body: loadFixture("robots.txt", "small-batch") },
+    [smallBatchCigar.sitemapUrl]: { body: loadFixture("sitemap.xml", "small-batch") },
+    [EASTERN]: { body: loadFixture("product-eastern-standard-sungrown-toro-extra.html", "small-batch") },
+    [TATUAJE]: { body: loadFixture("product-tatuaje-black-label-petite-lancero.html", "small-batch") },
+    [CALDWELL]: { body: loadFixture("landing-caldwell.html", "small-batch") },
+    [CUTTER]: { body: loadFixture("product-xikar-xi3-cutter.html", "small-batch") },
+  });
+
+  it("passes the live robots.txt, which asks for no crawl delay and blocks no product slug", async () => {
+    const result = await runProbe(createMockFetcher(liveRoutes()), smallBatchCigar);
+    expect(result.robots.status).toBe(200);
+    expect(result.robots.matchedAgent).toBe("*");
+    expect(result.robots.productPathAllowed).toBe(true);
+  });
+
+  it("reads a FLAT urlset and admits only the one-segment slugs", async () => {
+    const fetcher = createMockFetcher(liveRoutes());
+    const result = await runProbe(fetcher, smallBatchCigar);
+
+    expect(result.sitemap.kind).toBe("urlset"); // no sitemapindex, so no product-only child to aim at
+    expect(result.sitemap.enumeratedLocs).toBe(12);
+    // 4 accepted: two products, a brand landing page, an accessory. Rejected: the
+    // root, the /blog/<slug> post (depth), and the six named root slugs.
+    expect(result.sitemap.productLocs).toBe(4);
+    expect(formatProbe(result)).toContain(
+      "out / 1 · /accessories 1 · /blog 1 · /blog/why-the-lancero-endures 1 · /boards 1 (+3 keys, 3 urls)",
+    );
+    expectWithinBudget(fetcher, smallBatchCigar);
+  });
+
+  it("reports needs-attention because the grouped cigar publishes no price", async () => {
+    const result = await runProbe(createMockFetcher(liveRoutes()), smallBatchCigar);
+
+    // spreadIndices(4, 3) draws the first product, the landing page and the
+    // accessory — which is the sample this vendor deserves: the landing page is
+    // ~23% of what the gate accepts and cannot be excluded by URL shape.
+    expect(result.products.map((p) => p.url)).toEqual([EASTERN, CALDWELL, CUTTER]);
+    expect(result.products[1]!.hasProduct).toBe(false); // /caldwell is a brand page
+    expect(result.productSummary).toEqual({ sampled: 3, parsed: 2, cigars: 1, placeholderPrices: 1 });
+    expect(result.verdict).toBe("needs-attention");
+    expect(result.notes.join(" ")).toMatch(/publishes a PLACEHOLDER price of 0/);
+  });
+
+  it("parses the cigar itself correctly — only the price is missing", async () => {
+    const result = await runProbe(createMockFetcher(liveRoutes()), smallBatchCigar);
+    const eastern = result.products[0]!;
+
+    expect(eastern.name).toBe("Eastern Standard Sungrown Toro Extra");
+    // The brand-first taxonomy `/./` was widened for: it names no cigar category.
+    expect(eastern.category).toEqual([
+      "SHOP BY BRAND",
+      "Caldwell",
+      "Signature",
+      "Eastern Standard Sungrown Toro Extra",
+    ]);
+    expect(eastern.isCigar).toBe(true);
+    expect(eastern.priceCents).toBeNull();
+    expect(eastern.priceIsPlaceholder).toBe(true);
+    // The accessory is a single SKU and does carry a real price — the placeholder
+    // is a grouped-product property, not a property of the site.
+    const cutter = result.products[2]!;
+    expect(cutter.priceCents).toBe(6499);
+    expect(cutter.priceIsPlaceholder).toBe(false);
+    expect(cutter.isCigar).toBe(false);
   });
 });
 

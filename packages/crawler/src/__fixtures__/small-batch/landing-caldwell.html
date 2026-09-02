@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- A BRAND landing page (#270, live shape 2026-09-02): one segment deep like
+     every product slug, and carrying a BreadcrumbList with NO Product node. About
+     23% of what the gate accepts is one of these — brand pages, line pages — and
+     no URL pattern can tell them apart from products, so they are found by
+     fetching them and dropped when extractJsonLd yields no Product. This fixture
+     is what makes that cost visible in the probe's own sample. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Caldwell Cigar Company | Small Batch Cigar</title>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "SHOP BY BRAND", "item": "https://www.smallbatchcigar.com/shop-by-brand" },
+        { "@type": "ListItem", "position": 2, "name": "Caldwell" }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body><h1>Caldwell Cigar Company</h1></body>
+</html>

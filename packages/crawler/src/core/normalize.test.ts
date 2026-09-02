@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { extractJsonLd } from "./jsonld.js";
 import { normalizeListing, isCigarCategory, isCigarListing, decodeEntities, parsePackaging } from "./normalize.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
+import { smallBatchCigar } from "../adapters/small-batch-cigar.js";
 import { loadFixture } from "../testing/fixtures.js";
 
 function normalize(fixture: string) {
@@ -38,6 +39,42 @@ describe("normalizeListing", () => {
   it("returns null for a product with no name", () => {
     expect(normalizeListing({ name: "  " }, [])).toBeNull();
   });
+
+  // #270, live 2026-09-02: Small Batch is nopCommerce and every cigar page is a
+  // GROUPED product — the parent node carries `"0.00"` and the real per-pack
+  // prices exist only in HTML. Writing that through would have put ~8,000 $0.00
+  // observations in `offers`, which is worse than no price: it is a false one.
+  it("reads a zero JSON-LD price as UNKNOWN, not as $0, and flags it", () => {
+    const listing = normalizeListing(
+      {
+        name: "Eastern Standard Sungrown Toro Extra",
+        sku: "CALD-ES-SG-TE",
+        offers: [{ price: "0.00", priceCurrency: "USD", availability: "https://schema.org/InStock" }],
+      },
+      ["SHOP BY BRAND", "Caldwell", "Signature", "Eastern Standard Sungrown Toro Extra"],
+    )!;
+
+    expect(listing.priceCents).toBeNull();
+    expect(listing.priceIsPlaceholder).toBe(true);
+    // The REST of the listing is good and is carried: stock, sku, taxonomy.
+    expect(listing.inStock).toBe(true);
+    expect(listing.sku).toBe("CALD-ES-SG-TE");
+    expect(listing.categoryPath).toEqual(["SHOP BY BRAND", "Caldwell", "Signature"]);
+  });
+
+  it("leaves a real price untouched and unflagged", () => {
+    const listing = normalize("product-padron.html")!;
+    expect(listing.priceCents).toBe(2450);
+    expect(listing.priceIsPlaceholder).toBe(false);
+  });
+
+  // A vendor that states no price at all is a different thing from one that
+  // states a placeholder, and only the second is a vendor-level defect.
+  it("does not flag a listing that states no price at all", () => {
+    const listing = normalizeListing({ name: "Padron 1964 Torpedo", offers: [{ availability: "InStock" }] }, [])!;
+    expect(listing.priceCents).toBeNull();
+    expect(listing.priceIsPlaceholder).toBe(false);
+  });
 });
 
 describe("isCigarCategory", () => {
@@ -51,6 +88,17 @@ describe("isCigarCategory", () => {
 
   it("rejects a sampler even though it sits under Cigars", () => {
     expect(isCigarCategory(["Home", "Shop", "Cigars", "Samplers"], foxCigar)).toBe(false);
+  });
+
+  // Small Batch's taxonomy is brand-first and never says "cigars" (#270, live
+  // 2026-09-02), so its category pattern is `/./` and the exclusion carries the
+  // load. The empty case is the one that keeps that safe.
+  it("accepts a brand-first path with no cigar word, and still refuses an empty taxonomy", () => {
+    expect(isCigarCategory(["SHOP BY BRAND", "Caldwell", "Signature"], smallBatchCigar)).toBe(true);
+    expect(isCigarCategory(["Amendola Signature Series"], smallBatchCigar)).toBe(true);
+    expect(isCigarCategory(["Accessories", "Cutters"], smallBatchCigar)).toBe(false);
+    expect(isCigarCategory(["Gift Cards"], smallBatchCigar)).toBe(false);
+    expect(isCigarCategory([], smallBatchCigar)).toBe(false);
   });
 });
 
@@ -66,6 +114,7 @@ describe("isCigarListing", () => {
     name,
     priceCents: null,
     currency: null,
+    priceIsPlaceholder: false,
     inStock: null,
     imageUrl: null,
     sku: null,

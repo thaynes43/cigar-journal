@@ -1,0 +1,55 @@
+<!doctype html>
+<!-- A nopCommerce GROUPED product, in the shape the live read of 2026-09-02
+     (#270) found on 20 of 20 cigar pages: the Product node publishes
+     `price: "0.00"` because the parent has no single price, and the real figures
+     live only in the per-pack `variant-overview` blocks of the HTML below.
+     Synthetic bytes, faithful structure — `sku`, `availability`, `image` and the
+     brand-first breadcrumb trail are all as the live pages carry them.
+
+     The taxonomy names no "cigars" category anywhere. That is the whole reason
+     this adapter's `cigarCategoryPattern` is `/./`. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Eastern Standard Sungrown Toro Extra | Small Batch Cigar</title>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "SHOP BY BRAND", "item": "https://www.smallbatchcigar.com/shop-by-brand" },
+        { "@type": "ListItem", "position": 2, "name": "Caldwell", "item": "https://www.smallbatchcigar.com/caldwell" },
+        { "@type": "ListItem", "position": 3, "name": "Signature", "item": "https://www.smallbatchcigar.com/caldwell-signature" },
+        { "@type": "ListItem", "position": 4, "name": "Eastern Standard Sungrown Toro Extra" }
+      ]
+    },
+    {
+      "@type": "Product",
+      "name": "Eastern Standard Sungrown Toro Extra",
+      "url": "https://www.smallbatchcigar.com/eastern-standard-sungrown-toro-extra",
+      "image": "https://images.smallbatchcigar.com/eastern-standard-sungrown-toro-extra.jpg",
+      "sku": "CALD-ES-SG-TE",
+      "brand": [],
+      "offers": [
+        {
+          "@type": "Offer",
+          "price": "0.00",
+          "priceCurrency": "USD",
+          "availability": "https://schema.org/InStock"
+        }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<h1>Eastern Standard Sungrown Toro Extra</h1>
+<!-- Where the real prices are, and why extracting them is ADR-015 work rather
+     than something normalizeListing can reach. -->
+<div class="variant-overview"><span class="variant-name">Single</span><span class="price-value">$13.50</span></div>
+<div class="variant-overview"><span class="variant-name">Box of 20</span><span class="price-value">$249.95</span></div>
+</body>
+</html>

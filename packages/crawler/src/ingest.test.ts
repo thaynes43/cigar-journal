@@ -1758,14 +1758,17 @@ describe("crawler ingest (embedded Postgres)", () => {
     const sbVendorId = inserted[0]!.id;
 
     const SB = "https://www.smallbatchcigar.com";
-    const NOELLA = `${SB}/tatuaje-brown-label-noella/`;
-    const CUTTER = `${SB}/xikar-xi3-cutter/`;
+    const EASTERN = `${SB}/eastern-standard-sungrown-toro-extra`;
+    const TATUAJE = `${SB}/tatuaje-black-label-petite-lancero`;
+    const CALDWELL = `${SB}/caldwell`;
+    const CUTTER = `${SB}/xikar-xi3-cutter`;
     const fetcher = createMockFetcher({
       [`${SB}/robots.txt`]: { body: loadFixture("robots.txt", "small-batch") },
       [smallBatchCigar.sitemapUrl]: { body: loadFixture("sitemap.xml", "small-batch") },
-      [`${SB}/products-sitemap-1.xml`]: { body: loadFixture("products-sitemap-1.xml", "small-batch") },
-      [NOELLA]: { body: loadFixture("product.html", "small-batch") },
-      [CUTTER]: { body: loadFixture("product-cutter.html", "small-batch") },
+      [EASTERN]: { body: loadFixture("product-eastern-standard-sungrown-toro-extra.html", "small-batch") },
+      [TATUAJE]: { body: loadFixture("product-tatuaje-black-label-petite-lancero.html", "small-batch") },
+      [CALDWELL]: { body: loadFixture("landing-caldwell.html", "small-batch") },
+      [CUTTER]: { body: loadFixture("product-xikar-xi3-cutter.html", "small-batch") },
     });
 
     const result = await runIngest(deps(fetcher, null), {
@@ -1775,16 +1778,51 @@ describe("crawler ingest (embedded Postgres)", () => {
     });
 
     expect(result.status).toBe("succeeded");
-    // The sitemap also lists /pages/about-us/ and /cart.php — neither is fetched.
+    // The sitemap also lists the root, a /blog/<slug> post and the six
+    // non-product root slugs — none of them is fetched.
     expect(fetcher.requested).toEqual([
       `${SB}/robots.txt`,
       smallBatchCigar.sitemapUrl,
-      `${SB}/products-sitemap-1.xml`,
-      NOELLA,
+      EASTERN,
+      TATUAJE,
+      CALDWELL,
       CUTTER,
     ]);
-    expect(result.stats.listingsParsed).toBe(2);
+    // /caldwell IS fetched (a landing page is the same URL shape as a product)
+    // and parses to nothing, so it is not among the three listings.
+    expect(result.stats.listingsParsed).toBe(3);
     expect(result.stats.skippedNonCigar).toBe(1); // the cutter
+    expect(result.stats.offersWritten).toBe(2);
+  });
+
+  // What the zero-price guard actually does to the database (#270). The row is
+  // still written — availability is a real observation and the listing match
+  // hangs off it — with NO price rather than a $0.00 one, because $0.00 is not a
+  // cheap cigar, it is a lie the market view would rank first.
+  it("writes a priceless offer row, never a $0.00 one, for a placeholder-priced listing", async () => {
+    const inserted = await pg.db
+      .insert(vendors)
+      .values({ name: "Small Batch placeholder", url: "https://placeholder.example", focus: "NC", approvalStatus: "owner-added" })
+      .returning({ id: vendors.id });
+    const sbVendorId = inserted[0]!.id;
+
+    const SB = "https://www.smallbatchcigar.com";
+    const EASTERN = `${SB}/eastern-standard-sungrown-toro-extra`;
+    const fetcher = createMockFetcher({
+      [`${SB}/robots.txt`]: { body: loadFixture("robots.txt", "small-batch") },
+      [smallBatchCigar.sitemapUrl]: { body: urlsetXml([EASTERN]) },
+      [EASTERN]: { body: loadFixture("product-eastern-standard-sungrown-toro-extra.html", "small-batch") },
+    });
+
+    await runIngest(deps(fetcher, null), { adapter: smallBatchCigar, vendorId: sbVendorId, mode: "offers" });
+
+    const rows = await pg.db.select().from(offers).where(eq(offers.vendorId, sbVendorId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.price).toBeNull();
+    expect(rows[0]!.pricePerStickCents).toBeNull();
+    // Everything the page DID state is kept.
+    expect(rows[0]!.inStock).toBe(true);
+    expect(rows[0]!.listingUrl).toBe(EASTERN);
   });
 
   it("robots disallow fails the run and records the reason in crawl_runs.error", async () => {

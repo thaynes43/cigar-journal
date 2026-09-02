@@ -9,6 +9,7 @@ import {
   queryPublicSmokes,
   publicJournalExists,
 } from "@cj/domain";
+import { photoStorage } from "@/lib/photos";
 import { router, authedProcedure, publicProcedure } from "../trpc";
 import {
   saveSmokeSchema,
@@ -59,8 +60,13 @@ export const smokesRouter = router({
     .mutation(({ ctx, input }) => updateSmoke(ctx.deps, ctx.principal, { ...input, provenance: { source: "manual" } })),
 
   // Same uuid guard, same reason as `get` above — authenticated, but a malformed
-  // id reaches the same uuid column and 500s just as readily.
+  // id reaches the same uuid column and 500s just as readily. The storage handle
+  // rides along so the domain can sweep the smoke's photo objects out of the
+  // bucket (#264); it is null when photos are unconfigured, and the delete then
+  // behaves exactly as it did before.
   delete: authedProcedure
     .input(z.object({ smokeId: z.string().uuid() }))
-    .mutation(({ ctx, input }) => deleteSmoke(ctx.deps, ctx.principal, { smokeId: input.smokeId })),
+    .mutation(({ ctx, input }) =>
+      deleteSmoke(ctx.deps, photoStorage, ctx.principal, { smokeId: input.smokeId }),
+    ),
 });

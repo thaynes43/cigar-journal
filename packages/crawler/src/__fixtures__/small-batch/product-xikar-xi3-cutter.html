@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- A single-SKU accessory (#270, live shape 2026-09-02). Two things it holds
+     down that no cigar page can: single-SKU products on this store DO carry a
+     real price in the JSON-LD — so the placeholder is a grouped-product property,
+     not a site-wide one — and `Accessories` is the live taxonomy's only non-cigar
+     bucket, which is what lets `cigarCategoryPattern: /./` be safe. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Xikar Xi3 Cutter | Small Batch Cigar</title>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Accessories", "item": "https://www.smallbatchcigar.com/accessories" },
+        { "@type": "ListItem", "position": 2, "name": "Cutters", "item": "https://www.smallbatchcigar.com/cutters" },
+        { "@type": "ListItem", "position": 3, "name": "Xikar Xi3 Cutter" }
+      ]
+    },
+    {
+      "@type": "Product",
+      "name": "Xikar Xi3 Cutter",
+      "url": "https://www.smallbatchcigar.com/xikar-xi3-cutter",
+      "image": "https://images.smallbatchcigar.com/xikar-xi3-cutter.jpg",
+      "sku": "XIK-XI3",
+      "brand": [],
+      "offers": [
+        {
+          "@type": "Offer",
+          "price": "64.99",
+          "priceCurrency": "USD",
+          "availability": "https://schema.org/InStock"
+        }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body><h1>Xikar Xi3 Cutter</h1></body>
+</html>
