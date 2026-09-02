@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { vendors, listingMatches, offers, type ListingMatchRow } from "@cj/db";
 import { createHarness, type DomainHarness } from "./testing/harness.js";
-import { getCigarOffers, getCigarOfferHistory } from "./reads.js";
+import { getCigarOffers, getCigarOfferHistory, getCigarPricing } from "./reads.js";
 
 describe("getCigarOffers", () => {
   let h: DomainHarness;
@@ -256,6 +256,217 @@ describe("getCigarOffers", () => {
       minPricePerStick: null,
       maxPricePerStick: null,
       observationCount: 0,
+    });
+  });
+
+  // DESIGN-005: the rows come out in the order the page renders them, so the tier
+  // blocks are a grouping of the payload rather than a re-sort of it — and
+  // get_offers hands the model the same sequence.
+  it("orders the rows by packaging tier, best per-stick inside each", async () => {
+    const cigarId = await h.seedCigar({ canonicalName: "Tiered Belicoso", brand: "Tiered" });
+    const shop = await addVendor("Tier Shop");
+    const other = await addVendor("Tier Second Shop");
+
+    const single = await addMatch(shop, cigarId, "tier-single");
+    await addOffer(shop, single, {
+      price: "11.59",
+      currency: "USD",
+      inStock: true,
+      packaging: "single",
+      sticksPerPackage: 1,
+      pricePerStickCents: 1159,
+      seenAt: new Date("2026-09-02T00:00:00Z"),
+    });
+    const fivePack = await addMatch(shop, cigarId, "tier-5pack");
+    await addOffer(shop, fivePack, {
+      price: "55.00",
+      currency: "USD",
+      inStock: true,
+      packaging: "5-pack",
+      sticksPerPackage: 5,
+      pricePerStickCents: 1100,
+      seenAt: new Date("2026-09-02T00:00:00Z"),
+    });
+    const box = await addMatch(shop, cigarId, "tier-box");
+    await addOffer(shop, box, {
+      price: "210.00",
+      currency: "USD",
+      inStock: true,
+      packaging: "box",
+      sticksPerPackage: 20,
+      pricePerStickCents: 1050,
+      seenAt: new Date("2026-09-02T00:00:00Z"),
+    });
+    // The same box tier from a second shop, dearer and out of stock — it sorts
+    // after the cheaper row inside the block, not into a block of its own.
+    const otherBox = await addMatch(other, cigarId, "tier-box-2");
+    await addOffer(other, otherBox, {
+      price: "224.00",
+      currency: "USD",
+      inStock: false,
+      packaging: "box",
+      sticksPerPackage: 20,
+      pricePerStickCents: 1120,
+      seenAt: new Date("2026-09-02T00:00:00Z"),
+    });
+    // No packaging word in the listing name: last, whatever the figure.
+    const bare = await addMatch(other, cigarId, "tier-bare");
+    await addOffer(other, bare, {
+      price: "452.60",
+      currency: "USD",
+      inStock: true,
+      seenAt: new Date("2026-09-02T00:00:00Z"),
+    });
+
+    const rows = await getCigarOffers(h.deps, { cigarId });
+    expect(rows.map((o) => [o.packaging, o.price])).toEqual([
+      ["single", 11.59],
+      ["5-pack", 55],
+      ["box", 210],
+      ["box", 224],
+      [null, 452.6],
+    ]);
+  });
+
+  // DESIGN-005 rule 4: the headline is two facts, and this is the second one.
+  describe("pricing.bestSingle", () => {
+    it("is the cheapest in-stock single, alongside a cheaper box in `lowest`", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Single Toro", brand: "Single" });
+      const cheap = await addVendor("Single Cheap Box");
+      const dear = await addVendor("Single Dear Stick");
+      const boxMatch = await addMatch(cheap, cigarId, "single-box");
+      await addOffer(cheap, boxMatch, {
+        price: "210.00",
+        currency: "USD",
+        inStock: true,
+        packaging: "box",
+        sticksPerPackage: 20,
+        pricePerStickCents: 1050,
+      });
+      const stickMatch = await addMatch(dear, cigarId, "single-stick");
+      await addOffer(dear, stickMatch, {
+        price: "11.59",
+        currency: "USD",
+        inStock: true,
+        packaging: "single",
+        sticksPerPackage: 1,
+        pricePerStickCents: 1159,
+      });
+
+      const pricing = await getCigarPricing(h.deps, cigarId);
+      expect(pricing!.lowest).toMatchObject({ perStick: true, amount: 10.5, packaging: "box" });
+      expect(pricing!.bestSingle).toMatchObject({
+        amount: 11.59,
+        currency: "USD",
+        vendor: "Single Dear Stick",
+      });
+    });
+
+    it("is null when no offer states a single — a missing tier is never invented", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Boxes Only Toro", brand: "Single" });
+      const shop = await addVendor("Single Boxes Only");
+      const match = await addMatch(shop, cigarId, "boxes-only");
+      await addOffer(shop, match, {
+        price: "210.00",
+        currency: "USD",
+        inStock: true,
+        packaging: "box",
+        sticksPerPackage: 20,
+        pricePerStickCents: 1050,
+      });
+      // An unpackaged row is `Not stated`, never a stick price (DESIGN-005 rule 1).
+      await addOffer(shop, await addMatch(shop, cigarId, "boxes-only-bare"), {
+        price: "9.99",
+        currency: "USD",
+        inStock: true,
+      });
+
+      expect((await getCigarPricing(h.deps, cigarId))!.bestSingle).toBeNull();
+    });
+
+    it("ignores a hidden vendor's single, exactly as `lowest` does (ADR-015)", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Hidden Single Toro", brand: "Single" });
+      const shown = await addVendor("Single Shown Shop");
+      const [hidden] = await h.deps.db
+        .insert(vendors)
+        .values({ name: "Single Hidden Shop", displayEnabled: false })
+        .returning({ id: vendors.id });
+      await addOffer(shown, await addMatch(shown, cigarId, "hidden-shown"), {
+        price: "11.59",
+        currency: "USD",
+        inStock: true,
+        packaging: "single",
+        sticksPerPackage: 1,
+        pricePerStickCents: 1159,
+      });
+      await addOffer(hidden!.id, await addMatch(hidden!.id, cigarId, "hidden-hidden"), {
+        price: "8.00",
+        currency: "USD",
+        inStock: true,
+        packaging: "single",
+        sticksPerPackage: 1,
+        pricePerStickCents: 800,
+      });
+
+      const pricing = await getCigarPricing(h.deps, cigarId);
+      expect(pricing!.bestSingle).toMatchObject({ amount: 11.59, vendor: "Single Shown Shop" });
+      expect(pricing!.lowest).toMatchObject({ amount: 11.59 });
+    });
+
+    it("takes a shop's CURRENT single, not its cheaper older one — the rule `lowest` follows", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Risen Single Toro", brand: "Single" });
+      const shop = await addVendor("Single Risen Shop");
+      const match = await addMatch(shop, cigarId, "risen-single");
+      await addOffer(shop, match, {
+        price: "9.00",
+        currency: "USD",
+        inStock: true,
+        packaging: "single",
+        sticksPerPackage: 1,
+        pricePerStickCents: 900,
+        seenAt: new Date("2026-06-01T00:00:00Z"),
+      });
+      await addOffer(shop, match, {
+        price: "11.59",
+        currency: "USD",
+        inStock: true,
+        packaging: "single",
+        sticksPerPackage: 1,
+        pricePerStickCents: 1159,
+        seenAt: new Date("2026-08-20T00:00:00Z"),
+      });
+
+      const pricing = await getCigarPricing(h.deps, cigarId);
+      expect(pricing!.bestSingle).toMatchObject({
+        amount: 11.59,
+        seenAt: "2026-08-20T00:00:00.000Z",
+      });
+      expect(pricing!.lowest).toMatchObject({ amount: 11.59 });
+    });
+
+    it("falls back to an out-of-stock single rather than leaving the fact unsaid", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: "Sold Out Single", brand: "Single" });
+      const shop = await addVendor("Single Sold Out Shop");
+      await addOffer(shop, await addMatch(shop, cigarId, "sold-out-single"), {
+        price: "11.59",
+        currency: "USD",
+        inStock: false,
+        packaging: "single",
+        sticksPerPackage: 1,
+        pricePerStickCents: 1159,
+      });
+      await addOffer(shop, await addMatch(shop, cigarId, "sold-out-box"), {
+        price: "210.00",
+        currency: "USD",
+        inStock: true,
+        packaging: "box",
+        sticksPerPackage: 20,
+        pricePerStickCents: 1050,
+      });
+
+      const pricing = await getCigarPricing(h.deps, cigarId);
+      expect(pricing!.lowest).toMatchObject({ amount: 10.5, packaging: "box" });
+      expect(pricing!.bestSingle).toMatchObject({ amount: 11.59 });
     });
   });
 });

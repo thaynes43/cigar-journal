@@ -833,8 +833,21 @@ export interface CigarPricingLowest {
   sticksPerPackage: number | null;
 }
 
+// The cheapest current SINGLE-stick offer (DESIGN-005 rule 4): the headline is
+// two facts, not one — the best per-stick with its packaging, and what one stick
+// costs on its own. `amount` is that single's price (per-stick and package price
+// are the same figure for a single). Null when no displayable offer states a
+// single, which is a fact about the market and never an invented tier.
+export interface CigarPricingSingle {
+  amount: number; // dollars
+  currency: string | null;
+  vendor: string;
+  seenAt: string; // ISO — when this figure was observed
+}
+
 export interface CigarPricing {
   lowest: CigarPricingLowest | null;
+  bestSingle: CigarPricingSingle | null;
   currency: string | null;
   observedAt: string; // ISO — when the `lowest` figure was observed
   sourceCount: number; // distinct sources (vendors + ad-hoc names) with a current observation

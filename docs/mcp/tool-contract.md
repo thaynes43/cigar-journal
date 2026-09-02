@@ -386,6 +386,11 @@ result:
       amount: 16.70
       packaging: box
       sticksPerPackage: 20
+    bestSingle:                #   the cheapest single (DESIGN-005); null when none is offered
+      amount: 18.40            #   what ONE stick costs, from this vendor
+      currency: USD
+      vendor: Small Batch Cigar
+      seenAt: "2026-08-28T18:02:00Z"
     currency: USD
     observedAt: "2026-08-28T18:02:00Z"
     sourceCount: 2             #   distinct sources with a current observation
@@ -409,7 +414,9 @@ catalog fields, and the verification state — the model acts on it with
 `request_cigar_enrichment` / `update_cigar`. `pricing` is the compact market
 summary: `lowest` is the best current per-stick when derivable (else the lowest
 package price), **always carrying its packaging** — a bare per-stick figure is
-banned (owner ruling). `pricing` is `null` when the cigar has no observations;
+banned (owner ruling). Quote `lowest` with its packaging and `bestSingle` as the
+single price; an offer whose `packaging` is `null` is "not stated" — never a
+stick price (DESIGN-005). `pricing` is `null` when the cigar has no observations;
 `refreshRecommended` trips when the newest observation is older than 30 days.
 
 ## browse_catalog — read
@@ -488,7 +495,8 @@ arguments:
   cigarId: cg_01j9x2             # from a prior search_cigars/get_cigar/browse_catalog result
 
 result:
-  offers:                        # current offer per (source, packaging) series, cheapest per-stick first
+  offers:                        # current offer per (source, packaging) series, in tier order:
+                                 #   single → packs → box → packaging not stated, best per-stick inside each
     - vendor: Small Batch Cigar
       isRegistryVendor: true     #   false for an ad-hoc/chat source (ADR-006 unapproved-source labels apply)
       price: 334.00              #   the packaging unit's price, null if none observed
@@ -508,10 +516,12 @@ result:
     observationCount: 9          #   total observations recorded for the cigar
 ```
 
-Catalog/market-scoped (offers are identical for every viewer), so `get_offers`
-takes no personal bounding and needs only `catalog:read`. A cigar with no offers
-returns `offers: []` and a zeroed `history` (all null, count 0) rather than an
-error — an id from a prior tool result always exists.
+An offer whose `packaging` is `null` is one nobody recorded a packaging for:
+quote it as a package price with that said, never as a stick price (DESIGN-005
+rule 1). Catalog/market-scoped (offers are identical for every viewer), so
+`get_offers` takes no personal bounding and needs only `catalog:read`. A cigar
+with no offers returns `offers: []` and a zeroed `history` (all null, count 0)
+rather than an error — an id from a prior tool result always exists.
 
 ## get_my_smokes — read
 

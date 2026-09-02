@@ -90,6 +90,10 @@ export interface Handoff {
     // A held cigar with no product photo — the "Missing photos" worklist row the
     // admin console's Queue enrichment button acts on (#154).
     heldPhotoless: { id: string; name: string };
+    // Priced at every packaging tier (DESIGN-005): a single, a 5-pack and a box
+    // from one shop, an out-of-stock box from a second, and one listing whose
+    // packaging nobody recorded. The figures the Price section has to render.
+    packaged: { id: string; name: string };
     // Smoked, favorited AND priced in stock — the one row that survives every
     // leaf toggle at once, so a grouped screen carrying all three still has a
     // card to drill through. `brandSlug` is the param that drill lands on.
@@ -272,6 +276,19 @@ export async function seed(opts: {
       lengthInches: "5",
       ringGauge: 52,
     });
+    // The one cigar priced at every packaging tier (DESIGN-005), so the Price
+    // section's blocks, its two-fact headline and the tile's `from` are all
+    // exercised against real offers rather than a mock. Its own row, because no
+    // other seeded cigar may carry a box price without breaking the specs that
+    // read their prices.
+    const packaged = await insertCigar(deps, {
+      canonicalName: "Warped Flor del Valle Sky Flower",
+      brand: "Warped",
+      vitolaName: "Corona Gorda",
+      type: "NC",
+      lengthInches: "5.5",
+      ringGauge: 46,
+    });
     // A deliberately long canonical name — the untitled-entry h1 has to wrap it
     // rather than overflow, and prod's longest is 93 characters.
     const opusx = await insertCigar(deps, {
@@ -447,6 +464,88 @@ export async function seed(opts: {
       status: "succeeded",
       finishedAt: new Date(),
     });
+
+    // --- The packaging tiers (DESIGN-005) ----------------------------------
+    // A second shop, so a tier holds more than one vendor row, and a registry
+    // vendor that is NOT a purchase destination (ADR-006, the Cuban Lou's
+    // posture): displayed, labeled `unapproved source`, never linked out. Its
+    // listing names no packaging, which is the whole point — $452.60 is a real
+    // figure and a reader must never take it for the price of one cigar.
+    const [secondShop] = await deps.db
+      .insert(vendors)
+      .values({
+        name: "E2E Second Cigars",
+        focus: "NC",
+        approvalStatus: "owner-added",
+        displayEnabled: true,
+      })
+      .returning({ id: vendors.id });
+    const [unapprovedShop] = await deps.db
+      .insert(vendors)
+      .values({
+        name: "E2E Reference Shop",
+        focus: "NC",
+        approvalStatus: "unapproved",
+        displayEnabled: true,
+        purchaseLinkout: false,
+      })
+      .returning({ id: vendors.id });
+    // The ad-hoc path (no listing match), like the Montecristo offer below — the
+    // tiers are a property of the offer rows, not of how they reached the cigar.
+    await deps.db.insert(offers).values([
+      {
+        vendorId: vendorRows[0]!.id,
+        cigarId: packaged,
+        inStock: true,
+        price: "11.59",
+        currency: "USD",
+        packaging: "single",
+        sticksPerPackage: 1,
+        pricePerStickCents: 1159,
+        listingUrl: "https://e2e-cigars.example/sky-flower/single",
+      },
+      {
+        vendorId: vendorRows[0]!.id,
+        cigarId: packaged,
+        inStock: true,
+        price: "55.00",
+        currency: "USD",
+        packaging: "5-pack",
+        sticksPerPackage: 5,
+        pricePerStickCents: 1100,
+        listingUrl: "https://e2e-cigars.example/sky-flower/5-pack",
+      },
+      {
+        vendorId: vendorRows[0]!.id,
+        cigarId: packaged,
+        inStock: true,
+        price: "210.00",
+        currency: "USD",
+        packaging: "box",
+        sticksPerPackage: 20,
+        pricePerStickCents: 1050,
+        listingUrl: "https://e2e-cigars.example/sky-flower/box",
+      },
+      {
+        vendorId: secondShop!.id,
+        cigarId: packaged,
+        inStock: false,
+        price: "224.00",
+        currency: "USD",
+        packaging: "box",
+        sticksPerPackage: 20,
+        pricePerStickCents: 1120,
+        listingUrl: "https://e2e-second.example/sky-flower/box",
+      },
+      {
+        vendorId: unapprovedShop!.id,
+        cigarId: packaged,
+        inStock: true,
+        price: "452.60",
+        currency: "USD",
+        listingUrl: "https://e2e-reference.example/sky-flower",
+      },
+    ]);
 
     // --- Mechanical brand backfill, mirroring migration 0026 ---------------
     // The migration mints one `brands` row per distinct free-text brand and links
@@ -658,6 +757,7 @@ export async function seed(opts: {
         wanted: { id: hemingway, name: "Arturo Fuente Hemingway Short Story" },
         sampleNC: { id: padron64, name: "Padrón 1964 Anniversary Maduro" },
         heldPhotoless: { id: photoless, name: "Tatuaje Black Label Corona Gorda" },
+        packaged: { id: packaged, name: "Warped Flor del Valle Sky Flower" },
         everyToggle: {
           id: monte2,
           name: "Montecristo No. 2",

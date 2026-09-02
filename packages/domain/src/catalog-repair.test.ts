@@ -304,6 +304,9 @@ describe("catalog repair + price observations", () => {
         packaging: "box",
         sticksPerPackage: 20,
       });
+      // The second half of the headline (DESIGN-005 rule 4): the box is the best
+      // per-stick, and a stick on its own still costs $18.
+      expect(detail.pricing!.bestSingle).toMatchObject({ amount: 18, vendor: "Single Shop" });
       expect(detail.pricing!.sourceCount).toBe(2);
       expect(detail.pricing!.observationCount).toBe(2);
       expect(detail.pricing!.refreshRecommended).toBe(false);
@@ -312,11 +315,15 @@ describe("catalog repair + price observations", () => {
 
       const list = await getCigarOffers(h.deps, { cigarId });
       expect(list).toHaveLength(2);
-      // Cheapest per-stick leads.
-      expect(list[0]!.vendor).toBe("Box Shop");
-      expect(list[0]!.pricePerStick).toBeCloseTo(16.7, 2);
-      expect(list[0]!.packaging).toBe("box");
-      expect(list[0]!.isRegistryVendor).toBe(false);
+      // Tier order, not price order (DESIGN-005 rule 2): the single leads the list
+      // even though the box is cheaper per stick — which is why `lowest` above and
+      // the first row here are deliberately different rows.
+      expect(list[0]!.vendor).toBe("Single Shop");
+      expect(list[0]!.packaging).toBe("single");
+      expect(list[1]!.vendor).toBe("Box Shop");
+      expect(list[1]!.pricePerStick).toBeCloseTo(16.7, 2);
+      expect(list[1]!.packaging).toBe("box");
+      expect(list[1]!.isRegistryVendor).toBe(false);
     });
 
     it("flags refreshRecommended when the latest observation is older than 30 days", async () => {
