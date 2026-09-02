@@ -313,8 +313,10 @@ describe("runProbe", () => {
   it("counts index coverage against every child the root ever served", async () => {
     const adapter: VendorAdapter = { ...cubanLous, sitemapSampling: { samples: 2 } };
     const childUrl = (n: string): string => `https://www.cubanlous.com/${n}-sitemap.xml`;
-    const first = ["a1", "a2", "a3", "a4"].map(childUrl);
-    const second = ["b1", "b2", "b3", "b4"].map(childUrl);
+    // Six per root, so the bound still bites: at MAX_PROBE_CHILDREN=5 a four-child
+    // index is covered whole and this test would assert nothing.
+    const first = ["a1", "a2", "a3", "a4", "a5", "a6"].map(childUrl);
+    const second = ["b1", "b2", "b3", "b4", "b5", "b6"].map(childUrl);
     const indexXml = (children: string[]): string =>
       `<?xml version="1.0" encoding="UTF-8"?>
       <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -330,10 +332,10 @@ describe("runProbe", () => {
     const fetcher = createMockFetcher(routes);
     const result = await runProbe(fetcher, adapter);
 
-    expect(result.sitemap.sampledChildren).toHaveLength(6); // 3 per sample, no overlap
-    expect(result.sitemap.totalLocs).toBe(8); // 8 distinct children across the two roots
-    expect(formatProbe(result)).toContain("children=6/8");
-    expect(result.notes.join(" ")).toMatch(/sitemapindex: sampled 6\/8 children/);
+    expect(result.sitemap.sampledChildren).toHaveLength(10); // 5 per sample, no overlap
+    expect(result.sitemap.totalLocs).toBe(12); // 12 distinct children across the two roots
+    expect(formatProbe(result)).toContain("children=10/12");
+    expect(result.notes.join(" ")).toMatch(/sitemapindex: sampled 10\/12 children/);
     expectWithinBudget(fetcher, adapter);
   });
 
@@ -342,14 +344,14 @@ describe("runProbe", () => {
   // catalog from an unsampled one.
   it("reports the index size and the sampled slice when it cannot cover the index", async () => {
     const children = numberedChildren(20);
-    const { result } = await indexProbe(children, 5); // outside the 3-child pick
+    const { result } = await indexProbe(children, 5); // outside the 5-child pick
 
     expect(result.verdict).toBe("needs-attention");
     expect(result.sitemap.totalLocs).toBe(20); // the INDEX size, not the union
     expect(result.sitemap.enumeratedLocs).toBe(0);
     expect(result.sitemap.sampledChildren).toHaveLength(MAX_PROBE_CHILDREN);
-    expect(result.notes.join(" ")).toMatch(/sitemapindex: sampled 3\/20 children/);
-    expect(formatProbe(result)).toContain("children=3/20");
+    expect(result.notes.join(" ")).toMatch(/sitemapindex: sampled 5\/20 children/);
+    expect(formatProbe(result)).toContain("children=5/20");
   });
 
   it("names a child sitemap that refused the fetch", async () => {
@@ -625,6 +627,36 @@ describe("2 Guys, live shape — the OG/microdata extractor reads it", () => {
     expect(candle!.category).toEqual(["Air Freshening", "Air Freshening Accessories"]);
   });
 
+  // ADR-009 defect found by the 2026-09-02 probe: this shop prices some listings
+  // BY THE BOX under a name that states no packaging, so price-at-a-glance showed
+  // $452.60 as the price of one stick on a tier-1 linkout vendor. Its
+  // `og:description` is a spec line and states the unit, so normalize reads it
+  // when the name is silent.
+  it("takes packaging from the og:description when the name states none", () => {
+    const packagingOf = (fixture: string) => {
+      const m = extractProductMarkup(loadFixture(fixture, "two-guys"), twoGuysCigars);
+      const listing = normalizeListing(m.product!, m.category, m.categorySource, m.productMarkup)!;
+      return { packaging: listing.packaging, sticksPerPackage: listing.sticksPerPackage };
+    };
+
+    // `5 X 54 - Sun Grownt - Single` (the shop's own typo, as served).
+    expect(packagingOf("live-product-perdomo-30th-robusto-sg-s-165681.html")).toEqual({
+      packaging: "single",
+      sticksPerPackage: 1,
+    });
+    // `4 1/2 x 56 - Ecuador Connecticut - Bundle of 10` — a $107.99 listing whose
+    // name says nothing, which is the shape that mispriced per-stick.
+    expect(packagingOf("live-product-romacraft-steel-porcupine-184527.html")).toEqual({
+      packaging: "bundle",
+      sticksPerPackage: 10,
+    });
+    // Prose, not a spec line: unknown stays unknown.
+    expect(packagingOf("live-product-smoke-exterm-candle-orange-734366037362.html")).toEqual({
+      packaging: null,
+      sticksPerPackage: null,
+    });
+  });
+
   it("prints the gate and both census sides so a probe log identifies the build", async () => {
     const out = formatProbe(await runProbe(createMockFetcher(liveRoutes()), twoGuysCigars));
 
@@ -726,8 +758,9 @@ describe("Small Batch, live shape — the gate is right and every cigar price is
 
 describe("probeFetchBudget", () => {
   it("scales with the adapter's sample count", () => {
-    expect(probeFetchBudget(cubanLous)).toBe(10);
-    expect(probeFetchBudget(twoGuysCigars)).toBe(22); // 4 samples
+    // 1 robots + 1 root + MAX_PROBE_CHILDREN children + 3 products + 2 slack.
+    expect(probeFetchBudget(cubanLous)).toBe(12);
+    expect(probeFetchBudget(twoGuysCigars)).toBe(30); // 4 samples
   });
 });
 
@@ -747,9 +780,15 @@ describe("Montefortuna, live shape — a Yoast index, a marca breadcrumb and no 
   const routes = (): Record<string, MockRoute> => ({
     [mf("/robots.txt")]: { body: fx("robots.txt") },
     [montefortuna.sitemapUrl]: { body: fx("sitemap-index.xml") },
-    // The three children `selectIndexChildren` picks out of the ten: the catalog
-    // child by name, plus the first and last of the index.
+    // The five children `selectIndexChildren` picks out of the ten at the probe's
+    // budget: all THREE catalog children by name, plus the first and last of the
+    // index. The fixture reduces the live 2,087-loc catalogue to seven locs in the
+    // first child, so the other two are routed empty — what the 5-child bound buys
+    // is that they are FETCHED at all (#270; at 3 the catalog got one slot and the
+    // probe reported 1,001 of 2,087).
     [mf("/product-sitemap.xml")]: { body: fx("product-sitemap.xml") },
+    [mf("/product-sitemap2.xml")]: { body: urlsetXml([]) },
+    [mf("/product-sitemap3.xml")]: { body: urlsetXml([]) },
     [mf("/post-sitemap.xml")]: { body: urlsetXml([mf("/blog/habanos-2026-releases/")]) },
     [mf("/product_tag-sitemap.xml")]: { body: urlsetXml([mf("/product-tag/robusto/")]) },
     [SHOP]: { body: fx("landing-shop.html") },
@@ -775,9 +814,20 @@ describe("Montefortuna, live shape — a Yoast index, a marca breadcrumb and no 
     expect(result.sitemap.kind).toBe("sitemapindex");
     expect(result.sitemap.totalLocs).toBe(10);
     expect(result.sitemap.sampledChildren).toHaveLength(MAX_PROBE_CHILDREN);
-    expect(result.sitemap.sampledChildren).toContain(mf("/product-sitemap.xml"));
-    // Seven locs in that child; the brand archive and the pagination are
-    // subtracted by `nonProductPathPattern`.
+    // ALL THREE catalog children, not one of them: this shop splits its 2,087
+    // products across `product-sitemap{,2,3}.xml`, and the 2026-09-02 probe
+    // reported 1,001 because the 3-child budget left the catalog a single slot.
+    expect(result.sitemap.sampledChildren).toEqual([
+      mf("/post-sitemap.xml"),
+      mf("/product-sitemap.xml"),
+      mf("/product-sitemap2.xml"),
+      mf("/product-sitemap3.xml"),
+      mf("/product_tag-sitemap.xml"),
+    ]);
+    // Every picked child answered, so no coverage gap is hiding behind a failure.
+    expect(result.notes.join(" ")).not.toMatch(/child sitemap .* returned/);
+    // Seven locs in the first catalog child; the brand archive and the pagination
+    // are subtracted by `nonProductPathPattern`.
     expect(result.sitemap.productLocs).toBe(5);
     expectWithinBudget(fetcher, montefortuna);
   });
@@ -815,19 +865,49 @@ describe("Montefortuna, live shape — a Yoast index, a marca breadcrumb and no 
   });
 
   // The two shapes the sitemap enumerates and the probe's spread does not sample.
-  // Both parse; both are refused by NAME, under a breadcrumb that says "cigar".
-  it("refuses a multi-box lot and a single stick on the name pattern alone", async () => {
+  // Both parse under a breadcrumb the gate admits, and only the LOT is refused.
+  it("refuses a multi-box lot by name and keeps the single stick", () => {
     const lot = extractProductMarkup(fx("product-2-boxes-montecristo.html"), montefortuna);
     const single = extractProductMarkup(fx("product-partagas-shorts-single.html"), montefortuna);
     const listingOf = (m: ReturnType<typeof extractProductMarkup>) =>
-      normalizeListing(m.product!, m.category, m.categorySource)!;
+      normalizeListing(m.product!, m.category, m.categorySource, m.productMarkup)!;
 
     expect(listingOf(lot).name).toBe("2 Boxes of 25 Montecristo No. 4");
     expect(isCigarCategory(listingOf(lot).categoryPath, montefortuna)).toBe(true);
     expect(isCigarListing(listingOf(lot), montefortuna)).toBe(false);
 
+    // `\bsingles?\b` came off the name pattern on 2026-09-02 (#270): at this shop
+    // "Single" is ONE STICK, the unit the catalog models.
     expect(listingOf(single).name).toBe("Partagas Shorts - Single");
-    expect(isCigarListing(listingOf(single), montefortuna)).toBe(false);
+    expect(isCigarListing(listingOf(single), montefortuna)).toBe(true);
+    expect(listingOf(single).packaging).toBe("single");
+    expect(listingOf(single).sticksPerPackage).toBe(1);
+  });
+
+  // The three /shop/ names the 2026-09-02 probe sampled, by shape. The single is
+  // the sampled name verbatim and was the one the old pattern got wrong; the
+  // other two are the multi-pack forms the same run confirmed it must keep
+  // refusing, and they are refused by `combos?` and by the leading-number guard.
+  it("admits the probe's single and still refuses its combo and its box lot", () => {
+    const listing = (name: string) => ({
+      name,
+      priceCents: null,
+      currency: null,
+      priceIsPlaceholder: false,
+      inStock: null,
+      imageUrl: null,
+      sku: null,
+      // `Home / Shop / <marca> / <product>` with the product crumb dropped.
+      categoryPath: ["Home", "Shop", "Quintero"],
+      packaging: null,
+      sticksPerPackage: null,
+    });
+
+    expect(isCigarListing(listing("Quintero Favoritos - Single"), montefortuna)).toBe(true);
+    expect(isCigarListing(listing("Habanos Robustos Combo"), montefortuna)).toBe(false);
+    expect(isCigarListing(listing("2 Boxes of 20 Romeo y Julieta Wide Churchills"), montefortuna)).toBe(false);
+    // The alternative `\bsingles?\b` was written for, still refused on its own.
+    expect(isCigarListing(listing("Damaged Cohiba Siglo VI Single"), montefortuna)).toBe(false);
   });
 });
 
@@ -1035,5 +1115,47 @@ describe("J.J. Fox, live shape — 2 Guys' markup on a Magento store", () => {
     const { product, category } = extractProductMarkup(fx("landing-cigars.html"), jjFox);
     expect(product).toBeNull();
     expect(category).toEqual([]);
+  });
+
+  // The three pages the 2026-09-02 probe sampled — and passed as `ok`. Two are
+  // humidification accessories the `humidor` spelling could not see, the third a
+  // mixed selection under a real cigar's keywords. Names and tag lists as served.
+  it("refuses the three samples its 2026-09-02 probe admitted as cigars", () => {
+    const listing = (name: string, keywords: string[]) => ({
+      name,
+      priceCents: null,
+      currency: null,
+      priceIsPlaceholder: false,
+      inStock: null,
+      imageUrl: null,
+      sku: null,
+      categoryPath: keywords,
+      packaging: null,
+      sticksPerPackage: null,
+    });
+
+    // `humidity`/`humidification`/`humidified` contain no "humidor", and each of
+    // these lists carries the `cigar` token `cigarCategoryPattern` reads — which
+    // is exactly how an 8g humidity pack probed as a cigar.
+    const integra = listing("Integra Boost 69% - 8g Pack", [
+      "integra boost",
+      "cigar humidity",
+      "cigar humidification",
+      "humidity levels",
+    ]);
+    const pouch = listing("EMS Humidified Resealable Cigar Pouch", ["ems", "humidified", "cigar", "pouch"]);
+    // A real cigar's tag list, so only the NAME can refuse this one.
+    const giftBox = listing("Habanos Seleccion Robusto Gift Box", ["Cuban Cigar", "Cigar", "Habanos"]);
+
+    expect(isCigarListing(integra, jjFox)).toBe(false);
+    expect(isCigarListing(pouch, jjFox)).toBe(false);
+    expect(isCigarListing(giftBox, jjFox)).toBe(false);
+
+    // The control the two fixes have to leave alone: this shop's vocabulary for
+    // an actual cigar, and the release a `selecci[oó]n` alternative would have
+    // taken with the gift box.
+    const cigarTags = ["Cuban Cigar", "Cigar", "Habanos", "Partagas"];
+    expect(isCigarListing(listing("Partagas Shorts", cigarTags), jjFox)).toBe(true);
+    expect(isCigarListing(listing("Hoyo de Monterrey Selección Reserva", cigarTags), jjFox)).toBe(true);
   });
 });

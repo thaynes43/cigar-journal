@@ -27,7 +27,18 @@ import type { VendorAdapter } from "../adapters/types.js";
 // Children of a sitemapindex to descend into per sample. More than one because
 // an index whose products live in the LAST child looked empty to the old
 // first-child probe; bounded because a probe must not walk a 20k-URL catalog.
-export const MAX_PROBE_CHILDREN = 3;
+//
+// FIVE, not three, since 2026-09-02 (#270). A budget of three reserves two slots
+// for the index's ends (`selectIndexChildren`), which left ONE for the catalog —
+// and a shop whose catalog is split across several children then had all but one
+// of them go unfetched. The probe under-reported Montefortuna as
+// `product-locs=1001` when the three `product-sitemap{,2,3}.xml` children hold
+// 1,001 + 1,000 + 86 = 2,087, and EGM as 998 of 1,071; both reconciled exactly to
+// the children the pick never reached. Five leaves three catalog slots, which is
+// the Woo/Shopify split as it is actually served. The coverage note below still
+// says what was not looked at — a bigger budget narrows that gap, it does not
+// close it.
+export const MAX_PROBE_CHILDREN = 5;
 // Product pages parsed per probe, spread across the enumeration.
 export const PRODUCT_SAMPLES = 3;
 // Parses required for an `ok` verdict, floored at the number actually sampled.
@@ -55,7 +66,7 @@ export interface ProbeProductSample {
   // `photoSource`/`photoUrlRewrite` (ADR-006 amendment 2026-09-02). Printed
   // because a rewrite is the one adapter field nothing else in a probe exercises:
   // Cigarworld's `/bilder/detail/big/` line is how the operator sees the 300x51
-  // thumbnail was corrected before a crawl writes 6,874 of them.
+  // thumbnail was corrected before a crawl writes 6,604 of them.
   photoUrl: string | null;
   isCigar: boolean;
   // 200 + a schema.org Product + a usable name: what the crawl needs to write a row.
@@ -218,11 +229,11 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
     for (const index of spreadIndices(productUrls.length, PRODUCT_SAMPLES)) {
       const url = productUrls[index]!;
       const res = await fetcher.fetchText(url);
-      const { product, category, categorySource, photoUrl } = extractProductMarkup(
+      const { product, productMarkup, category, categorySource, photoUrl } = extractProductMarkup(
         res.status === 200 ? res.body : "",
         adapter,
       );
-      const listing = product ? normalizeListing(product, category, categorySource) : null;
+      const listing = product ? normalizeListing(product, category, categorySource, productMarkup) : null;
       if (res.status !== 200) notes.push(`sample product ${url} returned ${res.status}.`);
       else if (!product) notes.push(`sample product ${url} has no ${markupLabel(adapter)} — parsing yields nothing.`);
       else if (!listing) notes.push(`sample product ${url} ${markupLabel(adapter)} has no usable name.`);

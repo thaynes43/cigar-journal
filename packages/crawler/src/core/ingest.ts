@@ -816,9 +816,9 @@ async function walkListings(
         stats.errors += 1;
         continue;
       }
-      const { product, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
+      const { product, productMarkup, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
       if (!product) continue;
-      const listing = normalizeListing(product, category, categorySource);
+      const listing = normalizeListing(product, category, categorySource, productMarkup);
       if (!listing) continue;
       stats.listingsParsed += 1;
 
@@ -1119,9 +1119,9 @@ async function tryEnrichCandidates(
       stats.errors += 1;
       continue;
     }
-    const { product, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
+    const { product, productMarkup, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
     if (!product) continue;
-    const listing = normalizeListing(product, category, categorySource);
+    const listing = normalizeListing(product, category, categorySource, productMarkup);
     if (!listing) continue;
     parsed = true;
     stats.listingsParsed += 1;

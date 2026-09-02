@@ -7,6 +7,14 @@ import type { ExclusionVendorAdapter } from "./types.js";
 // `schema.org/Product` itemscope, category from the keywords tag list — which
 // is why this adapter needs no new extractor.
 //
+// THE 2026-09-02 PROBE PASSED THIS VENDOR FALSELY, and the two fixes are below.
+// Its three samples were `Integra Boost 69% - 8g Pack`, `EMS Humidified
+// Resealable Cigar Pouch` and `Habanos Seleccion Robusto Gift Box` (£347): the
+// first two are HUMIDIFICATION ACCESSORIES the category gate admitted as cigars,
+// the third a mixed selection. An `ok` on that sample is worse than a
+// needs-attention — it is three would-be catalog rows, none of them a cigar. See
+// `excludePattern` and `excludeNamePattern` below.
+//
 //   country     United Kingdom. Habanos-led, with New World lines alongside, so
 //               `focus: "both"`.
 //   platform    Magento 2 (nginx).
@@ -31,7 +39,13 @@ import type { ExclusionVendorAdapter } from "./types.js";
 //               an `itemtype="…/Product"` itemscope, exactly the 2 Guys shape.
 //               There is NO `og:upc` and NO `og:brand`, so a listing from this
 //               vendor carries no sku and no brand; matching v2 reads the name.
-//               `og:availability` is absent too, so stock stays unknown.
+//               `og:availability` is absent too, so stock stays unknown. Being
+//               an OpenGraph vendor also means `normalizeListing` may read
+//               packaging out of `og:description` when a name states none
+//               (#270); here that description is a one-line blurb ("The
+//               quintessential Cuban half corona.") and states no count, so it
+//               yields nothing — which is the conservative half of that rule
+//               doing its job, not a gap.
 //   category    `<meta name="keywords">` = `"Cuban Cigar, Cigar, Habanos,
 //               <marca>"` on every product page, and ABSENT on the category
 //               pages (`/cigars.html`, `/cigar-accessories/humidors.html` state
@@ -75,6 +89,11 @@ export const jjFox: ExclusionVendorAdapter = {
   // A landing page that slips through costs one fetch and parses to nothing —
   // it carries no `og:type=product` — while over-matching would drop a real
   // product silently, which is the asymmetry this whole field is written around.
+  // `/19-st-james-street` (the shop's address page, and the one product-shaped
+  // loc with no `.html`) is exactly that case on the live sitemap: the gate
+  // admits it, the 2026-09-02 probe fetched it, and it parsed to nothing.
+  // Harmless, and left unnamed — a fifth literal buys one fetch and risks a real
+  // slug.
   nonProductPathPattern:
     /^\/(?:$|(?:cigars|cigar-accessories|cigar-gifts|pipes-and-tobacco|brand|brands|customer|store|events?|who-we-are|search|checkout|catalog)(?:\/|\.html$|$)|(?:best-sellers|new-arrivals|event-tickets|rare-limited-edition-cigars)\.html$)|^\/.*\.php$/i,
   // Products are root-level. The 589 category locs sit at depth 2-5 and are out
@@ -86,8 +105,22 @@ export const jjFox: ExclusionVendorAdapter = {
   cigarCategoryPattern: /cigar/i,
   // `pipe` and `tobacco` are here because this merchant sells both, and its
   // accessory keywords name their own aisle the way the cigar ones name theirs.
-  excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?|pipe|tobacco/i,
-  excludeNamePattern: /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b/i,
+  //
+  // `humid`, NOT `humidor` (probe 2026-09-02, #270). The humidification aisle
+  // tags itself `cigar humidity` / `cigar humidification` / `humidified`, none of
+  // which contains "humidor", while every one of them carries the `cigar` token
+  // `cigarCategoryPattern` reads — so an 8g Boveda-style pack and a humidified
+  // pouch both passed the gate AS CIGARS. The stem is safe here because a real
+  // cigar's keywords are `Cuban Cigar, Cigar, Habanos, <marca>`, a vocabulary
+  // with no word beginning "humid".
+  excludePattern: /accessor|ashtray|lighter|cutter|humid|sampler?|pipe|tobacco/i,
+  // `gift box` is this shop's word for a mixed selection sold as one line —
+  // `Habanos Seleccion Robusto Gift Box`, £347, several marcas in a box. Its
+  // keywords are a real cigar's, so only the NAME can refuse it. `selecci[oó]n`
+  // is deliberately NOT here: it would also take `Selección Reserva`, a real
+  // Habanos release and one catalog cigar.
+  excludeNamePattern:
+    /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b|\bgift box(?:es)?\b/i,
   // Drop `?width=265&height=265&store=default&image-type=image`, which is both a
   // 265px resize and a robots-disallowed shape under `/*?`.
   photoUrlRewrite: "strip-query",
@@ -110,3 +143,7 @@ export const jjFox: ExclusionVendorAdapter = {
 //      only note is a zero-priced sample is this vendor's stock state showing
 //      through, not a broken adapter — re-probe, or enable the enrich lane
 //      (which needs no price) and leave the offers walk off.
+//   6. THE SAMPLE NAMES, one by one. `cigars>=1` is a floor and not a reading:
+//      the 2026-09-02 run cleared every number above and its three "cigars" were
+//      two humidification packs and a gift box. A verdict here is only as good
+//      as the names on the `name=` lines.

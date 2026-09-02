@@ -206,7 +206,7 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
       expect([adapter.slug, adapter.purchaseLinkout]).toEqual([adapter.slug, false]);
       expect([adapter.slug, adapter.crawlEnabled]).toEqual([adapter.slug, false]);
       // A cap is not optional on any of them: the smallest gate here accepts 913
-      // URLs and the largest 6,874, and the fetcher THROWS at the cap.
+      // URLs and the largest 6,604, and the fetcher THROWS at the cap.
       expect([adapter.slug, (adapter.maxPages ?? 0) > 0]).toEqual([adapter.slug, true]);
       // None of these vendors asks for a Crawl-delay, so every interval here is
       // our own politeness above the 2.5s floor.
@@ -227,6 +227,10 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
     expect(montefortuna.excludePattern.test("Home / Shop / Accesories")).toBe(true);
     expect(montefortuna.excludeNamePattern!.test("2 Boxes of 25 Montecristo No. 4")).toBe(true);
     expect(montefortuna.excludeNamePattern!.test("Cohiba Siglo VI")).toBe(false);
+    // Corrected 2026-09-02 (#270): "Single" is one stick here, the unit the
+    // catalog models — and the name the alternative was written for is still out.
+    expect(montefortuna.excludeNamePattern!.test("Quintero Favoritos - Single")).toBe(false);
+    expect(montefortuna.excludeNamePattern!.test("Damaged Cohiba Siglo VI Single")).toBe(true);
 
     // EGM: a ProductGroup with a `category` string and no breadcrumb, and a photo
     // its JSON-LD does not name.
@@ -248,6 +252,14 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
     expect(jjFox.productMarkup).toBe("opengraph");
     expect(jjFox.categorySource).toBe("keywords-meta");
     expect(jjFox.photoUrlRewrite).toBe("strip-query");
+    // Corrected 2026-09-02 (#270), after a probe that passed two humidification
+    // accessories and a gift box as cigars: the exclusion is the STEM, and the
+    // mixed selection is refused by name without touching `Selección Reserva`.
+    expect(jjFox.excludePattern.test("cigar humidity")).toBe(true);
+    expect(jjFox.excludePattern.test("humidified")).toBe(true);
+    expect(jjFox.excludePattern.test("Cuban Cigar / Cigar / Habanos / Partagas")).toBe(false);
+    expect(jjFox.excludeNamePattern!.test("Habanos Seleccion Robusto Gift Box")).toBe(true);
+    expect(jjFox.excludeNamePattern!.test("Hoyo de Monterrey Selección Reserva")).toBe(false);
   });
 
   it("carries the crawl-shape fixes the live probes called for", () => {

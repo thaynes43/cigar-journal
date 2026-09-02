@@ -9,10 +9,15 @@
 
 import { extractJsonLd, productImageUrl, type JsonLdProduct } from "./jsonld.js";
 import { extractKeywords, extractOgImage, extractOpenGraphProduct } from "./opengraph.js";
-import type { CategorySource, PhotoUrlRewrite, VendorAdapter } from "../adapters/types.js";
+import type { CategorySource, PhotoUrlRewrite, ProductMarkup, VendorAdapter } from "../adapters/types.js";
 
 export interface ExtractedMarkup {
   product: JsonLdProduct | null;
+  // Which extractor produced the node, carried out with it because it says what
+  // the node's OTHER fields may be trusted to mean: an OG `description` is the
+  // shop's own spec line, a JSON-LD one is marketing prose (`normalizeListing`,
+  // packaging-from-description).
+  productMarkup: ProductMarkup;
   // The taxonomy as the page states it, in the shape `categorySource` names —
   // a trail ending with the product, a tag list, or the `category` string split
   // on its separators. `normalizeListing` is told which, and reads it accordingly.
@@ -50,12 +55,13 @@ export function rewritePhotoUrl(url: string, rewrite: PhotoUrlRewrite | undefine
 
 export function extractProductMarkup(html: string, adapter: VendorAdapter): ExtractedMarkup {
   const categorySource = adapter.categorySource ?? "breadcrumbs";
+  const productMarkup = adapter.productMarkup ?? "json-ld";
   // Only the JSON-LD side carries a breadcrumb trail: an OG vendor's product page
   // states none (2 Guys' is "Home / <brand>" by design). Declaring "opengraph"
   // with the breadcrumb category source therefore yields an EMPTY path, which
   // `isCigarListing` refuses — a stated refusal, not a silent admit.
   const { product, breadcrumbs } =
-    adapter.productMarkup === "opengraph"
+    productMarkup === "opengraph"
       ? { product: extractOpenGraphProduct(html), breadcrumbs: [] as string[] }
       : extractJsonLd(html);
 
@@ -75,7 +81,7 @@ export function extractProductMarkup(html: string, adapter: VendorAdapter): Extr
   const photoUrl =
     product && statedPhoto ? rewritePhotoUrl(statedPhoto, adapter.photoUrlRewrite) : null;
 
-  return { product, category, categorySource, photoUrl };
+  return { product, productMarkup, category, categorySource, photoUrl };
 }
 
 // What a probe note calls the markup it did not find. Naming the DECLARED format

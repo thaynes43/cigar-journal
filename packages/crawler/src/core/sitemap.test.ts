@@ -6,6 +6,7 @@ import {
   selectIndexChildren,
   MAX_SITEMAP_SAMPLES,
 } from "./sitemap.js";
+import { MAX_PROBE_CHILDREN } from "./probe.js";
 import { createMockFetcher, loadFixture, urlsetXml } from "../testing/fixtures.js";
 
 describe("parseSitemap", () => {
@@ -172,6 +173,42 @@ describe("selectIndexChildren", () => {
     expect(picked).toContain("https://vendor.example/store-sitemap.xml");
     expect(picked).toContain(locs[0]);
     expect(picked).toHaveLength(3);
+  });
+
+  // The Montefortuna shape, and the reason the probe's budget is 5 (#270): a Woo
+  // index of ten whose catalog is split across three `product-sitemap*.xml`
+  // children, with three product_* TERM archives beside them. At a budget of 3
+  // the catalog got one slot and the probe counted 1,001 of 2,087 locs; at
+  // MAX_PROBE_CHILDREN the cap is `want - 2` = 3, so all three come first and
+  // the two ends still fit.
+  it("takes all three catalog children of a Woo index before the ends", () => {
+    const locs = [
+      "post-sitemap.xml",
+      "page-sitemap.xml",
+      "product-sitemap.xml",
+      "product-sitemap2.xml",
+      "product-sitemap3.xml",
+      "category-sitemap.xml",
+      "post_tag-sitemap.xml",
+      "product_brand-sitemap.xml",
+      "product_cat-sitemap.xml",
+      "product_tag-sitemap.xml",
+    ].map((n) => `https://vendor.example/${n}`);
+
+    const picked = selectIndexChildren(locs, MAX_PROBE_CHILDREN);
+
+    expect(picked).toHaveLength(MAX_PROBE_CHILDREN);
+    expect(picked).toEqual([
+      "https://vendor.example/post-sitemap.xml", // first child
+      "https://vendor.example/product-sitemap.xml",
+      "https://vendor.example/product-sitemap2.xml",
+      "https://vendor.example/product-sitemap3.xml",
+      "https://vendor.example/product_tag-sitemap.xml", // last child
+    ]);
+    // The term archives that share the `product` hint are still demoted: they
+    // spend no slot while a catalog-shaped child is unpicked.
+    expect(picked).not.toContain("https://vendor.example/product_cat-sitemap.xml");
+    expect(picked).not.toContain("https://vendor.example/product_brand-sitemap.xml");
   });
 
   it("dedupes a repeated child loc rather than spending a slot twice", () => {

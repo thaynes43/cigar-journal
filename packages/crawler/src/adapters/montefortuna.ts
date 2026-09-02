@@ -90,9 +90,19 @@ export const montefortuna: PrefixVendorAdapter = {
   // Hoyo de Monterrey Epicure No. 2`, `Trinidad Double Pack`, `Damaged Cohiba
   // Siglo VI Single`, `Vintage Partagas Shorts`, `… Sevilla Jar (19)`. The
   // leading-number guard is the general form of the first two: a listing whose
-  // NAME starts with a count is a multi-box lot, never one catalog cigar.
+  // NAME starts with a count is a multi-box lot, never one catalog cigar; the
+  // 2026-09-02 probe sampled `2 Boxes of 20 …` and a `… Combo` and both are
+  // refused by it and by `combos?`.
+  //
+  // `\bsingles?\b` WAS an alternative here and is deliberately gone (probe
+  // 2026-09-02, #270). At this shop "Single" means ONE STICK — the probe's
+  // `Quintero Favoritos - Single`, under a `Home / Shop / Quintero Favoritos –
+  // Single` trail the gate admits — which is exactly the unit the catalog models,
+  // so the alternative was refusing this vendor's most catalogable listings. It
+  // was written for `Damaged Cohiba Siglo VI Single`, and `\bdamaged\b` already
+  // refuses that one on its own.
   excludeNamePattern:
-    /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b|\bdamaged\b|\bvintage\b|\bsingles?\b|\bdouble pack\b|\btriple pack\b|\bfivers?\b|\bjars?\b|\bcabs?\b|^\s*\d+\s/i,
+    /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b|\bdamaged\b|\bvintage\b|\bdouble pack\b|\btriple pack\b|\bfivers?\b|\bjars?\b|\bcabs?\b|^\s*\d+\s/i,
   // 4s between requests. The robots.txt asks for no Crawl-delay, so this is our
   // own politeness above the 2.5s fetcher floor — a 2,087-product catalogue at a
   // shop we have no relationship with.
@@ -108,8 +118,11 @@ export const montefortuna: PrefixVendorAdapter = {
 // never an adapter edit (ADR-006). On this build the probe must show:
 //   1. robots still allows `/shop/` for our UA (the Cloudflare managed block is
 //      updated by Cloudflare, not by the shop — re-read it, do not assume).
-//   2. `kind=sitemapindex`, and a descended `product-sitemap*.xml` child —
-//      `product-locs` should land near 2,087.
+//   2. `kind=sitemapindex`, and the three `product-sitemap*.xml` children
+//      descended — `product-locs` should land near 2,087. The 2026-09-02 run
+//      reported 1,001, which is `product-sitemap.xml` alone: the probe's child
+//      budget was 3 and spent one slot on the catalog, so the other two children
+//      were never fetched. Raised to 5 (probe.ts), which fits all three.
 //   3. `parsed>=2` and `cigars>=1` with `category=Home / Shop / <marca>`, i.e.
 //      the `/shop/i` gate reading the trail and not the product name.
 //   4. `photo=` naming a `wp-content/uploads` URL rather than the site logo.

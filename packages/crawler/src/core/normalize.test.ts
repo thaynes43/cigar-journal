@@ -179,3 +179,61 @@ describe("parsePackaging", () => {
     });
   });
 });
+
+// The second packaging source (#270, probe 2026-09-02). What is under test here
+// is what normalize is allowed to BELIEVE about a description — the packaging
+// vocabulary itself is @cj/domain's and unchanged.
+describe("normalizeListing — packaging from an OpenGraph description", () => {
+  const facts = (listing: { packaging: string | null; sticksPerPackage: number | null }) => ({
+    packaging: listing.packaging,
+    sticksPerPackage: listing.sticksPerPackage,
+  });
+  const og = (name: string, description: string) =>
+    facts(normalizeListing({ name, description }, [], "keywords-meta", "opengraph")!);
+  const jsonLd = (name: string, description: string) =>
+    facts(normalizeListing({ name, description }, [], "breadcrumbs")!);
+  const UNKNOWN = { packaging: null, sticksPerPackage: null };
+
+  it("reads the unit off a spec-line description when the name states none", () => {
+    // 2 Guys' own spec line, and the two box-priced shapes the probe sampled
+    // ($169.99 and $452.60) whose names carry no packaging token at all.
+    expect(og("Perdomo 30th Robusto SG S", "5 X 54 - Sun Grown - Single")).toEqual({
+      packaging: "single",
+      sticksPerPackage: 1,
+    });
+    expect(og("Liga Privada No9 Belicoso", "6 x 52 - Connecticut Broadleaf - Box of 24")).toEqual({
+      packaging: "box",
+      sticksPerPackage: 24,
+    });
+    expect(og("Rough Rider Toro Maduro", "6 x 50 - Maduro - 20 Count")).toEqual({
+      packaging: null,
+      sticksPerPackage: 20,
+    });
+  });
+
+  it("lets the name win wherever both state something", () => {
+    expect(og("Padron 1964 Anniversary Torpedo Box of 20", "5 x 50 - Maduro - Single")).toEqual({
+      packaging: "box",
+      sticksPerPackage: 20,
+    });
+  });
+
+  it("refuses a description that states no count — a sentence is not a spec line", () => {
+    // The vocabulary's standalone-container rule is right for a title and wrong
+    // for prose: neither of these is a statement that THIS listing is a box.
+    expect(og("Rough Rider Toro Maduro", "Ships in a cedar box.")).toEqual(UNKNOWN);
+    expect(og("Rough Rider Toro Maduro", "A rich maduro from the same box-pressed blend.")).toEqual(UNKNOWN);
+    expect(og("Rough Rider Toro Maduro", "")).toEqual(UNKNOWN);
+  });
+
+  it("never reads a JSON-LD vendor's description, whatever it says", () => {
+    expect(jsonLd("Rough Rider Toro Maduro", "6 x 50 - Maduro - Box of 20")).toEqual(UNKNOWN);
+    // The Fox listings, unchanged: their packaging is the name's, as it always
+    // was. `product-padron-box.html` carries the prose this rule exists for —
+    // "The full box of the same box-pressed Nicaraguan puro" — and its name
+    // states the box anyway; the other two state nothing and stay unknown.
+    expect(facts(normalize("product-padron-box.html")!)).toEqual({ packaging: "box", sticksPerPackage: 20 });
+    expect(facts(normalize("product-padron.html")!)).toEqual(UNKNOWN);
+    expect(facts(normalize("product-oliva.html")!)).toEqual(UNKNOWN);
+  });
+});
