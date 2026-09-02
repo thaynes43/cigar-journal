@@ -29,6 +29,21 @@ export { updateSmoke } from "./update-smoke.js";
 export { deleteSmoke } from "./delete-smoke.js";
 export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, getCigarOfferHistory, getCigarPricing, getCigarPriceHistory, browseCigars } from "./reads.js";
 
+// The packaging vocabulary the price surfaces share (DESIGN-005): which tier an
+// offer belongs to, what that tier is called, and the row order every surface
+// renders it in. Exported because the web groups the tier blocks itself — one
+// vocabulary, not a second copy of the labels in the app.
+export {
+  packagingTier,
+  compareOffersByTier,
+  TIER_SINGLE,
+  TIER_PACK,
+  TIER_BOX,
+  TIER_NOT_STATED,
+  type PackagingTier,
+  type OfferOrderFields,
+} from "./packaging-tier.js";
+
 // Anonymous reads for public journals (PRD-001 R7, ADR-004; issue #96). No
 // Principal — the visibility filter is the authorization, applied server-side.
 export { getPublicSmoke, queryPublicSmokes, publicJournalExists } from "./public-reads.js";

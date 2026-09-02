@@ -36,6 +36,7 @@ import type {
   CatalogCigar,
   CigarOffer,
   CigarPricing,
+  CigarPricingSingle,
   CigarPricePoint,
   OfferHistory,
   PriceType,
@@ -50,6 +51,7 @@ import { assessEnrichmentFields } from "./enrichment.js";
 import { validateQueryFilters } from "./validation.js";
 import { isUuid } from "./uuid.js";
 import { vendorDisplaysPricesSql, offerIsDisplayableSql } from "./offer-display.js";
+import { compareOffersByTier, packagingTier, TIER_SINGLE } from "./packaging-tier.js";
 import { decodeSmokeCursor, encodeSmokeCursor, afterSmokeCursor } from "./smoke-cursor.js";
 import { rankByIdentity, CANDIDATE_POOL } from "./name-heuristics.js";
 
@@ -882,27 +884,32 @@ async function latestSeries(deps: Deps, cigarId: string): Promise<SeriesRow[]> {
 }
 
 // The current market snapshot for a cigar: the newest observation per (source,
-// packaging) series, best per-stick first. Catalog-scoped, not owner-scoped —
-// market data is the same for every viewer, so no principal.
+// packaging) series, in the tier order a buyer thinks in (DESIGN-005 rule 2 —
+// single → packs → box → packaging not stated, best per-stick inside each).
+// Catalog-scoped, not owner-scoped — market data is the same for every viewer, so
+// no principal. The order is part of the payload: the web groups the rows into
+// tier blocks and get_offers hands the model the same sequence.
 export async function getCigarOffers(
   deps: Deps,
   args: { cigarId: string },
 ): Promise<CigarOffer[]> {
   const rows = await latestSeries(deps, args.cigarId);
-  return rows.map((row) => ({
-    vendor: row.source,
-    isRegistryVendor: Boolean(row.is_registry),
-    purchaseLinkout: Boolean(row.purchase_linkout),
-    price: row.price != null ? Number(row.price) : null,
-    currency: row.currency,
-    inStock: row.in_stock,
-    listingUrl: row.listing_url,
-    seenAt: new Date(row.seen_at).toISOString(),
-    packaging: row.packaging,
-    sticksPerPackage: row.sticks_per_package,
-    pricePerStick: row.price_per_stick_cents != null ? row.price_per_stick_cents / 100 : null,
-    priceType: row.price_type,
-  }));
+  return rows
+    .map((row) => ({
+      vendor: row.source,
+      isRegistryVendor: Boolean(row.is_registry),
+      purchaseLinkout: Boolean(row.purchase_linkout),
+      price: row.price != null ? Number(row.price) : null,
+      currency: row.currency,
+      inStock: row.in_stock,
+      listingUrl: row.listing_url,
+      seenAt: new Date(row.seen_at).toISOString(),
+      packaging: row.packaging,
+      sticksPerPackage: row.sticks_per_package,
+      pricePerStick: row.price_per_stick_cents != null ? row.price_per_stick_cents / 100 : null,
+      priceType: row.price_type,
+    }))
+    .sort(compareOffersByTier);
 }
 
 // The compact price history behind get_offers (PRD-003 R-MCP-2, ADR-009): span
@@ -971,11 +978,50 @@ function available(row: SeriesRow): boolean {
   return row.in_stock !== false;
 }
 
+// The figure a series shows: its per-stick when derivable, else the packaging
+// unit's price. For a single these are the same number, which is why bestSingle
+// can compare on it without caring which column carried it.
+function seriesAmount(row: SeriesRow): number | null {
+  if (row.price_per_stick_cents != null) return row.price_per_stick_cents / 100;
+  return row.price != null ? Number(row.price) : null;
+}
+
+// The cheapest current single (DESIGN-005 rule 4). Scoped to the single tier and
+// then in-stock-preferred WITHIN it, the same shape `lowest` uses over the whole
+// pool: an out-of-stock single is still what a stick costs at that shop, so it
+// answers rather than leaving the second half of the headline blank. Series are
+// already collapsed to their latest observation upstream, so a shop's older
+// price can never win over its current one — the stale-vs-fresh rule `lowest`
+// gets from latestSeries, unchanged.
+function bestSingleOf(rows: SeriesRow[]): CigarPricingSingle | null {
+  const singles = rows.filter(
+    (row) =>
+      packagingTier(row.packaging, row.sticks_per_package).order === TIER_SINGLE &&
+      seriesAmount(row) != null,
+  );
+  if (singles.length === 0) return null;
+  const stocked = singles.filter(available);
+  const pool = stocked.length > 0 ? stocked : singles;
+  const best = [...pool].sort(
+    (a, b) =>
+      seriesAmount(a)! - seriesAmount(b)! ||
+      new Date(b.seen_at).getTime() - new Date(a.seen_at).getTime(),
+  )[0]!;
+  return {
+    amount: seriesAmount(best)!,
+    currency: best.currency,
+    vendor: best.source,
+    seenAt: new Date(best.seen_at).toISOString(),
+  };
+}
+
 // The compact pricing summary (ADR-009): the best CURRENT per-stick (in-stock
 // preferred, ties toward singles) with its packaging, else the lowest package
-// price with packaging; plus distinct-source and observation counts and the 30d
-// staleness flag. Null when the cigar has no observations. The per-stick figure
-// never travels without its packaging — the display rule is enforced by shape.
+// price with packaging; the cheapest single alongside it (DESIGN-005 — the
+// headline is two facts, not one); plus distinct-source and observation counts
+// and the 30d staleness flag. Null when the cigar has no observations. The
+// per-stick figure never travels without its packaging — the display rule is
+// enforced by shape.
 export async function getCigarPricing(deps: Deps, cigarId: string): Promise<CigarPricing | null> {
   const rows = await latestSeries(deps, cigarId);
   if (rows.length === 0) return null;
@@ -1041,6 +1087,7 @@ export async function getCigarPricing(deps: Deps, cigarId: string): Promise<Ciga
 
   return {
     lowest,
+    bestSingle: bestSingleOf(rows),
     currency: best?.currency ?? rows[0]!.currency,
     observedAt,
     sourceCount,

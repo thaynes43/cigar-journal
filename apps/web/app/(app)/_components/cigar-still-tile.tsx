@@ -45,8 +45,13 @@ export function CigarStillTile({
   // Per-stick price-at-a-glance (DESIGN-003 §Tile, R-PRICE-2): shown only when the
   // best offer derives a per-stick figure; a package-only offer carries none, so
   // the tile shows nothing rather than a misleading number (DESIGN-002 honesty).
+  // `from` when that figure came out of a multi-stick package (DESIGN-005 rule 3):
+  // $10.50 /stick means "if you buy the box", and a bare figure is only ever what
+  // one stick costs on its own.
   const perStickPrice =
-    cigar.price && cigar.price.perStick ? `$${cigar.price.amount.toFixed(2)} /stick` : null;
+    cigar.price && cigar.price.perStick
+      ? `${(cigar.price.sticksPerPackage ?? 1) > 1 ? "from " : ""}$${cigar.price.amount.toFixed(2)} /stick`
+      : null;
   const dims =
     cigar.vitola.lengthInches != null && cigar.vitola.ringGauge != null
       ? `${cigar.vitola.lengthInches}" × ${cigar.vitola.ringGauge}`
