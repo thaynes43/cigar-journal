@@ -13,6 +13,12 @@ export interface NormalizedListing {
   name: string;
   priceCents: number | null;
   currency: string | null;
+  // The vendor published a price and it parsed to zero (or below) — see the guard
+  // in `normalizeListing`. `priceCents` is null on such a listing, exactly as it
+  // is when the vendor published nothing, and this is the difference: "no price
+  // stated" vs "a placeholder stated where the price goes". The probe fails a
+  // vendor on it; nothing else needs to care.
+  priceIsPlaceholder: boolean;
   inStock: boolean | null;
   imageUrl: string | null;
   sku: string | null;
@@ -120,12 +126,23 @@ export function normalizeListing(
 
   const offer = firstOf(product.offers);
   const { cents, currency } = priceFromOffer(offer);
+  // A JSON-LD price of zero is a PLACEHOLDER, not a price. Vendor-neutral because
+  // the platform behaviour is: a GROUPED/parent product has no single price, so
+  // the parent node publishes `"0.00"` and the real figures live per variant in
+  // HTML. Small Batch (live 2026-09-02, #270) does exactly this on 20 of 20 cigar
+  // pages, and a seed there would have written ~8,000 offers at $0.00 — not a
+  // missing price but a false one, which price-at-a-glance and every cheapest-per-
+  // stick sort would have ranked first. Unknown is the honest reading; the rest of
+  // the listing (name, sku, stock, image) is good and is carried through, and an
+  // offer row with a null price still records availability.
+  const priceIsPlaceholder = cents != null && cents <= 0;
   const packaging = parsePackaging(name);
 
   return {
     name,
-    priceCents: cents,
+    priceCents: priceIsPlaceholder ? null : cents,
     currency,
+    priceIsPlaceholder,
     inStock: availabilityToStock(offer?.availability),
     imageUrl: imageUrl(product.image),
     sku: typeof product.sku === "string" ? product.sku : null,

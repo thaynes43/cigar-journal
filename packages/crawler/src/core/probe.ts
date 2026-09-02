@@ -44,6 +44,10 @@ export interface ProbeProductSample {
   name: string | null;
   priceCents: number | null;
   currency: string | null;
+  // The vendor published a price of zero here (normalize.ts drops it to unknown).
+  // A FAILURE, not a note: a crawl of such a vendor writes an observation per
+  // listing with no price in it.
+  priceIsPlaceholder: boolean;
   // The taxonomy the page stated, in the shape the adapter's `categorySource`
   // names — a breadcrumb trail, or the vendor's keywords tag list.
   category: string[];
@@ -87,7 +91,7 @@ export interface ProbeResult {
   // names where the products live when the gate admits nothing.
   pathShapes: { accepted: PathCensus; rejected: PathCensus };
   products: ProbeProductSample[];
-  productSummary: { sampled: number; parsed: number; cigars: number };
+  productSummary: { sampled: number; parsed: number; cigars: number; placeholderPrices: number };
   verdict: "ok" | "needs-attention";
   notes: string[];
 }
@@ -223,6 +227,7 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
         name: listing?.name ?? null,
         priceCents: listing?.priceCents ?? null,
         currency: listing?.currency ?? null,
+        priceIsPlaceholder: listing?.priceIsPlaceholder ?? false,
         category,
         isCigar: listing ? isCigarListing(listing, adapter) : false,
         parsed: listing !== null,
@@ -236,10 +241,36 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
     sampled: products.length,
     parsed: products.filter((p) => p.parsed).length,
     cigars: products.filter((p) => p.isCigar).length,
+    placeholderPrices: products.filter((p) => p.priceIsPlaceholder).length,
   };
+  // A vendor whose structured markup publishes a zero price is NOT crawlable for offers,
+  // whatever else parsed. Small Batch (#270) cleared every other bar — robots,
+  // enumeration, three clean parses — while publishing "0.00" on every cigar, so
+  // an enablement on this verdict would have written ~8,000 priceless offer rows
+  // and called the run healthy. Named per URL, because the fix is per-platform.
+  for (const product of products.filter((p) => p.priceIsPlaceholder)) {
+    notes.push(
+      `sample product ${product.url} publishes a PLACEHOLDER price of 0 — offers would carry no price. ` +
+        `Grouped/variant product: the real price is not in the structured markup.`,
+    );
+  }
+  // …and a vendor none of whose parsed samples is a cigar is not crawlable for
+  // the catalogue either. The old bar stopped at `parsed`, so Small Batch's
+  // `/cigar/i` category gate — which matches nothing in a brand-first taxonomy —
+  // read as a pass while it discarded every listing at `isCigarListing`.
+  if (productSummary.parsed > 0 && productSummary.cigars === 0) {
+    notes.push(
+      "no sampled product passed the cigar gate — the category patterns do not match this vendor's " +
+        "taxonomy (see the `category=` line on each sample above).",
+    );
+  }
   const requiredParses = Math.min(REQUIRED_PARSED_SAMPLES, productSummary.sampled);
   const verdict: ProbeResult["verdict"] =
-    productPathAllowed && productUrls.length > 0 && productSummary.parsed >= requiredParses
+    productPathAllowed &&
+    productUrls.length > 0 &&
+    productSummary.parsed >= requiredParses &&
+    productSummary.cigars >= 1 &&
+    productSummary.placeholderPrices === 0
       ? "ok"
       : "needs-attention";
 
@@ -298,15 +329,20 @@ export function formatProbe(result: ProbeResult): string {
   );
   lines.push(
     `  products: sampled=${result.productSummary.sampled} parsed=${result.productSummary.parsed} ` +
-      `cigars=${result.productSummary.cigars}`,
+      `cigars=${result.productSummary.cigars} placeholder-prices=${result.productSummary.placeholderPrices}`,
   );
   for (const product of result.products) {
     lines.push(
       `    ${product.parsed ? "ok  " : "fail"} ${product.url}`,
       `      status=${product.status} hasProduct=${product.hasProduct} isCigar=${product.isCigar} ` +
         `name=${product.name ?? "-"} ` +
-        `price=${product.priceCents != null ? (product.priceCents / 100).toFixed(2) : "-"} ` +
+        `price=${product.priceIsPlaceholder ? "0.00 PLACEHOLDER" : product.priceCents != null ? (product.priceCents / 100).toFixed(2) : "-"} ` +
         `${product.currency ?? ""}`.trimEnd(),
+      // The taxonomy the category gate actually saw. Free (already parsed) and the
+      // one line that identifies a `cigars=0` as a gate/vendor mismatch rather
+      // than an empty catalogue — Small Batch's `SHOP BY BRAND / …` trail names
+      // no "cigars" anywhere, which no other field on this page would reveal.
+      `      category=${product.category.length > 0 ? product.category.join(" / ") : "-"}`,
     );
   }
   if (result.products.length === 0) lines.push("    (none sampled)");
