@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { migrate } from "../scripts/migrate.js";
-import { createDatabase, type Database } from "../index.js";
+import { createDatabase, swallowShutdownErrors, type Database } from "../index.js";
 
 // Test harness: a throwaway Postgres 16 instance from the `embedded-postgres`
 // binary (no Docker in this environment), migrated to head. Real Postgres —
@@ -36,6 +36,60 @@ function freePort(): Promise<number> {
 // reports skipped). Retrying with a fresh port and data directory costs nothing
 // on the happy path and removes the failure class.
 const START_ATTEMPTS = 5;
+
+// How long a cluster gets to answer SIGINT before it is taken by force. Generous,
+// because a loaded runner shutting down thirty Postgres instances at once is slow
+// and killing a healthy one early would leave a half-written data directory.
+const STOP_TIMEOUT_MS = 20_000;
+
+// Only what `stopSafely` needs, so its own test can hand it a stub. `process` is
+// `private` on EmbeddedPostgres, hence the cast at the call sites: reading a
+// child's exit state is the whole fix, and there is no public accessor for it.
+export interface StoppableCluster {
+  stop: () => Promise<void>;
+  process?: {
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill: (signal?: NodeJS.Signals) => boolean;
+  };
+}
+
+// `EmbeddedPostgres.stop()` CAN NEVER RETURN once its child is already gone.
+//
+// It waits on an 'exit' event that it registers AFTER sending SIGINT — and on a
+// ChildProcess that has already exited, that event has fired and will not fire
+// again, so the promise never settles. The retry path below reaches exactly that
+// state: `start()` rejects from its own `close` handler, which means the process
+// is gone by definition. A `beforeAll` that loses the port race then hangs on the
+// cleanup rather than retrying, and reports the whole FILE as failed at vitest's
+// 60 s hook timeout — the flake seen on
+// apps/web/app/api/photos/[id]/thumb/route.test.ts.
+//
+// So ask the child before waiting on it, and bound the wait either way: a cluster
+// that will not answer SIGINT must not hold a hook open either. Exported for its
+// own test.
+export async function stopSafely(
+  cluster: StoppableCluster,
+  timeoutMs: number = STOP_TIMEOUT_MS,
+): Promise<void> {
+  const child = cluster.process;
+  // Never started, or already dead: there is nothing to wait for, and waiting is
+  // the bug.
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = await Promise.race([
+    cluster.stop().then(
+      () => false,
+      () => false,
+    ),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (timedOut) child.kill("SIGKILL");
+}
 
 // A throwaway Postgres 16 instance with NO migrations applied — the empty
 // substrate. Tests that need to observe a specific migration (e.g. the 0008
@@ -73,8 +127,13 @@ export async function startRawTestPostgres(): Promise<TestPostgres> {
       await pg.initialise();
       await pg.start();
     } catch (error) {
-      lastError = error;
-      await pg.stop().catch(() => {});
+      // `start()` rejects with NO argument — its `close` handler calls a bare
+      // `reject()` — so the honest report of a lost port race is a message this
+      // harness writes, not the `undefined` the library hands over.
+      lastError =
+        error ??
+        new Error(`embedded Postgres exited before it was ready (port ${port} was probably taken)`);
+      await stopSafely(pg as unknown as StoppableCluster);
       rmSync(dir, { recursive: true, force: true });
       continue;
     }
@@ -82,25 +141,22 @@ export async function startRawTestPostgres(): Promise<TestPostgres> {
     const url = `postgresql://postgres:postgres@127.0.0.1:${port}/postgres`;
     const { db, pool } = createDatabase(url);
 
-    // Shutting the server down terminates any client the pool still holds, and
-    // node-postgres surfaces that as an 'error' event on the POOL. `createDatabase`
-    // attaches no listener (production pools outlive the server), and an 'error'
-    // event with no listener is an UNHANDLED error — which fails the whole vitest
-    // process even though every test passed. That is the standing CI flake (#174):
-    // the job printed "66 files / 932 tests passed" and still exited 1 on a single
-    // pg 57P01 "terminating connection due to administrator command".
+    // Shutting the server down terminates any connection the pool still holds, and
+    // node-postgres surfaces that as an 'error' EVENT — on the pool for an idle
+    // client, on the CLIENT ITSELF for one that is checked out. An 'error' event
+    // with no listener is an UNHANDLED error, which fails the whole vitest process
+    // even though every test passed. That is the standing CI flake (#174): the job
+    // printed "66 files / 932 tests passed" and still exited 1 on a single pg 57P01
+    // "terminating connection due to administrator command".
     //
     // The race is inherent to tearing a server down under a live pool, so the fix
     // is to expect it rather than to try to order it away: swallow the shutdown
-    // class, and once `stop()` has been entered swallow everything, since nothing
-    // a dying server says is a test result. Anything else, at any other time, is
-    // still reported — loudly, but without killing an otherwise green run.
+    // class on both surfaces (pool-errors.ts), and once `stop()` has been entered
+    // swallow everything, since nothing a dying server says is a test result.
+    // Anything else, at any other time, is still reported — loudly, but without
+    // killing an otherwise green run.
     let stopping = false;
-    pool.on("error", (error: unknown) => {
-      const code = (error as { code?: string } | null)?.code;
-      if (stopping || code === "57P01" || code === "ECONNRESET" || code === "EPIPE") return;
-      console.error("[embedded-pg] unexpected pool error", error);
-    });
+    swallowShutdownErrors(pool, { label: "embedded-pg", isTearingDown: () => stopping });
 
     return {
       db,
@@ -108,7 +164,10 @@ export async function startRawTestPostgres(): Promise<TestPostgres> {
       stop: async () => {
         stopping = true;
         await pool.end().catch(() => {});
-        await pg.stop().catch(() => {});
+        // Not `pg.stop()`: a server that died on its own during the file — OOM,
+        // a crashed backend — would otherwise hang this hook to its timeout and
+        // report a passing file as failed.
+        await stopSafely(pg as unknown as StoppableCluster);
         rmSync(dir, { recursive: true, force: true });
       },
     };

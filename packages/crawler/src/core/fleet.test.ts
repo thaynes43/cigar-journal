@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
-import { createDatabase, vendors, crawlRuns, type Pool } from "@cj/db";
+import { createDatabase, swallowShutdownErrors, vendors, crawlRuns, type Pool } from "@cj/db";
 import { runFleet, selectEnabledFleet } from "./fleet.js";
 import type { IngestResult } from "./ingest.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
@@ -25,10 +25,20 @@ describe("fleet walk (embedded Postgres)", () => {
     // The lane lock is taken on a POOL connection (pg_try_advisory_lock is
     // session-scoped), so the fleet needs a real pool rather than the harness db.
     pool = createDatabase(pg.url).pool;
+    // A pool of our own is a pool the harness does not guard. `createDatabase`
+    // attaches no error listener — production pools outlive their server — and an
+    // 'error' event with no listener is an UNHANDLED error that exits vitest 1 on
+    // a green run. This file is the one that holds a CHECKED-OUT client (the lane
+    // lock, and the `holder` below), which is the half `pool.on('error')` alone
+    // never sees. Same discipline as the harness, from the same helper.
+    swallowShutdownErrors(pool, { label: "fleet.test" });
   }, 60_000);
 
   afterAll(async () => {
-    await pool?.end();
+    // Order matters as much as the swallow: the pool goes away BEFORE the server
+    // it is connected to. `.catch` so a pool that will not end still cannot strand
+    // an embedded Postgres.
+    await pool?.end().catch(() => {});
     await pg?.stop();
   });
 

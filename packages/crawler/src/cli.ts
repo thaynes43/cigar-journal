@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
-import { createDatabase, vendors, type Database } from "@cj/db";
+import { createDatabase, swallowShutdownErrors, vendors, type Database } from "@cj/db";
 import { photoStorageFromEnv } from "@cj/photos";
 import { getAdapter, adapterSlugs } from "./adapters/index.js";
 import { createFetcher } from "./core/fetcher.js";
@@ -332,6 +332,28 @@ function formatFleetSummary(result: FleetResult, photosEnabled: boolean, dryRun:
   return lines.join("\n");
 }
 
+// EVERY POOL THIS CLI OPENS, GUARDED THE SAME WAY (@cj/db pool-errors.ts).
+//
+// A Postgres that goes away mid-run — a CNPG failover, a rolling upgrade, an
+// operator's `pg_ctl stop` — terminates the connections this process holds, and
+// node-postgres raises that as an 'error' EVENT: on the pool for an idle client,
+// on the CLIENT ITSELF for one that is checked out. `withVendorLaneLock` holds a
+// checked-out client for the WHOLE length of a crawl, so that second surface is
+// this binary's normal state rather than a corner.
+//
+// Unlistened, an 'error' event kills the process — and a crawler killed mid-run
+// closes no `crawl_runs` row, leaving it stranded `running` until the #155 sweep
+// reclaims it the following night. Swallowed, the same failure still surfaces as
+// the RUN's error: pg errors every in-flight query BEFORE it emits, so
+// `runIngest`'s bracket closes the row `failed`, the fleet's per-vendor catch
+// moves on to the next shop, and an uncaught one still exits 1 through `main`.
+// Proved against a server that really goes away in lane-lock-shutdown.test.ts.
+function openDatabase(databaseUrl: string): ReturnType<typeof createDatabase> {
+  const handle = createDatabase(databaseUrl);
+  swallowShutdownErrors(handle.pool, { label: "crawl" });
+  return handle;
+}
+
 // --all-enabled: the whole enabled fleet, serially, in tier order (ADR-015,
 // closes #156). Each vendor gets its OWN fetcher — politeness and the page cap are
 // per-adapter, and one shared limiter would spread one vendor's manners over
@@ -339,7 +361,7 @@ function formatFleetSummary(result: FleetResult, photosEnabled: boolean, dryRun:
 // ordinary runs in sequence.
 async function runFleetMode(args: CrawlArgs, mode: CrawlMode, databaseUrl: string): Promise<number> {
   const storage = photoStorageFromEnv();
-  const { db, pool } = createDatabase(databaseUrl);
+  const { db, pool } = openDatabase(databaseUrl);
   try {
     const result = await runFleet(db, pool, {
       mode,
@@ -397,7 +419,7 @@ async function runImportApprovedMode(filePath: string, apply: boolean, databaseU
     return 2;
   }
   const stores = parseApprovedWiki(content);
-  const { db, pool } = createDatabase(databaseUrl);
+  const { db, pool } = openDatabase(databaseUrl);
   try {
     const diff = await diffApproved(db, stores);
     console.log(`parsed ${stores.length} store(s) from the wiki snapshot.`);
@@ -436,7 +458,7 @@ async function runBrandImagesMode(args: CrawlArgs, databaseUrl: string): Promise
   // so a brand-image run is indistinguishable from any other crawl in its manners.
   const fetcher = createFetcher();
   const storage = args.probe ? null : photoStorageFromEnv();
-  const { db, pool } = createDatabase(databaseUrl);
+  const { db, pool } = openDatabase(databaseUrl);
   try {
     if (args.probe) {
       const report = await probeBrandTaxonomy(
@@ -553,7 +575,7 @@ async function main(): Promise<number> {
   }
 
   const storage = photoStorageFromEnv();
-  const { db, pool } = createDatabase(databaseUrl);
+  const { db, pool } = openDatabase(databaseUrl);
   const mode = args.mode;
   try {
     const vendorId = await resolveVendor(db, adapter);

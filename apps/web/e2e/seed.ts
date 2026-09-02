@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   createDatabase,
+  swallowShutdownErrors,
   blendBlenders,
   blenders,
   blends,
@@ -207,7 +208,12 @@ export async function seed(opts: {
   secret: string;
 }): Promise<{ handoff: Handoff; adminState: StorageState; nonAdminState: StorageState }> {
   const host = new URL(opts.baseURL).hostname;
+  // The e2e Postgres is torn down as soon as the run ends, and a pool that is
+  // still holding connections when it goes raises node-postgres' 'error' EVENT —
+  // unlistened, that takes the Playwright global setup down with it and reports a
+  // green suite as a harness crash (@cj/db pool-errors.ts).
   const { db, pool } = createDatabase(opts.databaseUrl);
+  swallowShutdownErrors(pool, { label: "e2e-seed" });
   const deps: Deps = { db, now: () => new Date() };
   const auth = createAuth({
     db,

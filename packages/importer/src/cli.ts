@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { eq } from "drizzle-orm";
-import { createDatabase, users, type Database } from "@cj/db";
+import { createDatabase, swallowShutdownErrors, users, type Database } from "@cj/db";
 import type { Deps, Principal } from "@cj/domain";
 import { runImport } from "./run.js";
 import { formatReport } from "./report.js";
@@ -147,6 +147,18 @@ function resolveDatabaseUrl(explicit: string | null): string | null {
   return explicit ?? process.env.DATABASE_URL ?? null;
 }
 
+// An import is a long single pass over the whole archive, so it is exactly the
+// job most likely to be running when Postgres fails over. node-postgres raises a
+// lost connection as an 'error' EVENT — on the pool, or on a checked-out client —
+// and unlistened that kills the process mid-import. Swallowed, the in-flight
+// query still rejects and the run still reports and exits non-zero (@cj/db
+// pool-errors.ts).
+function openDatabase(databaseUrl: string): ReturnType<typeof createDatabase> {
+  const handle = createDatabase(databaseUrl);
+  swallowShutdownErrors(handle.pool, { label: "import" });
+  return handle;
+}
+
 // Resolve the owner by email, refusing (exit 1) if unknown. Returns the deps +
 // principal ready for a run, or null once it has printed the reason.
 async function resolveOwner(
@@ -190,7 +202,7 @@ async function runArchive(argv: string[]): Promise<number> {
     return 2;
   }
 
-  const { db, pool } = createDatabase(databaseUrl);
+  const { db, pool } = openDatabase(databaseUrl);
   try {
     const owner = await resolveOwner(db, args.userEmail);
     if (!owner) return 1;
@@ -236,7 +248,7 @@ async function runLedger(argv: string[]): Promise<number> {
     return 2;
   }
 
-  const { db, pool } = createDatabase(databaseUrl);
+  const { db, pool } = openDatabase(databaseUrl);
   try {
     const owner = await resolveOwner(db, args.userEmail);
     if (!owner) return 1;
