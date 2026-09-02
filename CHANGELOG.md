@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.1](https://github.com/thaynes43/cigar-journal/compare/v0.39.0...v0.39.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **crawler:** probe-driven corrections — Montefortuna singles, J.J. Fox humidification, product-child probe bias, OpenGraph packaging ([#270](https://github.com/thaynes43/cigar-journal/issues/270)) ([#278](https://github.com/thaynes43/cigar-journal/issues/278)) ([23298c3](https://github.com/thaynes43/cigar-journal/commit/23298c3151c3b7cd4f189e7216c89d4bd84ba971))
+
 ## [0.39.0](https://github.com/thaynes43/cigar-journal/compare/v0.38.0...v0.39.0) (2026-09-02)
 
 
