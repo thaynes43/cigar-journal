@@ -12,6 +12,13 @@ import { DomainError, type ErrorCode } from "@cj/domain";
 export const PHOTO_PRIVATE_CACHE = "private, max-age=31536000, immutable";
 export const PHOTO_PUBLIC_CACHE = "public, max-age=300, must-revalidate";
 
+// A photo drop's thumbnails (ADR-014). The token rides the URL, so the URL is
+// the credential: anything that caches these bytes caches the authorization with
+// them. `no-store` is the only honest answer — the page is a handful of
+// thumbnails opened once on a phone, and nothing about it is worth a cache that
+// could outlive the link.
+export const PHOTO_DROP_CACHE = "private, no-store";
+
 // One URL, two variants: the same photo id serves owner bytes or public bytes
 // depending on the session cookie. Every response on those routes carries this,
 // so a shared cache can never hand one viewer's variant — or its cache scope —

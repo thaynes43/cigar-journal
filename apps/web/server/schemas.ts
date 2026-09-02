@@ -79,6 +79,11 @@ export const saveSmokeSchema = z.object({
   assessment: assessmentInput.optional(),
   journal: journalInput.nullish(),
   consumption: consumptionInput.optional(),
+  // The photo drop this save claims (ADR-014). EXPLICIT and never inferred — a
+  // save without it leaves every open drop untouched — so the field exists here
+  // only to be passed through; no web form sends one yet (offering the open drop
+  // on the record form is the ADR's own follow-up).
+  photoDropId: z.string().optional(),
 });
 
 export const updateSmokeSchema = z.object({
