@@ -1,5 +1,6 @@
-import { eq } from "drizzle-orm";
-import { auditLog, idempotencyKeys, smokes, smokeProgression } from "@cj/db";
+import { and, eq } from "drizzle-orm";
+import { auditLog, idempotencyKeys, smokePhotos, smokes, smokeProgression } from "@cj/db";
+import type { PhotoStorage } from "@cj/photos";
 import type { Deps, Principal, Tx } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
 import type { DeleteSmokeInput, DeleteSmokeResult } from "./types.js";
@@ -11,8 +12,12 @@ import { smokeSnapshot } from "./mapping.js";
 // delete tool). The smoke, its progression, and its retry keys go; one audit
 // tombstone (actor "web") preserves the full before-snapshot. @cj/domain is the
 // single writer, so no other surface reaches this.
+//
+// `storage` is null when photos are unconfigured cluster-wide, which skips the
+// object sweep below — as everywhere else, the journal works without a bucket.
 export async function deleteSmoke(
   deps: Deps,
+  storage: PhotoStorage | null,
   principal: Principal,
   input: DeleteSmokeInput,
 ): Promise<DeleteSmokeResult> {
@@ -21,7 +26,33 @@ export async function deleteSmoke(
   // refuses before opening a transaction it would only have to unwind
   // (./uuid.ts).
   if (!isUuid(input.smokeId)) throw new SmokeNotFoundError();
-  return deps.db.transaction((tx) => deleteWithinTx(tx, principal, input));
+
+  // The keys are read BEFORE the transaction because the rows do not survive it:
+  // smoke_photos cascades with the smoke, and the row is the only record of where
+  // the bytes live. Owner-scoped exactly as the delete itself is, so a cross-user
+  // smoke yields nothing here and is refused below without a sweep ever running.
+  const doomed = storage
+    ? await deps.db
+        .select({ objectKey: smokePhotos.objectKey, thumbKey: smokePhotos.thumbKey })
+        .from(smokePhotos)
+        .where(and(eq(smokePhotos.smokeId, input.smokeId), eq(smokePhotos.userId, principal.userId)))
+    : [];
+
+  const result = await deps.db.transaction((tx) => deleteWithinTx(tx, principal, input));
+
+  // AFTER the commit, best-effort (#264): ADR-007 puts object cleanup in
+  // @cj/domain, not the DB, and until now a deleted smoke left every
+  // `smoke/<id>/…` and claimed `drop/<dropId>/…` object in the bucket forever.
+  // The ordering is removeSmokePhoto's and for its reason — a failed delete must
+  // leave the photos servable, and an orphaned object is the cheaper failure.
+  if (storage) {
+    for (const photo of doomed) {
+      await storage.delete(photo.objectKey).catch(() => {});
+      await storage.delete(photo.thumbKey).catch(() => {});
+    }
+  }
+
+  return result;
 }
 
 async function deleteWithinTx(

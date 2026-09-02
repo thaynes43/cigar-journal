@@ -70,6 +70,11 @@ describe("photo drops", () => {
     return saved.smoke.smokeId;
   }
 
+  async function auditRows(action: string) {
+    const rows = await h.deps.db.select().from(auditLog).where(eq(auditLog.userId, user.userId));
+    return rows.filter((r) => r.action === action);
+  }
+
   async function auditActions(dropId: string): Promise<string[]> {
     const rows = await h.deps.db.select().from(auditLog).where(eq(auditLog.userId, user.userId));
     return rows
@@ -169,6 +174,39 @@ describe("photo drops", () => {
     await expect(
       setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: newRequestId(), kind: "burn" }),
     ).rejects.toBeInstanceOf(PhotoNotFoundError);
+  });
+
+  it("audits a kind change staged and attached, and writes nothing for a no-op", async () => {
+    // #267. Every other mutation on these two tables leaves a row; a change made
+    // through the anonymous link is the one that most needs to be traceable.
+    const drop = await openPhotoDrop(h.deps, storage, user);
+    const staged = await stagePhotoByToken(h.deps, storage, { token: drop.token, image: image() });
+
+    await setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: staged.photoId, kind: "band" });
+    await setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: staged.photoId, kind: "band" });
+
+    const stagedRows = await auditRows("staged_photo.kind");
+    expect(stagedRows).toHaveLength(1);
+    // The drop's owner, attributed to no credential — the writer held a token.
+    expect(stagedRows[0]!.actor).toBe("web");
+    expect(stagedRows[0]!.clientId).toBeNull();
+    expect(stagedRows[0]!.smokeId).toBeNull();
+    expect(stagedRows[0]!.before).toEqual({ photoId: staged.photoId, kind: "other" });
+    expect(stagedRows[0]!.after).toEqual({ photoId: staged.photoId, kind: "band" });
+
+    // The same photo after the claim: the row lives on smoke_photos now, so the
+    // action changes and the audit row can finally name the smoke.
+    const smokeId = await newSmoke();
+    await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+    await setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: staged.photoId, kind: "burn" });
+    await setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: staged.photoId, kind: "burn" });
+
+    const attachedRows = await auditRows("smoke_photo.kind");
+    expect(attachedRows).toHaveLength(1);
+    expect(attachedRows[0]!.smokeId).toBe(smokeId);
+    expect(attachedRows[0]!.before).toEqual({ photoId: staged.photoId, kind: "band" });
+    expect(attachedRows[0]!.after).toEqual({ photoId: staged.photoId, kind: "burn" });
+    expect(await auditRows("staged_photo.kind")).toHaveLength(1);
   });
 
   it("removes a staged photo with its objects and a tombstone", async () => {
@@ -387,7 +425,7 @@ describe("photo drops", () => {
     await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
     expect((await getPhotoDropByToken(h.deps, { token: drop.token })).status).toBe("attached");
 
-    await deleteSmoke(h.deps, user, { smokeId });
+    await deleteSmoke(h.deps, storage, user, { smokeId });
 
     // photo_drops.smoke_id is ON DELETE SET NULL: claimed with no smoke is closed.
     const view = await getPhotoDropByToken(h.deps, { token: drop.token });

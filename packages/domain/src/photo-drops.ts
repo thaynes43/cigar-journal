@@ -470,28 +470,62 @@ export async function stagePhotoByToken(
   }
 }
 
-// Reclassify one of the drop's photos, staged or already on the smoke.
+// Reclassify one of the drop's photos, staged or already on the smoke. The update
+// and its audit row go in ONE transaction, as every other mutation on these two
+// tables does (#267): the writer being an anonymous token holder is a reason to
+// record the change, not to skip it. Re-selecting the kind already stored still
+// returns the view but writes nothing — a row whose before equals its after says
+// nothing about the photo. Both rows are attributed to the drop's OWNER with no
+// client, exactly as stagePhotoByToken attributes its own writes: the token is
+// the authorization, so there is no principal and no credential to name.
 export async function setPhotoDropPhotoKind(
   deps: Deps,
   args: SetPhotoDropPhotoKindInput,
 ): Promise<PhotoDropPhotoView> {
   const drop = await loadDropByToken(deps, args.token);
   const ref = await resolveDropPhoto(deps, drop, args.photoId);
+  const before = ref.row.kind;
 
   if (ref.where === "staged") {
-    const updated = await deps.db
-      .update(stagedSmokePhotos)
-      .set({ kind: args.kind })
-      .where(eq(stagedSmokePhotos.id, ref.row.id))
-      .returning();
-    return toStagedView(updated[0]!);
+    if (before === args.kind) return toStagedView(ref.row);
+    return deps.db.transaction(async (tx) => {
+      const updated = await tx
+        .update(stagedSmokePhotos)
+        .set({ kind: args.kind })
+        .where(eq(stagedSmokePhotos.id, ref.row.id))
+        .returning();
+      await tx.insert(auditLog).values({
+        userId: drop.userId,
+        ...auditActor(undefined, "web"),
+        action: "staged_photo.kind",
+        // Nothing to point at: a staged photo is bound to the drop, not a smoke.
+        smokeId: null,
+        before: { photoId: ref.row.id, kind: before },
+        after: { photoId: ref.row.id, kind: args.kind },
+        correlationId: null,
+      });
+      return toStagedView(updated[0]!);
+    });
   }
-  const updated = await deps.db
-    .update(smokePhotos)
-    .set({ kind: args.kind })
-    .where(eq(smokePhotos.id, ref.row.id))
-    .returning();
-  return toAttachedView(updated[0]!);
+
+  if (before === args.kind) return toAttachedView(ref.row);
+  return deps.db.transaction(async (tx) => {
+    const updated = await tx
+      .update(smokePhotos)
+      .set({ kind: args.kind })
+      .where(eq(smokePhotos.id, ref.row.id))
+      .returning();
+    await tx.insert(auditLog).values({
+      userId: drop.userId,
+      ...auditActor(undefined, "web"),
+      action: "smoke_photo.kind",
+      smokeId: ref.row.smokeId,
+      before: { photoId: ref.row.id, kind: before },
+      after: { photoId: ref.row.id, kind: args.kind },
+      correlationId: null,
+    });
+    return toAttachedView(updated[0]!);
+  });
 }
 
 // Take one photo back out of the drop — the remedy the ADR relies on when two
