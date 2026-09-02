@@ -11,15 +11,17 @@ before building or enabling any adapter.**
 | Vendor | Platform | Structured path | Verdict |
 |---|---|---|---|
 | Fox Cigar | WooCommerce | sitemap + JSON-LD Product | caution — softest target, crawl gently |
-| 2 Guys Cigars | WebSell/NitroSell | sitemap (products are ROOT-LEVEL slugs ending in the NitroSell product code) | live-read 2026-09-01 (#217), the fullest one yet: sitemap = 1 root + 4,888 one-segment slugs + 1,467 `/store/go/registry/<n>/`, nothing else. 3,841 of the slugs end in `-<digits>` (= `og:upc`) and are products; the other 1,047 are landing pages or 404s. Gate is Mode B — 1 segment, minus `/store/` and minus anything without a product code. robots: two `*` groups, `Crawl-delay: 5` (honored via `minIntervalMs`), only `/store/filtered/` disallowed. **Blocker is now the PARSER, not the gate: this vendor serves no `application/ld+json` anywhere** — product data lives in OpenGraph (`og:type=product`, `product:price:amount`, `og:upc`, `og:brand`) plus a bare `itemtype="schema.org/Product"`, and product pages carry no category breadcrumb. `crawl_enabled=false` until an OG/microdata extractor exists and an ADR rules it acceptable |
+| 2 Guys Cigars | WebSell/NitroSell | sitemap (products are ROOT-LEVEL slugs ending in the NitroSell product code) | live-read 2026-09-01 (#217), the fullest one yet: sitemap = 1 root + 4,888 one-segment slugs + 1,467 `/store/go/registry/<n>/`, nothing else. 3,841 of the slugs end in `-<digits>` (= `og:upc`) and are products; the other 1,047 are landing pages or 404s. Gate is Mode B — 1 segment, minus `/store/` and minus anything without a product code. robots: two `*` groups, `Crawl-delay: 5` (honored via `minIntervalMs`), only `/store/filtered/` disallowed. This vendor serves no `application/ld+json` anywhere — product data lives in OpenGraph (`og:type=product`, `product:price:amount`, `og:availability`, `og:upc`, `og:brand`) plus a bare `itemtype="schema.org/Product"`, and product pages carry no category breadcrumb. **Parser blocker RESOLVED 2026-09-02 (#252)**: the adapter declares `productMarkup: "opengraph"` + `categorySource: "keywords-meta"` (the `<meta name="keywords">` list carries a literal `Cigars` token; a page with no tags is refused), and the live fixtures parse. `crawl_enabled=false` until an in-cluster probe passes the #179 bar on that build (`product-locs` 3,841, `parsed>=2`, `cigars>=1`) |
 | Cigars International | custom (STG) + reCAPTCHA/Cloudflare | sitemap likely | **avoid** — active bot defenses; sister STG sites' ToS explicitly ban scraping |
 | Small Batch Cigar | unknown (~20k URLs) | sitemapindex | live-probed 2026-08-29: products are ROOT-LEVEL slugs with no shared prefix — adapter uses the exclusion gate (negative path pattern + 1-segment depth bound), written against an UNCONFIRMED platform; `crawl_enabled=false` until a re-probe confirms the pattern (a product-only child sitemap, if one exists, would be sharper) |
 | Holt's | Magento-style | sitemap + JSON-LD common | caution→avoid — large retailer, read ToS first |
 | Cuban Lou's | WooCommerce | Yoast product-only sitemap (985 locs) + JSON-LD | live-probed 2026-08-29 and ENABLED; **flag: US-embargo exposure** for surfacing Habanos price data — admin decision via the registry toggle, risk noted in PRD. Post-seed audit: most of its catalog is bundle/quantity SKUs the shared `excludeNamePattern` does not cover (#127) |
 
 Cross-cutting: **none is Shopify**, so no `/products.json` anywhere — build
-the crawler on sitemap enumeration + JSON-LD Product parsing, low rate,
-cached, with an identifying User-Agent.
+the crawler on sitemap enumeration + structured product markup (JSON-LD where a
+vendor serves it, OpenGraph/microdata where it does not — ADR-006 amendment
+2026-09-02, declared per adapter), low rate, cached, with an identifying
+User-Agent.
 
 ## r/cubancigars online-stores wiki
 

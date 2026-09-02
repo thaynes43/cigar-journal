@@ -23,7 +23,8 @@ import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedP
 import type { VendorAdapter } from "../adapters/types.js";
 import { collectSitemapSamples, collectSitemapUrls } from "./sitemap.js";
 import { filterProductUrls, pathOf, robotsGatePath } from "./product-url.js";
-import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
+import type { JsonLdProduct } from "./jsonld.js";
+import { extractProductMarkup } from "./markup.js";
 import { isCigarListing, normalizeListing, type NormalizedListing } from "./normalize.js";
 import {
   coversAsk,
@@ -677,9 +678,9 @@ async function walkListings(
         stats.errors += 1;
         continue;
       }
-      const { product, breadcrumbs } = extractJsonLd(body);
+      const { product, category, categorySource } = extractProductMarkup(body, adapter);
       if (!product) continue;
-      const listing = normalizeListing(product, breadcrumbs);
+      const listing = normalizeListing(product, category, categorySource);
       if (!listing) continue;
       stats.listingsParsed += 1;
 
@@ -963,9 +964,9 @@ async function tryEnrichCandidates(
       stats.errors += 1;
       continue;
     }
-    const { product, breadcrumbs } = extractJsonLd(body);
+    const { product, category, categorySource } = extractProductMarkup(body, adapter);
     if (!product) continue;
-    const listing = normalizeListing(product, breadcrumbs);
+    const listing = normalizeListing(product, category, categorySource);
     if (!listing) continue;
     parsed = true;
     stats.listingsParsed += 1;

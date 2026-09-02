@@ -1,5 +1,6 @@
 // @cj/crawler — the vendor crawl substrate (ADR-006). Generic core (fetch,
-// sitemap, JSON-LD, normalize, match, ingest) driven by small per-vendor adapter
+// sitemap, structured markup — JSON-LD or OpenGraph/microdata per the adapter's
+// declaration — normalize, match, ingest) driven by small per-vendor adapter
 // objects; runs as the image's `crawl` role via src/cli.ts. Library surface here;
 // the CLI entry is src/cli.ts.
 
@@ -11,6 +12,8 @@ export type {
   PrefixProductGate,
   ExclusionProductGate,
   SitemapSampling,
+  ProductMarkup,
+  CategorySource,
 } from "./adapters/types.js";
 export {
   adapters,
@@ -71,6 +74,8 @@ export {
   type ProbeProductSample,
 } from "./core/probe.js";
 export { extractJsonLd, type ExtractedJsonLd, type JsonLdProduct, type JsonLdOffer } from "./core/jsonld.js";
+export { extractOpenGraphProduct, extractKeywords, type OpenGraphProduct } from "./core/opengraph.js";
+export { extractProductMarkup, markupLabel, type ExtractedMarkup } from "./core/markup.js";
 export { normalizeListing, isCigarCategory, isCigarListing, decodeEntities, type NormalizedListing } from "./core/normalize.js";
 export {
   resolveListing,

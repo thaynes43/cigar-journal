@@ -1,4 +1,4 @@
-import { extractJsonLd } from "./jsonld.js";
+import { extractProductMarkup, markupLabel } from "./markup.js";
 import { isCigarListing, normalizeListing } from "./normalize.js";
 import { parseRobots } from "./robots.js";
 import { collectSitemapSamples, type SitemapSample } from "./sitemap.js";
@@ -31,8 +31,8 @@ export const MAX_PROBE_CHILDREN = 3;
 // Product pages parsed per probe, spread across the enumeration.
 export const PRODUCT_SAMPLES = 3;
 // Parses required for an `ok` verdict, floored at the number actually sampled.
-// One parse proves the JSON-LD extractor works but NOT that the enumeration
-// selects products — the mirror image of the bug this exists to catch. Two
+// One parse proves the adapter's declared extractor works but NOT that the
+// enumeration selects products — the mirror image of the bug this exists to catch. Two
 // spread-apart parses prove both. Requiring all three would re-import the false
 // negative, since real sitemaps always carry a few redirects and 410s.
 export const REQUIRED_PARSED_SAMPLES = 2;
@@ -44,7 +44,9 @@ export interface ProbeProductSample {
   name: string | null;
   priceCents: number | null;
   currency: string | null;
-  breadcrumbs: string[];
+  // The taxonomy the page stated, in the shape the adapter's `categorySource`
+  // names — a breadcrumb trail, or the vendor's keywords tag list.
+  category: string[];
   isCigar: boolean;
   // 200 + a schema.org Product + a usable name: what the crawl needs to write a row.
   parsed: boolean;
@@ -206,19 +208,22 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
     for (const index of spreadIndices(productUrls.length, PRODUCT_SAMPLES)) {
       const url = productUrls[index]!;
       const res = await fetcher.fetchText(url);
-      const { product: jsonLd, breadcrumbs } = extractJsonLd(res.status === 200 ? res.body : "");
-      const listing = jsonLd ? normalizeListing(jsonLd, breadcrumbs) : null;
+      const { product, category, categorySource } = extractProductMarkup(
+        res.status === 200 ? res.body : "",
+        adapter,
+      );
+      const listing = product ? normalizeListing(product, category, categorySource) : null;
       if (res.status !== 200) notes.push(`sample product ${url} returned ${res.status}.`);
-      else if (!jsonLd) notes.push(`sample product ${url} has no schema.org Product JSON-LD — parsing yields nothing.`);
-      else if (!listing) notes.push(`sample product ${url} JSON-LD has no usable name.`);
+      else if (!product) notes.push(`sample product ${url} has no ${markupLabel(adapter)} — parsing yields nothing.`);
+      else if (!listing) notes.push(`sample product ${url} ${markupLabel(adapter)} has no usable name.`);
       products.push({
         url,
         status: res.status,
-        hasProduct: jsonLd !== null,
+        hasProduct: product !== null,
         name: listing?.name ?? null,
         priceCents: listing?.priceCents ?? null,
         currency: listing?.currency ?? null,
-        breadcrumbs,
+        category,
         isCigar: listing ? isCigarListing(listing, adapter) : false,
         parsed: listing !== null,
       });

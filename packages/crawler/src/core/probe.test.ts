@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runProbe, formatProbe, probeFetchBudget, MAX_PROBE_CHILDREN } from "./probe.js";
+import { runProbe, formatProbe, probeFetchBudget, MAX_PROBE_CHILDREN, REQUIRED_PARSED_SAMPLES } from "./probe.js";
 import { cubanLous } from "../adapters/cuban-lous.js";
 import { twoGuysCigars } from "../adapters/two-guys-cigars.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
@@ -491,15 +491,15 @@ describe("mode-A product gate — a non-product subtree under the prefix", () =>
 });
 
 
-// 2 Guys as it actually is, from the 2026-09-01 in-cluster read (#217). The gate
-// now selects the right URLs — and the probe still says needs-attention, for a
-// reason that is finally the true one: this vendor serves NO JSON-LD. Every
-// fixture below is a real response.
+// 2 Guys as it actually is, from the 2026-09-01 in-cluster read (#217), now read
+// by the extractor its pages actually need (#252). Every fixture below is a real
+// response. This describe replaces the characterization of a blocked vendor that
+// stood here until `parsed` went non-zero — deliberately, as that block asked.
 //
-// These assertions are a CHARACTERIZATION of a blocked vendor, not an aspiration.
-// When the OG/microdata extractor lands they must be rewritten, deliberately, by
-// whoever makes `parsed` non-zero.
-describe("2 Guys, live shape — the gate is right and the parser still has nothing", () => {
+// What it can and cannot prove: the PIPELINE parses this vendor's real markup and
+// gates it. The catalog-wide numbers (`product-locs` 3,841) still need the
+// in-cluster probe, because the fixture sitemap is a trimmed capture.
+describe("2 Guys, live shape — the OG/microdata extractor reads it", () => {
   const two = (path: string): string => `https://www.2guyscigars.com${path}`;
   const PERDOMO = two("/perdomo-30th-robusto-sg-s-165681/");
   const ROMACRAFT = two("/romacraft-steel-porcupine-184527/");
@@ -541,16 +541,41 @@ describe("2 Guys, live shape — the gate is right and the parser still has noth
     expectWithinBudget(fetcher, twoGuysCigars);
   });
 
-  it("reports needs-attention because the pages carry no JSON-LD at all", async () => {
+  it("parses all three sampled pages and admits the two cigars", async () => {
     const result = await runProbe(createMockFetcher(liveRoutes()), twoGuysCigars);
 
-    // 200s, real product pages, nothing to parse: og:type=product and
-    // itemtype="https://schema.org/Product" are not what extractJsonLd reads.
+    // Requirements 4 and 5 of the #179 bar, the two this vendor was stuck on:
+    // parsed >= REQUIRED_PARSED_SAMPLES and at least one cigar.
     expect(result.products.every((p) => p.status === 200)).toBe(true);
-    expect(result.products.every((p) => !p.hasProduct)).toBe(true);
-    expect(result.productSummary).toEqual({ sampled: 3, parsed: 0, cigars: 0 });
-    expect(result.verdict).toBe("needs-attention");
-    expect(result.notes.join(" ")).toMatch(/no schema\.org Product JSON-LD/);
+    expect(result.products.every((p) => p.hasProduct)).toBe(true);
+    expect(result.productSummary).toEqual({ sampled: 3, parsed: 3, cigars: 2 });
+    expect(result.productSummary.parsed).toBeGreaterThanOrEqual(REQUIRED_PARSED_SAMPLES);
+    expect(result.verdict).toBe("ok");
+    // Nothing left to say about the markup — the notes carry no parse failure.
+    expect(result.notes.join(" ")).not.toMatch(/parsing yields nothing/);
+  });
+
+  it("reads price, stock and category off the OG tags, and refuses the candle", async () => {
+    const result = await runProbe(createMockFetcher(liveRoutes()), twoGuysCigars);
+    const [perdomo, romacraft, candle] = result.products;
+
+    expect(perdomo!.name).toBe("Perdomo 30th Robusto SG S");
+    expect(perdomo!.priceCents).toBe(1379);
+    expect(perdomo!.currency).toBe("USD");
+    expect(perdomo!.isCigar).toBe(true);
+    // The category is the vendor's keywords tag list, not a breadcrumb trail.
+    expect(perdomo!.category).toEqual(["30 nick anniversary nicaragua", "Cigars", "Perdomo 30th Sun Grown"]);
+
+    expect(romacraft!.priceCents).toBe(10799); // out of stock, still a parsed listing
+    expect(romacraft!.isCigar).toBe(true);
+
+    // The accessory the URL gate cannot tell from a cigar: parsed, then refused
+    // on its own tags. This is the whole cost of admitting a vendor whose slugs
+    // carry no taxonomy.
+    expect(candle!.name).toBe("Smoke Exterm Candle Orange");
+    expect(candle!.parsed).toBe(true);
+    expect(candle!.isCigar).toBe(false);
+    expect(candle!.category).toEqual(["Air Freshening", "Air Freshening Accessories"]);
   });
 
   it("prints the gate and both census sides so a probe log identifies the build", async () => {

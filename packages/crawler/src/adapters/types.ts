@@ -1,8 +1,9 @@
 // A vendor adapter is small, disposable configuration (ADR-006): where the
-// sitemap lives, how to recognize a product URL, and which breadcrumb paths are
-// cigars vs accessories. The generic core (fetch/sitemap/jsonld/normalize/match/
-// ingest) is driven entirely by these fields, so a new vendor is a new adapter
-// object plus a registry entry — no core changes.
+// sitemap lives, how to recognize a product URL, which structured markup its
+// pages carry, and which category paths are cigars vs accessories. The generic
+// core (fetch/sitemap/markup/normalize/match/ingest) is driven entirely by these
+// fields, so a new vendor is a new adapter object plus a registry entry — no core
+// changes.
 // --- source kind (ADR-013 §4, migration 0028) --------------------------------
 // WHAT THE REGISTRY ROW THIS ADAPTER SEEDS *IS*. The same rule the database
 // holds as `vendors_non_vendor_source_chk`, stated a compile earlier: a non-shop
@@ -41,6 +42,13 @@ export interface NonVendorSourceKind {
 
 export type SourceKind = VendorSourceKind | NonVendorSourceKind;
 
+// --- page shape (ADR-006 amendment 2026-09-02) -------------------------------
+// The structured product markup a vendor serves, and where its category comes
+// from. Both are declarations about the vendor's pages, so they ride the adapter
+// with the product gate; the core reads them and nothing sniffs the HTML.
+export type ProductMarkup = "json-ld" | "opengraph";
+export type CategorySource = "breadcrumbs" | "keywords-meta";
+
 // Everything that is true of an adapter whatever kind of source it points at.
 export interface VendorAdapterShape {
   // Registry key, used on the CLI (`--vendor <slug>`) and as the adapter id.
@@ -68,6 +76,21 @@ export interface VendorAdapterShape {
   // Whether this vendor's offers may be displayed at all (seeds display_enabled).
   displayEnabled: boolean;
   // --- crawl shape ---------------------------------------------------------
+  // WHICH structured markup this vendor's product pages carry (ADR-006 amendment
+  // 2026-09-02). DECLARED, never sniffed from the page: a vendor's shape belongs
+  // where the rest of its shape is, and a silent format change then fails loudly
+  // at the probe instead of quietly parsing the other format. Absent = "json-ld",
+  // which is what the first four vendors serve.
+  productMarkup?: ProductMarkup;
+  // WHERE the category the cigar gate reads comes from. "breadcrumbs" is the
+  // JSON-LD BreadcrumbList (a trail ENDING with the product, whose last crumb
+  // normalize drops); "keywords-meta" is the vendor's own `<meta name="keywords">`
+  // tag list, taxonomy end to end. Needed by a vendor whose product pages state no
+  // category at all — 2 Guys' breadcrumb is "Home / <brand>" by design. A page
+  // with no derivable category yields an EMPTY path and is refused by
+  // `isCigarListing`, exactly as an unmatched path is (ADR-006 2026-09-02).
+  // Absent = "breadcrumbs".
+  categorySource?: CategorySource;
   // A breadcrumb path (joined) matching this is a cigar category…
   cigarCategoryPattern: RegExp;
   // …unless it also matches this (accessories, samplers, humidors, etc.).
