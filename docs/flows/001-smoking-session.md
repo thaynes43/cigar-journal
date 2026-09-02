@@ -23,6 +23,38 @@ sequenceDiagram
     Note over C: Context lives in the chat.<br/>No MCP calls, no writes.
 ```
 
+## Photos during the smoke
+
+A photo is taken when it is taken — usually long before the save. The model
+opens a **photo drop** the moment one appears (ADR-014) and relays its link;
+the user adds the photo right then, and every later photo goes to the same
+link. The in-chat attachment itself never reaches the server on any client
+([`../mcp/client-compatibility.md`](../mcp/client-compatibility.md)), so the
+link is the path, and the drop is what lets it exist before the smoke does.
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant C as LLM Client
+    participant M as MCP Server
+    participant W as Web (/d/<token>)
+    U->>C: (photo of the cigar) First third — pepper up front.
+    C->>M: open_photo_drop {}
+    M-->>C: { photoDropId, uploadUrl, shareWithUser }
+    C->>U: Add it here and it lands on the review: https://…/d/…
+    U->>W: adds the photo (and two more, an hour later)
+    Note over C: Holds photoDropId for the session.<br/>No further photo calls.
+    U->>C: That's it. Really liked that one.
+    C->>M: save_smoke { …, photoDropId }
+    M-->>C: smoke + photoDrop { status: claimed, attached: 3 }
+    C->>U: Saved, with your three photos.
+```
+
+The claim runs after the save commits and never fails it; a drop the save did
+not carry is attached later with `add_smoke_photo { smokeId, photoDropId }`.
+The link keeps working for the saved smoke until it expires, so a photo of the
+nub taken after the save needs nothing new.
+
 ## Mid-conversation history retrieval
 
 ```mermaid
