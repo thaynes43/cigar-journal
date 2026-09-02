@@ -3,7 +3,7 @@
 // Role command in k8s: workingDir /app/mcp, `node --import tsx src/index.ts`.
 
 import type { Server } from "node:http";
-import { createDatabase } from "@cj/db";
+import { createDatabase, swallowShutdownErrors } from "@cj/db";
 import type { Deps } from "@cj/domain";
 import { buildApp } from "./app.js";
 import { port, protectedResourceMetadataUrl, webOrigin } from "./config.js";
@@ -16,7 +16,15 @@ function main(): void {
   // discovery URLs all derive from it (RFC 8707 audience binding).
   const prm = protectedResourceMetadataUrl();
 
-  const { db } = createDatabase(databaseUrl);
+  // A pool of its own, NOT the ambient @cj/db singleton, so it does not inherit
+  // that singleton's shutdown guard and needs its own. This is the one role that
+  // is always up: a CNPG failover terminates every connection it holds, and
+  // node-postgres raises that as an 'error' EVENT — unlistened, the pod dies on a
+  // failover it would otherwise ride out, because pg discards the dead clients and
+  // the next request reconnects. In-flight requests still fail, loudly and on
+  // their own (@cj/db pool-errors.ts).
+  const { db, pool } = createDatabase(databaseUrl);
+  swallowShutdownErrors(pool, { label: "mcp" });
   const deps: Deps = { db, now: () => new Date() };
   const app = buildApp(deps);
 

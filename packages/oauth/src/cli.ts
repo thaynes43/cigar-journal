@@ -1,4 +1,4 @@
-import { createDatabase } from "@cj/db";
+import { createDatabase, swallowShutdownErrors } from "@cj/db";
 import {
   mintDeliveryRefusal,
   parseArgs,
@@ -55,6 +55,18 @@ function resolveDatabaseUrl(explicit: string | null): string | null {
   return explicit ?? process.env.DATABASE_URL ?? null;
 }
 
+// A Postgres that goes away under this CLI — a failover, a rolling upgrade —
+// raises node-postgres' 'error' EVENT on the pool or on a checked-out client, and
+// an 'error' event with no listener kills the process. Swallowing the shutdown
+// class does not hide the failure: pg errors every in-flight query first, so the
+// mint or the revoke still reports it and still exits non-zero (@cj/db
+// pool-errors.ts).
+function openDatabase(databaseUrl: string): ReturnType<typeof createDatabase> {
+  const handle = createDatabase(databaseUrl);
+  swallowShutdownErrors(handle.pool, { label: "oauth-cli" });
+  return handle;
+}
+
 async function runMint(
   options: Extract<ParsedArgs, { command: "mint" }>["options"],
 ): Promise<number> {
@@ -96,7 +108,7 @@ async function runMint(
     log: NARRATE,
   };
 
-  const { db, pool } = createDatabase(databaseUrl);
+  const { db, pool } = openDatabase(databaseUrl);
   try {
     if (!options.yes) {
       // The plan runs the mint's own validators against the same database, so a
@@ -124,7 +136,7 @@ async function runList(
     console.error("error: DATABASE_URL is not set (pass --database-url or export DATABASE_URL)");
     return 2;
   }
-  const { db, pool } = createDatabase(databaseUrl);
+  const { db, pool } = openDatabase(databaseUrl);
   try {
     const rows = await listServiceTokens(db, {
       includeExpired: options.includeExpired,
@@ -146,7 +158,7 @@ async function runRevoke(
     console.error("error: DATABASE_URL is not set (pass --database-url or export DATABASE_URL)");
     return 2;
   }
-  const { db, pool } = createDatabase(databaseUrl);
+  const { db, pool } = openDatabase(databaseUrl);
   try {
     if (!options.yes) {
       // Resolved the way the revoke resolves it — any token row by id, not just
