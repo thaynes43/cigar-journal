@@ -47,3 +47,13 @@ ALTER TABLE vendors
 -- is admin data, and an admin's value outranks a migration.
 UPDATE vendors SET tier = 1
  WHERE name IN ('Fox Cigar', '2 Guys Cigars', 'Small Batch Cigar') AND tier = 2;
+
+-- Tier 1 IS the display authority (ADR-015), and the gate that reads
+-- `display_enabled` is wired in the same release. Fox Cigar's row still carries
+-- the `false` the old adapter posture seeded on 2026-08-28, so without this the
+-- site's only displayed prices would go dark the moment the gate lands. Scoped
+-- to tier 1 and to rows a tier-1 adapter names; an admin's later `false` on a
+-- tier-1 row is a re-decision this migration does not run again to undo.
+UPDATE vendors SET display_enabled = true
+ WHERE tier = 1 AND kind = 'vendor' AND display_enabled = false
+   AND name IN ('Fox Cigar', '2 Guys Cigars', 'Small Batch Cigar');
