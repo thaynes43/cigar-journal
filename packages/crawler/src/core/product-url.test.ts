@@ -468,7 +468,9 @@ describe("registry invariant", () => {
       sitemapUrl: "https://halfwheel.example/sitemap.xml",
       crawlEnabled: false,
       approvalStatus: "owner-added",
-      displayEnabled: false,
+      // A reference source is not the price authority (ADR-015); it quotes no
+      // prices at all.
+      tier: 2,
       cigarCategoryPattern: /^$/,
       excludePattern: /^$/,
       productPathPrefix: "/review/",

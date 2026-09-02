@@ -5,10 +5,11 @@ import { photoStorageFromEnv } from "@cj/photos";
 import { getAdapter, adapterSlugs } from "./adapters/index.js";
 import { createFetcher } from "./core/fetcher.js";
 import { runIngest, type CrawlMode, type IngestResult } from "./core/ingest.js";
+import { runFleet, type FleetResult } from "./core/fleet.js";
 import { withVendorLaneLock } from "./core/run-record.js";
 import { runProbe, formatProbe, probeFetchBudget } from "./core/probe.js";
 import { runBrandImages, probeBrandTaxonomy, type BrandImagesResult } from "./core/brand-images.js";
-import { vendorPostureDrift, formatVendorPostureDrift } from "./core/vendor-posture.js";
+import { adapterPosture, vendorPostureDrift, formatVendorPostureDrift } from "./core/vendor-posture.js";
 import {
   parseApprovedWiki,
   diffApproved,
@@ -29,6 +30,7 @@ import type { VendorAdapter } from "./adapters/types.js";
 
 interface CrawlArgs {
   vendor: string | null;
+  allEnabled: boolean;
   mode: CrawlMode | null;
   dryRun: boolean;
   probe: boolean;
@@ -49,14 +51,23 @@ const USAGE = `vendor crawler (ADR-006)
 
 usage:
   crawl --vendor <slug> --mode <seed|offers|enrich> [--dry-run] [--limit N] [--database-url <url>]
+  crawl --all-enabled --mode <offers|enrich> [--dry-run] [--limit N] [--database-url <url>]
   crawl --vendor <slug> --probe [--database-url <url>]
   crawl --import-approved <file> [--yes] [--database-url <url>]
   crawl --brand-images [--dry-run] [--limit N] [--brand "<name>"] [--refresh]
   crawl --brand-images --probe [--limit N]
 
-  --vendor           adapter slug (${adapterSlugs().join(", ") || "none registered"})
+  --vendor           adapter slug (${adapterSlugs().join(", ") || "none registered"}).
+                     A manual run: explicit, and it ignores vendors.crawl_enabled.
+  --all-enabled      crawl every vendors row with crawl_enabled that has an adapter,
+                     serially, in TIER ORDER (ADR-015) — one crawl_runs row, lane
+                     lock and --limit per vendor, exactly as --vendor gives one. A
+                     vendor's failure is logged and the walk continues; the exit
+                     code is 1 if any vendor failed. Mutually exclusive with --vendor.
   --mode             seed (create catalog + offers + photos), offers (offers only,
-                     no catalog creation), or enrich (drain the gap-fill queue)
+                     no catalog creation), or enrich (drain the gap-fill queue).
+                     --all-enabled takes offers or enrich; seeding the catalog is a
+                     deliberate per-vendor act.
   --dry-run          fetch (bounded) and print the would-write report; no DB/storage writes
   --probe            live-verify an adapter: fetch robots.txt, the sitemap root
                      (N samples when the adapter configures sampling) plus up to
@@ -87,6 +98,7 @@ env:
 function parseArgs(argv: string[]): CrawlArgs {
   const args: CrawlArgs = {
     vendor: null,
+    allEnabled: false,
     mode: null,
     dryRun: false,
     probe: false,
@@ -105,6 +117,9 @@ function parseArgs(argv: string[]): CrawlArgs {
     switch (a) {
       case "--vendor":
         args.vendor = argv[++i] ?? null;
+        break;
+      case "--all-enabled":
+        args.allEnabled = true;
         break;
       case "--mode": {
         const value = argv[++i] ?? "";
@@ -174,6 +189,7 @@ async function resolveVendor(db: Database, adapter: VendorAdapter): Promise<stri
       id: vendors.id,
       kind: vendors.kind,
       focus: vendors.focus,
+      tier: vendors.tier,
       crawlEnabled: vendors.crawlEnabled,
       displayEnabled: vendors.displayEnabled,
       approvalStatus: vendors.approvalStatus,
@@ -191,24 +207,19 @@ async function resolveVendor(db: Database, adapter: VendorAdapter): Promise<stri
     return existing[0].id;
   }
 
+  // Every posture column comes from ONE projection (core/vendor-posture.ts), which
+  // is the same object the drift report compares an existing row against. That
+  // includes `tier` (ADR-015) and the `display_enabled` derived from it: a tier-2
+  // vendor's offers are recorded and not shown, and the rule has one home.
+  //
+  // The ADR-013 source kind is carried through rather than defaulted, so the seed
+  // path can register a reviewer or a reference source at all — and so
+  // `vendors_non_vendor_source_chk` is a constraint some code can actually reach.
+  // The adapter type refuses the bad combination first (a non-vendor kind cannot
+  // name a `focus`); the database is the backstop for it.
   const inserted = await db
     .insert(vendors)
-    .values({
-      name: adapter.name,
-      url: adapter.url,
-      // The ADR-013 source kind, carried through rather than defaulted, so the
-      // seed path can register a reviewer or a reference source at all — and so
-      // `vendors_non_vendor_source_chk` is a constraint some code can actually
-      // reach. The adapter type refuses the bad combination first (a non-vendor
-      // kind cannot name a `focus`); this is the database's backstop for it.
-      kind: adapter.kind,
-      // Undefined on a non-vendor adapter, where the CHECK requires NULL.
-      focus: adapter.focus ?? null,
-      crawlEnabled: adapter.crawlEnabled,
-      displayEnabled: adapter.displayEnabled,
-      approvalStatus: adapter.approvalStatus,
-      purchaseLinkout: adapter.purchaseLinkout,
-    })
+    .values({ name: adapter.name, url: adapter.url, ...adapterPosture(adapter) })
     .returning({ id: vendors.id });
   return inserted[0]!.id;
 }
@@ -291,6 +302,78 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
     for (const line of result.report) lines.push(`  ${line}`);
   }
   return lines.join("\n");
+}
+
+// The fleet roll-up printed after the last vendor's own summary. One line per
+// vendor in the order they ran, so the tier ordering is legible in the log, then
+// the totals an operator (and the alerting on the Job) reads first.
+//
+// `skipped` is kept out of `failed` deliberately: it means another process held
+// that vendor's lane lock, which is the lock doing its job, not an incident.
+function formatFleetSummary(result: FleetResult, photosEnabled: boolean, dryRun: boolean): string {
+  const succeeded = result.outcomes.filter((o) => o.status === "succeeded").length;
+  const skipped = result.outcomes.filter((o) => o.status === "skipped").length;
+  const lines = [
+    `fleet ${result.mode}  vendors=${result.outcomes.length} succeeded=${succeeded} ` +
+      `failed=${result.failed} skipped=${skipped}` +
+      `${photosEnabled ? "" : "  [photos disabled]"}${dryRun ? "  [dry run]" : ""}`,
+  ];
+  for (const outcome of result.outcomes) {
+    lines.push(
+      `  tier ${outcome.tier}  ${outcome.slug}  ${outcome.status}` +
+        (outcome.error ? `  ${outcome.error}` : ""),
+    );
+  }
+  for (const name of result.unregistered) {
+    // An enabled row nothing can crawl: a registry/deploy mismatch, named so it can
+    // be acted on rather than counted so it can be ignored.
+    lines.push(`  no adapter for enabled vendor "${name}" — skipped`);
+  }
+  return lines.join("\n");
+}
+
+// --all-enabled: the whole enabled fleet, serially, in tier order (ADR-015,
+// closes #156). Each vendor gets its OWN fetcher — politeness and the page cap are
+// per-adapter, and one shared limiter would spread one vendor's manners over
+// another's domain — and its own lane lock and crawl_runs row, so a fleet run is N
+// ordinary runs in sequence.
+async function runFleetMode(args: CrawlArgs, mode: CrawlMode, databaseUrl: string): Promise<number> {
+  const storage = photoStorageFromEnv();
+  const { db, pool } = createDatabase(databaseUrl);
+  try {
+    const result = await runFleet(db, pool, {
+      mode,
+      runVendor: (adapter, vendorId) =>
+        runIngest(
+          {
+            db,
+            fetcher: createFetcher({ minIntervalMs: adapter.minIntervalMs, maxPages: adapter.maxPages }),
+            storage,
+            now: () => new Date(),
+          },
+          { adapter, vendorId, mode, limit: args.limit, dryRun: args.dryRun },
+        ),
+      onVendor: (outcome, adapter) => {
+        if (outcome.drift.length > 0) console.warn(formatVendorPostureDrift(outcome.name, outcome.drift).join("\n"));
+        if (outcome.status === "skipped") {
+          console.log(
+            `crawl ${outcome.slug} (${mode})  status=skipped\n` +
+              `  lane already running: another process holds the ${mode} lock for this vendor.`,
+          );
+        } else if (outcome.result) {
+          console.log(formatSummary(adapter, mode, outcome.result, storage !== null));
+        } else {
+          console.error(`crawl ${outcome.slug} (${mode})  status=failed\n  error: ${outcome.error ?? "unknown"}`);
+        }
+      },
+      onUnregistered: (name) =>
+        console.warn(`vendor "${name}" is crawl_enabled but no adapter is registered for it — skipped.`),
+    });
+    console.log(formatFleetSummary(result, storage !== null, args.dryRun));
+    return result.failed > 0 ? 1 : 0;
+  } finally {
+    await pool.end();
+  }
 }
 
 // --probe: a read-only live check, no DB. Fetcher uses the adapter's rate and a
@@ -405,6 +488,42 @@ async function main(): Promise<number> {
       return 2;
     }
     return runImportApprovedMode(args.importApproved, args.yes, databaseUrl);
+  }
+
+  // --- --all-enabled (the whole fleet, in tier order) ----------------------
+  if (args.allEnabled) {
+    if (args.vendor) {
+      // Not a preference — the two answer the same question differently.
+      // `--vendor` is a MANUAL run and ignores `crawl_enabled` on purpose (an
+      // operator crawling a disabled shop to test it), `--all-enabled` is that
+      // flag's reader. Accepting both would have to silently pick one.
+      console.error("error: --all-enabled and --vendor are mutually exclusive\n\n" + USAGE);
+      return 2;
+    }
+    if (args.probe) {
+      // A probe live-verifies ONE adapter and writes nothing; there is no fleet
+      // verdict to give, and probing every enabled vendor at once is a fetch storm
+      // nobody asked for.
+      console.error("error: --probe verifies one adapter — pass --vendor <slug>\n\n" + USAGE);
+      return 2;
+    }
+    if (!args.mode) {
+      console.error("error: --mode is required with --all-enabled (offers or enrich)\n\n" + USAGE);
+      return 2;
+    }
+    if (args.mode === "seed") {
+      // Seeding MINTS catalog rows. Every enabled vendor may feed the catalog
+      // (ADR-015 — structure has no tier), but doing it to the whole fleet on one
+      // command is a decision an operator should have to make one shop at a time.
+      console.error("error: --all-enabled takes --mode offers or enrich; run a seed per vendor\n\n" + USAGE);
+      return 2;
+    }
+    const databaseUrl = args.databaseUrl ?? process.env.DATABASE_URL ?? null;
+    if (!databaseUrl) {
+      console.error("error: DATABASE_URL is not set (pass --database-url or export DATABASE_URL)");
+      return 2;
+    }
+    return runFleetMode(args, args.mode, databaseUrl);
   }
 
   if (!args.vendor) {

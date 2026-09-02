@@ -3283,4 +3283,275 @@ describe("crawler ingest (embedded Postgres)", () => {
     const entry = fleet.find((v) => v.vendorId === reclaimedLane)!;
     expect(entry.lastEnrichStartedAt).toBeNull();
   });
+
+  // --- ADR-015: the photo slot is ordered, not first-come --------------------
+  //
+  // Before tiers, `product_photos` was UNIQUE(cigar_id), inserted with
+  // onConflictDoNothing and never deleted by the crawler: one slot, first write
+  // wins, forever. That made a wrong photo permanent — and, once vendors are
+  // ranked, it made a RIGHT photo permanent at the wrong authority. These cases
+  // are the replacement rule in both directions, on the seed/offers walk, which is
+  // where it actually runs (a fulfilled ask never comes back to the drain).
+
+  const tierOf = async (vendor: string, tier: number): Promise<void> => {
+    await pg.db.update(vendors).set({ tier }).where(eq(vendors.id, vendor));
+  };
+
+  // The offers walk over one Padron listing: it links the leaf that exists and
+  // never mints, so each case controls the catalog row and the slot itself.
+  const padronOffersRoutes = {
+    [ROBOTS]: { body: loadFixture("robots.txt") },
+    [SITEMAP]: { body: urlsetXml([PADRON_URL]) },
+    [PADRON_URL]: { body: loadFixture("product-padron.html") },
+    [PADRON_IMG]: { binary: Buffer.from("padron-image"), contentType: "image/jpeg" },
+  };
+
+  const offersRun = (vendor: string, storage: PhotoStorage | null) =>
+    runIngest(deps(createMockFetcher(padronOffersRoutes), storage), {
+      adapter: foxCigar,
+      vendorId: vendor,
+      mode: "offers",
+    });
+
+  // The occupying photo, written directly so the case controls the occupant's
+  // vendor, tier and rights without a second walk to arrange them.
+  const occupy = async (
+    cigarId: string,
+    values: { vendorId: string | null; rights?: "pending" | "approved" | "suppressed" },
+    storage: PhotoStorage,
+  ): Promise<{ objectKey: string; thumbKey: string }> => {
+    const tag = randomUUID();
+    const keys = { objectKey: `product/${cigarId}/${tag}.jpg`, thumbKey: `product/${cigarId}/${tag}.thumb.jpg` };
+    await storage.put(keys.objectKey, Buffer.from("incumbent-full"), "image/jpeg");
+    await storage.put(keys.thumbKey, Buffer.from("incumbent-thumb"), "image/jpeg");
+    await pg.db.insert(productPhotos).values({
+      cigarId,
+      vendorId: values.vendorId,
+      sourceUrl: "https://example.test/incumbent.jpg",
+      ...keys,
+      contentType: "image/jpeg",
+      width: 800,
+      height: 600,
+      bytes: 1234,
+      rights: values.rights ?? "pending",
+    });
+    return keys;
+  };
+
+  const stored = async (storage: PhotoStorage, key: string): Promise<boolean> =>
+    storage
+      .get(key)
+      .then(() => true)
+      .catch(() => false);
+
+  // A cigar this file's Padron listing resolves to, and only this one: the
+  // namesakes earlier cases left behind are retired so the resolver reaches a
+  // single leaf (see soleActiveLeaf).
+  const padronLeaf = async (): Promise<string> => {
+    const cigarId = await seedCigar(PADRON_NAME, null, { brandId: padronBrandId, brand: "Padron" });
+    await soleActiveLeaf(PADRON_NAME, cigarId);
+    return cigarId;
+  };
+
+  // THE UPGRADE PATH. A tier-1 shop walking its own catalogue finds a cigar whose
+  // photo came from tier 2 and supersedes it: new objects first, the row swapped in
+  // one transaction, the old objects dropped after the commit, the whole thing
+  // audited.
+  it("a tier-1 capture replaces a tier-2 photo, swaps the objects and audits the swap", async () => {
+    const storage = createMemoryPhotoStorage();
+    const lower = await makeVendor("Slot Tier Two", "NC");
+    const upper = await makeVendor("Slot Tier One", "NC");
+    await tierOf(lower, 2);
+    await tierOf(upper, 1);
+    await setFleet([lower, upper]);
+
+    const cigarId = await padronLeaf();
+    // The lower tier's link is what evidences the market, so the tier-1 capture is
+    // testing the TIER rule and not tripping over the market guard.
+    await stock(lower, cigarId);
+    const old = await occupy(cigarId, { vendorId: lower }, storage);
+
+    const run = await offersRun(upper, storage);
+    expect(run.status).toBe("succeeded");
+    expect(run.stats.photosCaptured).toBe(1);
+    expect(run.stats.photosSkippedMarket).toBeUndefined();
+
+    // Still ONE slot — a replacement, not a second row.
+    const photos = await photosFor(cigarId);
+    expect(photos).toHaveLength(1);
+    expect(photos[0]!.vendorId).toBe(upper);
+    expect(photos[0]!.objectKey).not.toBe(old.objectKey);
+    // A new photo from a new source is `pending` again: carrying the old row's
+    // approval across would launder an unreviewed image through a decision made
+    // about a different one.
+    expect(photos[0]!.rights).toBe("pending");
+
+    // The object store sees the crawler DELETE for the first time (ADR-015) — and
+    // only after the row swap committed.
+    expect(await stored(storage, photos[0]!.objectKey)).toBe(true);
+    expect(await stored(storage, photos[0]!.thumbKey)).toBe(true);
+    expect(await stored(storage, old.objectKey)).toBe(false);
+    expect(await stored(storage, old.thumbKey)).toBe(false);
+
+    // The audit is what makes a delete reviewable after the bytes are gone: both
+    // vendors, both tiers, both key pairs.
+    const audits = await pg.db.select().from(auditLog).where(eq(auditLog.action, "product_photo.replace"));
+    const mine = audits.filter((a) => (a.after as { cigarId?: string })?.cigarId === cigarId);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.before).toMatchObject({ vendorId: lower, tier: 2, objectKey: old.objectKey });
+    expect(mine[0]!.after).toMatchObject({ vendorId: upper, tier: 1, objectKey: photos[0]!.objectKey });
+  });
+
+  it("a lower tier never takes the slot from a higher one, and a peer never takes it from a peer", async () => {
+    const storage = createMemoryPhotoStorage();
+    const top = await makeVendor("Slot Incumbent One", "NC");
+    const lower = await makeVendor("Slot Challenger Two", "NC");
+    const peer = await makeVendor("Slot Peer Two", "NC");
+    await tierOf(top, 1);
+    await tierOf(lower, 2);
+    await tierOf(peer, 2);
+    await setFleet([top, lower, peer]);
+
+    const cigarId = await padronLeaf();
+    await stock(top, cigarId);
+    const held = await occupy(cigarId, { vendorId: top }, storage);
+
+    // Numerically greater tier = strictly lower authority: it may link and price
+    // the listing, and it may not take the slot.
+    const down = await offersRun(lower, storage);
+    expect(down.stats.photosCaptured).toBe(0);
+    expect(down.stats.offersWritten).toBe(1);
+    expect((await photosFor(cigarId))[0]!.vendorId).toBe(top);
+
+    // A peer at the SAME tier is not "above" either — two peers swapping the slot
+    // nightly is churn, not authority.
+    await pg.db.update(productPhotos).set({ vendorId: peer }).where(eq(productPhotos.cigarId, cigarId));
+    const sideways = await offersRun(lower, storage);
+    expect(sideways.stats.photosCaptured).toBe(0);
+    expect((await photosFor(cigarId))[0]!.vendorId).toBe(peer);
+
+    // And nothing was deleted on either refusal.
+    expect(await stored(storage, held.objectKey)).toBe(true);
+    expect(await stored(storage, held.thumbKey)).toBe(true);
+  });
+
+  // A takedown is a legal state, not a quality judgement. Re-filling the slot from
+  // a better source would republish exactly what was suppressed, so `suppressed` is
+  // final whatever the tier — and so is a curator's upload, which has no vendor and
+  // outranks every tier.
+  it("suppressed rights and a curator's photo are final against any tier", async () => {
+    const storage = createMemoryPhotoStorage();
+    const lower = await makeVendor("Suppressed Occupant", "NC");
+    const upper = await makeVendor("Suppressed Challenger", "NC");
+    await tierOf(lower, 2);
+    await tierOf(upper, 1);
+    await setFleet([lower, upper]);
+
+    const cigarId = await padronLeaf();
+    await stock(lower, cigarId);
+    const takedown = await occupy(cigarId, { vendorId: lower, rights: "suppressed" }, storage);
+
+    const refused = await offersRun(upper, storage);
+    expect(refused.stats.photosCaptured).toBe(0);
+    expect((await photosFor(cigarId))[0]!.rights).toBe("suppressed");
+    expect(await stored(storage, takedown.objectKey)).toBe(true);
+
+    // The curator's row: `vendor_id IS NULL`, so there is no tier to outrank.
+    await pg.db
+      .update(productPhotos)
+      .set({ vendorId: null, rights: "approved" })
+      .where(eq(productPhotos.cigarId, cigarId));
+    const curated = await offersRun(upper, storage);
+    expect(curated.stats.photosCaptured).toBe(0);
+    expect((await photosFor(cigarId))[0]!.vendorId).toBeNull();
+    expect(await stored(storage, takedown.objectKey)).toBe(true);
+  });
+
+  // The market guard still applies ON TOP of the tier rule: a replacement is a
+  // write, and every rule that governs writing the slot governs rewriting it.
+  //
+  // The shape is the #170 one, one tier up: a `both`-market vendor has no focus to
+  // rule anything out, so it may not pre-empt a FOCUSED vendor that stocks the row
+  // — and being tier 1 does not buy it that authority. Tier orders who may
+  // displace whom; it never grants the market claim the vendor does not have.
+  it("a higher tier is still refused the slot when the market authority refuses it", async () => {
+    const storage = createMemoryPhotoStorage();
+    const focused = await makeVendor("Market Guarded Focused", "NC");
+    const bothTop = await makeVendor("Market Guarded Both", "both");
+    await tierOf(focused, 2);
+    await tierOf(bothTop, 1);
+    await setFleet([focused, bothTop]);
+
+    const cigarId = await padronLeaf();
+    // The focused NC vendor stocks it, which is exactly what a market-agnostic
+    // vendor may not write over.
+    await stock(focused, cigarId);
+    const kept = await occupy(cigarId, { vendorId: focused }, storage);
+
+    const run = await offersRun(bothTop, storage);
+    expect(run.stats.photosCaptured).toBe(0);
+    expect(run.stats.photosSkippedMarket).toBe(1);
+    // The listing is still linked and still priced — only the permanent artifact
+    // was refused.
+    expect(run.stats.offersWritten).toBe(1);
+    expect((await photosFor(cigarId))[0]!.objectKey).toBe(kept.objectKey);
+    expect(await stored(storage, kept.objectKey)).toBe(true);
+  });
+
+  // --- ADR-015: the drain asks the best source first --------------------------
+  //
+  // The open-set clause, through the real drain: a tier-2 lane does not select an
+  // ask a covering tier-1 lane has not looked at, and takes it the moment tier 1's
+  // miss is in the ledger. That ordering is exactly what `--all-enabled --mode
+  // enrich` produces inside one run.
+  it("a tier-2 drain waits for the tier-1 lane, then takes the ask it missed", async () => {
+    const top = await makeVendor("Drain Tier One", "NC");
+    const lower = await makeVendor("Drain Tier Two", "NC");
+    await tierOf(top, 1);
+    await tierOf(lower, 2);
+    await arrange([top, lower]);
+
+    const cigarId = await seedCigar(`Tier Ordered Ask ${randomUUID().slice(0, 8)}`, "NC");
+    const requestId = await seedRequest(cigarId);
+
+    // Tier 2 first, and it selects nothing: the ask is not its to take yet.
+    const early = await enrichRun(lower, missRoutes);
+    expect(early.stats.enrich!.requests).toBe(0);
+    expect(await ledgerRows(requestId)).toHaveLength(0);
+
+    // Tier 1 looks and does not carry it. Its own enumeration names nothing like
+    // the ask, so the honest verdict is `no_candidate` — no page opened, no budget
+    // burned — which is still terminal for the fallback (#240).
+    const above = await enrichRun(top, noCandidateRoutes);
+    expect(above.stats.enrich).toMatchObject({ requests: 1, noCandidate: 1 });
+
+    // Now the ask falls to tier 2, which is the whole of "photos fall down the
+    // tier list".
+    const late = await enrichRun(lower, missRoutes);
+    expect(late.stats.enrich!.requests).toBe(1);
+    expect((await ledgerRows(requestId)).map((r) => r.vendorId).sort()).toEqual([top, lower].sort());
+  });
+
+  it("tier 1 is unaffected, and a tier-1 lane in the other market blocks nothing", async () => {
+    const top = await makeVendor("Unblocked Tier One", "NC");
+    const ccTop = await makeVendor("Other Market Tier One", "CC");
+    const lower = await makeVendor("Unblocked Tier Two", "NC");
+    await tierOf(top, 1);
+    await tierOf(ccTop, 1);
+    await tierOf(lower, 2);
+    await arrange([top, ccTop, lower]);
+
+    const cigarId = await seedCigar(`Unblocked Ask ${randomUUID().slice(0, 8)}`, "NC");
+    const requestId = await seedRequest(cigarId);
+
+    // Nothing sits above tier 1, so its own open set is untouched by the clause.
+    const above = await enrichRun(top, noCandidateRoutes);
+    expect(above.stats.enrich!.requests).toBe(1);
+
+    // And the tier-1 CC lane never held the ask: the negative filter rules it out
+    // of this cigar's fleet, so it owes no look and cannot block one.
+    const below = await enrichRun(lower, missRoutes);
+    expect(below.stats.enrich!.requests).toBe(1);
+    expect((await ledgerRows(requestId)).map((r) => r.vendorId)).not.toContain(ccTop);
+  });
 });

@@ -1,6 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 import type { Queryer } from "./deps.js";
-import type { CigarType } from "./types.js";
+import type { CigarType, ProductPhotoRights } from "./types.js";
 
 // A vendor's coarse market posture (`vendors.focus`). `both` is a vendor that
 // trades in either market; NULL is a vendor whose posture nobody has recorded.
@@ -233,7 +233,15 @@ export function coversMarket(focus: VendorFocus | null, market: CigarType | null
 // they are both better authorities than we are). Only the stockist fact separates
 // them, which is why it is carried alongside the market rather than derived from
 // it.
-export function mayWriteCatalogPhoto(focus: VendorFocus | null, facts: PhotoAuthority): boolean {
+// `Pick`, not the whole `PhotoAuthority`: MARKET authority is decided by the
+// market facts alone. The slot's occupant rides the same read (ADR-015) but is a
+// different question with a different answer — see `mayReplaceCatalogPhoto` —
+// and a guard that takes the fields it does not read invites one to leak into
+// the other.
+export function mayWriteCatalogPhoto(
+  focus: VendorFocus | null,
+  facts: Pick<PhotoAuthority, "market" | "focusedStockist">,
+): boolean {
   if (focus === "NC" || focus === "CC") return facts.market === focus;
   return !facts.focusedStockist;
 }
@@ -258,7 +266,7 @@ export function mayWriteCatalogPhotoSql(focus: VendorFocus | null, cigarId: SQL)
   return sql`(NOT ${focusedStockistSql(cigarId)})`;
 }
 
-// The two facts the slot guard needs about a cigar, read together.
+// The facts the slot guard needs about a cigar, read together.
 export interface PhotoAuthority {
   // The evidenced market (above): `cigars.type`, else the single market shared by
   // every single-market vendor stocking it, else null.
@@ -266,6 +274,132 @@ export interface PhotoAuthority {
   // Whether ANY single-market vendor stocks this cigar — the question `market`
   // cannot answer, since it reports null both for "no evidence" and "conflict".
   focusedStockist: boolean;
+  // WHO HOLDS THE SLOT TODAY, or null when it is empty (ADR-015). Read here, in
+  // the same statement as the two facts above, so a capture cannot ask "may I
+  // write?" and "may I replace what is there?" from two different snapshots.
+  occupant: PhotoSlotOccupant | null;
+}
+
+// The occupying photo, as much of it as the tier rule and the object cleanup
+// need. `tier` is the occupant's VENDOR's tier, resolved through the join here so
+// there is exactly one place the number is looked up.
+export interface PhotoSlotOccupant {
+  photoId: string;
+  vendorId: string | null;
+  // NULL when no vendor owns the row — a curator's upload (`attachProductPhoto`
+  // writes `vendor_id = null`). Curators outrank every tier (ADR-015), which is
+  // why a null reads as "unreplaceable" and not as "unknown, so probably fine".
+  tier: number | null;
+  rights: ProductPhotoRights;
+  objectKey: string;
+  thumbKey: string;
+}
+
+// HIGHER-TIER REPLACEMENT, THE OTHER HALF OF THE SLOT RULE (ADR-015).
+//
+// `product_photos` used to be first-writer-forever: UNIQUE(cigar_id), inserted
+// with onConflictDoNothing, never deleted by the crawler. That is what made a
+// wrong photo permanent — and, once vendors are TIERED, it also makes a RIGHT
+// photo permanent at the wrong authority: a tier-2 shop that discovers a cigar
+// first would hold the slot against the tier-1 shop enabled next month, and the
+// ordering the tiers exist to express would be decided by whoever crawled first.
+//
+// So the slot is now ordered rather than first-come, in one direction only:
+//
+//   * STRICTLY LOWER authority (a numerically GREATER tier) may be replaced. Same
+//     tier is not — two peers swapping the slot every night is churn, not
+//     authority — and a higher tier is emphatically not.
+//   * `rights = 'suppressed'` is FINAL whatever the tier. A takedown is a legal
+//     state, not a quality judgement, and re-filling the slot from a better source
+//     would republish exactly what was suppressed.
+//   * A curator's photo (`vendor_id IS NULL`) is never replaced by a crawl.
+//     Curators outrank every tier; the crawler has no tier to compare against.
+//
+// The market authority (`mayWriteCatalogPhoto`) still applies on top of this — a
+// replacement is a write, and every rule that governs writing the slot governs
+// rewriting it.
+export function mayReplaceCatalogPhoto(tier: number, occupant: PhotoSlotOccupant | null): boolean {
+  // Nothing to replace. Not "yes" — the empty-slot case is an INSERT and is
+  // guarded by the unique constraint, not by this.
+  if (occupant == null) return false;
+  if (occupant.rights === "suppressed") return false;
+  if (occupant.tier == null) return false;
+  return occupant.tier > tier;
+}
+
+// THE SAME RULE, AS A PREDICATE THE UPDATE ITSELF CAN EVALUATE, for exactly the
+// reason `mayWriteCatalogPhotoSql` exists one screen up: the JS read above is a
+// pre-flight separated from the write by an image download — seconds of
+// third-party HTTP — and in that window a curator can suppress the photo or
+// another lane can take the slot. The pre-flight saves the vendor's bandwidth;
+// this is the authority. Any change to one belongs in both, and
+// enrichment-coverage.test.ts asserts them equivalent over the truth table.
+//
+// The inner JOIN (not LEFT JOIN) is what carries the `vendor_id IS NULL` case: a
+// curator's row has no vendor, so it joins to nothing and the EXISTS is false —
+// the same answer `occupant.tier == null` gives above.
+export function mayReplaceCatalogPhotoSql(tier: number, cigarId: SQL): SQL {
+  return sql`EXISTS (
+    SELECT 1
+      FROM product_photos rp
+      JOIN vendors rv ON rv.id = rp.vendor_id
+     WHERE rp.cigar_id = ${cigarId}
+       AND rp.rights <> 'suppressed'
+       AND rv.tier > ${tier}
+  )`;
+}
+
+// TIER-ORDERED DRAIN ELIGIBILITY (ADR-015). "A photo falls down the tier list"
+// as one SQL clause: a vendor of tier `tier` may take an ask only when EVERY
+// enabled vendor above it that could cover the ask has already looked and come up
+// empty, or is retired on this ask.
+//
+// Read it as the sentence it implements — NOT EXISTS (a higher-tier covering
+// vendor that still owes this ask a look). Composed from the same three
+// predicates the rest of this module is built on, never re-stated:
+//   * `coversMarketSql` on the higher-tier vendor's own focus against the ask's
+//     EVIDENCED market, so a tier-1 CC shop never blocks an NC ask it could not
+//     have answered;
+//   * a terminal ledger row — `miss` (we read that catalogue, it is not there) or
+//     `no_candidate` (its enumeration names the ask nowhere, #240). `match` is not
+//     terminal here because a match FULFILS the request, which leaves the open set
+//     by another door; `error` and `photo_refused` are not terminal because the
+//     lane still owes the look;
+//   * or retirement, the exact complement of `vendorNotRetiredSql`, so a
+//     higher-tier vendor that has burned its budget or its error budget stops
+//     holding the ask hostage.
+//
+// `kind = 'vendor'` for the reason `enrichVendorFleet` documents: `coversMarketSql`
+// is the LIBERAL filter and admits a NULL focus, so without it the first
+// registered reviewer would block the fleet on catalogue questions it has no
+// catalogue to answer.
+//
+// TIER 1 IS UNAFFECTED — nothing has a tier below 1, so the EXISTS is empty and
+// the clause is inert. And the fallback is a property of ONE RUN, not of a
+// calendar: `crawl --all-enabled --mode enrich` walks the fleet serially in tier
+// order inside a single process, so tier 1's misses are already in the ledger by
+// the time tier 2's open set is selected. Running the tiers from separate CronJobs
+// would make the same clause correct-but-slow — tier 2 would simply skip the ask
+// until tier 1's next night.
+export function everyHigherTierLookedSql(tier: number, requestId: SQL, cigarId: SQL): SQL {
+  return sql`NOT EXISTS (
+    SELECT 1
+      FROM vendors hv
+     WHERE hv.crawl_enabled
+       AND hv.kind = 'vendor'
+       AND hv.tier < ${tier}
+       AND ${coversMarketSql(sql`hv.focus`, evidencedMarketSql(cigarId))}
+       AND NOT EXISTS (
+         SELECT 1
+           FROM enrichment_attempts ha
+          WHERE ha.request_id = ${requestId}
+            AND ha.vendor_id = hv.id
+            AND (
+              ha.last_outcome IN ('miss', 'no_candidate')
+              OR NOT ${vendorNotRetiredSql(sql`ha.attempts`, sql`ha.errors`)}
+            )
+       )
+  )`;
 }
 
 // "Does a CRAWL-ENABLED vendor with a real market already stock this cigar?" Same
@@ -285,19 +419,51 @@ export function focusedStockistSql(cigarId: SQL): SQL {
   )`;
 }
 
-// Both facts in ONE statement, so the guard cannot read them from two different
+// Every fact in ONE statement, so the guard cannot read them from two different
 // snapshots, and so composing it inside a caller's transaction still sees the
 // link that transaction just wrote (the self-evidencing ordering below).
+//
+// The occupant rides the same read (ADR-015). The LEFT JOINs are what keep this a
+// single row on an empty slot: no photo yields nulls, and a photo with no vendor —
+// a curator's upload — yields a null tier, which `mayReplaceCatalogPhoto` reads as
+// "outranks every tier".
 export async function photoAuthority(q: Queryer, cigarId: string): Promise<PhotoAuthority> {
   const id = sql`${cigarId}::uuid`;
-  const result = await q.execute(
-    sql`SELECT ${evidencedMarketSql(id)} AS market, ${focusedStockistSql(id)} AS focused`,
-  );
-  const row = (result.rows as unknown as { market: string | null; focused: boolean }[])[0];
+  const result = await q.execute(sql`
+    SELECT ${evidencedMarketSql(id)} AS market, ${focusedStockistSql(id)} AS focused,
+           pp.id AS photo_id, pp.vendor_id, pp.rights, pp.object_key, pp.thumb_key,
+           pv.tier AS occupant_tier
+      FROM (SELECT 1) AS anchor
+      LEFT JOIN product_photos pp ON pp.cigar_id = ${id}
+      LEFT JOIN vendors pv ON pv.id = pp.vendor_id
+  `);
+  const row = (
+    result.rows as unknown as {
+      market: string | null;
+      focused: boolean;
+      photo_id: string | null;
+      vendor_id: string | null;
+      rights: ProductPhotoRights | null;
+      object_key: string | null;
+      thumb_key: string | null;
+      occupant_tier: number | null;
+    }[]
+  )[0];
   const market = row?.market ?? null;
   return {
     market: market === "NC" || market === "CC" ? market : null,
     focusedStockist: row?.focused === true,
+    occupant:
+      row?.photo_id == null
+        ? null
+        : {
+            photoId: row.photo_id,
+            vendorId: row.vendor_id,
+            tier: row.occupant_tier == null ? null : Number(row.occupant_tier),
+            rights: row.rights ?? "pending",
+            objectKey: row.object_key ?? "",
+            thumbKey: row.thumb_key ?? "",
+          },
   };
 }
 

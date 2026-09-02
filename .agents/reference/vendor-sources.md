@@ -8,14 +8,33 @@ before building or enabling any adapter.**
 
 ## Crawl posture per vendor
 
-| Vendor | Platform | Structured path | Verdict |
-|---|---|---|---|
-| Fox Cigar | WooCommerce | sitemap + JSON-LD Product | caution — softest target, crawl gently |
-| 2 Guys Cigars | WebSell/NitroSell | sitemap (products are ROOT-LEVEL slugs ending in the NitroSell product code) | live-read 2026-09-01 (#217), the fullest one yet: sitemap = 1 root + 4,888 one-segment slugs + 1,467 `/store/go/registry/<n>/`, nothing else. 3,841 of the slugs end in `-<digits>` (= `og:upc`) and are products; the other 1,047 are landing pages or 404s. Gate is Mode B — 1 segment, minus `/store/` and minus anything without a product code. robots: two `*` groups, `Crawl-delay: 5` (honored via `minIntervalMs`), only `/store/filtered/` disallowed. **Blocker is now the PARSER, not the gate: this vendor serves no `application/ld+json` anywhere** — product data lives in OpenGraph (`og:type=product`, `product:price:amount`, `og:upc`, `og:brand`) plus a bare `itemtype="schema.org/Product"`, and product pages carry no category breadcrumb. `crawl_enabled=false` until an OG/microdata extractor exists and an ADR rules it acceptable |
-| Cigars International | custom (STG) + reCAPTCHA/Cloudflare | sitemap likely | **avoid** — active bot defenses; sister STG sites' ToS explicitly ban scraping |
-| Small Batch Cigar | unknown (~20k URLs) | sitemapindex | live-probed 2026-08-29: products are ROOT-LEVEL slugs with no shared prefix — adapter uses the exclusion gate (negative path pattern + 1-segment depth bound), written against an UNCONFIRMED platform; `crawl_enabled=false` until a re-probe confirms the pattern (a product-only child sitemap, if one exists, would be sharper) |
-| Holt's | Magento-style | sitemap + JSON-LD common | caution→avoid — large retailer, read ToS first |
-| Cuban Lou's | WooCommerce | Yoast product-only sitemap (985 locs) + JSON-LD | live-probed 2026-08-29 and ENABLED; **flag: US-embargo exposure** for surfacing Habanos price data — admin decision via the registry toggle, risk noted in PRD. Post-seed audit: most of its catalog is bundle/quantity SKUs the shared `excludeNamePattern` does not cover (#127) |
+**Tier** is `vendors.tier` (ADR-015, migration 0034; 1 is the highest authority).
+It orders three things and nothing else: whose offers are **displayed** (tier 1
+only — every crawled vendor's prices are still *recorded*, so a promotion is a
+flag flip rather than a re-crawl), whom the enrich drain asks **first** (a lower
+tier takes an ask only once every covering higher-tier vendor has looked and
+missed), and who may **replace** the one catalogue-photo slot. Catalog structure
+has no tier: any enabled vendor feeds brands, lines and leaves. The column is
+admin data — an adapter only seeds a NEW row, and a disagreement is reported by
+the run, never written over it.
+
+**Open, as of 2026-09-02:** `display_enabled` is written (by the crawler's
+`resolveVendor`, by `--import-approved`, by the importer) and read by NOBODY. The
+offers read paths — `reads.ts` `latestSeries` and `catalog-browse.ts`'s
+`OFFER_JOIN` — gate on `listing_matches.status IN ('auto','confirmed')` alone, so
+every crawled vendor's prices render today whatever its tier. Seeding the column
+from the tier is therefore only half of "displayed from tier 1"; wiring the two
+read paths to it is the other half and is not in this change.
+
+| Vendor | Tier | Platform | Structured path | Verdict |
+|---|---|---|---|---|
+| Fox Cigar | 1 | WooCommerce | sitemap + JSON-LD Product | caution — softest target, crawl gently. Owner's linkout NC shop and today the only vendor with an offers walk, so it is the price authority in practice as well as by tier |
+| 2 Guys Cigars | 1 | WebSell/NitroSell | sitemap (products are ROOT-LEVEL slugs ending in the NitroSell product code) | live-read 2026-09-01 (#217), the fullest one yet: sitemap = 1 root + 4,888 one-segment slugs + 1,467 `/store/go/registry/<n>/`, nothing else. 3,841 of the slugs end in `-<digits>` (= `og:upc`) and are products; the other 1,047 are landing pages or 404s. Gate is Mode B — 1 segment, minus `/store/` and minus anything without a product code. robots: two `*` groups, `Crawl-delay: 5` (honored via `minIntervalMs`), only `/store/filtered/` disallowed. **Blocker is now the PARSER, not the gate: this vendor serves no `application/ld+json` anywhere** — product data lives in OpenGraph (`og:type=product`, `product:price:amount`, `og:upc`, `og:brand`) plus a bare `itemtype="schema.org/Product"`, and product pages carry no category breadcrumb. `crawl_enabled=false` until an OG/microdata extractor exists and an ADR rules it acceptable. Tier 1 is a posture, not a promise the lane runs |
+| Cigars International | — | custom (STG) + reCAPTCHA/Cloudflare | sitemap likely | **avoid** — active bot defenses; sister STG sites' ToS explicitly ban scraping |
+| Small Batch Cigar | 1 | unknown (~20k URLs) | sitemapindex | live-probed 2026-08-29: products are ROOT-LEVEL slugs with no shared prefix — adapter uses the exclusion gate (negative path pattern + 1-segment depth bound), written against an UNCONFIRMED platform; `crawl_enabled=false` until a re-probe confirms the pattern (a product-only child sitemap, if one exists, would be sharper) |
+| Holt's | — | Magento-style | sitemap + JSON-LD common | caution→avoid — large retailer, read ToS first |
+| Cuban Lou's | 2 | WooCommerce | Yoast product-only sitemap (985 locs) + JSON-LD | live-probed 2026-08-29 and ENABLED; **flag: US-embargo exposure** for surfacing Habanos price data — admin decision via the registry toggle, risk noted in PRD. Post-seed audit: most of its catalog is bundle/quantity SKUs the shared `excludeNamePattern` does not cover (#127). Off the r/cubancigars approved list, so tier 2: its offers are recorded and not displayed, and its photos fill only what tier 1 could not |
+| r/cubancigars approved stores | 1 (on onboarding) | — | — | The Habanos price authority per ADR-015, `approval_status = 'approved'`. None is adapted or probed yet; the approved-list import mints a registry row at the default tier 2, and promoting one to tier 1 is an admin act after its adapter and in-cluster probe exist |
 
 Cross-cutting: **none is Shopify**, so no `/products.json` anywhere — build
 the crawler on sitemap enumeration + JSON-LD Product parsing, low rate,

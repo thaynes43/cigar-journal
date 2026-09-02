@@ -35,7 +35,9 @@ export const smallBatchCigar: ExclusionVendorAdapter = {
   focus: "NC",
   crawlEnabled: false,
   approvalStatus: "owner-added",
-  displayEnabled: true,
+  // Tier 1 (ADR-015): one of the owner's linkout NC shops, so its prices are
+  // display-grade the day its probe passes and its row is enabled.
+  tier: 1,
   purchaseLinkout: true,
   // Exclusion gate (Mode B): reject the known non-product paths, then require a
   // single path segment. The depth bound carries most of the load — `/blogs/news/x`

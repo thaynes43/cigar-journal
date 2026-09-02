@@ -82,6 +82,25 @@ LLM-created cigars accumulate until curated.
 
 ## Amendments
 
+- **2026-09-02 — vendors are TIERED, and three of this ADR's rules are now read
+  through the tier (ADR-015, issue #270).** Nothing here is retracted; what
+  changes is the ordering laid over it. `vendors.tier` (migration 0034, 1 is
+  highest) decides (a) which vendors' offers are DISPLAYED — prices are recorded
+  from every crawled vendor and shown only from tier 1, through the
+  `display_enabled` gate this ADR already defines; (b) who the enrich drain asks
+  FIRST — a vendor of tier *t* may take an ask only once every enabled
+  higher-tier vendor that covers the ask's evidenced market has looked and
+  missed, so the per-vendor ledger below is what fallback is computed from; and
+  (c) the one catalogue-photo slot, which stops being first-writer-forever — a
+  higher-tier capture REPLACES a lower tier's photo (never the reverse, and
+  `rights = 'suppressed'` and a curator's upload are final whatever the tier).
+  The `--vendor` CLI gains `--all-enabled`, which walks the enabled fleet
+  serially in tier order in one process (closes #156), because that ordering is
+  what makes fallback a property of one run rather than of a CronJob calendar.
+  Catalog STRUCTURE is untiered: a seed walk from any enabled vendor may still
+  create brand/line/leaf rows under matching v2's alias-anchored resolution. See
+  ADR-015 for the decision and its alternatives.
+
 - **2026-09-01 — "curator outranks crawler" was written about a HUMAN, and a
   reasonless bulk agent unmatch is not one (issue #245).** The amendment above
   fixed which pages the drain fetches. This one fixes what it is allowed to write

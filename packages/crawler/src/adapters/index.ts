@@ -27,6 +27,15 @@ export function getAdapter(slug: string): VendorAdapter | undefined {
   return adapters[slug];
 }
 
+// THE OTHER KEY, and it is the one the registry actually joins on. `resolveVendor`
+// looks a row up by `vendors.name`, so a fleet walk that starts from the registry
+// (`--all-enabled`) has to come back the same way — a slug never appears in the
+// database. Names are unique per shop in practice and a duplicate would simply
+// share an adapter, which is what a duplicate row means anyway.
+export function getAdapterByName(name: string): VendorAdapter | undefined {
+  return Object.values(adapters).find((adapter) => adapter.name === name);
+}
+
 export function adapterSlugs(): string[] {
   return Object.keys(adapters);
 }

@@ -41,6 +41,12 @@ export interface NonVendorSourceKind {
 
 export type SourceKind = VendorSourceKind | NonVendorSourceKind;
 
+// A tier is an ORDINAL an admin reads and types, not a score, and the database
+// CHECKs it to [1, 9] (migration 0034). Spelled as a union rather than `number`
+// for the same reason `SourceKind` is a union: the mistake is made on the adapter
+// line, so that is where it should fail.
+export type VendorTier = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+
 // Everything that is true of an adapter whatever kind of source it points at.
 export interface VendorAdapterShape {
   // Registry key, used on the CLI (`--vendor <slug>`) and as the adapter id.
@@ -65,8 +71,15 @@ export interface VendorAdapterShape {
   // owner buys from are 'owner-added'; a CC vendor off the approved list (Cuban
   // Lou's) is 'unapproved' and labeled wherever shown.
   approvalStatus: "owner-added" | "approved" | "unapproved";
-  // Whether this vendor's offers may be displayed at all (seeds display_enabled).
-  displayEnabled: boolean;
+  // THE ORDER OF AUTHORITY (ADR-015, migration 0034; seeds vendors.tier). 1 is
+  // the highest. Tier 1 is the PRICE AUTHORITY — the r/cubancigars approved
+  // stores for Habanos and the owner's linkout NC shops; lower tiers are sources
+  // for photos and catalog structure whose offers are recorded and not shown.
+  //
+  // It orders exactly three things: display (`display_enabled`, derived from this
+  // — see `adapterPosture`), who the enrich drain asks first, and who may replace
+  // the one catalogue-photo slot. Structure has no tier.
+  tier: VendorTier;
   // --- crawl shape ---------------------------------------------------------
   // A breadcrumb path (joined) matching this is a cigar category…
   cigarCategoryPattern: RegExp;
