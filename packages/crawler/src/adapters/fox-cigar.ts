@@ -22,7 +22,9 @@ export const foxCigar: PrefixVendorAdapter = {
   focus: "NC",
   crawlEnabled: true,
   approvalStatus: "owner-added",
-  displayEnabled: true,
+  // Tier 1 (ADR-015): a linkout NC shop the owner buys from, and the fleet's
+  // price authority — its offers are the ones displayed.
+  tier: 1,
   purchaseLinkout: true,
   productPathPrefix: "/shop/",
   cigarCategoryPattern: /cigar/i,

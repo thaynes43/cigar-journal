@@ -449,3 +449,29 @@ init container at startup (ADR-003).
   (claimed with no smoke reads `closed`) instead of erasing the claim. The 7-day
   sweep of an unclaimed drop and its objects runs lazily, when the same user next
   opens one.
+- `0034_vendor_tiers.sql` — `vendors.tier` (ADR-015, crawl audit #270): a
+  `smallint NOT NULL DEFAULT 2` CHECKed to `[1, 9]`, 1 being the highest
+  authority. A tier is an ORDINAL an admin reads and types, not a score, so the
+  band is narrow and a value outside it is refused rather than silently sorting a
+  shop to the front of the fleet. It orders exactly three things: whose offers are
+  **displayed** (`display_enabled` is seeded true only for tier 1 — prices are
+  recorded from every crawled vendor, so promoting a shop is a flag flip and not a
+  re-crawl), whom the enrich drain asks **first** (`everyHigherTierLookedSql`: a
+  lower tier may take an ask only once every enabled higher-tier vendor whose
+  focus covers the ask's evidenced market has a terminal `miss`/`no_candidate` row
+  or is retired), and who may **replace** the one catalogue-photo slot, which
+  stops being first-writer-forever — a higher-tier capture supersedes a lower
+  tier's photo, never the reverse, and `rights = 'suppressed'` plus a curator's
+  upload (`vendor_id IS NULL`) are final whatever the tier. Catalog STRUCTURE is
+  untiered. **The default is 2, not 1**: every pre-0034 row predates the notion
+  and the safe reading of "nobody decided" is "not the price authority" — a
+  default of 1 would promote every registered shop, including the ones
+  `--import-approved` mints with no adapter and no probe, into the display gate on
+  deploy. The backfill is two rows because the fleet is two vendors deep: `Fox
+  Cigar` → 1 (the owner's linkout NC shop, and the only vendor with an offers
+  walk), Cuban Lou's left at the default (unapproved, so recorded and not shown).
+  Guarded on `tier = 2` — the value the ADD COLUMN just wrote — so it is
+  idempotent and a later deliberate re-tiering survives a re-run, the same
+  discipline 0025's vendor correction uses. No index: `vendors` is a handful of
+  rows, and both new readers scan it inside a correlated subquery that is already
+  bounded by the drain's `LIMIT`.

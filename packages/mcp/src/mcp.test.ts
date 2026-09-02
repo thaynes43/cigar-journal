@@ -1892,7 +1892,10 @@ describe("@cj/mcp adapter", () => {
 
   it("record_price observes a price, dedupes an identical repeat, and surfaces per-stick-with-packaging on get_cigar", async () => {
     const cigarId = await h.seedCigar({ canonicalName: "Priced Via MCP", verification: "unverified" });
-    await h.pg.db.insert(vendors).values({ name: "MCP Box Shop" });
+    // record_price resolves this name to a REGISTRY vendor, so the observation
+    // carries that vendor's display gate (ADR-015) — display-enabled here, since
+    // the assertion below is that the price reaches get_cigar.
+    await h.pg.db.insert(vendors).values({ name: "MCP Box Shop", displayEnabled: true });
     await withClient(ownerFull, async (client) => {
       const first = payloadOf(
         await call(client, "record_price", {

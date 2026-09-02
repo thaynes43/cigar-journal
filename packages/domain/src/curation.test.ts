@@ -60,7 +60,13 @@ describe("curation", () => {
     h = await createHarness();
     admin = await h.createUser("curator@example.com", "admin");
     user = await h.createUser("member@example.com");
-    const [v] = await h.deps.db.insert(vendors).values({ name: "Test Vendor" }).returning({ id: vendors.id });
+    // `displayEnabled` explicitly: the column defaults to false and the offer
+    // reads gate on it (ADR-015), and the unmatch case below asserts that a
+    // match's offers were VISIBLE before the unmatch and gone after.
+    const [v] = await h.deps.db
+      .insert(vendors)
+      .values({ name: "Test Vendor", displayEnabled: true })
+      .returning({ id: vendors.id });
     vendorId = v!.id;
   }, 60_000);
 

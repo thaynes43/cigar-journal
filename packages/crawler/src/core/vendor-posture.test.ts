@@ -1,20 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { vendorPostureDrift, formatVendorPostureDrift, type VendorPostureRow } from "./vendor-posture.js";
+import {
+  adapterPosture,
+  vendorPostureDrift,
+  formatVendorPostureDrift,
+  type VendorPostureRow,
+} from "./vendor-posture.js";
 import { twoGuysCigars } from "../adapters/two-guys-cigars.js";
+import { cubanLous } from "../adapters/cuban-lous.js";
 import type { VendorAdapter } from "../adapters/types.js";
 
-// The row as the adapter would have seeded it, so each test perturbs exactly one
-// field and the assertion names the perturbation.
+// The row as the adapter would have seeded it — through the SAME projection
+// `resolveVendor` inserts, so each test perturbs exactly one field and the
+// assertion names the perturbation.
 function rowFor(adapter: VendorAdapter, overrides: Partial<VendorPostureRow> = {}): VendorPostureRow {
-  return {
-    kind: adapter.kind,
-    focus: adapter.focus ?? null,
-    crawlEnabled: adapter.crawlEnabled,
-    displayEnabled: adapter.displayEnabled,
-    approvalStatus: adapter.approvalStatus,
-    purchaseLinkout: adapter.purchaseLinkout,
-    ...overrides,
-  };
+  return { ...adapterPosture(adapter), ...overrides };
 }
 
 describe("vendorPostureDrift", () => {
@@ -30,11 +29,31 @@ describe("vendorPostureDrift", () => {
     expect(drift).toEqual([{ field: "crawl_enabled", row: "false", adapter: "true" }]);
   });
 
+  // A DEMOTION THE ADAPTER CANNOT APPLY, which is the tier's version of the same
+  // blind spot: 2 Guys ships tier 1, and an admin who moved its prod row to 3
+  // would otherwise never learn the two disagree (ADR-015).
+  it("names a tier the row and the adapter disagree about", () => {
+    const drift = vendorPostureDrift(rowFor(twoGuysCigars, { tier: 3 }), twoGuysCigars);
+    expect(drift).toEqual([{ field: "tier", row: "3", adapter: "1" }]);
+  });
+
+  // `display_enabled` is DERIVED from the tier, so it is not separately settable
+  // on an adapter and the two can never disagree in the seed. Cuban Lou's is the
+  // live case: tier 2, so its offers are recorded and not shown, and a prod row
+  // that still says `true` is reported rather than overwritten.
+  it("seeds display_enabled from the tier, and reports a row that disagrees", () => {
+    expect(adapterPosture(twoGuysCigars).displayEnabled).toBe(true);
+    expect(adapterPosture(cubanLous).displayEnabled).toBe(false);
+    const drift = vendorPostureDrift(rowFor(cubanLous, { displayEnabled: true }), cubanLous);
+    expect(drift).toEqual([{ field: "display_enabled", row: "true", adapter: "false" }]);
+  });
+
   it("reports every posture field, and only posture fields", () => {
     const drift = vendorPostureDrift(
       rowFor(twoGuysCigars, {
         kind: "reviewer",
         focus: "CC",
+        tier: 4,
         crawlEnabled: true,
         displayEnabled: false,
         approvalStatus: "unapproved",
@@ -45,6 +64,7 @@ describe("vendorPostureDrift", () => {
     expect(drift.map((d) => d.field)).toEqual([
       "kind",
       "focus",
+      "tier",
       "crawl_enabled",
       "display_enabled",
       "approval_status",
@@ -64,7 +84,7 @@ describe("vendorPostureDrift", () => {
       purchaseLinkout: false,
       crawlEnabled: false,
       approvalStatus: "owner-added",
-      displayEnabled: false,
+      tier: 2,
       cigarCategoryPattern: /^$/,
       excludePattern: /^$/,
       productPathPrefix: "/review/",

@@ -59,7 +59,10 @@ export const twoGuysCigars: ExclusionVendorAdapter = {
   focus: "NC",
   crawlEnabled: false,
   approvalStatus: "owner-added",
-  displayEnabled: true,
+  // Tier 1 (ADR-015): one of the owner's linkout NC shops. The tier is a posture,
+  // not a promise the lane runs — the parser blocker below still keeps
+  // `crawlEnabled` false, and nothing is displayed from a vendor that never ran.
+  tier: 1,
   purchaseLinkout: true,
   // Exclusion gate (Mode B), two branches, both anchored:
   //

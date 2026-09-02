@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { crawlRuns, enrichmentAttempts, enrichmentRequests, listingMatches, vendors } from "@cj/db";
+import { crawlRuns, enrichmentAttempts, enrichmentRequests, listingMatches, productPhotos, vendors } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { maybeQueueEnrichment } from "./enrichment.js";
 import type { CigarType } from "./types.js";
@@ -13,8 +13,12 @@ import {
   enrichmentCoverageForCigar,
   enrichmentCoverageForRequest,
   evidencedMarket,
+  everyHigherTierLookedSql,
   liveEnrichMarkets,
+  mayReplaceCatalogPhoto,
+  mayReplaceCatalogPhotoSql,
   mayWriteCatalogPhoto,
+  photoAuthority,
   recordEnrichmentAttempt,
   vendorNotRetiredSql,
   type VendorFocus,
@@ -888,5 +892,178 @@ describe("enrichment coverage", () => {
     // ...even though the very same lane counts against nothing filed since.
     const { requestId } = await askedAt(new Date("2026-08-10T00:00:00.000Z"), "CC");
     expect((await enrichmentCoverageForRequest(h.deps.db, requestId, "CC")).live).toHaveLength(0);
+  });
+
+  // --- tiers (ADR-015) -------------------------------------------------------
+  //
+  // "Photos fall down the tier list" is one SQL clause, and these cases are the
+  // sentence it implements: a lower tier may take an ask only once every enabled
+  // higher-tier vendor that COULD have answered it has looked and come up empty.
+  // Every case sets the whole fleet, because eligibility is a fleet-wide fact.
+
+  const tierOf = async (vendorId: string, tier: number): Promise<void> => {
+    await h.deps.db.update(vendors).set({ tier }).where(eq(vendors.id, vendorId));
+  };
+
+  // The predicate as the drain evaluates it — through the SQL builder, against real
+  // rows, because the SQL is what runs.
+  const eligible = async (tier: number, requestId: string, cigarId: string): Promise<boolean> => {
+    const rows = await h.deps.db.execute(
+      sql`SELECT ${everyHigherTierLookedSql(tier, sql`${requestId}::uuid`, sql`${cigarId}::uuid`)} AS ok`,
+    );
+    return (rows.rows[0] as { ok: boolean }).ok;
+  };
+
+  it("a lower tier waits for the tier above it, and takes the ask once that tier has missed", async () => {
+    await clearFleet();
+    const top = await makeVendor("Tier One Shop", "NC");
+    await tierOf(top, 1);
+    const { cigarId, requestId } = await makeRequest("NC", "Tier Fallback");
+
+    // Tier 1 has not looked, so the ask is not tier 2's to take yet: the whole
+    // point of the ordering is that the best source is asked first.
+    expect(await eligible(2, requestId, cigarId)).toBe(false);
+
+    // A completed look that found nothing hands the ask down. `miss` is terminal
+    // here for the same reason it burns budget elsewhere — we READ that catalogue.
+    await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId: top, outcome: "miss", at });
+    expect(await eligible(2, requestId, cigarId)).toBe(true);
+  });
+
+  it("tier 1 is unaffected: nothing sits above it, so the clause is inert", async () => {
+    await clearFleet();
+    const peer = await makeVendor("Tier One Peer", "NC");
+    await tierOf(peer, 1);
+    const { cigarId, requestId } = await makeRequest("NC", "Tier One Ask");
+
+    // A peer at the same tier does not gate — same tier is not "above".
+    expect(await eligible(1, requestId, cigarId)).toBe(true);
+  });
+
+  it("a higher-tier vendor that could not have answered does not hold the ask", async () => {
+    await clearFleet();
+    const ccTop = await makeVendor("Tier One CC Shop", "CC");
+    await tierOf(ccTop, 1);
+    // An NC cigar: the tier-1 shop trades the other market, so the negative filter
+    // rules it out of the fleet entirely and it has no look to owe.
+    const { cigarId, requestId } = await makeRequest("NC", "Out Of Market Above");
+
+    expect(await eligible(2, requestId, cigarId)).toBe(true);
+  });
+
+  it("a disabled higher tier holds nothing, and a retired one hands the ask down", async () => {
+    await clearFleet();
+    const top = await makeVendor("Tier One Retiring", "NC");
+    await tierOf(top, 1);
+    const { cigarId, requestId } = await makeRequest("NC", "Tier Retirement");
+    expect(await eligible(2, requestId, cigarId)).toBe(false);
+
+    // RETIRED, not merely tried: the ledger row says the lane burned its error
+    // budget without ever finishing a look, so it will not look again and must stop
+    // holding the ask. This is the exact complement of `vendorNotRetiredSql`.
+    for (let i = 0; i < ERROR_BUDGET; i += 1) {
+      await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId: top, outcome: "error", at });
+    }
+    expect(await eligible(2, requestId, cigarId)).toBe(true);
+
+    // And `crawl_enabled` is the lever it is everywhere else in this module: a
+    // vendor that cannot be asked cannot hold an ask open either.
+    await h.deps.db.delete(enrichmentAttempts).where(eq(enrichmentAttempts.requestId, requestId));
+    expect(await eligible(2, requestId, cigarId)).toBe(false);
+    await h.deps.db.update(vendors).set({ crawlEnabled: false }).where(eq(vendors.id, top));
+    expect(await eligible(2, requestId, cigarId)).toBe(true);
+  });
+
+  it("an incomplete look above does not hand the ask down; a no_candidate one does", async () => {
+    await clearFleet();
+    const top = await makeVendor("Tier One Partial", "NC");
+    await tierOf(top, 1);
+    const { cigarId, requestId } = await makeRequest("NC", "Tier Partial Look");
+
+    // An error says nothing about any catalogue, so the lane still owes the look.
+    await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId: top, outcome: "error", at });
+    expect(await eligible(2, requestId, cigarId)).toBe(false);
+
+    // `no_candidate` DOES hand it down: the shop's own enumeration names the ask
+    // nowhere (#240), which is as final a "not here" as this vendor can give
+    // without opening a page, and holding the ask on it would strand every row no
+    // tier-1 enumeration happens to name.
+    await recordEnrichmentAttempt(h.deps.db, { requestId, vendorId: top, outcome: "no_candidate", at });
+    expect(await eligible(2, requestId, cigarId)).toBe(true);
+  });
+
+  // --- the photo slot's tier rule (ADR-015) ----------------------------------
+  //
+  // The same "two halves that must not drift" discipline `mayWriteCatalogPhoto`
+  // carries: a JS pre-flight and the predicate the UPDATE evaluates in its own
+  // snapshot. Asserted against real `product_photos` rows so the SQL half is
+  // exercised as the write exercises it.
+  it("mayReplaceCatalogPhoto mirrors its SQL over occupant tier, rights and ownership", async () => {
+    await clearFleet();
+
+    const occupy = async (
+      cigarId: string,
+      values: { vendorId: string | null; rights: "pending" | "approved" | "suppressed" },
+    ): Promise<void> => {
+      await h.deps.db.insert(productPhotos).values({
+        cigarId,
+        vendorId: values.vendorId,
+        objectKey: `obj/${newRequestId()}`,
+        thumbKey: `thumb/${newRequestId()}`,
+        contentType: "image/jpeg",
+        width: 800,
+        height: 600,
+        bytes: 1234,
+        rights: values.rights,
+      });
+    };
+
+    const inSql = async (tier: number, cigarId: string): Promise<boolean> => {
+      const rows = await h.deps.db.execute(
+        sql`SELECT ${mayReplaceCatalogPhotoSql(tier, sql`${cigarId}::uuid`)} AS ok`,
+      );
+      return (rows.rows[0] as { ok: boolean }).ok;
+    };
+
+    // capturing tier, occupant tier, occupant vendor?, rights, expected
+    const cases: [number, number, boolean, "pending" | "approved" | "suppressed", boolean][] = [
+      // Strictly lower authority (a greater number) is replaceable — the upgrade path.
+      [1, 2, true, "pending", true],
+      [1, 9, true, "approved", true],
+      [2, 3, true, "pending", true],
+      // Same tier is not: two peers swapping the slot nightly is churn, not authority.
+      [1, 1, true, "pending", false],
+      // Higher authority is emphatically not.
+      [2, 1, true, "pending", false],
+      // A takedown is final whatever the tier.
+      [1, 2, true, "suppressed", false],
+      // A curator's upload has no vendor and outranks every tier.
+      [1, 2, false, "pending", false],
+    ];
+
+    for (const [tier, occupantTier, hasVendor, rights, expected] of cases) {
+      const occupantVendor = hasVendor ? await makeVendor("Slot Occupant", "NC", { enrichRun: false }) : null;
+      if (occupantVendor) await tierOf(occupantVendor, occupantTier);
+      const cigarId = await h.seedCigar({ canonicalName: `Slot Case ${newRequestId()}` });
+      await occupy(cigarId, { vendorId: occupantVendor, rights });
+
+      const authority = await photoAuthority(h.deps.db, cigarId);
+      expect([tier, occupantTier, hasVendor, rights, mayReplaceCatalogPhoto(tier, authority.occupant)]).toEqual([
+        tier,
+        occupantTier,
+        hasVendor,
+        rights,
+        expected,
+      ]);
+      expect(await inSql(tier, cigarId)).toBe(expected);
+    }
+
+    // An EMPTY slot is not "replaceable" in either half: that case is an INSERT,
+    // guarded by UNIQUE(cigar_id), and answering true here would let the caller
+    // take the update path with nothing to update.
+    const empty = await h.seedCigar({ canonicalName: `Slot Empty ${newRequestId()}` });
+    expect((await photoAuthority(h.deps.db, empty)).occupant).toBeNull();
+    expect(mayReplaceCatalogPhoto(1, null)).toBe(false);
+    expect(await inSql(1, empty)).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, boolean, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, boolean, smallint, timestamp } from "drizzle-orm/pg-core";
 
 // Admin-managed source registry (Market context). Cuban vendors carry an approval
 // status synced from the r/cubancigars wiki; unapproved sources stay labeled.
@@ -22,7 +22,28 @@ export const vendors = pgTable("vendors", {
   // `evidencedMarketSql` infers a cigar's market from exactly that claim.
   kind: text("kind").$type<"vendor" | "reviewer" | "reference">().notNull().default("vendor"),
   focus: text("focus").$type<"NC" | "CC" | "both">(),
+  // THE ORDER OF AUTHORITY (ADR-015, migration 0034). 1 is the highest; the
+  // migration CHECKs [1, 9]. It orders three things and nothing else: which
+  // vendor's offers are DISPLAYED (tier 1 only, through `display_enabled`), who
+  // the enrich drain asks FIRST (a lower tier may only take an ask every
+  // higher-tier covering vendor has already missed), and who may REPLACE the one
+  // catalogue-photo slot. Catalog structure has no tier — every enabled vendor
+  // feeds brands, lines and leaves.
+  //
+  // Admin data, seeded from the adapter's posture on first resolve exactly as
+  // `focus` is, and never overwritten by a crawl. Defaults to 2: "nobody has
+  // decided" must not mean "price authority".
+  tier: smallint("tier").notNull().default(2),
   crawlEnabled: boolean("crawl_enabled").notNull().default(false),
+  // May this vendor's offers be SHOWN? True only for tier 1 as seeded (ADR-015);
+  // lower tiers' offers are still recorded, so promoting a shop is a flag flip
+  // rather than a re-crawl. An admin's value on an existing row always wins.
+  //
+  // READ BY EVERY PRICE SURFACE since 2026-09-02 (@cj/domain `offer-display.ts`):
+  // `reads.ts`'s four offer queries and catalog-browse's OFFER_JOIN join `vendors`
+  // and require it, so a row with this false is recorded and invisible. It gates
+  // DISPLAY only — the offers still count as stocking evidence for the evidenced
+  // market and the stockist facts.
   displayEnabled: boolean("display_enabled").notNull().default(false),
   // Is this vendor a place to buy? (owner ruling 2026-08-29, ADR-006, migration
   // 0018). false = offers/photos still ingested and shown, but never as a

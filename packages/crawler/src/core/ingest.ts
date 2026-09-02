@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import { enrichmentRequests, productPhotos, vendors, type Database, type SuggestedParse } from "@cj/db";
+import { auditLog, enrichmentRequests, productPhotos, vendors, type Database, type SuggestedParse } from "@cj/db";
 import {
+  auditActor,
   recordPriceObservation,
   recordEnrichmentAttempt,
   enrichmentCoverageForRequest,
@@ -13,6 +14,9 @@ import {
   parseListing,
   mayWriteCatalogPhoto,
   mayWriteCatalogPhotoSql,
+  mayReplaceCatalogPhoto,
+  mayReplaceCatalogPhotoSql,
+  everyHigherTierLookedSql,
   photoAuthority,
   vendorNotRetiredSql,
   type CigarType,
@@ -66,6 +70,11 @@ import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
 // still bounds a run whatever this says.
 const ENRICH_DEFAULT_LIMIT = 50;
 const MAX_ENRICH_CANDIDATES = 8;
+
+// `vendors.tier`'s own default (migration 0034), restated here for the one case
+// the registry read below cannot cover: a vendorId with no row. It is the
+// conservative end of the scale, never the price authority.
+export const DEFAULT_VENDOR_TIER = 2;
 
 export type CrawlMode = "seed" | "offers" | "enrich";
 
@@ -205,6 +214,18 @@ export interface IngestOptions {
   dryRun?: boolean;
 }
 
+// THIS VENDOR'S REGISTRY POSTURE, read once per run (see runIngest) and threaded
+// to every guard that needs it. `focus` is the coarse market claim every write
+// guard already read; `tier` is the order of authority ADR-015 adds. They travel
+// as one value because the photo guard now reads BOTH — market authority decides
+// whether this vendor may write the slot at all, tier decides whether it may take
+// the slot from whoever holds it — and two parameters that must come from the same
+// registry row are two chances to pass one from somewhere else.
+interface VendorPosture {
+  focus: VendorFocus | null;
+  tier: number;
+}
+
 export interface IngestResult {
   crawlRunId: string | null;
   status: "succeeded" | "failed";
@@ -329,36 +350,52 @@ async function productUrls(deps: IngestDeps, adapter: VendorAdapter, stats: Inge
 //             written, and nothing about this vendor will change that on the next
 //             run; the ask is still open and still needs a different vendor;
 //   skipped — there was nothing to do (no storage, no image on the listing, or the
-//             slot was already filled). Not a refusal: the ask is satisfied or was
-//             never about a photo.
+//             slot is held by an authority this vendor may not displace). Not a
+//             refusal: the ask is satisfied or was never about a photo.
+//
+// THE SLOT IS ORDERED, NOT FIRST-COME (ADR-015). An occupied slot used to
+// short-circuit unconditionally; now a capture from a HIGHER-tier vendor replaces
+// a lower tier's photo — new objects written first, the row swapped in one
+// transaction, the old objects dropped after the commit, and the whole thing
+// audited as `product_photo.replace`. Same tier or higher, a curator's upload, or
+// `rights = 'suppressed'` all still short-circuit; see `mayReplaceCatalogPhoto`.
+//
+// This is the upgrade path the tiers exist for, and it runs on the SEED/OFFERS
+// walk rather than on the drain: an ask whose photo exists is `fulfilled` and the
+// drain's open set never re-selects it, so nothing in `enrich` would ever look at
+// a filled slot again. A tier-1 vendor walking its own catalogue is what finds the
+// tier-2 photo and supersedes it.
 type PhotoCapture = "wrote" | "refused" | "skipped";
 
 async function capturePhoto(
   deps: IngestDeps,
   vendorId: string,
-  focus: VendorFocus | null,
+  posture: VendorPosture,
   cigarId: string,
   listing: NormalizedListing,
   stats: IngestStats,
 ): Promise<PhotoCapture> {
   if (!deps.storage || !listing.imageUrl) return "skipped";
+  const { focus, tier } = posture;
+
+  // ONE READ FOR BOTH QUESTIONS — may this vendor write the slot (market
+  // authority), and may it take the slot from whoever holds it (tier). Reading
+  // them together is what keeps the answer coherent: two reads could see a
+  // curator's suppression land between them.
+  const authority = await photoAuthority(deps.db, cigarId);
 
   // The slot check comes FIRST so `photosSkippedMarket` counts only refusals that
-  // would otherwise have written: a cigar that already has its photo is a no-op
-  // whatever the market says, and counting it would inflate the number an operator
-  // reads as "wrong-market photos this run prevented".
-  const existing = await deps.db
-    .select({ id: productPhotos.id })
-    .from(productPhotos)
-    .where(eq(productPhotos.cigarId, cigarId))
-    .limit(1);
-  if (existing[0]) return "skipped";
+  // would otherwise have written: a cigar whose photo this vendor may not displace
+  // is a no-op whatever the market says, and counting it would inflate the number
+  // an operator reads as "wrong-market photos this run prevented".
+  if (authority.occupant && !mayReplaceCatalogPhoto(tier, authority.occupant)) return "skipped";
+  const replacing = authority.occupant;
 
   // PRE-FLIGHT, not the guard. This read is here for one reason only — a photo we
   // already know we may not write is a photo we should not spend the vendor's
-  // bandwidth fetching. The AUTHORITATIVE evaluation is the INSERT's own WHERE
+  // bandwidth fetching. The AUTHORITATIVE evaluation is the write's own WHERE
   // clause below, in the write's snapshot; see mayWriteCatalogPhotoSql.
-  if (!mayWriteCatalogPhoto(focus, await photoAuthority(deps.db, cigarId))) {
+  if (!mayWriteCatalogPhoto(focus, authority)) {
     stats.photosSkippedMarket = (stats.photosSkippedMarket ?? 0) + 1;
     return "refused";
   }
@@ -382,6 +419,97 @@ async function capturePhoto(
   await deps.storage.put(thumbKey, processed.thumb, processed.contentType);
 
   try {
+    // --- the replacement arm (ADR-015) --------------------------------------
+    // GUARD AND UPDATE IN ONE STATEMENT, for the reason the insert arm below
+    // states: the pre-flight and the write are an image download apart. The WHERE
+    // re-states BOTH halves in the write's snapshot — market authority exactly as
+    // an insert must satisfy it, and the tier rule against the row as it stands
+    // now, so a curator's suppression or a competing swap inside the window
+    // simply updates nothing.
+    //
+    // `rights` goes back to 'pending', which is what a fresh capture from this
+    // vendor would have got: the replacement is a NEW photo from a NEW source, and
+    // carrying the old row's approval across would launder an unreviewed image
+    // through a decision made about a different one.
+    if (replacing) {
+      const swapped = await deps.db.transaction(async (tx) => {
+        const updated = await tx.execute(sql`
+          UPDATE product_photos
+             SET vendor_id = ${vendorId}::uuid,
+                 source_url = ${listing.imageUrl},
+                 object_key = ${objectKey},
+                 thumb_key = ${thumbKey},
+                 content_type = ${processed.contentType},
+                 width = ${processed.width},
+                 height = ${processed.height},
+                 bytes = ${processed.full.length},
+                 rights = 'pending'
+           WHERE id = ${replacing.photoId}::uuid
+             AND ${mayWriteCatalogPhotoSql(focus, sql`${cigarId}::uuid`)}
+             AND ${mayReplaceCatalogPhotoSql(tier, sql`${cigarId}::uuid`)}
+          RETURNING id
+        `);
+        if (updated.rows.length === 0) return false;
+
+        // The audit is what makes a crawler DELETING objects reviewable: it names
+        // both vendors, both tiers and both key pairs, so the swap can be read —
+        // and, if the tiers were wrong, understood — after the old bytes are gone.
+        await tx.insert(auditLog).values({
+          userId: null,
+          ...auditActor(undefined, "import"),
+          action: "product_photo.replace",
+          smokeId: null,
+          before: {
+            id: replacing.photoId,
+            cigarId,
+            vendorId: replacing.vendorId,
+            tier: replacing.tier,
+            rights: replacing.rights,
+            objectKey: replacing.objectKey,
+            thumbKey: replacing.thumbKey,
+          },
+          after: {
+            id: replacing.photoId,
+            cigarId,
+            vendorId,
+            tier,
+            rights: "pending",
+            objectKey,
+            thumbKey,
+            sourceUrl: listing.imageUrl,
+          },
+          correlationId: null,
+        });
+        return true;
+      });
+
+      if (swapped) {
+        // Only once the swap is durable: the old objects are unreferenced now, and
+        // a delete before the commit would strand a live row pointing at nothing.
+        // Best-effort, like every other object delete in the tree — a bucket
+        // failure must not fail a committed crawl.
+        await deps.storage.delete(replacing.objectKey).catch(() => {});
+        await deps.storage.delete(replacing.thumbKey).catch(() => {});
+        stats.photosCaptured += 1;
+        return "wrote";
+      }
+
+      // Nothing was written, so our bytes are orphans.
+      await deps.storage.delete(objectKey).catch(() => {});
+      await deps.storage.delete(thumbKey).catch(() => {});
+
+      // WHICH half of the WHERE failed, told apart the same way the insert arm
+      // tells its two zero-row cases apart: re-read the slot. Still replaceable →
+      // the tier rule holds and it was the market authority that moved under us,
+      // which is a refusal and is counted as one. No longer replaceable → someone
+      // else took, suppressed or upgraded the slot, which is a skip.
+      const current = await photoAuthority(deps.db, cigarId);
+      if (!mayReplaceCatalogPhoto(tier, current.occupant)) return "skipped";
+      stats.photosSkippedMarket = (stats.photosSkippedMarket ?? 0) + 1;
+      return "refused";
+    }
+
+    // --- the insert arm ------------------------------------------------------
     // GUARD AND INSERT IN ONE STATEMENT. `INSERT ... SELECT ... WHERE <authority>`
     // evaluates the write authority in the same snapshot as the write, closing the
     // window the pre-flight above cannot: between that read and here we downloaded
@@ -438,7 +566,7 @@ async function capturePhoto(
 async function ingestListing(
   deps: IngestDeps,
   options: IngestOptions,
-  focus: VendorFocus | null,
+  posture: VendorPosture,
   crawlRunId: string | null,
   url: string,
   listing: NormalizedListing,
@@ -447,6 +575,7 @@ async function ingestListing(
 ): Promise<void> {
   const now = deps.now();
   const listingKey = pathOf(url);
+  const { focus } = posture;
 
   const cigarId = await deps.db.transaction(async (tx) => {
     // `vendorFocus` is the seed/offers half of #170, and the half that has already
@@ -641,7 +770,7 @@ async function ingestListing(
 
   if (cigarId) {
     try {
-      await capturePhoto(deps, options.vendorId, focus, cigarId, listing, stats);
+      await capturePhoto(deps, options.vendorId, posture, cigarId, listing, stats);
     } catch (error) {
       // Photo ingestion is isolated from the offer write (ADR-007).
       stats.errors += 1;
@@ -655,7 +784,7 @@ async function ingestListing(
 async function walkListings(
   deps: IngestDeps,
   options: IngestOptions,
-  focus: VendorFocus | null,
+  posture: VendorPosture,
   crawlRunId: string | null,
   stats: IngestStats,
   report: string[],
@@ -698,7 +827,7 @@ async function walkListings(
         continue;
       }
 
-      await ingestListing(deps, options, focus, crawlRunId, url, listing, product, stats);
+      await ingestListing(deps, options, posture, crawlRunId, url, listing, product, stats);
     } catch (error) {
       stats.errors += 1;
       void error;
@@ -716,7 +845,7 @@ async function nameSimilarity(deps: IngestDeps, a: string, b: string): Promise<n
 async function drainEnrichment(
   deps: IngestDeps,
   options: IngestOptions,
-  focus: VendorFocus | null,
+  posture: VendorPosture,
   crawlRunId: string | null,
   stats: IngestStats,
   report: string[],
@@ -764,6 +893,15 @@ async function drainEnrichment(
   // the price of that coupling, and at LIMIT 50 it is not a price worth optimizing
   // away — a drain that filters on one market while the rollup counts on another
   // holds requests open forever.
+  //
+  // AND THE TIER CLAUSE (ADR-015). `everyHigherTierLookedSql` is the last filter
+  // because it is the newest and the most easily misread: it removes an ask that a
+  // BETTER source has not looked at yet, so this lane fills only what the tiers
+  // above it could not. It is inert for a tier-1 vendor (nothing is above it), and
+  // it makes fallback a property of ONE RUN — `--all-enabled --mode enrich` walks
+  // the fleet serially in tier order in one process, so tier 1's misses are in the
+  // ledger before tier 2's open set is selected. Under a per-vendor CronJob
+  // calendar the same clause is still correct, just a night slower per tier.
   const open = await deps.db.execute(sql`
     SELECT r.id AS request_id, c.id AS cigar_id, c.canonical_name,
            c.brand, c.line, c.brand_id, c.line_id, c.blend_id,
@@ -776,8 +914,9 @@ async function drainEnrichment(
     LEFT JOIN enrichment_attempts a
            ON a.request_id = r.id AND a.vendor_id = ${options.vendorId}
     WHERE r.status IN ('pending', 'in_progress', 'exhausted')
-      AND ${coversMarketSql(sql`${focus}::text`, evidencedMarketSql(sql`c.id`))}
+      AND ${coversMarketSql(sql`${posture.focus}::text`, evidencedMarketSql(sql`c.id`))}
       AND ${vendorNotRetiredSql(sql`COALESCE(a.attempts, 0)`, sql`COALESCE(a.errors, 0)`)}
+      AND ${everyHigherTierLookedSql(posture.tier, sql`r.id`, sql`c.id`)}
     ORDER BY r.created_at
     LIMIT ${limit}
   `);
@@ -829,7 +968,7 @@ async function drainEnrichment(
     const outcome = await tryEnrichCandidates(
       deps,
       options,
-      focus,
+      posture,
       crawlRunId,
       ask,
       ranked,
@@ -941,7 +1080,7 @@ async function drainEnrichment(
 async function tryEnrichCandidates(
   deps: IngestDeps,
   options: IngestOptions,
-  focus: VendorFocus | null,
+  posture: VendorPosture,
   crawlRunId: string | null,
   ask: EnrichAsk,
   ranked: { url: string }[],
@@ -950,6 +1089,7 @@ async function tryEnrichCandidates(
   report: string[],
 ): Promise<EnrichmentOutcome> {
   const { adapter } = options;
+  const { focus } = posture;
   if (enumerated === 0) return "error";
   if (ranked.length === 0) return "no_candidate";
 
@@ -1159,7 +1299,7 @@ async function tryEnrichCandidates(
     // make on its own.
     let captured: PhotoCapture = "skipped";
     try {
-      captured = await capturePhoto(deps, options.vendorId, focus, ask.cigarId, listing, stats);
+      captured = await capturePhoto(deps, options.vendorId, posture, ask.cigarId, listing, stats);
     } catch {
       stats.errors += 1;
     }
@@ -1287,19 +1427,29 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
   // whole class of drift. NULL focus means unknown, which the negative filter
   // treats as covering everything and the photo guard treats as no authority to
   // assert either way.
+  //
+  // `tier` rides the same read for the same reason (ADR-015): the adapter carries
+  // a seed value, the ROW is what the drain's eligibility clause and the photo
+  // slot's replacement rule are evaluated against, and an admin re-tiering a shop
+  // must take effect on the next run without an adapter change. A row that
+  // somehow has none falls back to the column's own default — the conservative
+  // end, never the price authority.
   const vendorRows = await deps.db
-    .select({ focus: vendors.focus })
+    .select({ focus: vendors.focus, tier: vendors.tier })
     .from(vendors)
     .where(eq(vendors.id, options.vendorId))
     .limit(1);
-  const focus = vendorRows[0]?.focus ?? null;
+  const posture: VendorPosture = {
+    focus: vendorRows[0]?.focus ?? null,
+    tier: vendorRows[0]?.tier ?? DEFAULT_VENDOR_TIER,
+  };
 
   // The crawl_runs row this pass belongs to, threaded to the write sites so an
   // audited write (a market downgrade unlinking a listing) names the run that made
   // it. Null on a dry run, which opens no row to name.
   const run = async (crawlRunId: string | null): Promise<void> => {
-    if (options.mode === "enrich") await drainEnrichment(deps, options, focus, crawlRunId, stats, report);
-    else await walkListings(deps, options, focus, crawlRunId, stats, report);
+    if (options.mode === "enrich") await drainEnrichment(deps, options, posture, crawlRunId, stats, report);
+    else await walkListings(deps, options, posture, crawlRunId, stats, report);
   };
 
   if (options.dryRun) {
