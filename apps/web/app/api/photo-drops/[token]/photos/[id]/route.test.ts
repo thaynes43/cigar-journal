@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { createHarness, newRequestId, type DomainHarness } from "@cj/domain/testing";
-import { openPhotoDrop, type Principal } from "@cj/domain";
+import { openPhotoDrop, saveSmoke, type Principal } from "@cj/domain";
 import { createMemoryPhotoStorage } from "@cj/photos";
 
 // One photo inside a drop, over HTTP (ADR-014, issue #263): the chip tap and the
@@ -163,6 +163,35 @@ describe("/api/photo-drops/[token]/photos/[id]", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(res.headers.get("Content-Type")).toBe("image/jpeg");
     expect((await res.arrayBuffer()).byteLength).toBeGreaterThan(0);
+  });
+
+  // The link outlives its claim (ADR-014): once a save has moved the photo onto
+  // the smoke, the same token still serves, reclassifies and removes it — now
+  // through the `smoke_photos` branch of the resolver. This is the one path the
+  // page renders for a finished smoke, and the domain tests alone do not prove
+  // the routes reach it.
+  it("keeps serving, reclassifying and removing a photo after the drop is claimed", async () => {
+    const photo = (await (await stage(token)).json()) as PhotoBody;
+    const cigarId = await h.seedCigar({ canonicalName: `Drop Photo ${newRequestId()}` });
+    const saved = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { cigarId },
+      overallDescriptors: ["cocoa"],
+      photoDropId,
+    });
+    expect(saved.photoDrop).toMatchObject({ status: "claimed", attached: 1 });
+
+    const res = await thumb(token, photo.photoId);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect((await res.arrayBuffer()).byteLength).toBeGreaterThan(0);
+
+    const patched = await patch(token, photo.photoId, { kind: "burn" });
+    expect(patched.status).toBe(200);
+    expect((await patched.json()) as PhotoBody).toMatchObject({ kind: "burn", attached: true });
+
+    expect((await del(token, photo.photoId)).status).toBe(204);
+    expect((await thumb(token, photo.photoId)).status).toBe(404);
   });
 
   it("answers 404 for an id this link cannot address, malformed or not", async () => {
