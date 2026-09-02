@@ -149,8 +149,15 @@ function isCatalogChild(loc: string): boolean {
 //
 // The cap is what makes the endpoint guarantee real rather than nominal: with a
 // budget of 3 or more, children[0] and children[n-1] are ALWAYS fetched, and the
-// name hint spends what is left. One catalog child is enough to prove a vendor
-// enumerates products, so capping the hint costs the probe nothing.
+// name hint spends what is left.
+//
+// `want - 2` is why the probe's budget moved from 3 to 5 (#270, 2026-09-02)
+// rather than the priority order moving: at 3 the catalog got ONE slot, which is
+// enough to prove a vendor enumerates products and NOT enough to count them.
+// Montefortuna splits its catalog across `product-sitemap{,2,3}.xml` and the
+// probe read 1,001 of 2,087; at 5 the cap is 3 and all three are taken before
+// either end. A catalog wider than that is still under-read, and the probe's
+// coverage note is what says so.
 // Returned in document order so the list reads against the index.
 export function selectIndexChildren(locs: string[], want: number): string[] {
   if (want <= 0) return [];

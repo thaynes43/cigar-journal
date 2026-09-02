@@ -18,11 +18,14 @@ import type { PrefixVendorAdapter } from "./types.js";
 //               them, so we fall under `*`; `minIntervalMs` below is our own
 //               politeness, not the vendor's ask.
 //   sitemap     `sitemap.xml` is a two-child sitemapindex: `sitemap_de.xml`
-//               (21,818 locs) and `sitemap_en.xml`. 6,874 of the German locs sit
-//               under `/zigarren/`; the rest are `/zigarrenzubehoer/`,
-//               `/zigarillos/`, `/pfeifen*/`, editorial and account pages. The
-//               English child duplicates the catalogue under `/en/`, which the
-//               prefix below rejects.
+//               (21,818 locs) and `sitemap_en.xml`. 6,874 locs sit under
+//               `/zigarren/`, of which THE GATE ACCEPTS 6,604 after the
+//               `sampler|marken` subtraction (probe 2026-09-02) — the 270-loc
+//               difference is the mixed-box and brand-archive trees, and it is
+//               the number a crawl of this vendor actually walks. The rest of
+//               the German child is `/zigarrenzubehoer/`, `/zigarillos/`,
+//               `/pfeifen*/`, editorial and account pages. The English child
+//               duplicates the catalogue under `/en/`, which the prefix rejects.
 //   product URL `/zigarren/<land>/[<serie>/]<slug>-<artikelnr>[_<id>]`, e.g.
 //               `/zigarren/kuba/regulares/cohiba-siglo-vi-01002_5618`.
 //   markup      one JSON-LD block: WebPage + Product + BreadcrumbList. The
@@ -43,7 +46,8 @@ import type { PrefixVendorAdapter } from "./types.js";
 //               `photoUrlRewrite` below rather than `photoSource: "og:image"`:
 //               the `big/` asset is derivable from the JSON-LD URL, so the
 //               listing keeps the URL the markup published and only the fetch
-//               is corrected.
+//               is corrected. CONFIRMED WORKING by the 2026-09-02 probe: every
+//               sample printed a `/bilder/detail/big/` photo URL.
 //   terms       `/service/agb` (read 2026-09-02) carries a **"Verbot
 //               gewerblicher Weiterverkäufe"** — a ban on the commercial RESALE
 //               OF ITS GOODS, not on reading or reusing its data; nothing in it
@@ -93,7 +97,7 @@ export const cigarworldDe: PrefixVendorAdapter = {
   // 4s between requests. The robots.txt asks `*` for no Crawl-delay at all, so
   // this is our own politeness — and this is the largest catalogue in the fleet.
   minIntervalMs: 4000,
-  // MANDATORY here, not decorative: the gate accepts 6,874 locs, which is ~7.6h
+  // MANDATORY here, not decorative: the gate accepts 6,604 locs, which is ~7.3h
   // at the interval above. The fetcher THROWS at the cap, so a full seed needs a
   // deliberately raised cap AND a deadline long enough to finish.
   maxPages: 500,
@@ -103,7 +107,7 @@ export const cigarworldDe: PrefixVendorAdapter = {
 //   1. robots still allows `/zigarren/` for our UA, and still names no
 //      Crawl-delay for `*` (CCBot/BLEXBot are named; we are not either).
 //   2. `kind=sitemapindex`, `sitemap_de.xml` descended, `product-locs` near
-//      6,874 — and `/zigarrenzubehoer` on the REJECTED side of the census,
+//      6,604 — and `/zigarrenzubehoer` on the REJECTED side of the census,
 //      which is what proves the `startsWith` prefix is not leaking.
 //   3. `parsed>=2`, `cigars>=1`, `category=Shop / Zigarren / Kuba / …`.
 //   4. `photo=` naming a `/bilder/detail/big/` URL — the one adapter field

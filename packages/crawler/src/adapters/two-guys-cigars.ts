@@ -100,6 +100,16 @@ export const twoGuysCigars: ExclusionVendorAdapter = {
   // are OpenGraph (`og:type=product`, `product:price:amount`/`:currency`,
   // `og:availability`, `og:upc`, `og:brand`, `og:image`) over a
   // `schema.org/Product` itemscope whose only itemprop is `name`.
+  //
+  // `og:description` is a SPEC LINE, not a blurb — `5 X 54 - Sun Grown - Single`,
+  // `4 1/2 x 56 - Ecuador Connecticut - Bundle of 10` — and it is where this
+  // vendor states the unit. It has to be read, because THIS SHOP PRICES SOME
+  // LISTINGS BY THE BOX under a name that says nothing about packaging: the
+  // 2026-09-02 probe sampled `Rough Rider Toro Maduro` at $169.99 and `Liga
+  // Privada No9 Belicoso` at $452.60, and with packaging null, price-at-a-glance
+  // showed a box price as the price of one stick — on a tier-1 LINKOUT vendor,
+  // which is where a wrong price is most expensive (ADR-009, #270).
+  // `normalizeListing` reads it for OpenGraph vendors only, name first.
   productMarkup: "opengraph",
   // And its product breadcrumb is "Home / <brand>" by design ("ticket 126909:
   // Home and brand URL instead of Breadcrumbs on product pages"), so the category
