@@ -1,6 +1,7 @@
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema/index.js";
+import { swallowShutdownErrors } from "./pool-errors.js";
 
 type Database = NodePgDatabase<typeof schema>;
 
@@ -24,12 +25,10 @@ function connect(): Database {
   //
   // The race is inherent to a pool outliving its server, so expect it rather than
   // order it away: swallow the shutdown class, and report anything else — loudly,
-  // but without killing a process whose work was otherwise fine.
-  pool.on("error", (error: unknown) => {
-    const code = (error as { code?: string } | null)?.code;
-    if (code === "57P01" || code === "ECONNRESET" || code === "EPIPE") return;
-    console.error("[db] unexpected pool error", error);
-  });
+  // but without killing a process whose work was otherwise fine. The swallow also
+  // covers every client the pool checks out, which a `pool.on('error')` alone does
+  // not — see pool-errors.ts.
+  swallowShutdownErrors(pool, { label: "db" });
 
   database = drizzle(pool, { schema });
   return database;
@@ -53,6 +52,7 @@ export function createDatabase(connectionString: string): { db: Database; pool: 
 }
 
 export { schema, Pool };
+export { isShutdownError, swallowShutdownErrors, type SwallowShutdownOptions } from "./pool-errors.js";
 export type { Database };
 
 // Re-export the tables and their row/value types so consumers have one import

@@ -4,6 +4,7 @@ import { and, eq, ne, sql } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
 import {
   createDatabase,
+  swallowShutdownErrors,
   vendors,
   brands,
   cigars,
@@ -3019,13 +3020,16 @@ describe("crawler ingest (embedded Postgres)", () => {
 
   // A pool of our own: the harness hands out a Database, and the advisory lock
   // needs a CLIENT it can hold for the length of a run. Ended in the case that
-  // opens it, so nothing leaks into a neighbour.
+  // opens it, so nothing leaks into a neighbour — and guarded like the harness's
+  // own pool, because a pool the harness did not make is a pool it does not cover
+  // and a checked-out client outliving the server is an UNHANDLED 57P01.
   const withPool = async <T,>(fn: (pool: ReturnType<typeof createDatabase>["pool"]) => Promise<T>): Promise<T> => {
     const { pool } = createDatabase(pg.url);
+    swallowShutdownErrors(pool, { label: "ingest.test" });
     try {
       return await fn(pool);
     } finally {
-      await pool.end();
+      await pool.end().catch(() => {});
     }
   };
 
