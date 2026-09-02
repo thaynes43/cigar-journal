@@ -119,6 +119,11 @@ export interface SaveSmokeInput {
   consumption?: ConsumptionInput;
   provenance?: ProvenanceInput;
   originalMarkdown?: string | null;
+  // The photo drop this save claims (ADR-014). EXPLICIT and never inferred: a
+  // save without it leaves every open drop untouched, so the web form and the
+  // legacy importer claim nothing. Part of the fingerprint on purpose — a retry
+  // of this save must carry the same drop, or it is a different intent.
+  photoDropId?: string;
   correlationId?: string;
 }
 
@@ -149,6 +154,12 @@ export interface SaveSmokeResult {
   // "yes, from the humidor" can read back the new remaining without a follow-up
   // read. Absent when no consumption block was supplied (nothing was deducted).
   holdingAfter?: { totalAcquired: number; remaining: number };
+  // What the claim of `photoDropId` did, present only when the save carried one
+  // (ADR-014). REPORTED, never raised: the smoke is already committed by the time
+  // the claim runs, so every outcome — including a claim that threw — arrives
+  // here as a status (ADR-007 failure isolation). Never stored in the idempotency
+  // envelope, so a replay re-runs the claim and re-reports it.
+  photoDrop?: PhotoDropClaimResult;
   replayed: boolean;
 }
 
@@ -539,6 +550,71 @@ export interface SmokePhotoView {
   width: number;
   height: number;
   createdAt: string;
+}
+
+// What a photo drop's link can still do (ADR-014):
+//   open     — unclaimed and unexpired; photos land in staged_smoke_photos.
+//   attached — claimed to a live smoke; photos land straight on the smoke, and
+//              the link keeps working until it expires.
+//   closed   — expired, or claimed to a smoke that has since been deleted. The
+//              link refuses uploads and shows nothing.
+export type PhotoDropStatus = "open" | "attached" | "closed";
+
+// One photo on a drop's page. Deliberately NOT SmokePhotoView: the page is
+// anonymous (the token is the authorization), so it may not carry a smokeId —
+// only whether the photo has already reached the smoke. Storage keys and byte
+// size stay server-side as everywhere else; `createdAt` is an ISO-8601 instant.
+export interface PhotoDropPhotoView {
+  photoId: string;
+  kind: SmokePhotoKind;
+  caption: string | null;
+  width: number;
+  height: number;
+  createdAt: string;
+  attached: boolean;
+}
+
+// The drop as its own page reads it, resolved from the raw token.
+export interface PhotoDropView {
+  photoDropId: string;
+  status: PhotoDropStatus;
+  expiresAt: string;
+  smokeId: string | null;
+  photos: PhotoDropPhotoView[];
+}
+
+// A drop handed to its owner. `token` is the raw URL token, returned EXACTLY
+// once — only its hash is stored, so a reused drop (`reused: true`) comes back
+// with a freshly minted one and the previous link is dead.
+export interface OpenPhotoDropResult {
+  photoDropId: string;
+  token: string;
+  expiresAt: string;
+  reused: boolean;
+  photoCount: number;
+}
+
+// not_found covers a drop id that names nothing AND another user's drop — a drop
+// never leaks (the tool-contract error principle, reported rather than thrown
+// because the smoke is already saved). bound_elsewhere is a drop already claimed
+// by a DIFFERENT smoke: nothing moves, so the earlier smoke keeps its photos.
+export type PhotoDropClaimStatus = "claimed" | "not_found" | "bound_elsewhere";
+
+export interface ClaimPhotoDropResult {
+  photoDropId: string;
+  status: PhotoDropClaimStatus;
+  // Staged photos moved onto the smoke, and the remainder left staged because
+  // the smoke is at MAX_PHOTOS_PER_SMOKE. A pending remainder is not an error:
+  // the link still shows it and the owner can remove a photo and re-claim.
+  attached: number;
+  pending: number;
+}
+
+// The same claim as REPORTED on a save result, plus the one outcome the claim
+// itself can never return: `failed`, which the save writes when the claim threw.
+// A photo problem may not fail a committed save (ADR-007, ADR-014).
+export interface PhotoDropClaimResult extends Omit<ClaimPhotoDropResult, "status"> {
+  status: PhotoDropClaimStatus | "failed";
 }
 
 // The humidor link behind a smoke (ADR-008). Present on a smoke that consumed a

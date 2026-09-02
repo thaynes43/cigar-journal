@@ -22,6 +22,10 @@ export * from "./smoke-progression.js";
 export * from "./smoke-photos.js";
 export * from "./smoke-consumptions.js";
 export * from "./photo-upload-tokens.js";
+// The photo drop and its staged photos (ADR-014, migration 0033). After
+// ./smokes.js and ./smoke-photos.js, whose shape and FK they point at.
+export * from "./photo-drops.js";
+export * from "./staged-smoke-photos.js";
 export * from "./invites.js";
 export * from "./vendors.js";
 export * from "./listing-matches.js";

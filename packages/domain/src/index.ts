@@ -382,6 +382,31 @@ export {
   type ConsumedProductUploadToken,
 } from "./photo-upload-tokens.js";
 
+// The photo drop (ADR-014, migration 0033): the link that collects a smoke's
+// photos BEFORE the smoke exists, and the claim `save_smoke` runs after it
+// commits. Two authorization regimes — the owner services take a Principal, the
+// token services take the raw token and nothing else (the token IS the
+// authorization, as on /u/<token>), so both must be reachable from here.
+export {
+  PHOTO_DROP_TTL_SECONDS,
+  PHOTO_DROP_RETENTION_SECONDS,
+  MAX_PHOTOS_PER_DROP,
+  openPhotoDrop,
+  claimPhotoDrop,
+  sweepPhotoDrops,
+  getPhotoDropByToken,
+  assertPhotoDropUsable,
+  stagePhotoByToken,
+  setPhotoDropPhotoKind,
+  removePhotoDropPhoto,
+  getPhotoDropPhotoObject,
+  type OpenPhotoDropInput,
+  type ClaimPhotoDropInput,
+  type StagePhotoByTokenInput,
+  type SetPhotoDropPhotoKindInput,
+  type RemovePhotoDropPhotoInput,
+} from "./photo-drops.js";
+
 // Catalog-invariant cigar resolution (ADR-002). Exported so the legacy importer
 // resolves/creates purchase-linked cigars through the same logic that backs
 // saveSmoke, rather than reimplementing trigram matching (flow 006).
