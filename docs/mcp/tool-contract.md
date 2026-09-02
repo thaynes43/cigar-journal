@@ -1390,8 +1390,13 @@ bug awaiting a retry.
 Two structured log events answer "why did this call not attach a photo", and they
 join on `(sessionId, rpcId)`:
 
-- **`photo_intake`** — one line per `add_smoke_photo` call, both modes, success and
-  failure. Fields: `outcome` (`attached` | `no_delivery` | `not_an_object` |
+Both are written for **both photo tools** — `add_smoke_photo` and
+`open_photo_drop` share one intake path (ADR-014), and each record's `tool` field
+names the call it came from, with every other field identical.
+
+- **`photo_intake`** — one line per photo-tool call that runs the intake, every
+  mode, success and failure (`add_smoke_photo` with a `photoDropId` claims a drop
+  and runs none, so it writes no line). Fields: `tool`, `outcome` (`attached` | `no_delivery` | `not_an_object` |
   `no_url` | `empty_url` | `bad_scheme` | `fetch_failed` | `too_large` |
   `unreadable` | `storage_unavailable`), `channel`
   (`argument` | `request_meta` | `none`), `mode`, the `argument` and `requestMeta`
@@ -1402,7 +1407,7 @@ join on `(sessionId, rpcId)`:
   same `correlationId`.
 - **`photo_intake_request`** — written at the HTTP layer, after bearer auth and
   **before** the SDK validates input, so a call the SDK rejects still leaves a
-  record. Fields: `paramKeys` (the keys of `params` **itself**, so a file handed
+  record. Fields: `tool`, `paramKeys` (the keys of `params` **itself**, so a file handed
   over somewhere the server never reads it still shows up), `argKeys`, `argImage`
   shape, `metaKeys`, `metaFileParams` shape + `count`. This is the class of call
   that previously left no trace at all, and it is what will settle whether the host

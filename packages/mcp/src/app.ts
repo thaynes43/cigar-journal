@@ -20,8 +20,8 @@ const MAX_BODY_BYTES = "100kb";
 // assigns on initialize — the spike-proven shape. A fresh initialize with no
 // session id creates a session and its own McpServer over @cj/domain.
 
-// The add_smoke_photo intake probe (see photo-intake.ts). It runs at the HTTP
-// layer, on the RAW JSON-RPC body, because the MCP SDK validates tool input
+// The photo intake probe (see photo-intake.ts). It runs at the HTTP layer, on the
+// RAW JSON-RPC body, because the MCP SDK validates tool input
 // BEFORE the handler runs and raises a rejection as McpError(InvalidParams) —
 // which never reaches `mcpEvent`. So a call carrying an undeclared top-level key
 // (the `.strict()` schema refuses it, and deliberately keeps refusing it: relaxing
@@ -58,7 +58,10 @@ function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): vo
     const params = rpc.params;
     if (typeof params !== "object" || params === null) continue;
     const call = params as Record<string, unknown>;
-    if (call.name !== "add_smoke_photo") continue;
+    // Both photo tools declare a file input, so both must be probed: a host that
+    // forwards an attachment to open_photo_drop and gets it refused would
+    // otherwise leave no trace at all (ADR-014).
+    if (call.name !== "add_smoke_photo" && call.name !== "open_photo_drop") continue;
 
     const args = call.arguments;
     const image =
@@ -69,7 +72,7 @@ function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): vo
     // Key names and JSON types only — never a handle's values (a download_url is a
     // short-lived credential; its path and query are the credential).
     mcpEvent("photo_intake_request", {
-      tool: "add_smoke_photo",
+      tool: call.name,
       // Both of these come from the caller and neither has been validated yet:
       // `mcp-session-id` is a raw header, and `id` is any JSON value off an
       // unparsed JSON-RPC body — an object, an array, or a megabyte of string.
@@ -93,9 +96,9 @@ function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): vo
 }
 
 // `storage` is the photo object store (ADR-007), read once from the environment
-// and shared across sessions; null when photos are unconfigured, in which case
-// add_smoke_photo returns the contract `unavailable`. Injectable so tests can
-// pass an in-memory store.
+// and shared across sessions; null when photos are unconfigured, in which case the
+// photo tools return the contract `unavailable`. Injectable so tests can pass an
+// in-memory store.
 export function buildApp(
   deps: Deps,
   storage: PhotoStorage | null = photoStorageFromEnv(),
@@ -156,8 +159,8 @@ export function buildApp(
 
   // express.json() runs before bearerAuth so the parsed JSON-RPC body is
   // available for per-tool scope determination (see requiredScopesForBody).
-  // The photo probe follows bearerAuth and precedes the transport, so an
-  // add_smoke_photo call is recorded even when the SDK rejects its arguments.
+  // The photo probe follows bearerAuth and precedes the transport, so a photo-tool
+  // call is recorded even when the SDK rejects its arguments.
   //
   // THE LIMIT IS EXPLICIT AND SMALL, ON PURPOSE. Every message this endpoint takes
   // is JSON-RPC text — a tool call with a narrative and a file HANDLE, never file

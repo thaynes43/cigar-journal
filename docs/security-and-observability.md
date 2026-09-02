@@ -36,8 +36,9 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
   per vendor, match-queue depth.
 - **Logs (Loki):** structured; tool name + error code + correlation id, never
   payload prose. Auth events logged at grant/revoke.
-- **Photo intake — shapes, never values (2026-08-30).** `add_smoke_photo` emits
-  `photo_intake` (per call, from the handler) and `photo_intake_request` (per
+- **Photo intake — shapes, never values (2026-08-30).** The photo tools
+  (`add_smoke_photo` and, since ADR-014, `open_photo_drop`) emit `photo_intake`
+  (per call, from the handler, `tool` naming which) and `photo_intake_request` (per
   `/mcp` POST, from the HTTP layer after bearer auth) so a failed attachment is
   diagnosable: *nothing delivered* / *delivered without a usable URL, and these are
   the keys it carried* / *URL present but unfetchable* / *success*. The rule that

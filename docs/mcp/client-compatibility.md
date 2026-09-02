@@ -310,6 +310,16 @@ claims it. The photo is added once, when it is taken, on every client.
 **Residual for the upstream report:** the Loki signature above is the evidence
 base. Mode A stays implemented on both photo tools.
 
+**Additive surface.** One new tool, `open_photo_drop`, on the existing
+`journal:write` scope — no new scope, so a connector token already minted reaches
+it with no re-consent — plus two **optional** arguments: `save_smoke.photoDropId`
+and `add_smoke_photo.photoDropId`. Omitting both is exactly the behavior that
+shipped before: no drop is claimed, `add_smoke_photo` mints its one-time link,
+and no existing schema changes shape (R-MCP-4). The ChatGPT per-conversation
+schema cache applies as always — the new tool and the two arguments reach an
+in-flight conversation only after a connector refresh and a new chat, and until
+then a `photoDropId` fails validation client-side rather than reaching the server.
+
 ## 2026-08-31 — gap-fill hardened: the two-call path, stated as an invariant
 
 The server `INSTRUCTIONS` "Gap-fill" paragraph and `add_cigar`'s tool description

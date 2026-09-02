@@ -19,6 +19,9 @@ import {
   setFavorite,
   addSmokePhoto,
   mintPhotoUploadToken,
+  openPhotoDrop,
+  claimPhotoDrop,
+  stagePhotoByToken,
   requestCigarEnrichment,
   updateCigar,
   recordPrice,
@@ -39,6 +42,8 @@ import {
   UnauthenticatedError,
   UnauthorizedError,
   UnavailableError,
+  ValidationError,
+  PhotoDropNotFoundError,
   type Deps,
   type Principal,
   type SaveSmokeInput,
@@ -49,6 +54,7 @@ import {
   type UpdateCigarInput,
   type RecordPriceInput,
   type CurationAttribution,
+  type ProcessedImage,
 } from "@cj/domain";
 import { processPhoto, type PhotoStorage } from "@cj/photos";
 import {
@@ -56,7 +62,7 @@ import {
   INSTRUCTIONS,
   PERSONAL_SCOPE,
   TOOL_SCOPES,
-  ADD_SMOKE_PHOTO_META,
+  PHOTO_FILE_PARAMS_META,
   type ToolName,
 } from "./constants.js";
 import type { McpAuthExtra } from "./auth.js";
@@ -75,6 +81,7 @@ import {
   recordPurchaseSchema,
   recordPurchaseBatchSchema,
   addSmokePhotoSchema,
+  openPhotoDropSchema,
   setWantSchema,
   setWantOutput,
   setFavoriteSchema,
@@ -123,6 +130,7 @@ import {
   recordPurchaseOutput,
   recordPurchaseBatchOutput,
   addSmokePhotoOutput,
+  openPhotoDropOutput,
   type SaveSmokeArgs,
   type UpdateSmokeArgs,
   type AddCigarArgs,
@@ -142,20 +150,21 @@ import {
   type UnusableReason,
 } from "./photo-intake.js";
 import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./results.js";
-import { smokeUrl, uploadUrl } from "./config.js";
+import { smokeUrl, uploadUrl, dropUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The thirty-two-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The thirty-three-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
 // identity, invariants, and validation all live below this layer.
 
-// ---- File intake (add_smoke_photo, ADR-007) --------------------------------
+// ---- File intake (add_smoke_photo / open_photo_drop, ADR-007, ADR-014) -----
 // ChatGPT attaches the user's image to the tool call. Per OpenAI's Apps SDK this
 // requires DECLARING the file input: the `image` property (schemas.ts) listed in
 // the tool-level `_meta["openai/fileParams"]` published in tools/list
-// (ADD_SMOKE_PHOTO_META) — without the declaration ChatGPT forwards nothing.
+// (PHOTO_FILE_PARAMS_META) — without the declaration ChatGPT forwards nothing.
+// Both photo tools declare it and share one intake path (intakePhoto below).
 // Two delivery shapes are accepted and normalized into one intake path:
 //   1. `image` ARGUMENT value — `{ download_url, file_id, mime_type?, file_name? }`
 //      the client fills in for the declared file param (the standard Apps SDK path).
@@ -360,6 +369,165 @@ async function fetchAttachedImage(target: {
     record.timedOut = error instanceof Error && error.name === "TimeoutError";
     return { record, failure: "fetch_failed" };
   }
+}
+
+// The intake BOTH photo tools run (ADR-014 put a second tool on this path).
+// Describe both channels, classify, fetch under the SSRF guard, decode, and write
+// the ONE `photo_intake` line that says what arrived. Shared rather than copied
+// because a second copy would be a second vocabulary: the diagnostics only answer
+// "why did this call not attach a photo" while every call is describable in the
+// same terms. `tool` names the caller in the record, so the two are separable in
+// Loki with every other field identical.
+interface PhotoIntake {
+  // The object store, proven configured. Handed back rather than re-checked by
+  // the caller: `storage_unavailable` must be RECORDED before it throws, so the
+  // check belongs here — and returning the narrowed store means a handler cannot
+  // forget it.
+  storage: PhotoStorage;
+  // The normalized image, present only when one arrived and decoded.
+  image?: ProcessedImage;
+  // Why there is none, in the model-visible vocabulary. Absent when `image` is.
+  delivery?: { status: DeliveryStatus; detail: string };
+}
+
+async function intakePhoto(args: {
+  tool: "open_photo_drop" | "add_smoke_photo";
+  image: unknown;
+  requestMeta: Record<string, unknown> | undefined;
+  storage: PhotoStorage | null;
+  correlationId: string;
+  sessionId: string | undefined;
+  rpcId: string | number | undefined;
+}): Promise<PhotoIntake> {
+  const startedAt = Date.now();
+
+  // Describe BOTH channels before deciding anything. Whatever else the call does,
+  // the record must be able to say what arrived — "nothing was sent" and "a handle
+  // arrived carrying { file_id, mime_type }" were once indistinguishable from
+  // outside.
+  const argument = describeArgument(args.image);
+  const requestMetaShape = describeRequestMeta(args.requestMeta);
+
+  // Exactly one `photo_intake` line per call, joined to the HTTP-layer
+  // `photo_intake_request` line on (sessionId, rpcId), and to `tool_called` /
+  // `tool_error` on correlationId.
+  const record = (
+    outcome: IntakeOutcome,
+    mode: "attached" | "upload_url" | "unavailable",
+    channel: Channel,
+    extras: { urlKey?: string; fetch?: FetchRecord; decodeError?: string } = {},
+  ): void => {
+    mcpEvent("photo_intake", {
+      tool: args.tool,
+      correlationId: args.correlationId,
+      sessionId: args.sessionId,
+      rpcId: args.rpcId,
+      outcome,
+      channel,
+      mode,
+      argument,
+      requestMeta: requestMetaShape,
+      ...extras,
+      latencyMs: Date.now() - startedAt,
+    });
+  };
+
+  // Photos disabled cluster-wide → the calling tool is non-functional; report
+  // `unavailable` rather than mint a link that would 503 on upload. Recorded
+  // first so this stays distinguishable from a delivery problem.
+  if (!args.storage) {
+    record("storage_unavailable", "unavailable", "none");
+    throw new UnavailableError();
+  }
+
+  const delivery = classify(args.image, args.requestMeta);
+  const channel: Channel = delivery.kind === "absent" ? "none" : delivery.channel;
+
+  // Turn the classified delivery into bytes, or into the reason there are none.
+  // Nothing below throws for a delivery problem: a link is the guaranteed path on
+  // both tools, so a failure becomes a link plus a record.
+  let outcome: IntakeOutcome;
+  let bytes: Buffer | undefined;
+  let declaredType: string | undefined;
+  let fetchRecord: FetchRecord | undefined;
+  let urlKey: string | undefined;
+
+  switch (delivery.kind) {
+    case "absent":
+      outcome = "no_delivery";
+      break;
+    case "unusable":
+      outcome = delivery.reason;
+      break;
+    case "fetchable": {
+      urlKey = delivery.urlKey;
+      const fetched = await fetchAttachedImage(delivery);
+      fetchRecord = fetched.record;
+      if (fetched.failure || !fetched.bytes) {
+        outcome = fetched.failure ?? "fetch_failed";
+      } else {
+        bytes = fetched.bytes;
+        // The handle's own mime_type wins over the response header — the host
+        // knows what the user attached; the origin often says nothing.
+        declaredType = delivery.mimeType ?? fetched.headerType;
+        outcome = "attached";
+      }
+      break;
+    }
+  }
+
+  let processed: Awaited<ReturnType<typeof processPhoto>> | undefined;
+  let decodeError: string | undefined;
+  if (bytes) {
+    // Bytes only ever come from a fetch, so the type resolution always has a
+    // fetch record to land in (inline delivery was removed — photo-intake.ts).
+    const resolved = resolveContentType(declaredType, bytes);
+    if (fetchRecord) {
+      fetchRecord.declaredType = resolved.declaredType;
+      fetchRecord.sniffedType = resolved.sniffedType;
+    }
+    try {
+      processed = await processPhoto(bytes, resolved.contentType);
+    } catch (error) {
+      // The error CLASS only — never its message, which can echo input.
+      // UnsupportedImageTypeError means the type was refused up front; any other
+      // name means the decoder itself gave up on the bytes.
+      decodeError = error instanceof Error ? error.name : "unknown";
+      // Bytes that will not decode are a FALLBACK, not an error: the user gets a
+      // working link and the reason lives in the record. UnsupportedImageTypeError
+      // and a decoder fault are one outcome here because they are one thing to the
+      // user: unusable bytes.
+      outcome = "unreadable";
+    }
+  }
+
+  const extras = {
+    ...(urlKey !== undefined ? { urlKey } : {}),
+    ...(fetchRecord ? { fetch: fetchRecord } : {}),
+    ...(decodeError !== undefined ? { decodeError } : {}),
+  };
+
+  if (processed) {
+    // `outcome: attached` describes INTAKE, not the storage write: it is recorded
+    // BEFORE the caller files the photo, so the intake story is complete even when
+    // that write then fails (smoke_not_found, photo_limit) — that failure arrives
+    // as `tool_error` under the same correlationId.
+    record("attached", "attached", channel, extras);
+    return {
+      storage: args.storage,
+      image: {
+        full: processed.full,
+        thumb: processed.thumb,
+        contentType: processed.contentType,
+        width: processed.width,
+        height: processed.height,
+        bytes: processed.full.byteLength,
+      },
+    };
+  }
+
+  record(outcome, "upload_url", channel, extras);
+  return { storage: args.storage, delivery: deliveryFor(outcome) };
 }
 
 // Resolve one redirect hop against the same scheme guard the first request passed.
@@ -866,6 +1034,12 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           // derived stock after the deduction, mirroring record_purchase's
           // holdingAfter. Additive — undefined serializes away when absent.
           holdingAfter: result.holdingAfter,
+          // What the `photoDropId` claim did (ADR-014) — present only when the
+          // save carried one. Reported, never raised: the smoke is committed
+          // before the claim runs, so `not_found`/`bound_elsewhere`/`failed` all
+          // arrive as a status on a successful save, and the model reads
+          // `attached` to tell the user how many photos landed.
+          photoDrop: result.photoDrop,
           replayed: result.replayed,
         });
       }),
@@ -1001,6 +1175,97 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
   );
 
   server.registerTool(
+    "open_photo_drop",
+    {
+      title: "Open photo drop",
+      // THE PHOTO PATH FOR A LIVE SMOKE (ADR-014, issue #263). add_smoke_photo
+      // binds to a smokeId, and a live smoke is one save_smoke at the end, so
+      // until this tool every photo taken during a smoke had to be sent twice —
+      // once when it was taken, once at the end when there was finally something
+      // to attach it to. The description leads with WHEN to call it, because the
+      // whole value is in the timing: the moment a photo appears, not when the
+      // smoke ends.
+      //
+      // It says "relay it once" for a reason the model cannot infer: the link is
+      // multi-use for its 48 hours, so re-minting per photo would train the user to
+      // wait for a new link they do not need.
+      description:
+        "Open a photo drop for the smoke in progress: a link the user adds photos to at any point during the smoke, before it is saved. Call it the moment a photo appears in the conversation or the user says they took one, and relay the link (shareWithUser is the sentence to say); the same link takes every later photo of this smoke, so relay it once. Keep the photoDropId and pass it to save_smoke, which attaches the dropped photos to the saved smoke; the link then keeps working for that smoke until it expires (48 hours). Opening again while a drop is open returns that drop with a fresh link. If the client forwarded an attached image with the call it is stored into the drop directly (delivery reports which happened). Never fill the image argument yourself — no URLs, ids, or invented fields.",
+      inputSchema: openPhotoDropSchema,
+      outputSchema: openPhotoDropOutput,
+      // The same file-input declaration add_smoke_photo publishes: a host that
+      // forwards an attachment gets it stored into the drop.
+      _meta: PHOTO_FILE_PARAMS_META,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        // Not idempotent: a second open ROTATES the token, which kills the link
+        // the first one returned (the raw token is never stored, so reuse must
+        // re-mint). Same drop, different link — a client that treats the call as
+        // repeatable would hand the user a dead URL.
+        idempotentHint: false,
+        title: "Open photo drop",
+      },
+    },
+    (args, extra) =>
+      run("open_photo_drop", extra.authInfo, async ({ principal }, correlationId) => {
+        const intake = await intakePhoto({
+          tool: "open_photo_drop",
+          image: args.image,
+          requestMeta: extra._meta as Record<string, unknown> | undefined,
+          storage,
+          correlationId,
+          sessionId: extra.sessionId,
+          rpcId: extra.requestId,
+        });
+
+        const drop = await openPhotoDrop(deps, intake.storage, principal, {
+          correlationId,
+          actor: "mcp",
+        });
+        const url = dropUrl(drop.token);
+
+        // A forwarded image goes STRAIGHT INTO the drop it just opened, through
+        // the same token path the web page uploads on — so one photo cannot arrive
+        // by a route the drop's own page does not know about.
+        let staged: { photoId: string; kind: string; width: number; height: number } | undefined;
+        if (intake.image) {
+          const photo = await stagePhotoByToken(deps, intake.storage, {
+            token: drop.token,
+            image: intake.image,
+            correlationId,
+          });
+          staged = {
+            photoId: photo.photoId,
+            kind: photo.kind,
+            width: photo.width,
+            height: photo.height,
+          };
+        }
+        const photoCount = drop.photoCount + (staged ? 1 : 0);
+
+        return jsonResult({
+          photoDropId: drop.photoDropId,
+          uploadUrl: url,
+          expiresAt: drop.expiresAt,
+          reused: drop.reused,
+          photoCount,
+          // The sentence to say, as on add_smoke_photo — a link nobody relays
+          // collects nothing. The reused wording names what is already waiting, so
+          // a model that lost the id in a long chat can tell the user their photos
+          // are still there rather than reopening the subject.
+          shareWithUser:
+            drop.reused && photoCount > 0
+              ? `Send the user this link to add photos during the smoke: ${url} — it already holds ${photoCount} ${photoCount === 1 ? "photo" : "photos"}, every photo of this smoke goes there, and they attach to the review when it is saved. It lasts 48 hours.`
+              : `Send the user this link to add photos during the smoke: ${url} — every photo of this smoke goes there, and they attach to the review when it is saved. It lasts 48 hours.`,
+          // Exactly one of the two, always: `staged` when a forwarded image landed
+          // in the drop, `delivery` (add_smoke_photo's vocabulary) when none did.
+          ...(staged ? { staged } : { delivery: intake.delivery }),
+        });
+      }),
+  );
+
+  server.registerTool(
     "add_smoke_photo",
     {
       title: "Add smoke photo",
@@ -1017,16 +1282,12 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // that works everywhere. Leading with a mode that has never fired taught the
       // model to treat the working path as a consolation prize.
       //
-      // THE SAME-TURN SENTENCE (owner, 2026-08-31) is the one thing the model is
-      // now told about attachment beyond "it may happen". Tonight's session is the
-      // evidence: the user's photo was attached SEVERAL TURNS BEFORE the call and
-      // nothing was forwarded. Every integration that does receive files receives
-      // the invoking turn's attachment, so current-turn-only is the plausible
-      // contract — and it is phrased as maximizing the chance, never as fact,
-      // because forwarding has never once been observed here (#202). It does NOT
-      // reinstate the withdrawn "ask them to re-send" instruction: that one fired
-      // on no_image_received and delayed the link. This one is standing advice
-      // that ends by naming the link as the path that always works.
+      // THE SAME-TURN SENTENCE IS GONE (2026-09-01, ADR-014). The retest ran with
+      // the image attached to the invoking message and the host still forwarded
+      // nothing, so advice that costs the user a re-attach for a path shown not to
+      // fire is withdrawn. What replaces it is not advice but a design: this tool
+      // now points a live smoke at open_photo_drop, which takes the photo when it
+      // is taken instead of asking for it again at the end.
       //
       // Attachment stays declared and stays implemented — it costs nothing to keep
       // and it is how this works the day a host forwards a file — but it is now
@@ -1034,11 +1295,11 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // vocabulary (below): it earns its place by telling the model the truth about
       // what arrived, which is exactly what the probe was built to learn.
       description:
-        "Add a photo to a smoke. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. If the client forwarded an attached image with the call, the photo is stored directly instead and no link is needed (delivery reports which happened). A client that forwards anything is understood to forward only an image attached to the message that triggered the call, so to give direct storage its best chance ask the user to attach — or re-attach — the photo in the same message as the request; the link is the path that always works. Never fill the image argument yourself — no URLs, ids, or invented fields.",
+        "Add a photo to a smoke that is already saved. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. With photoDropId it instead attaches the photos of that drop to the smoke (for a drop save_smoke did not carry) and mints no link. If the client forwarded an attached image with the call, the photo is stored directly and no link is needed (delivery reports which happened). For a photo taken during a smoke that is not saved yet, use open_photo_drop. Never fill the image argument yourself — no URLs, ids, or invented fields.",
       inputSchema: addSmokePhotoSchema,
       outputSchema: addSmokePhotoOutput,
       // Declare `image` as a file input so ChatGPT forwards the attached photo.
-      _meta: ADD_SMOKE_PHOTO_META,
+      _meta: PHOTO_FILE_PARAMS_META,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -1048,139 +1309,51 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     },
     (args, extra) =>
       run("add_smoke_photo", extra.authInfo, async ({ principal }, correlationId) => {
-        const startedAt = Date.now();
-        const requestMeta = extra._meta as Record<string, unknown> | undefined;
-
-        // Describe BOTH channels before deciding anything. Whatever else this call
-        // does, the record must be able to say what arrived — that is the whole
-        // point of the change: "nothing was sent" and "a handle arrived carrying
-        // { file_id, mime_type }" used to be indistinguishable from outside.
-        const argument = describeArgument(args.image);
-        const requestMetaShape = describeRequestMeta(requestMeta);
-
-        // Exactly one `photo_intake` line per call, joined to the HTTP-layer
-        // `photo_intake_request` line on (sessionId, rpcId), and to `tool_called`
-        // /`tool_error` on correlationId.
-        const record = (
-          outcome: IntakeOutcome,
-          mode: "attached" | "upload_url" | "unavailable",
-          channel: Channel,
-          extras: {
-            urlKey?: string;
-            fetch?: FetchRecord;
-            decodeError?: string;
-          } = {},
-        ): void => {
-          mcpEvent("photo_intake", {
-            tool: "add_smoke_photo",
+        // MODE C — a drop the save did not carry (ADR-014). It takes no intake and
+        // mints no link: the photos already exist, staged against the drop, and
+        // the whole call is the claim that moves them onto this smoke. It runs
+        // ahead of the storage check because it touches no bucket at all.
+        //
+        // The two "wrong id" answers differ from the SAVE's, and must: there the
+        // smoke is already committed so a bad drop is reported rather than raised
+        // (ADR-007), while here the claim IS the call and has no result to carry a
+        // status on. A drop that is not the caller's is `photo_drop_not_found`
+        // (never distinguished from one that never existed), and one already bound
+        // to a different smoke is a validation_error naming the field — the photos
+        // belong to that other smoke and moving them would take them off it.
+        if (args.photoDropId !== undefined) {
+          const photoDrop = await claimPhotoDrop(deps, principal, {
+            photoDropId: args.photoDropId,
+            smokeId: args.smokeId,
             correlationId,
-            sessionId: extra.sessionId,
-            rpcId: extra.requestId,
-            outcome,
-            channel,
-            mode,
-            argument,
-            requestMeta: requestMetaShape,
-            ...extras,
-            latencyMs: Date.now() - startedAt,
+            actor: "mcp",
           });
-        };
-
-        // Photos disabled cluster-wide → the whole tool is non-functional; report
-        // `unavailable` rather than mint a link that would 503 on upload. Recorded
-        // first so this stays distinguishable from a delivery problem.
-        if (!storage) {
-          record("storage_unavailable", "unavailable", "none");
-          throw new UnavailableError();
+          if (photoDrop.status === "not_found") throw new PhotoDropNotFoundError();
+          if (photoDrop.status === "bound_elsewhere") {
+            throw new ValidationError([
+              { path: "photoDropId", message: "Already attached to another smoke." },
+            ]);
+          }
+          return jsonResult({ mode: "drop_claimed", photoDrop });
         }
 
-        const delivery = classify(args.image, requestMeta);
-        const channel: Channel = delivery.kind === "absent" ? "none" : delivery.channel;
+        const intake = await intakePhoto({
+          tool: "add_smoke_photo",
+          image: args.image,
+          requestMeta: extra._meta as Record<string, unknown> | undefined,
+          storage,
+          correlationId,
+          sessionId: extra.sessionId,
+          rpcId: extra.requestId,
+        });
 
-        // Turn the classified delivery into bytes, or into the reason there are
-        // none. Nothing below throws for a delivery problem: mode B is the
-        // guaranteed path, so a failure becomes a link plus a record.
-        let outcome: IntakeOutcome;
-        let bytes: Buffer | undefined;
-        let declaredType: string | undefined;
-        let fetchRecord: FetchRecord | undefined;
-        let urlKey: string | undefined;
-
-        switch (delivery.kind) {
-          case "absent":
-            outcome = "no_delivery";
-            break;
-          case "unusable":
-            outcome = delivery.reason;
-            break;
-          case "fetchable": {
-            urlKey = delivery.urlKey;
-            const fetched = await fetchAttachedImage(delivery);
-            fetchRecord = fetched.record;
-            if (fetched.failure || !fetched.bytes) {
-              outcome = fetched.failure ?? "fetch_failed";
-            } else {
-              bytes = fetched.bytes;
-              // The handle's own mime_type wins over the response header — the
-              // host knows what the user attached; the origin often says nothing.
-              declaredType = delivery.mimeType ?? fetched.headerType;
-              outcome = "attached";
-            }
-            break;
-          }
-        }
-
-        let processed: Awaited<ReturnType<typeof processPhoto>> | undefined;
-        let decodeError: string | undefined;
-        if (bytes) {
-          // Bytes only ever come from a fetch, so the type resolution always has a
-          // fetch record to land in (inline delivery was removed — photo-intake.ts).
-          const resolved = resolveContentType(declaredType, bytes);
-          if (fetchRecord) {
-            fetchRecord.declaredType = resolved.declaredType;
-            fetchRecord.sniffedType = resolved.sniffedType;
-          }
-          try {
-            processed = await processPhoto(bytes, resolved.contentType);
-          } catch (error) {
-            // The error CLASS only — never its message, which can echo input.
-            // UnsupportedImageTypeError means the type was refused up front; any
-            // other name means the decoder itself gave up on the bytes.
-            decodeError = error instanceof Error ? error.name : "unknown";
-            // Bytes that will not decode are a FALLBACK, not an error: the user
-            // gets a working upload link and the reason lives in the record. This
-            // deliberately replaces the old `validation_error`/`unavailable` — a
-            // model-visible error the user never sees, for a failure they cannot
-            // fix. UnsupportedImageTypeError and a decoder fault are one outcome
-            // here because they are one thing to the user: unusable bytes.
-            outcome = "unreadable";
-          }
-        }
-
-        const extras = {
-          ...(urlKey !== undefined ? { urlKey } : {}),
-          ...(fetchRecord ? { fetch: fetchRecord } : {}),
-          ...(decodeError !== undefined ? { decodeError } : {}),
-        };
-
-        if (processed) {
-          // `outcome: attached` describes INTAKE, not the storage write: it is
-          // recorded before addSmokePhoto so the intake story is complete even when
-          // the write then fails (smoke_not_found, photo_limit) — that failure
-          // arrives as `tool_error` under the same correlationId.
-          record("attached", "attached", channel, extras);
-          const photo = await addSmokePhoto(deps, storage, principal, {
+        // Mode A — opportunistic: a host forwarded a file and it decoded.
+        if (intake.image) {
+          const photo = await addSmokePhoto(deps, intake.storage, principal, {
             smokeId: args.smokeId,
             kind: args.kind,
             caption: args.caption ?? null,
-            image: {
-              full: processed.full,
-              thumb: processed.thumb,
-              contentType: processed.contentType,
-              width: processed.width,
-              height: processed.height,
-              bytes: processed.full.byteLength,
-            },
+            image: intake.image,
             actor: "mcp",
             correlationId,
           });
@@ -1190,7 +1363,6 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
         // Mode B — the ordinary path: mint a single-use link bound to
         // (user, smoke, kind?, caption?) for the user to open on their phone, and
         // tell the model plainly why it got one.
-        record(outcome, "upload_url", channel, extras);
         const minted = await mintPhotoUploadToken(deps, principal, {
           smokeId: args.smokeId,
           kind: args.kind,
@@ -1206,7 +1378,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           // field left the model to decide whether a link was worth mentioning;
           // this is the whole point of the call, so the result says so in words.
           shareWithUser: `Send the user this link to add their photo: ${url} — it works once and is valid for 24 hours.`,
-          delivery: deliveryFor(outcome),
+          delivery: intake.delivery,
         });
       }),
   );

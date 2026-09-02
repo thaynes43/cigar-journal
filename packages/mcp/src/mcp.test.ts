@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
+import { createMemoryPhotoStorage, processPhoto, type PhotoStorage } from "@cj/photos";
 import {
   registerClient,
   getClient,
@@ -16,7 +16,12 @@ import {
   exchangeAuthorizationCode,
 } from "@cj/oauth";
 import { createHarness, type DomainHarness } from "@cj/domain/testing";
-import type { Principal } from "@cj/domain";
+import {
+  assertPhotoDropUsable,
+  getPhotoDropByToken,
+  stagePhotoByToken,
+  type Principal,
+} from "@cj/domain";
 import {
   purchases,
   vendors,
@@ -283,7 +288,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the thirty-two tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
+  it("lists exactly the thirty-three tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -299,6 +304,7 @@ describe("@cj/mcp adapter", () => {
           "get_my_smokes",
           "get_offers",
           "get_smoke",
+          "open_photo_drop",
           "record_price",
           "record_purchase",
           "record_purchase_batch",
@@ -347,6 +353,7 @@ describe("@cj/mcp adapter", () => {
         "record_purchase",
         "record_purchase_batch",
         "update_smoke",
+        "open_photo_drop",
         "add_smoke_photo",
         "set_want",
         "set_favorite",
@@ -363,6 +370,32 @@ describe("@cj/mcp adapter", () => {
         "queue_enrichment_backlog",
       ])
         expect(readOnly(w)).not.toBe(true);
+    });
+  });
+
+  it("tools/list declares the same file input on open_photo_drop, and no smokeId", async () => {
+    // The drop takes the SAME host-forwarded attachment add_smoke_photo takes
+    // (ADR-014), so it must publish the same declaration — the `_meta` list and a
+    // real top-level `image` property, or ChatGPT forwards nothing. And it must
+    // publish NO smokeId: the smoke it collects for does not exist yet, which is
+    // the entire reason the tool is here.
+    await withClient(ownerFull, async (client) => {
+      const { tools } = await client.listTools();
+      const drop = tools.find((t) => t.name === "open_photo_drop")!;
+
+      expect((drop._meta as Record<string, unknown> | undefined)?.["openai/fileParams"]).toEqual([
+        "image",
+      ]);
+      expect(drop.outputSchema, "open_photo_drop is missing an outputSchema").toBeDefined();
+
+      const inputSchema = drop.inputSchema as {
+        properties?: Record<string, unknown>;
+        required?: string[];
+      };
+      expect(Object.keys(inputSchema.properties ?? {})).toEqual(["image"]);
+      expect(inputSchema.required ?? []).toEqual([]);
+      expect(drop.annotations?.readOnlyHint).not.toBe(true);
+      expect(drop.annotations?.idempotentHint).not.toBe(true);
     });
   });
 
@@ -2743,6 +2776,315 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  // ---- open_photo_drop and the photo-drop claims (ADR-014, issue #263) ------
+  //
+  // ONE OPEN DROP PER USER is the invariant every test here has to respect: a
+  // second open returns the FIRST drop with a fresh token. So each test that
+  // asserts on `reused` or `photoCount` gets its own user — sharing `owner` would
+  // make the results depend on file order rather than on the code.
+
+  async function dropUser(): Promise<string> {
+    const user = await h.createUser(`drop-${randomUUID()}@example.com`);
+    return (await mintToken(ALL_SCOPES, user.userId)).token;
+  }
+
+  // The token rides the returned link — it is the only place the raw token is ever
+  // handed out (only its hash is stored), which is what the web page and these
+  // tests both work from.
+  function tokenOf(uploadUrl: string): string {
+    const token = uploadUrl.slice(`${ORIGIN}/d/`.length);
+    expect(token).toMatch(/^[A-Za-z0-9_-]+$/);
+    return token;
+  }
+
+  interface OpenedDrop {
+    photoDropId: string;
+    uploadUrl: string;
+    expiresAt: string;
+    reused: boolean;
+    photoCount: number;
+    shareWithUser: string;
+    delivery?: { status: string };
+    staged?: { photoId: string; kind: string; width: number; height: number };
+  }
+
+  // Put a photo into a drop through the DOMAIN's token path — the same call the
+  // /d/<token> page makes — so these tests exercise the claim against photos that
+  // arrived the way real ones do.
+  async function stageIntoDrop(token: string, kind?: "cigar" | "band"): Promise<string> {
+    const processed = await processPhoto(PNG_FIXTURE, "image/png");
+    const view = await stagePhotoByToken(h.deps, storage, {
+      token,
+      kind,
+      image: { ...processed, bytes: processed.full.byteLength },
+    });
+    return view.photoId;
+  }
+
+  it("open_photo_drop returns a multi-photo /d/ link, empty and not reused", async () => {
+    await withClient(await dropUser(), async (client) => {
+      const data = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+
+      expect(data.uploadUrl).toMatch(new RegExp(`^${ORIGIN}/d/[A-Za-z0-9_-]+$`));
+      expect(data.reused).toBe(false);
+      expect(data.photoCount).toBe(0);
+      expect(Number.isNaN(Date.parse(data.expiresAt))).toBe(false);
+      // No image arrived, so the model is told why in add_smoke_photo's vocabulary.
+      expect(data.delivery?.status).toBe("no_image_received");
+      expect(data).not.toHaveProperty("staged");
+      // The sentence to relay carries the link and its lifetime.
+      expect(data.shareWithUser).toContain(data.uploadUrl);
+      expect(data.shareWithUser).toContain("48 hours");
+    });
+  });
+
+  it("opening again returns the same drop with a fresh link, and kills the old one", async () => {
+    // The rotation is forced, not chosen: only the token HASH is stored, so a
+    // reissue cannot re-derive the previous raw token and necessarily replaces it.
+    // The cost is stated in the ADR and pinned here — the earlier link stops working.
+    const token = await dropUser();
+    await withClient(token, async (client) => {
+      const first = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      const firstToken = tokenOf(first.uploadUrl);
+      await stageIntoDrop(firstToken, "cigar");
+
+      const second = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      expect(second.photoDropId).toBe(first.photoDropId);
+      expect(second.reused).toBe(true);
+      expect(second.uploadUrl).not.toBe(first.uploadUrl);
+      // The photo staged through the dead link is still in the drop — this is what
+      // lets a model that lost the id in a long chat recover the user's photos.
+      expect(second.photoCount).toBe(1);
+      expect(second.shareWithUser).toContain("it already holds 1 photo,");
+
+      await expect(assertPhotoDropUsable(h.deps, { token: firstToken })).rejects.toMatchObject({
+        code: "upload_token_invalid",
+      });
+      await expect(
+        assertPhotoDropUsable(h.deps, { token: tokenOf(second.uploadUrl) }),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  it("open_photo_drop stores a forwarded image into the drop (request _meta channel)", async () => {
+    await withFixture(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "image/png", "content-length": PNG_FIXTURE.byteLength });
+        res.end(PNG_FIXTURE);
+      },
+      async (fixtureUrl) => {
+        await withClient(await dropUser(), async (client) => {
+          const result = (await client.callTool({
+            name: "open_photo_drop",
+            arguments: {},
+            _meta: {
+              "openai/fileParams": [
+                { download_url: fixtureUrl, file_id: "file_d1", mime_type: "image/png" },
+              ],
+            },
+          })) as CallToolResult;
+
+          const data = payloadOf(result) as OpenedDrop;
+          expect(data.staged?.kind).toBe("other");
+          expect(data.staged?.width).toBeGreaterThan(0);
+          expect(data.photoCount).toBe(1);
+          // Exactly one of the two: a stored image leaves nothing for `delivery`
+          // to explain.
+          expect(data).not.toHaveProperty("delivery");
+
+          const view = await getPhotoDropByToken(h.deps, { token: tokenOf(data.uploadUrl) });
+          expect(view.photos.map((ph) => ph.photoId)).toEqual([data.staged!.photoId]);
+        });
+      },
+    );
+  });
+
+  it("open_photo_drop stores a forwarded image via the declared `image` argument", async () => {
+    await withFixture(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "image/png", "content-length": PNG_FIXTURE.byteLength });
+        res.end(PNG_FIXTURE);
+      },
+      async (fixtureUrl) => {
+        await withClient(await dropUser(), async (client) => {
+          const data = payloadOf(
+            await call(client, "open_photo_drop", {
+              image: { download_url: fixtureUrl, file_id: "file_d2", mime_type: "image/png" },
+            }),
+          ) as OpenedDrop;
+
+          expect(data.staged).toBeDefined();
+          expect(data.photoCount).toBe(1);
+          const view = await getPhotoDropByToken(h.deps, { token: tokenOf(data.uploadUrl) });
+          expect(view.status).toBe("open");
+          expect(view.photos).toHaveLength(1);
+        });
+      },
+    );
+  });
+
+  it("open_photo_drop writes the intake records under its own tool name", async () => {
+    // The diagnostics are shared, not duplicated (ADR-014): both photo tools write
+    // `photo_intake` and the HTTP-layer `photo_intake_request`, and `tool` is the
+    // only field that separates them in Loki.
+    await withClient(await dropUser(), async (client) => {
+      const { lines } = await captureMcpLog(() => call(client, "open_photo_drop", {}));
+
+      const record = eventPayload(lines, "photo_intake");
+      expect(record.tool).toBe("open_photo_drop");
+      expect(record.outcome).toBe("no_delivery");
+      expect(record.channel).toBe("none");
+      expect(record.mode).toBe("upload_url");
+
+      const probe = eventPayload(lines, "photo_intake_request");
+      expect(probe.tool).toBe("open_photo_drop");
+      expect(probe.paramKeys).toEqual(["arguments", "name"]);
+      // The two records join on (sessionId, rpcId), exactly as they do for
+      // add_smoke_photo.
+      expect(record.rpcId).toEqual(probe.rpcId);
+      expect(record.sessionId).toEqual(probe.sessionId);
+    });
+  });
+
+  it("save_smoke with photoDropId attaches the drop's photos and reports the count", async () => {
+    await withClient(await dropUser(), async (client) => {
+      const drop = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      const token = tokenOf(drop.uploadUrl);
+      const first = await stageIntoDrop(token, "cigar");
+      const second = await stageIntoDrop(token, "band");
+
+      const saved = payloadOf(
+        await call(client, "save_smoke", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId: primaryCigarId },
+          overallDescriptors: ["drop-claim"],
+          photoDropId: drop.photoDropId,
+        }),
+      ) as {
+        smoke: { smokeId: string };
+        photoDrop: { photoDropId: string; status: string; attached: number; pending: number };
+      };
+
+      expect(saved.photoDrop).toEqual({
+        photoDropId: drop.photoDropId,
+        status: "claimed",
+        attached: 2,
+        pending: 0,
+      });
+
+      const full = payloadOf(await call(client, "get_smoke", { smokeId: saved.smoke.smokeId })) as {
+        smoke: { photos: { photoId: string }[] };
+      };
+      expect(full.smoke.photos.map((ph) => ph.photoId).sort()).toEqual([first, second].sort());
+    });
+  });
+
+  it("save_smoke with an unknown photoDropId still saves, and reports not_found", async () => {
+    // The claim runs AFTER the save commits and may never fail it (ADR-007/014):
+    // a drop that is not the caller's is reported on the result, not raised.
+    await withClient(await dropUser(), async (client) => {
+      const result = await call(client, "save_smoke", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId: primaryCigarId },
+        overallDescriptors: ["drop-unknown"],
+        photoDropId: randomUUID(),
+      });
+      expect(result.isError).not.toBe(true);
+      const saved = payloadOf(result) as {
+        smoke: { smokeId: string };
+        photoDrop: { status: string; attached: number };
+      };
+      expect(saved.smoke.smokeId).toBeTruthy();
+      expect(saved.photoDrop.status).toBe("not_found");
+      expect(saved.photoDrop.attached).toBe(0);
+    });
+  });
+
+  it("add_smoke_photo with photoDropId claims the drop instead of minting a link", async () => {
+    await withClient(await dropUser(), async (client) => {
+      const drop = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      const photoId = await stageIntoDrop(tokenOf(drop.uploadUrl), "cigar");
+      // Deliberately saved WITHOUT the drop — this tool exists for the drop the
+      // save did not carry.
+      const smokeId = await saveBareSmoke(client, "drop-late-claim");
+
+      const data = payloadOf(
+        await call(client, "add_smoke_photo", { smokeId, photoDropId: drop.photoDropId }),
+      ) as {
+        mode: string;
+        photoDrop: { photoDropId: string; status: string; attached: number; pending: number };
+      };
+      expect(data.mode).toBe("drop_claimed");
+      expect(data.photoDrop).toEqual({
+        photoDropId: drop.photoDropId,
+        status: "claimed",
+        attached: 1,
+        pending: 0,
+      });
+      // No link is minted on this path.
+      expect(data).not.toHaveProperty("uploadUrl");
+
+      const full = payloadOf(await call(client, "get_smoke", { smokeId })) as {
+        smoke: { photos: { photoId: string }[] };
+      };
+      expect(full.smoke.photos.map((ph) => ph.photoId)).toEqual([photoId]);
+    });
+  });
+
+  it("add_smoke_photo with an unknown photoDropId errors photo_drop_not_found", async () => {
+    // Unlike the save, this call has no result to carry a status on: the claim IS
+    // the call, so a drop that names nothing is an error the model must act on.
+    await withClient(await dropUser(), async (client) => {
+      const smokeId = await saveBareSmoke(client, "drop-claim-unknown");
+      const error = errorOf(
+        await call(client, "add_smoke_photo", { smokeId, photoDropId: randomUUID() }),
+      );
+      expect(error.code).toBe("photo_drop_not_found");
+      expect(error.recoverable).toBe(false);
+    });
+  });
+
+  it("add_smoke_photo refuses a drop already bound to another smoke", async () => {
+    await withClient(await dropUser(), async (client) => {
+      const drop = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      await stageIntoDrop(tokenOf(drop.uploadUrl), "cigar");
+
+      // The drop belongs to this smoke from here on.
+      payloadOf(
+        await call(client, "save_smoke", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId: primaryCigarId },
+          overallDescriptors: ["drop-owner-smoke"],
+          photoDropId: drop.photoDropId,
+        }),
+      );
+
+      const other = await saveBareSmoke(client, "drop-thief-smoke");
+      const error = errorOf(
+        await call(client, "add_smoke_photo", { smokeId: other, photoDropId: drop.photoDropId }),
+      );
+      expect(error.code).toBe("validation_error");
+      expect(error.fields).toEqual([
+        { path: "photoDropId", message: "Already attached to another smoke." },
+      ]);
+    });
+  });
+
+  it("rejects open_photo_drop for a token without journal:write: 403", async () => {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerCatalogJournal}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "open_photo_drop", arguments: {} },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+  });
+
   // ---- curation surface (admin only; DESIGN-003 wave 4a, issue #126) --------
 
   // A listing match at status 'auto' linked to a fresh cigar, with an offer that
@@ -4095,6 +4437,18 @@ describe("@cj/mcp adapter", () => {
       // Mode B: no link is minted for a smoke that cannot exist.
       await withClient(ownerFull, async (client) => {
         expectCode(await call(client, "add_smoke_photo", { smokeId: BAD }), "smoke_not_found");
+      });
+    });
+
+    it("add_smoke_photo: malformed photoDropId → photo_drop_not_found", async () => {
+      // The drop id is checked before the smoke id, so a valid smoke isolates the
+      // answer to the drop — and a malformed drop reads exactly like an unknown one.
+      await withClient(ownerFull, async (client) => {
+        const smokeId = await saveBareSmoke(client, "drop-malformed-id");
+        expectCode(
+          await call(client, "add_smoke_photo", { smokeId, photoDropId: BAD }),
+          "photo_drop_not_found",
+        );
       });
     });
   });
