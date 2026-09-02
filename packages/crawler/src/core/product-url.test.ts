@@ -111,6 +111,13 @@ describe("exclusion gate (mode B)", () => {
   const accepts = [
     "https://www.smallbatchcigar.com/tatuaje-brown-label-noella/",
     "https://www.smallbatchcigar.com/xikar-xi3-cutter",
+    // Live locs, 2026-09-02 (#270). Trailing slashes are absent on this store.
+    "https://www.smallbatchcigar.com/eastern-standard-sungrown-toro-extra",
+    // Brand and line landing pages are the SAME shape as products and are
+    // accepted on purpose — ~23% of the accepted set. No pattern separates them;
+    // normalizeListing drops them when the page carries no Product.
+    "https://www.smallbatchcigar.com/caldwell",
+    "https://www.smallbatchcigar.com/tatuaje-black-label",
   ];
   // Product slugs whose FIRST hyphen-delimited word is a reserved path word. A
   // `\b` after the word matches at the hyphen too, so these were all dropped —
@@ -128,6 +135,12 @@ describe("exclusion gate (mode B)", () => {
     "https://www.smallbatchcigar.com/wishlist-edition/",
     "https://www.smallbatchcigar.com/sitemap-cigar/",
     "https://www.smallbatchcigar.com/rss-limited-2019/",
+    // The same trap for the six slugs added on 2026-09-02: a hyphen is not a
+    // segment boundary, so a product may start with any of those words.
+    "https://www.smallbatchcigar.com/gift-card-holder-toro",
+    "https://www.smallbatchcigar.com/accessories-of-the-crown-robusto",
+    "https://www.smallbatchcigar.com/boards-and-barrels-lancero",
+    "https://www.smallbatchcigar.com/blog-post-edition-2024",
   ];
   const rejects = [
     "https://www.smallbatchcigar.com/",
@@ -144,6 +157,18 @@ describe("exclusion gate (mode B)", () => {
     "https://www.smallbatchcigar.com/cart/",
     "https://www.smallbatchcigar.com/checkout",
     "https://www.smallbatchcigar.com/feed/",
+    // The six non-product ROOT slugs the live sitemap carries (2026-09-02, #270)
+    // — every one of them leaked before, because the directory branch of the
+    // pattern needs a trailing `/` and these are bare one-segment slugs. They are
+    // the whole difference between 10,955 accepted and 10,961.
+    "https://www.smallbatchcigar.com/contactus",
+    "https://www.smallbatchcigar.com/blog",
+    "https://www.smallbatchcigar.com/boards",
+    "https://www.smallbatchcigar.com/shop-by-brand",
+    "https://www.smallbatchcigar.com/accessories",
+    "https://www.smallbatchcigar.com/gift-card",
+    // And the blog itself, which the depth bound rejects without help (331 locs).
+    "https://www.smallbatchcigar.com/blog/why-the-lancero-endures",
   ];
 
   it("accepts root-level product slugs", () => {

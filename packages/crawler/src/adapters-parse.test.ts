@@ -19,7 +19,6 @@ interface AdapterCase {
   dir: string;
   robotsUrl: string;
   sitemapUrl: string;
-  childUrl?: string; // sitemapindex child, when the fixture is an index
   // The probe parses several spread-apart URLs, so each set routes two products:
   // a cigar (first in the sitemap) and an accessory.
   productUrl: string;
@@ -28,26 +27,21 @@ interface AdapterCase {
   expectedKind: "urlset" | "sitemapindex";
 }
 
-// 2 Guys is still NOT in this list, for a different reason than before. It CAN
-// now produce a parsed product — the OG/microdata extractor and the keywords
-// category source landed with #252 — but this harness is shaped for a
-// hand-written pair (`product.html` + `product-cutter.html`, exactly one cigar).
-// 2 Guys' fixtures are verbatim live captures under their own names and its probe
-// samples three of them, so its full parse is asserted against the real bytes in
-// `core/probe.test.ts` instead. Re-writing its pages to fit this shape is the
-// mistake this whole lane has been unwinding.
+// Two adapters are NOT in this list, for two different reasons — and both are
+// asserted against their real shapes in `core/probe.test.ts` instead.
+//
+// 2 Guys CAN now produce a parsed product (the OG/microdata extractor and the
+// keywords category source landed with #252), but this harness is shaped for a
+// hand-written pair (`product.html` + `product-cutter.html`, exactly one cigar)
+// and its fixtures are verbatim live captures under their own names.
+//
+// Small Batch cannot clear the harness at all: it asserts a priced cigar, and
+// the 2026-09-02 live read (#270) found `"0.00"` on every grouped cigar page, so
+// its honest verdict is needs-attention until an HTML price extractor exists.
+//
+// Re-writing either vendor's pages to fit this shape is the mistake this whole
+// lane has been unwinding.
 const cases: AdapterCase[] = [
-  {
-    adapter: smallBatchCigar,
-    dir: "small-batch",
-    robotsUrl: "https://www.smallbatchcigar.com/robots.txt",
-    sitemapUrl: "https://www.smallbatchcigar.com/sitemap.xml",
-    childUrl: "https://www.smallbatchcigar.com/products-sitemap-1.xml",
-    productUrl: "https://www.smallbatchcigar.com/tatuaje-brown-label-noella/",
-    cutterUrl: "https://www.smallbatchcigar.com/xikar-xi3-cutter/",
-    expectedName: "Tatuaje Brown Label Noella",
-    expectedKind: "sitemapindex",
-  },
   {
     adapter: cubanLous,
     dir: "cuban-lous",
@@ -69,7 +63,6 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
         [c.productUrl]: { body: loadFixture("product.html", c.dir) },
         [c.cutterUrl]: { body: loadFixture("product-cutter.html", c.dir) },
       };
-      if (c.childUrl) routes[c.childUrl] = { body: loadFixture("products-sitemap-1.xml", c.dir) };
 
       const fetcher = createMockFetcher(routes);
       const result = await runProbe(fetcher, c.adapter);
@@ -120,8 +113,11 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
     for (const c of cases) {
       expect(c.adapter.crawlEnabled).toBe(false);
     }
-    // 2 Guys is not in `cases` and is the one that most needs saying.
+    // The two outside `cases` are the ones that most need saying — both have now
+    // been live-probed, and both failed. Enabling either is a registry decision
+    // an operator makes; it is never an adapter edit.
     expect(twoGuysCigars.crawlEnabled).toBe(false);
+    expect(smallBatchCigar.crawlEnabled).toBe(false);
     // Cuban Lou's posture: unapproved + no purchase link-out (owner ruling).
     expect(cubanLous.approvalStatus).toBe("unapproved");
     expect(cubanLous.purchaseLinkout).toBe(false);
@@ -149,5 +145,17 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
     // Small Batch products are root-level slugs: exclusion gate, no prefix.
     expect(smallBatchCigar.productPathPrefix).toBeUndefined();
     expect(smallBatchCigar.nonProductPathPattern).toBeInstanceOf(RegExp);
+    // #270, live 2026-09-02. Its taxonomy is brand-first and never says "cigars",
+    // so `/cigar/i` passed 4 of 20 real cigar pages — the category gate is now
+    // "any taxonomy at all" and the exclusion carries the load.
+    expect(smallBatchCigar.cigarCategoryPattern.source).toBe(".");
+    expect(smallBatchCigar.excludePattern.test("SHOP BY BRAND / Gift Cards")).toBe(true);
+    // Its robots.txt asks for NO Crawl-delay, so the interval is discretionary
+    // politeness rather than a vendor requirement — above the 2.5s default, and
+    // deliberately below 2 Guys' asked-for 5s.
+    expect(smallBatchCigar.minIntervalMs).toBe(3000);
+    // The cap is far below a full pass (10,955 accepted locs) and the fetcher
+    // THROWS at it — a seed needs a raised cap plus a deadline, not a longer wait.
+    expect(smallBatchCigar.maxPages).toBe(500);
   });
 });

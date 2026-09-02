@@ -1,7 +1,17 @@
-# www.smallbatchcigar.com robots.txt — HAND-WRITTEN representative fixture.
-# NOT a live capture (ADR-006): the dev pod cannot reach this domain. The probe
-# must confirm the real robots.txt (and any Crawl-delay) before enabling crawling.
+# www.smallbatchcigar.com/robots.txt — the SHAPE of the live file, read
+# in-cluster 2026-09-02 (#270), trimmed to a representative subset. The real file
+# is one `User-agent: *` group with ~90 stock nopCommerce disallows, NO
+# Crawl-delay, and the sitemap line below. Not one disallow touches a root
+# product slug, which is what makes a Mode-B gate over `/` legal here.
 User-agent: *
-Allow: /
+Disallow: /cart$
+Disallow: /checkout
+Disallow: /compareproducts
+Disallow: /customer/
+Disallow: /wishlist
+Disallow: /boards/
+Disallow: /search?
+Disallow: /passwordrecovery
+Disallow: /newsletter/
 
 Sitemap: https://www.smallbatchcigar.com/sitemap.xml

@@ -1,7 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- HAND-WRITTEN representative fixture (ADR-006): a sitemapINDEX, as a ~20k-URL
-     catalog is likely to ship. The probe/collector descends one level into the
-     child. The real root path + shape must be confirmed live. -->
-<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <sitemap><loc>https://www.smallbatchcigar.com/products-sitemap-1.xml</loc></sitemap>
-</sitemapindex>
+<!-- The live sitemap's SHAPE, read in-cluster 2026-09-02 (#270), scaled down to
+     twelve locs. The real one is a FLAT urlset of 11,288 locs — no sitemapindex,
+     no child sitemaps, identical changefreq/lastmod on every entry.
+
+     Every kind of loc the real file carries is represented once: the root, two
+     products, a brand landing page and a line landing page (indistinguishable
+     from a product by URL — all one-segment slugs), an accessory, a /blog/<slug>
+     post, and the six non-product ROOT slugs the gate had to be taught by name
+     because they are one segment deep like everything else. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://www.smallbatchcigar.com/</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/eastern-standard-sungrown-toro-extra</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/tatuaje-black-label-petite-lancero</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/caldwell</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/xikar-xi3-cutter</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/blog/why-the-lancero-endures</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/blog</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/boards</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/shop-by-brand</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/accessories</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/gift-card</loc></url>
+  <url><loc>https://www.smallbatchcigar.com/contactus</loc></url>
+</urlset>

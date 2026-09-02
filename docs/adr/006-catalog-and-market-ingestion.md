@@ -256,6 +256,52 @@ LLM-created cigars accumulate until curated.
     performs the change; they are no longer told about it by a crawl that quietly
     did nothing.
 
+- **2026-09-02 — Small Batch is read live, and a zero price becomes an unknown
+  price everywhere (issue #270).** In-cluster Jobs fetched robots.txt, the
+  sitemap, both policy pages and 20 product pages. The adapter's six standing
+  assumptions are all now findings, recorded in its header and in
+  `vendor-sources.md`: nopCommerce behind Cloudflare, no product API, a FLAT
+  `urlset` of 11,288 locs with no child sitemap to sharpen, and a gate that
+  accepts 10,955 / rejects 333 once the six non-product ROOT slugs (`/contactus`,
+  `/blog`, `/boards`, `/shop-by-brand`, `/accessories`, `/gift-card`) are named.
+  Two rulings come out of it.
+  - **A price of zero is a PLACEHOLDER, and `normalizeListing` reads it as
+    UNKNOWN for every vendor.** The guard sits below the markup abstraction the
+    amendment above introduced, so it holds for an OpenGraph price as much as a
+    JSON-LD one. `offers.price` is `"0.00"` on 20 of 20 cigar
+    pages, because a nopCommerce GROUPED product has no single price: the real
+    per-pack figures live in HTML `variant-overview` blocks (single-SKU
+    accessories on the same store do carry a real price). This is a platform
+    property, not a Small Batch one, so the guard is vendor-neutral and sits in
+    `normalize.ts`: `priceCents` goes null and `priceIsPlaceholder` records that
+    the vendor stated something. The rest of the listing is kept, and the offer
+    row is still written — availability is a real observation and the listing
+    match hangs off it — with **no price** rather than a $0.00 one. `$0.00` is
+    not a missing price, it is a false one, and it would have sorted first in
+    every cheapest-per-stick view the market lane has.
+  - **The probe bar gains two conditions, because the old one green-lit this
+    vendor.** An `ok` verdict now also requires `cigars >= 1` among the parsed
+    samples and ZERO parsed samples whose price parsed to zero. Small Batch
+    cleared every previous condition — robots, enumeration, three clean parses —
+    while its brand-first taxonomy (`SHOP BY BRAND / <brand> / [<line>]`, the
+    word "cigars" nowhere in it) meant `/cigar/i` matched 4 of 20 real cigars,
+    and while publishing a placeholder price on all of them. The verdict is a
+    pre-enablement gate; a bar that passes a vendor whose crawl writes ~8,000
+    priceless rows is not one. `--probe` also prints each sample's breadcrumb
+    trail now, so a `cigars=0` is diagnosable as a taxonomy mismatch from the
+    output alone. The vendor's own category gate is widened to `/./` — any
+    taxonomy at all — with `excludePattern` carrying the load, which the live
+    read licenses: `Accessories` is the only non-cigar bucket the store has.
+  - **Still `crawl_enabled = false`, and not for a fixable reason.** Offers are
+    not worth writing until an HTML price extractor exists (ADR-015 work, out of
+    scope here); the enrich drain, which links listings and needs no price, is
+    what this unblocks. A full seed is ~11k fetches ≈ 9h at the adapter's
+    discretionary 3s interval — the live robots.txt asks for no Crawl-delay at
+    all — which is well over `maxPages: 500`, and the fetcher THROWS at that cap
+    rather than stopping cleanly. So a seed needs a raised cap AND a deadline
+    that fits it; resume/chunking so a capped run is restartable is tracked under
+    #270.
+
 - **2026-09-01 — the drain's prefilter joins matching v2, and a look that read
   nothing stops claiming it did (issue #240).** The amendment below put the
   drain's *comparison* on matching v2 and left the step in front of it alone: a
