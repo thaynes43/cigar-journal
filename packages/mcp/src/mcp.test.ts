@@ -1262,6 +1262,40 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  // THE PRODUCTION SHAPE, THROUGH THE TOOL SURFACE (2026-09-01). A ChatGPT
+  // session called add_cigar for "Atabey Black Ritos" over a catalog holding
+  // "Atabey Ritos" — a different blend — and got created:false /
+  // already_existed: the residue `{black}` sat on the query side alone, which the
+  // resolver used to call compatible. The tool must hand the model the question
+  // instead, with the Ritos row as a candidate to show the user.
+  it("add_cigar asks rather than silently linking Atabey Black Ritos onto Atabey Ritos", async () => {
+    const ritosId = await h.seedCigar({ canonicalName: "Atabey Ritos", brand: "Atabey" });
+    await withClient(ownerFull, async (client) => {
+      const ambiguous = await call(client, "add_cigar", {
+        clientRequestId: randomUUID(),
+        cigar: { canonicalName: "Atabey Black Ritos", brand: "Atabey" },
+      });
+      const error = errorOf(ambiguous);
+      expect(error.code).toBe("cigar_ambiguous");
+      expect(error.recoverable).toBe(true);
+      const candidates = error.candidates as { cigarId: string }[];
+      expect(candidates.map((c) => c.cigarId)).toContain(ritosId);
+
+      // The user confirms Atabey Black is not the Ritos: the retry creates.
+      const created = payloadOf(
+        await call(client, "add_cigar", {
+          clientRequestId: randomUUID(),
+          cigar: { canonicalName: "Atabey Black Ritos", brand: "Atabey" },
+          confirmedDistinct: true,
+        }),
+      ) as { created: boolean; guidance: string; cigar: { cigarId: string; canonicalName: string } };
+      expect(created.created).toBe(true);
+      expect(created.guidance).toBe("created");
+      expect(created.cigar.canonicalName).toBe("Atabey Black Ritos");
+      expect(created.cigar.cigarId).not.toBe(ritosId);
+    });
+  });
+
   it("rejects add_cigar for a token without journal:write: 403", async () => {
     const res = await fetch(`${baseUrl}/mcp`, {
       method: "POST",

@@ -777,9 +777,11 @@ Create an unverified catalog entry from the user's own naming when search_cigars
 matched nothing, and queue background enrichment so the crawler fills the specs
 and a product photo. Use before `save_smoke`/`record_purchase` when the cigar is
 missing. Resolve-or-create is the exact path `save_smoke` uses for a described
-cigar (exact-name link, `cigar_ambiguous` when it can't decide, unverified create
-otherwise); this tool adds the enrichment queue and the `confirmedDistinct`
-escape hatch — which `record_purchase` carries too, so an acquisition never needs
+cigar — it links only to a close row making the *same* identity claims, raises
+`cigar_ambiguous` when a close row differs by a word or a stated wrapper, and
+creates an unverified entry otherwise (nothing close, or a number/packaging
+difference the names state outright); this tool adds the enrichment queue and the
+`confirmedDistinct` escape hatch — which `record_purchase` carries too, so an acquisition never needs
 this tool as a detour just to reach the flag.
 
 **It is a prelude, never the answer** (#177). It writes no journal entry and no
@@ -812,7 +814,9 @@ result:
 Enrichment is queued at most once per cigar: skipped when a pending or fulfilled
 request already exists, or when the entry already has both a product photo and
 full vitola dimensions (nothing left to fill). A described name that matches two
-catalog rows returns `cigar_ambiguous` with candidates, exactly as `save_smoke`.
+catalog rows — or lands a word away from one, "Atabey Black Ritos" against a
+catalogued "Atabey Ritos" (production, 2026-09-01) — returns `cigar_ambiguous`
+with candidates, exactly as `save_smoke`.
 
 ## record_purchase — write, idempotent
 
