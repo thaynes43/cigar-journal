@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.0](https://github.com/thaynes43/cigar-journal/compare/v0.36.1...v0.37.0) (2026-09-02)
+
+
+### Features
+
+* photo drop (ADR-014) and the journal link verdict — Atabey Black Ritos ≠ Atabey Ritos ([#265](https://github.com/thaynes43/cigar-journal/issues/265)) ([11913db](https://github.com/thaynes43/cigar-journal/commit/11913db32b7c2295ab448ef9a6a51b3965b49386))
+
 ## [0.36.1](https://github.com/thaynes43/cigar-journal/compare/v0.36.0...v0.36.1) (2026-09-01)
 
 
