@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The /en-gb/ copy of the same catalogue. Every loc here must land on the REJECTED side of the gate: /en-gb/products/x does not start with /products/ -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://egmcigars.com/en-gb/products/cohiba-siglo-6-slb</loc></url>
+  <url><loc>https://egmcigars.com/en-gb/products/halo-onyx-cigar-cutter</loc></url>
+</urlset>

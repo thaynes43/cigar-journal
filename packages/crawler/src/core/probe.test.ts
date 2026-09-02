@@ -4,6 +4,12 @@ import { cubanLous } from "../adapters/cuban-lous.js";
 import { twoGuysCigars } from "../adapters/two-guys-cigars.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
 import { smallBatchCigar } from "../adapters/small-batch-cigar.js";
+import { montefortuna } from "../adapters/montefortuna.js";
+import { egmCigars } from "../adapters/egm-cigars.js";
+import { cigarworldDe } from "../adapters/cigarworld-de.js";
+import { jjFox } from "../adapters/jj-fox.js";
+import { extractProductMarkup } from "./markup.js";
+import { isCigarCategory, isCigarListing, normalizeListing } from "./normalize.js";
 import {
   createMockFetcher,
   loadFixture,
@@ -722,5 +728,312 @@ describe("probeFetchBudget", () => {
   it("scales with the adapter's sample count", () => {
     expect(probeFetchBudget(cubanLous)).toBe(10);
     expect(probeFetchBudget(twoGuysCigars)).toBe(22); // 4 samples
+  });
+});
+
+// =============================================================================
+// The four Habanos picture sources, probed against their live shapes (#270).
+// Each set is the 2026-09-02 in-cluster read reduced to the pages that decide a
+// verdict; the numbers the LIVE probe must reproduce are in each adapter header.
+// =============================================================================
+
+describe("Montefortuna, live shape — a Yoast index, a marca breadcrumb and no price", () => {
+  const mf = (path: string): string => `https://www.montefortunacigars.com${path}`;
+  const fx = (name: string): string => loadFixture(name, "montefortuna");
+  const SHOP = mf("/shop/");
+  const COHIBA = mf("/shop/cohiba-siglo-vi/");
+  const CUTTER = mf("/shop/xikar-xi3-cutter/");
+
+  const routes = (): Record<string, MockRoute> => ({
+    [mf("/robots.txt")]: { body: fx("robots.txt") },
+    [montefortuna.sitemapUrl]: { body: fx("sitemap-index.xml") },
+    // The three children `selectIndexChildren` picks out of the ten: the catalog
+    // child by name, plus the first and last of the index.
+    [mf("/product-sitemap.xml")]: { body: fx("product-sitemap.xml") },
+    [mf("/post-sitemap.xml")]: { body: urlsetXml([mf("/blog/habanos-2026-releases/")]) },
+    [mf("/product_tag-sitemap.xml")]: { body: urlsetXml([mf("/product-tag/robusto/")]) },
+    [SHOP]: { body: fx("landing-shop.html") },
+    [COHIBA]: { body: fx("product-cohiba-siglo-vi.html") },
+    [CUTTER]: { body: fx("product-cutter.html") },
+  });
+
+  it("passes the live robots.txt, whose Content-Signal is a reservation and not a rule we break", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, montefortuna);
+
+    // We are none of the named bots (ClaudeBot, GPTBot, CCBot, …), so we fall
+    // under `*`, which allows `/`. The `Content-Signal` line is not an allow/deny
+    // directive and the parser ignores it for that purpose.
+    expect(result.robots.matchedAgent).toBe("*");
+    expect(result.robots.productPathAllowed).toBe(true);
+  });
+
+  it("descends the Yoast index to the catalog child and gates /shop/ down to five locs", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, montefortuna);
+
+    expect(result.sitemap.kind).toBe("sitemapindex");
+    expect(result.sitemap.totalLocs).toBe(10);
+    expect(result.sitemap.sampledChildren).toHaveLength(MAX_PROBE_CHILDREN);
+    expect(result.sitemap.sampledChildren).toContain(mf("/product-sitemap.xml"));
+    // Seven locs in that child; the brand archive and the pagination are
+    // subtracted by `nonProductPathPattern`.
+    expect(result.sitemap.productLocs).toBe(5);
+    expectWithinBudget(fetcher, montefortuna);
+  });
+
+  it("parses two of three samples and admits the cigar on its marca trail", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, montefortuna);
+
+    expect(result.products.map((p) => p.url)).toEqual([SHOP, COHIBA, CUTTER]);
+    expect(result.productSummary).toEqual({ sampled: 3, parsed: 2, cigars: 1, placeholderPrices: 0 });
+    // The /shop/ root is in the sitemap and carries no Product; the probe names it
+    // rather than counting it against the vendor.
+    expect(result.products[0]!.parsed).toBe(false);
+    expect(result.notes.join(" ")).toContain(`sample product ${SHOP} has no schema.org Product JSON-LD`);
+    expect(result.verdict).toBe("ok");
+  });
+
+  it("reads the cigar with a sku, no price, and the product shot rather than the logo", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, montefortuna);
+    const cohiba = result.products[1]!;
+
+    expect(cohiba.name).toBe("Cohiba Siglo VI");
+    expect(cohiba.category).toEqual(["Home", "Shop", "Cohiba", "Cohiba Siglo VI"]);
+    expect(cohiba.isCigar).toBe(true);
+    // NO PRICE is not a placeholder price: the offer states availability only, so
+    // the price is unknown and the vendor still passes.
+    expect(cohiba.priceCents).toBeNull();
+    expect(cohiba.priceIsPlaceholder).toBe(false);
+    expect(cohiba.photoUrl).toBe(
+      "https://www.montefortunacigars.com/wp-content/uploads/2019/07/Cohiba-Siglo-VI-Cigar-Web-1.jpg",
+    );
+    expect(result.products[2]!.isCigar).toBe(false);
+    expect(formatProbe(result)).toContain("category=Home / Shop / Cohiba / Cohiba Siglo VI");
+  });
+
+  // The two shapes the sitemap enumerates and the probe's spread does not sample.
+  // Both parse; both are refused by NAME, under a breadcrumb that says "cigar".
+  it("refuses a multi-box lot and a single stick on the name pattern alone", async () => {
+    const lot = extractProductMarkup(fx("product-2-boxes-montecristo.html"), montefortuna);
+    const single = extractProductMarkup(fx("product-partagas-shorts-single.html"), montefortuna);
+    const listingOf = (m: ReturnType<typeof extractProductMarkup>) =>
+      normalizeListing(m.product!, m.category, m.categorySource)!;
+
+    expect(listingOf(lot).name).toBe("2 Boxes of 25 Montecristo No. 4");
+    expect(isCigarCategory(listingOf(lot).categoryPath, montefortuna)).toBe(true);
+    expect(isCigarListing(listingOf(lot), montefortuna)).toBe(false);
+
+    expect(listingOf(single).name).toBe("Partagas Shorts - Single");
+    expect(isCigarListing(listingOf(single), montefortuna)).toBe(false);
+  });
+});
+
+describe("EGM, live shape — a Shopify ProductGroup and a category with no breadcrumb", () => {
+  const egm = (path: string): string => `https://egmcigars.com${path}`;
+  const fx = (name: string): string => loadFixture(name, "egm-cigars");
+  const QUERY = "?from=11256354948&to=9033607840001";
+  const COHIBA = egm("/products/cohiba-siglo-6-slb");
+  const CUTTER = egm("/products/halo-onyx-cigar-cutter");
+
+  const routes = (): Record<string, MockRoute> => ({
+    [egm("/robots.txt")]: { body: fx("robots.txt") },
+    [egmCigars.sitemapUrl]: { body: fx("sitemap.xml") },
+    [egm(`/sitemap_products_1.xml${QUERY}`)]: { body: fx("sitemap-products-1.xml") },
+    [egm(`/en-gb/sitemap_products_1.xml${QUERY}`)]: { body: fx("sitemap-products-1-en-gb.xml") },
+    [COHIBA]: { body: fx("product.html") },
+    [CUTTER]: { body: fx("product-cutter.html") },
+  });
+
+  it("crawls the catalogue once — the locale copy is on the rejected side of the gate", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, egmCigars);
+
+    expect(result.sitemap.kind).toBe("sitemapindex");
+    expect(result.sitemap.enumeratedLocs).toBe(4);
+    expect(result.sitemap.productLocs).toBe(2);
+    expect(result.pathShapes.rejected.top.map((e) => e.key)).toContain("/en-gb/products");
+    expectWithinBudget(fetcher, egmCigars);
+  });
+
+  it("parses the ProductGroup, prices it off the lifted variant offer, and gates on `category`", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, egmCigars);
+    const cohiba = result.products[0]!;
+
+    expect(result.productSummary).toEqual({ sampled: 2, parsed: 2, cigars: 1, placeholderPrices: 0 });
+    expect(cohiba.name).toBe("Cohiba Siglo VI Cigar");
+    expect(cohiba.category).toEqual(["Cigars"]);
+    expect(cohiba.priceCents).toBe(10694);
+    expect(cohiba.currency).toBe("CHF");
+    expect(cohiba.isCigar).toBe(true);
+    expect(cohiba.photoUrl).toBe(
+      "https://egmcigars.com/cdn/shop/files/Cohiba_Siglo_VI_Cigar_Box_of_25_Cigars_EGM_Cigars.jpg?v=1693381836",
+    );
+    expect(result.products[1]!.isCigar).toBe(false);
+    expect(result.verdict).toBe("ok");
+  });
+
+  it("finds no product on a collection page, whatever the gate did with its URL", () => {
+    const { product, category } = extractProductMarkup(fx("landing-collection.html"), egmCigars);
+    expect(product).toBeNull();
+    expect(category).toEqual([]);
+  });
+});
+
+describe("Cigarworld.de, live shape — a German taxonomy, real prices and a thumbnail photo", () => {
+  const cw = (path: string): string => `https://www.cigarworld.de${path}`;
+  const fx = (name: string): string => loadFixture(name, "cigarworld-de");
+  const RAS = cw("/zigarren/kuba/regulares/ramon-allones-specially-selected-01025_3430");
+  const SORTIMENT = cw("/zigarren/kuba/regulares/kuba-sortiment-01099_9001");
+
+  const routes = (): Record<string, MockRoute> => ({
+    [cw("/robots.txt")]: { body: fx("robots.txt") },
+    [cigarworldDe.sitemapUrl]: { body: fx("sitemap.xml") },
+    [cw("/sitemap_de.xml")]: { body: fx("sitemap-de.xml") },
+    [cw("/sitemap_en.xml")]: { body: fx("sitemap-en.xml") },
+    [RAS]: { body: fx("product.html") },
+    [SORTIMENT]: { body: fx("product-cutter.html") },
+  });
+
+  it("is allowed by a robots.txt that names CCBot and BLEXBot but not us", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, cigarworldDe);
+
+    expect(result.robots.matchedAgent).toBe("*");
+    expect(result.robots.productPathAllowed).toBe(true);
+  });
+
+  it("keeps /zigarrenzubehoer/, /zigarillos/ and the /en/ copy out of the gate", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, cigarworldDe);
+
+    expect(result.sitemap.kind).toBe("sitemapindex");
+    expect(result.sitemap.enumeratedLocs).toBe(9);
+    expect(result.sitemap.productLocs).toBe(2);
+    // Seven of the nine enumerated locs are refused, and the census names where
+    // they live. `/zigarrenzubehoer/humidor` is one of them and sits in the tail
+    // behind the five ties the top-N shows — the gate itself is asserted URL by
+    // URL in `product-url.test.ts`.
+    expect(result.pathShapes.rejected.total).toBe(7);
+    const rejected = result.pathShapes.rejected.top.map((e) => e.key);
+    expect(rejected).toContain("/en/cigars");
+    expect(rejected).toContain("/zigarillos/kuba");
+    expectWithinBudget(fetcher, cigarworldDe);
+  });
+
+  it("reads the price and rewrites the 300x51 thumbnail to the /big/ asset", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, cigarworldDe);
+    const ras = result.products[0]!;
+
+    expect(result.productSummary).toEqual({ sampled: 2, parsed: 2, cigars: 1, placeholderPrices: 0 });
+    expect(ras.name).toBe("Ramon Allones Specially Selected");
+    expect(ras.priceCents).toBe(1800);
+    expect(ras.currency).toBe("EUR");
+    expect(ras.category).toEqual([
+      "Shop",
+      "Zigarren",
+      "Kuba",
+      "Regulares",
+      "Ramon Allones",
+      "Zigarren",
+      "Specially Selected",
+    ]);
+    expect(ras.isCigar).toBe(true);
+    expect(ras.photoUrl).toBe("https://www.cigarworld.de/bilder/detail/big/2390.jpg");
+    // The `photo=` line is how an operator sees the rewrite fired at all.
+    expect(formatProbe(result)).toContain("photo=https://www.cigarworld.de/bilder/detail/big/2390.jpg");
+    // A mixed selection under the same cigar trail, refused by name.
+    expect(result.products[1]!.name).toBe("Kuba Sortiment 6 Zigarren");
+    expect(result.products[1]!.isCigar).toBe(false);
+    expect(result.verdict).toBe("ok");
+  });
+
+  it("would refuse the Grosstubo on its breadcrumb even if the prefix ever admitted it", () => {
+    const markup = extractProductMarkup(fx("product-humidor.html"), cigarworldDe);
+    const listing = normalizeListing(markup.product!, markup.category, markup.categorySource)!;
+
+    expect(listing.name).toContain("Cohiba Siglo VI");
+    expect(listing.categoryPath[1]).toBe("Zigarrenzubehör");
+    expect(isCigarListing(listing, cigarworldDe)).toBe(false);
+  });
+
+  it("finds no product on a category page inside the prefix", () => {
+    expect(extractProductMarkup(fx("landing-zigarren-kuba.html"), cigarworldDe).product).toBeNull();
+  });
+});
+
+describe("J.J. Fox, live shape — 2 Guys' markup on a Magento store", () => {
+  const jj = (path: string): string => `https://www.jjfox.co.uk${path}`;
+  const fx = (name: string): string => loadFixture(name, "jj-fox");
+  const PARTAGAS = jj("/partagas-shorts-842.html");
+  const CUTTER = jj("/xikar-xi3-cigar-cutter-901.html");
+  const COHIBA_OOS = jj("/cohiba-siglo-vi.html");
+
+  const routes = (): Record<string, MockRoute> => ({
+    [jj("/robots.txt")]: { body: fx("robots.txt") },
+    [jjFox.sitemapUrl]: { body: fx("sitemap.xml") },
+    [PARTAGAS]: { body: fx("product.html") },
+    [CUTTER]: { body: fx("product-cutter.html") },
+  });
+
+  it("selects the root-level .html products out of a flat urlset", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, jjFox);
+
+    expect(result.sitemap.kind).toBe("urlset");
+    expect(result.sitemap.enumeratedLocs).toBe(8);
+    expect(result.sitemap.productLocs).toBe(2);
+    expect(result.robots.productPathAllowed).toBe(true);
+    expectWithinBudget(fetcher, jjFox);
+  });
+
+  it("reads the OG tags, decodes the Magento hex spaces and strips the photo query", async () => {
+    const fetcher = createMockFetcher(routes());
+    const result = await runProbe(fetcher, jjFox);
+    const partagas = result.products[0]!;
+
+    expect(result.productSummary).toEqual({ sampled: 2, parsed: 2, cigars: 1, placeholderPrices: 0 });
+    // `og:title` is `Partagas&#x20;Shorts` on the wire.
+    expect(partagas.name).toBe("Partagas Shorts");
+    expect(partagas.priceCents).toBe(2450);
+    expect(partagas.currency).toBe("GBP");
+    expect(partagas.category).toEqual(["Cuban Cigar", "Cigar", "Habanos", "Partagas"]);
+    expect(partagas.isCigar).toBe(true);
+    expect(partagas.photoUrl).toBe(
+      "https://www.jjfox.co.uk/media/catalog/product/P/a/Partagas_Shorts_box_of_25.jpg",
+    );
+    expect(result.products[1]!.isCigar).toBe(false);
+    expect(result.verdict).toBe("ok");
+  });
+
+  // The number most likely to fail this vendor's live probe, and it is a shelf
+  // state rather than a broken adapter: an out-of-stock line prices at "0".
+  it("FAILS the vendor when an out-of-stock line publishes a price of zero", async () => {
+    const fetcher = createMockFetcher({
+      ...routes(),
+      [jjFox.sitemapUrl]: { body: urlsetXml([PARTAGAS, COHIBA_OOS]) },
+      [COHIBA_OOS]: { body: fx("product-out-of-stock.html") },
+    });
+    const result = await runProbe(fetcher, jjFox);
+    const cohiba = result.products[1]!;
+
+    expect(cohiba.name).toBe("Cohiba Siglo VI");
+    expect(cohiba.isCigar).toBe(true);
+    expect(cohiba.priceIsPlaceholder).toBe(true);
+    // Unknown, never zero — the same reading Small Batch's grouped products got.
+    expect(cohiba.priceCents).toBeNull();
+    expect(result.productSummary.placeholderPrices).toBe(1);
+    expect(result.verdict).toBe("needs-attention");
+    expect(result.notes.join(" ")).toContain("PLACEHOLDER price of 0");
+  });
+
+  it("stays silent on a category page: no og:type, no keywords, no product", () => {
+    const { product, category } = extractProductMarkup(fx("landing-cigars.html"), jjFox);
+    expect(product).toBeNull();
+    expect(category).toEqual([]);
   });
 });

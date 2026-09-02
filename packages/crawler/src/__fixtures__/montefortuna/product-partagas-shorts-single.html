@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- Live shape 2026-09-02, /shop/partagas-shorts-single/. Two findings in one
+     page:
+       1. its `og:image` is `Montefortuna-Logo-Facebook.png`, the SITE LOGO,
+          while the JSON-LD `image` is the real product shot. This page is why
+          `photoSource` stays "json-ld" for this vendor.
+       2. the breadcrumb is `Home / Shop / <product>` — no marca crumb — and the
+          name ends in "Single", which `excludeNamePattern` refuses: a single
+          stick pulled from a box is not a separate catalog cigar. -->
+<html lang="en-US">
+<head>
+<meta charset="UTF-8" />
+<title>Partagas Shorts - Single | Montefortuna Cigars</title>
+<meta property="og:type" content="article" />
+<meta property="og:image" content="https://www.montefortunacigars.com/wp-content/uploads/2018/12/Montefortuna-Logo-Facebook.png" />
+<meta property="og:image:width" content="873" />
+<meta property="og:image:height" content="609" />
+<script type="application/ld+json">
+{"@context":"https://schema.org","@graph":[
+  {"@type":"BreadcrumbList","itemListElement":[
+    {"@type":"ListItem","position":1,"name":"Home","item":"https://www.montefortunacigars.com/"},
+    {"@type":"ListItem","position":2,"name":"Shop","item":"https://www.montefortunacigars.com/shop/"},
+    {"@type":"ListItem","position":3,"name":"Partagas Shorts &#8211; Single"}]},
+  {"@type":"Product","name":"Partagas Shorts - Single","sku":"PA-SHO25-07/SD",
+   "brand":{"@type":"Brand","name":"All Singles"},
+   "image":"https://www.montefortunacigars.com/wp-content/uploads/2019/01/Partagas-Shorts-Cabinet-50-.jpg",
+   "offers":{"@type":"Offer","availability":"http://schema.org/OutOfStock",
+     "url":"https://www.montefortunacigars.com/shop/partagas-shorts-single/"}}]}
+</script>
+</head>
+<body><h1>Partagas Shorts - Single</h1></body>
+</html>

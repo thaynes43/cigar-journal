@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Live shape 2026-09-02: a Yoast index of 10 children. The catalog is the three product-sitemap*.xml files (1,001 + 1,000 + 86 = 2,087 locs); the rest are post/page/category and the three product_* term archives, which selectIndexChildren demotes below the catalog child -->
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://www.montefortunacigars.com/post-sitemap.xml</loc></sitemap>
+  <sitemap><loc>https://www.montefortunacigars.com/page-sitemap.xml</loc></sitemap>
+  <sitemap><loc>https://www.montefortunacigars.com/product-sitemap.xml</loc></sitemap>
+  <sitemap><loc>https://www.montefortunacigars.com/product-sitemap2.xml</loc></sitemap>
+  <sitemap><loc>https://www.montefortunacigars.com/product-sitemap3.xml</loc></sitemap>
+  <sitemap><loc>https://www.montefortunacigars.com/category-sitemap.xml</loc></sitemap>
+  <sitemap><loc>https://www.montefortunacigars.com/post_tag-sitemap.xml</loc></sitemap>
+  <sitemap><loc>https://www.montefortunacigars.com/product_brand-sitemap.xml</loc></sitemap>
+  <sitemap><loc>https://www.montefortunacigars.com/product_cat-sitemap.xml</loc></sitemap>
+  <sitemap><loc>https://www.montefortunacigars.com/product_tag-sitemap.xml</loc></sitemap>
+</sitemapindex>

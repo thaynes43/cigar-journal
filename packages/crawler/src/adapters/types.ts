@@ -53,7 +53,24 @@ export type VendorTier = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 // from. Both are declarations about the vendor's pages, so they ride the adapter
 // with the product gate; the core reads them and nothing sniffs the HTML.
 export type ProductMarkup = "json-ld" | "opengraph";
-export type CategorySource = "breadcrumbs" | "keywords-meta";
+export type CategorySource = "breadcrumbs" | "keywords-meta" | "json-ld-category";
+
+// --- the catalogue photo (ADR-006 amendment 2026-09-02, issue #270) ----------
+// WHICH URL on the product page the photo is fetched from, and how to correct it.
+// Both are declarations about the vendor's pages, like the two above, and both
+// apply ONLY to the photo fetch — the listing's `imageUrl` and the offer's raw
+// payload carry what the markup said, unedited.
+//
+// The probe of 2026-09-02 is why they exist: a vendor's JSON-LD `image` is not
+// reliably the asset. Cigarworld publishes a 300x51 thumbnail there and the full
+// 744x128 (up to 3386px) strip at `og:image`; J.J. Fox's `og:image` carries a
+// `?width=265` resize that the bare path serves at 600px.
+export type PhotoSource = "json-ld" | "og:image";
+
+// `{ pattern, replacement }` is `String.replace` — one substitution, so the
+// pattern needs no `g` flag and must not carry `y` (both make a shared RegExp
+// stateful across pages). "strip-query" drops everything from the first `?`.
+export type PhotoUrlRewrite = { pattern: RegExp; replacement: string } | "strip-query";
 
 // Everything that is true of an adapter whatever kind of source it points at.
 export interface VendorAdapterShape {
@@ -102,8 +119,21 @@ export interface VendorAdapterShape {
   // category at all — 2 Guys' breadcrumb is "Home / <brand>" by design. A page
   // with no derivable category yields an EMPTY path and is refused by
   // `isCigarListing`, exactly as an unmatched path is (ADR-006 2026-09-02).
-  // Absent = "breadcrumbs".
+  // "json-ld-category" is the JSON-LD Product's own `category` string, split on
+  // `>` or `/` — taxonomy end to end, like the keywords list, so nothing is
+  // dropped from it. EGM's Shopify pages state `"category": "Cigars"` and carry
+  // no breadcrumb node at all. Absent = "breadcrumbs".
   categorySource?: CategorySource;
+  // WHERE the photo comes from. Absent = "json-ld", which is what the JSON-LD
+  // vendors served before this field existed; for a `productMarkup: "opengraph"`
+  // vendor the product node's `image` IS `og:image` already, so the default is
+  // that vendor's og image either way. Declared "og:image" reads the page's
+  // `og:image:secure_url`/`og:image` even though the JSON-LD names an image —
+  // EGM's ProductGroup names none, and Cigarworld's names a thumbnail.
+  photoSource?: PhotoSource;
+  // A correction applied to that URL and to nothing else. Absent — the norm —
+  // fetches exactly the URL the page stated.
+  photoUrlRewrite?: PhotoUrlRewrite;
   // A breadcrumb path (joined) matching this is a cigar category…
   cigarCategoryPattern: RegExp;
   // …unless it also matches this (accessories, samplers, humidors, etc.).

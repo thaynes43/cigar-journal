@@ -1,21 +1,51 @@
-// The one place a page is turned into a product + a category, per the adapter's
-// declaration (ADR-006 amendment 2026-09-02, issue #252). Two structured sources
-// now exist — JSON-LD and OpenGraph/microdata — and two category sources — the
-// breadcrumb trail and the vendor's keywords tag list. Which pair runs is read
-// from the adapter, never from the page, and every caller (both ingest walks and
-// the probe) goes through here so the four combinations cannot drift apart.
+// The one place a page is turned into a product + a category + the URL its photo
+// is fetched from, per the adapter's declaration (ADR-006 amendments 2026-09-02,
+// issues #252 and #270). Two structured sources now exist — JSON-LD and
+// OpenGraph/microdata — three category sources — the breadcrumb trail, the
+// vendor's keywords tag list, and the JSON-LD `category` string — and two photo
+// sources. Which combination runs is read from the adapter, never from the page,
+// and every caller (both ingest walks and the probe) goes through here so the
+// combinations cannot drift apart.
 
-import { extractJsonLd, type JsonLdProduct } from "./jsonld.js";
-import { extractKeywords, extractOpenGraphProduct } from "./opengraph.js";
-import type { CategorySource, VendorAdapter } from "../adapters/types.js";
+import { extractJsonLd, productImageUrl, type JsonLdProduct } from "./jsonld.js";
+import { extractKeywords, extractOgImage, extractOpenGraphProduct } from "./opengraph.js";
+import type { CategorySource, PhotoUrlRewrite, VendorAdapter } from "../adapters/types.js";
 
 export interface ExtractedMarkup {
   product: JsonLdProduct | null;
   // The taxonomy as the page states it, in the shape `categorySource` names —
-  // a trail ending with the product, or a tag list. `normalizeListing` is told
-  // which, and reads it accordingly.
+  // a trail ending with the product, a tag list, or the `category` string split
+  // on its separators. `normalizeListing` is told which, and reads it accordingly.
   category: string[];
   categorySource: CategorySource;
+  // THE URL THE CATALOGUE PHOTO IS FETCHED FROM, and nothing else: the listing's
+  // `imageUrl` and the offer's raw payload keep what the markup published. Null
+  // when the page names no image, which `capturePhoto` reads as "no photo".
+  photoUrl: string | null;
+}
+
+// The JSON-LD Product's own taxonomy string. Split on `>` or `/` because both
+// spellings are in the wild for a path; a single term (EGM's `"Cigars"`) is one
+// element. Taxonomy end to end — unlike a breadcrumb trail it does not end with
+// the product — so `normalizeListing` keeps all of it.
+function jsonLdCategoryPath(product: JsonLdProduct | null): string[] {
+  const raw = product?.category;
+  const value = Array.isArray(raw) ? raw.join(" > ") : raw;
+  if (typeof value !== "string") return [];
+  return value
+    .split(/[>/]/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+}
+
+// Correct the photo URL the page stated. `String.replace` substitutes once, so an
+// adapter's pattern needs no `g` flag; "strip-query" drops the query and fragment,
+// which is how a Magento resize (`?width=265&height=265&…`) becomes the full-size
+// asset J.J. Fox serves at the bare path.
+export function rewritePhotoUrl(url: string, rewrite: PhotoUrlRewrite | undefined): string {
+  if (rewrite === undefined) return url;
+  if (rewrite === "strip-query") return url.split(/[?#]/)[0] ?? url;
+  return url.replace(rewrite.pattern, rewrite.replacement);
 }
 
 export function extractProductMarkup(html: string, adapter: VendorAdapter): ExtractedMarkup {
@@ -29,11 +59,23 @@ export function extractProductMarkup(html: string, adapter: VendorAdapter): Extr
       ? { product: extractOpenGraphProduct(html), breadcrumbs: [] as string[] }
       : extractJsonLd(html);
 
-  return {
-    product,
-    category: categorySource === "keywords-meta" ? extractKeywords(html) : breadcrumbs,
-    categorySource,
-  };
+  const category =
+    categorySource === "keywords-meta"
+      ? extractKeywords(html)
+      : categorySource === "json-ld-category"
+        ? jsonLdCategoryPath(product)
+        : breadcrumbs;
+
+  // An OG vendor's product node already carries `og:image`, so the default source
+  // is that vendor's og image without declaring anything; a JSON-LD vendor
+  // declares "og:image" only where its `image` is absent (EGM's ProductGroup
+  // names none) or is a thumbnail (Cigarworld's 300x51).
+  const statedPhoto =
+    adapter.photoSource === "og:image" ? extractOgImage(html) : productImageUrl(product?.image);
+  const photoUrl =
+    product && statedPhoto ? rewritePhotoUrl(statedPhoto, adapter.photoUrlRewrite) : null;
+
+  return { product, category, categorySource, photoUrl };
 }
 
 // What a probe note calls the markup it did not find. Naming the DECLARED format

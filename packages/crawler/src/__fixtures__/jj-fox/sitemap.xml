@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Eight of the 1,502 locs in the live flat urlset, one per shape the exclusion gate has to separate. 913 of the live locs are root-level .html; the rest are the category trees below. Deliberately WITHOUT the out-of-stock Cohiba Siglo VI, which prices at zero — that page is routed by its own probe test, where the placeholder verdict is the assertion -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://www.jjfox.co.uk/</loc></url>
+  <url><loc>https://www.jjfox.co.uk/cigars.html</loc></url>
+  <url><loc>https://www.jjfox.co.uk/cigars/country/cuban-cigars.html</loc></url>
+  <url><loc>https://www.jjfox.co.uk/cigar-accessories/humidors.html</loc></url>
+  <url><loc>https://www.jjfox.co.uk/best-sellers.html</loc></url>
+  <url><loc>https://www.jjfox.co.uk/brands</loc></url>
+  <url><loc>https://www.jjfox.co.uk/partagas-shorts-842.html</loc></url>
+  <url><loc>https://www.jjfox.co.uk/xikar-xi3-cigar-cutter-901.html</loc></url>
+</urlset>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Seven of the 21,818 German locs, one per shape the gate has to separate: two products under /zigarren/kuba/regulares/ (a cigar and a mixed Sortiment the name pattern refuses), the sampler and marken subtrees the exclusion subtracts, and the three sibling trees the `startsWith` prefix keeps out — /zigarrenzubehoer/ (note it does NOT start with /zigarren/), /zigarillos/ and /pfeifen/ -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://www.cigarworld.de/zigarren/kuba/regulares/ramon-allones-specially-selected-01025_3430</loc></url>
+  <url><loc>https://www.cigarworld.de/zigarren/kuba/regulares/kuba-sortiment-01099_9001</loc></url>
+  <url><loc>https://www.cigarworld.de/zigarren/sampler/kuba-einsteiger-sampler-90012345</loc></url>
+  <url><loc>https://www.cigarworld.de/zigarren/marken/cohiba</loc></url>
+  <url><loc>https://www.cigarworld.de/zigarrenzubehoer/humidor/habanos-grosstubo-cohiba-siglo-vi-6396530-90016744_49422</loc></url>
+  <url><loc>https://www.cigarworld.de/zigarillos/kuba/guantanamera-cristales-01050_1234</loc></url>
+  <url><loc>https://www.cigarworld.de/pfeifen/vauen/vauen-classic-90011111</loc></url>
+</urlset>

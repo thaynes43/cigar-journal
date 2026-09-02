@@ -51,6 +51,12 @@ export interface ProbeProductSample {
   // The taxonomy the page stated, in the shape the adapter's `categorySource`
   // names — a breadcrumb trail, or the vendor's keywords tag list.
   category: string[];
+  // The URL a crawl WOULD fetch the catalogue photo from, after the adapter's
+  // `photoSource`/`photoUrlRewrite` (ADR-006 amendment 2026-09-02). Printed
+  // because a rewrite is the one adapter field nothing else in a probe exercises:
+  // Cigarworld's `/bilder/detail/big/` line is how the operator sees the 300x51
+  // thumbnail was corrected before a crawl writes 6,874 of them.
+  photoUrl: string | null;
   isCigar: boolean;
   // 200 + a schema.org Product + a usable name: what the crawl needs to write a row.
   parsed: boolean;
@@ -212,7 +218,7 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
     for (const index of spreadIndices(productUrls.length, PRODUCT_SAMPLES)) {
       const url = productUrls[index]!;
       const res = await fetcher.fetchText(url);
-      const { product, category, categorySource } = extractProductMarkup(
+      const { product, category, categorySource, photoUrl } = extractProductMarkup(
         res.status === 200 ? res.body : "",
         adapter,
       );
@@ -229,6 +235,7 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
         currency: listing?.currency ?? null,
         priceIsPlaceholder: listing?.priceIsPlaceholder ?? false,
         category,
+        photoUrl,
         isCigar: listing ? isCigarListing(listing, adapter) : false,
         parsed: listing !== null,
       });
@@ -342,7 +349,8 @@ export function formatProbe(result: ProbeResult): string {
       // one line that identifies a `cigars=0` as a gate/vendor mismatch rather
       // than an empty catalogue — Small Batch's `SHOP BY BRAND / …` trail names
       // no "cigars" anywhere, which no other field on this page would reveal.
-      `      category=${product.category.length > 0 ? product.category.join(" / ") : "-"}`,
+      `      category=${product.category.length > 0 ? product.category.join(" / ") : "-"} ` +
+        `photo=${product.photoUrl ?? "-"}`,
     );
   }
   if (result.products.length === 0) lines.push("    (none sampled)");
