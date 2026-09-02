@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.39.0](https://github.com/thaynes43/cigar-journal/compare/v0.38.0...v0.39.0) (2026-09-02)
+
+
+### Features
+
+* **crawler:** Habanos picture sources — Montefortuna, EGM, Cigarworld.de, J.J. Fox (tiers 2–5); photo source/rewrite, ProductGroup, json-ld-category (ADR-015) ([#277](https://github.com/thaynes43/cigar-journal/issues/277)) ([e24ae43](https://github.com/thaynes43/cigar-journal/commit/e24ae431105432f6657980fe6f6b2e6d0491102c))
+* **crawler:** vendor tiers — --all-enabled in tier order, tier-aware drain, higher-tier photo replacement, display gate (ADR-015) ([#275](https://github.com/thaynes43/cigar-journal/issues/275)) ([5b2a2d7](https://github.com/thaynes43/cigar-journal/commit/5b2a2d7664e4b010a468a6e41f2756949fcea722))
+
 ## [0.38.0](https://github.com/thaynes43/cigar-journal/compare/v0.37.0...v0.38.0) (2026-09-02)
 
 
