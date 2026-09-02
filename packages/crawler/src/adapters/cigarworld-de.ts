@@ -48,6 +48,12 @@ import type { PrefixVendorAdapter } from "./types.js";
 //               listing keeps the URL the markup published and only the fetch
 //               is corrected. CONFIRMED WORKING by the 2026-09-02 probe: every
 //               sample printed a `/bilder/detail/big/` photo URL.
+//   packaging   PER-STICK EUR PRICES on bare product names (`Ramon Allones
+//               Specially Selected`, EUR 18.00) — the shop's unit is one cigar,
+//               and a multi-stick line names its container (`Kuba Sortiment 6
+//               Zigarren`, `… Etui`), which `excludeNamePattern` refuses anyway.
+//               Hence `impliedPackaging: "single"` (DESIGN-005 amendment
+//               2026-09-02, migration 0035).
 //   terms       `/service/agb` (read 2026-09-02) carries a **"Verbot
 //               gewerblicher Weiterverkäufe"** — a ban on the commercial RESALE
 //               OF ITS GOODS, not on reading or reusing its data; nothing in it
@@ -79,6 +85,8 @@ export const cigarworldDe: PrefixVendorAdapter = {
   nonProductPathPattern: /^\/zigarren\/(?:sampler|marken|brands?)(?:\/|$)/i,
   productMarkup: "json-ld",
   categorySource: "breadcrumbs",
+  // Per-stick EUR prices on bare names — see the header.
+  impliedPackaging: "single",
   cigarCategoryPattern: /zigarren|cigar/i,
   // German first, because the taxonomy is German: `Zigarrenzubehör` is the
   // accessory root (spelled `zubehoer` in URLs, so both spellings are matched),

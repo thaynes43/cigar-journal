@@ -233,7 +233,9 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
         res.status === 200 ? res.body : "",
         adapter,
       );
-      const listing = product ? normalizeListing(product, category, categorySource, productMarkup) : null;
+      const listing = product
+        ? normalizeListing(product, category, categorySource, productMarkup, adapter.impliedPackaging)
+        : null;
       if (res.status !== 200) notes.push(`sample product ${url} returned ${res.status}.`);
       else if (!product) notes.push(`sample product ${url} has no ${markupLabel(adapter)} — parsing yields nothing.`);
       else if (!listing) notes.push(`sample product ${url} ${markupLabel(adapter)} has no usable name.`);

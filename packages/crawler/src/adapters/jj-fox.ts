@@ -52,6 +52,12 @@ import type { ExclusionVendorAdapter } from "./types.js";
 //               no keywords, no og:type and no itemscope) — so a landing page
 //               yields no product at all, and a page with no tags yields an
 //               empty path and is refused.
+//   packaging   PER-STICK GBP PRICES on bare product names (`Partagas Shorts`,
+//               GBP 24.50) — a single is the unit this merchant quotes, and a
+//               box listing says so in the title (`… Box of 25`). Hence
+//               `impliedPackaging: "single"` (DESIGN-005 amendment 2026-09-02,
+//               migration 0035); the og:description blurb above states no count,
+//               so the posture is what answers a bare listing here.
 //   asks        8/8 of the queued Cuban asks are covered.
 //   photo       `www.jjfox.co.uk/media/catalog/product/…jpg?width=265&height=265
 //               &store=default&image-type=image` — a 265x265 RESIZE. The bare
@@ -102,6 +108,8 @@ export const jjFox: ExclusionVendorAdapter = {
   purchaseLinkout: false,
   productMarkup: "opengraph",
   categorySource: "keywords-meta",
+  // Per-stick GBP prices on bare names; a box says `Box of 25` — see the header.
+  impliedPackaging: "single",
   cigarCategoryPattern: /cigar/i,
   // `pipe` and `tobacco` are here because this merchant sells both, and its
   // accessory keywords name their own aisle the way the cigar ones name theirs.

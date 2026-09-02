@@ -1,6 +1,6 @@
 import { parsePackagingFacts, type PackagingFacts } from "@cj/domain";
 import { productImageUrl, type JsonLdOffer, type JsonLdPriceSpecification, type JsonLdProduct } from "./jsonld.js";
-import type { CategorySource, ProductMarkup, VendorAdapter } from "../adapters/types.js";
+import type { CategorySource, ImpliedPackaging, ProductMarkup, VendorAdapter } from "../adapters/types.js";
 
 // A vendor-neutral listing distilled from a schema.org Product + the category the
 // page states. Price is carried in integer cents (the offers table stores a
@@ -23,10 +23,12 @@ export interface NormalizedListing {
   imageUrl: string | null;
   sku: string | null;
   categoryPath: string[];
-  // Packaging tier + count parsed from the listing name — and, on an OpenGraph
-  // vendor, from its `og:description` when the name states nothing (`packagingOf`
-  // below). ADR-009 CONSERVATIVE: an unstated packaging stays null, never
-  // guessed. Fed to the offers observation so per-stick can be derived.
+  // Packaging tier + count parsed from the listing name; failing that, on an
+  // OpenGraph vendor, from its `og:description`; failing that, from the adapter's
+  // `impliedPackaging` (`packagingOf` below). ADR-009 CONSERVATIVE still: a
+  // packaging no source states — and whose vendor declares no posture — stays
+  // null, never guessed. Fed to the offers observation so per-stick can be
+  // derived.
   packaging: string | null;
   sticksPerPackage: number | null;
 }
@@ -70,14 +72,40 @@ export function parsePackaging(name: string): { packaging: string | null; sticks
 //     `Bundle of 10`, `Pack of 5`, `5-Pack` and `20 Count`, and drops the stray
 //     "box" or "tin" a sentence happened to contain.
 // An unparseable description therefore leaves packaging null, exactly as before.
-function packagingOf(product: JsonLdProduct, name: string, productMarkup: ProductMarkup): PackagingFacts {
+//
+// AND, LAST, THE VENDOR'S OWN POSTURE (DESIGN-005 amendment 2026-09-02, #270).
+// Where neither source states anything, an adapter that declares
+// `impliedPackaging: "single"` says what its bare listings ARE: one stick. Fox
+// lists a single by default and names every other unit — `Box of 20`, `5 Pack`,
+// `Tubos`, `Tin` — so `packaging: null` there is not "unknown", it is the
+// everyday case, and it was 6,894 of its 7,169 offers on 2026-09-02.
+// DESIGN-005's `Not stated` is for a shop whose bare listing genuinely states
+// nothing (Small Batch's grouped parents, Cuban Lou's bundles), and those
+// adapters declare nothing here, so their listings are untouched.
+//
+// It is checked LAST, so a stated packaging always wins over the posture — a Fox
+// `Box of 20` is a box, exactly as before. And it is a claim about the UNIT, not
+// about the price: a listing with no price (or a placeholder one) becomes a
+// single with no per-stick, because `computePricePerStickCents` derives nothing
+// from a null price.
+function packagingOf(
+  product: JsonLdProduct,
+  name: string,
+  productMarkup: ProductMarkup,
+  impliedPackaging: ImpliedPackaging | undefined,
+): PackagingFacts {
+  const implied: PackagingFacts =
+    impliedPackaging === "single"
+      ? { packaging: "single", sticksPerPackage: 1 }
+      : { packaging: null, sticksPerPackage: null };
+
   const fromName = parsePackaging(name);
   if (fromName.packaging != null || fromName.sticksPerPackage != null) return fromName;
-  if (productMarkup !== "opengraph") return fromName;
+  if (productMarkup !== "opengraph") return implied;
   const description = typeof product.description === "string" ? product.description : "";
-  if (!description) return fromName;
+  if (!description) return implied;
   const fromDescription = parsePackaging(description);
-  return fromDescription.sticksPerPackage != null ? fromDescription : fromName;
+  return fromDescription.sticksPerPackage != null ? fromDescription : implied;
 }
 
 function firstOf<T>(value: T | T[] | undefined): T | undefined {
@@ -156,6 +184,11 @@ export function normalizeListing(
   // by `packagingOf`; a caller that omits it gets the JSON-LD reading, which is
   // the name-only parse this function has always done.
   productMarkup: ProductMarkup = "json-ld",
+  // The adapter's `impliedPackaging` — what a listing that states no packaging at
+  // all IS at this vendor (DESIGN-005 amendment 2026-09-02). Read only by
+  // `packagingOf`; omitted, nothing is implied and an unstated packaging stays
+  // null, which is what every caller got before this argument existed.
+  impliedPackaging?: ImpliedPackaging,
 ): NormalizedListing | null {
   const name = typeof product.name === "string" ? decodeEntities(product.name.trim()) : "";
   if (!name) return null;
@@ -172,7 +205,7 @@ export function normalizeListing(
   // the listing (name, sku, stock, image) is good and is carried through, and an
   // offer row with a null price still records availability.
   const priceIsPlaceholder = cents != null && cents <= 0;
-  const packaging = packagingOf(product, name, productMarkup);
+  const packaging = packagingOf(product, name, productMarkup, impliedPackaging);
 
   return {
     name,

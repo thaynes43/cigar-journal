@@ -11,6 +11,13 @@ import type { PrefixVendorAdapter } from "./types.js";
 // NOT an accessory/sampler/etc. Accessories live under their own "Accessories"
 // category; samplers stay excluded on purpose (mixed-blend boxes are not a
 // single catalog cigar) — both are counted as skipped-non-cigar.
+//
+// Packaging posture: THIS SHOP SELLS ONE STICK BY DEFAULT and names every other
+// unit — `Box of 20`, `5 Pack`, `Tubos`, `Tin` — so a listing whose name states
+// no packaging is a single, and `impliedPackaging` says so (DESIGN-005 amendment
+// 2026-09-02, migration 0035). Left unstated it was 6,894 of its 7,169 offers
+// rendering as `Not stated` with no per-stick, which is the everyday case
+// wearing the exception's clothes.
 export const foxCigar: PrefixVendorAdapter = {
   slug: "fox-cigar",
   name: "Fox Cigar",
@@ -27,6 +34,8 @@ export const foxCigar: PrefixVendorAdapter = {
   tier: 1,
   purchaseLinkout: true,
   productPathPrefix: "/shop/",
+  // A bare name is one stick here — see the header.
+  impliedPackaging: "single",
   cigarCategoryPattern: /cigar/i,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?/i,
   excludeNamePattern: /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b/i,

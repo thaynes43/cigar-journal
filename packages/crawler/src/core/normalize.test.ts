@@ -1,13 +1,25 @@
 import { describe, it, expect } from "vitest";
+import { computePricePerStickCents } from "@cj/domain";
 import { extractJsonLd } from "./jsonld.js";
+import { extractProductMarkup } from "./markup.js";
 import { normalizeListing, isCigarCategory, isCigarListing, decodeEntities, parsePackaging } from "./normalize.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
 import { smallBatchCigar } from "../adapters/small-batch-cigar.js";
+import { cigarworldDe } from "../adapters/cigarworld-de.js";
+import { jjFox } from "../adapters/jj-fox.js";
 import { loadFixture } from "../testing/fixtures.js";
+import type { VendorAdapter } from "../adapters/types.js";
 
 function normalize(fixture: string) {
   const { product, breadcrumbs } = extractJsonLd(loadFixture(fixture));
   return normalizeListing(product!, breadcrumbs);
+}
+
+// The whole adapter-driven read, as ingest and the probe run it: extract with the
+// markup the adapter declares, normalize with its packaging posture.
+function normalizeFor(adapter: VendorAdapter, fixture: string, dir: string) {
+  const { product, category, categorySource, productMarkup } = extractProductMarkup(loadFixture(fixture, dir), adapter);
+  return normalizeListing(product!, category, categorySource, productMarkup, adapter.impliedPackaging);
 }
 
 // Magento 2 escapes every space in an og:* value as a HEX character reference
@@ -232,8 +244,76 @@ describe("normalizeListing — packaging from an OpenGraph description", () => {
     // was. `product-padron-box.html` carries the prose this rule exists for —
     // "The full box of the same box-pressed Nicaraguan puro" — and its name
     // states the box anyway; the other two state nothing and stay unknown.
+    // (These read Fox with NO adapter posture — see the next block for what the
+    // adapter's own `impliedPackaging` then makes of the bare two.)
     expect(facts(normalize("product-padron-box.html")!)).toEqual({ packaging: "box", sticksPerPackage: 20 });
     expect(facts(normalize("product-padron.html")!)).toEqual(UNKNOWN);
     expect(facts(normalize("product-oliva.html")!)).toEqual(UNKNOWN);
+  });
+});
+
+// The third packaging source and the last one consulted (DESIGN-005 amendment
+// 2026-09-02, #270): what a listing that states nothing IS at this vendor. The
+// gap it closes was 6,894 of Fox's 7,169 offers reading as `Not stated` on a
+// tier-1 shop that lists one stick by default.
+describe("normalizeListing — the adapter's implied packaging", () => {
+  const facts = (listing: { packaging: string | null; sticksPerPackage: number | null }) => ({
+    packaging: listing.packaging,
+    sticksPerPackage: listing.sticksPerPackage,
+  });
+
+  it("reads a bare Fox listing as one stick, so per-stick is the price", () => {
+    const listing = normalizeFor(foxCigar, "product-padron.html", "fox")!;
+
+    expect(facts(listing)).toEqual({ packaging: "single", sticksPerPackage: 1 });
+    // The point of the whole change: the figure a buyer compares now exists, and
+    // it is the listing's own price.
+    expect(computePricePerStickCents(listing.priceCents, listing.sticksPerPackage)).toBe(listing.priceCents);
+    expect(listing.priceCents).toBe(2450);
+  });
+
+  it("leaves a Fox listing that names its box exactly as it was", () => {
+    const listing = normalizeFor(foxCigar, "product-padron-box.html", "fox")!;
+
+    expect(facts(listing)).toEqual({ packaging: "box", sticksPerPackage: 20 });
+    expect(computePricePerStickCents(listing.priceCents, listing.sticksPerPackage)).toBe(2300);
+  });
+
+  it("reads the two per-stick Habanos merchants the same way", () => {
+    // Cigarworld quotes EUR per stick on a bare name; J.J. Fox quotes GBP, and
+    // its og:description ("The quintessential Cuban half corona.") states no
+    // count — so the posture is what answers, which is the case it exists for.
+    expect(facts(normalizeFor(cigarworldDe, "product.html", "cigarworld-de")!)).toEqual({
+      packaging: "single",
+      sticksPerPackage: 1,
+    });
+    expect(facts(normalizeFor(jjFox, "product.html", "jj-fox")!)).toEqual({
+      packaging: "single",
+      sticksPerPackage: 1,
+    });
+  });
+
+  it("implies nothing at a vendor that declares nothing", () => {
+    // Small Batch's cigar pages are GROUPED parents: the bare name states no
+    // unit and the shop does not sell one by default, so `Not stated` is the
+    // honest reading and its adapter stays silent. Its price is the `0.00`
+    // placeholder, and a placeholder yields no per-stick either way.
+    const listing = normalizeFor(smallBatchCigar, "product-eastern-standard-sungrown-toro-extra.html", "small-batch")!;
+
+    expect(smallBatchCigar.impliedPackaging).toBeUndefined();
+    expect(facts(listing)).toEqual({ packaging: null, sticksPerPackage: null });
+    expect(listing.priceIsPlaceholder).toBe(true);
+    expect(computePricePerStickCents(listing.priceCents, listing.sticksPerPackage)).toBeNull();
+  });
+
+  it("states the unit even where the price is unknown — and derives no per-stick", () => {
+    // A single is a claim about what is sold, not about what it costs. J.J. Fox
+    // serves `product:price:amount = "0"` on an out-of-stock line, which
+    // normalize reads as unknown; the row still records the unit it is sold in.
+    const listing = normalizeFor(jjFox, "product-out-of-stock.html", "jj-fox")!;
+
+    expect(facts(listing)).toEqual({ packaging: "single", sticksPerPackage: 1 });
+    expect(listing.priceCents).toBeNull();
+    expect(computePricePerStickCents(listing.priceCents, listing.sticksPerPackage)).toBeNull();
   });
 });
