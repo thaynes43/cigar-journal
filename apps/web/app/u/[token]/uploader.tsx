@@ -2,35 +2,13 @@
 
 import { useRef, useState } from "react";
 import { ui } from "@/lib/ui";
-import { MAX_UPLOAD_LABEL } from "@/lib/upload-limits";
+import { GENERIC_UPLOAD_ERROR, messageFor } from "@/lib/upload-messages";
 
-// What each failure actually was, in the user's terms. A single "Upload failed."
-// for every case told someone holding a 40MB video the same thing it told
-// someone whose link had expired — one of them could have fixed it in a second
-// and had no way to know. The route names the failure; this is the only place
-// that turns a name into words.
-//
-// Every number here comes from the thing that enforced it — the byte ceiling
-// from the constant the route checks, the photo count from the domain error's
-// own payload — so no message can outlive the rule it describes. The type list
-// is the pipeline's ACCEPTED set (@cj/photos), minus the HEIF spelling of HEIC.
-const GENERIC_ERROR = "Upload failed — try again.";
-const PHOTO_LIMIT_FALLBACK = 12; // @cj/domain MAX_PHOTOS_PER_SMOKE
-
-function messageFor(code: string | undefined, limit: number | undefined): string {
-  switch (code) {
-    case "photo_limit":
-      return `Photo limit reached — this smoke already has ${limit ?? PHOTO_LIMIT_FALLBACK}.`;
-    case "too_large":
-      return `That photo is over the ${MAX_UPLOAD_LABEL} limit.`;
-    case "unsupported_type":
-      return "That file type isn't supported — use a JPEG, PNG, HEIC, or WebP photo.";
-    case "upload_token_invalid":
-      return "This link has expired or was already used. Ask for a new one in chat.";
-    default:
-      return GENERIC_ERROR;
-  }
-}
+// The failure vocabulary lives in lib/upload-messages.ts, shared with the photo
+// drop page (ADR-014) — both post the same file to the same pipeline. Only the
+// photo-limit sentence is this page's own: a `/u` link is bound to a smoke that
+// already holds its photos, so it says so.
+const photoLimitMessage = (limit: number) => `Photo limit reached — this smoke already has ${limit}.`;
 
 // One tile, mobile-first: tap to open the camera roll (no `capture`, so it is the
 // gallery by default), and upload starts on selection. On success the tile swaps
@@ -56,7 +34,7 @@ export function TokenUploader({ token }: { token: string }) {
         const body = (await res.json().catch(() => null)) as {
           error?: { code?: string; limit?: number };
         } | null;
-        setMessage(messageFor(body?.error?.code, body?.error?.limit));
+        setMessage(messageFor(body?.error?.code, body?.error?.limit, photoLimitMessage));
         setState("error");
         return;
       }
@@ -76,7 +54,7 @@ export function TokenUploader({ token }: { token: string }) {
       setPreview(URL.createObjectURL(file));
       setState("done");
     } catch {
-      setMessage(GENERIC_ERROR);
+      setMessage(GENERIC_UPLOAD_ERROR);
       setState("error");
     } finally {
       if (fileRef.current) fileRef.current.value = "";

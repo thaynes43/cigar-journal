@@ -152,17 +152,21 @@ and never state a per-stick figure without its packaging; name the vendor when i
 is a known shop, otherwise give a source name (and URL). An identical price re-seen
 within a day is skipped; a changed price is always kept.
 
-Photos attach through add_smoke_photo, never save_smoke. Call it with just the
-smoke id: you get back a one-time upload link — relay it to the user, it works
-once and lasts 24 hours, and shareWithUser is the sentence to say. If the host
-forwarded an attached image with the call the photo is stored directly instead and
-no link is needed; delivery.status reports which happened. A host that forwards
-anything is understood to forward only an image attached to the message that
-triggered the call, so when the user wants one stored directly ask them to
-attach (or re-attach) it in the same message as the request; the link works
-either way. Never fill the image argument yourself, and never paste an image, a
-chat file link, or a file id into any field. A photo never blocks saving the
-smoke.
+Photos. The moment the user shares a photo during a smoke, or says they took
+one, call open_photo_drop and relay its link (shareWithUser is the sentence to
+say): they add the photo there right then, and every later photo of the same
+smoke goes to that same link. Keep the photoDropId and pass it to save_smoke,
+which attaches the dropped photos to the saved smoke and reports how many in
+photoDrop.attached — never ask the user to send a photo again at the end; when
+attached is 0 and they meant to add one, say the link is still open and a photo
+added now lands on the saved smoke. Opening a drop while one is open returns
+the same drop with a fresh link. After a save, add_smoke_photo with the smoke
+id returns a one-time upload link for a photo of that saved smoke, and with a
+photoDropId attaches a drop the save did not carry. If the host forwarded an
+attached image with either call the photo is stored directly and no link is
+needed; delivery.status reports which happened. Never fill the image argument
+yourself, and never paste an image, a chat file link, or a file id into any
+field. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -686,6 +690,7 @@ arguments:
   consumption:                   # OPTIONAL — omit when unknown (deducts nothing)
     fromHumidor: true            #   true deducts one stick; false = not from humidor
     purchaseId: pu_01kd          #   optional lot attribution when the user named a lot
+  photoDropId: pd_01kf           # OPTIONAL — the drop opened for this smoke (open_photo_drop, ADR-014)
 
 result:
   smoke:
@@ -699,8 +704,26 @@ result:
   holdingAfter:                  # PRESENT ONLY when a `consumption` block was supplied
     totalAcquired: 7             #   (additive; mirrors record_purchase's holdingAfter)
     remaining: 6                 #   max(0, totalAcquired − count(consumptions)) (ADR-008)
+  photoDrop:                     # PRESENT ONLY when `photoDropId` was supplied
+    photoDropId: pd_01kf
+    status: claimed              # claimed | not_found | bound_elsewhere | failed
+    attached: 2                  #   photos moved onto this smoke by the claim
+    pending: 0                   #   photos left in the drop (only when the smoke's photo cap was hit)
   replayed: false
 ```
+
+**The photo drop is claimed after the save, never inside it (ADR-014).** With
+`photoDropId`, the drop's staged photos are moved onto the new smoke and the drop
+is bound to it, so a photo added through the same link afterwards lands on the
+smoke directly until the link expires. The claim runs after the save transaction
+commits, in its own transaction, and **never fails the save**: a drop that is not
+the caller's (or does not exist) reports `not_found`, one already bound to a
+different smoke reports `bound_elsewhere`, an unexpected failure reports
+`failed` — and the smoke is saved in every case. An idempotent replay re-runs the
+claim (it is idempotent) and re-reports it. A save without `photoDropId` touches
+no drop, however many the user has open: attachment is explicit, never inferred
+(compare `consumption`). `add_smoke_photo` accepts the same `photoDropId` for a
+drop the save did not carry.
 
 **Explicit consumption (ADR-008).** `consumption` is the ONLY way a smoke deducts
 from the humidor. `fromHumidor: true` links the smoke to the caller's holdings
@@ -754,9 +777,11 @@ Create an unverified catalog entry from the user's own naming when search_cigars
 matched nothing, and queue background enrichment so the crawler fills the specs
 and a product photo. Use before `save_smoke`/`record_purchase` when the cigar is
 missing. Resolve-or-create is the exact path `save_smoke` uses for a described
-cigar (exact-name link, `cigar_ambiguous` when it can't decide, unverified create
-otherwise); this tool adds the enrichment queue and the `confirmedDistinct`
-escape hatch — which `record_purchase` carries too, so an acquisition never needs
+cigar — it links only to a close row making the *same* identity claims, raises
+`cigar_ambiguous` when a close row differs by a word or a stated wrapper, and
+creates an unverified entry otherwise (nothing close, or a number/packaging
+difference the names state outright); this tool adds the enrichment queue and the
+`confirmedDistinct` escape hatch — which `record_purchase` carries too, so an acquisition never needs
 this tool as a detour just to reach the flag.
 
 **It is a prelude, never the answer** (#177). It writes no journal entry and no
@@ -789,7 +814,9 @@ result:
 Enrichment is queued at most once per cigar: skipped when a pending or fulfilled
 request already exists, or when the entry already has both a product photo and
 full vitola dimensions (nothing left to fill). A described name that matches two
-catalog rows returns `cigar_ambiguous` with candidates, exactly as `save_smoke`.
+catalog rows — or lands a word away from one, "Atabey Black Ritos" against a
+catalogued "Atabey Ritos" (production, 2026-09-01) — returns `cigar_ambiguous`
+with candidates, exactly as `save_smoke`.
 
 ## record_purchase — write, idempotent
 
@@ -1003,6 +1030,59 @@ original markdown is immutable. The `consumption` op sets, clears
 the smoke's `cigar` clears a now-foreign lot automatically. The movement is
 audited in the same transaction as the smoke change.
 
+## open_photo_drop — write
+
+Open a **photo drop** for the smoke in progress (ADR-014, issue #263): a link the
+user adds photos to at any point during the smoke, before it is saved. The
+photos wait in the drop; `save_smoke` with the drop's id attaches them to the
+saved smoke, and the same link then keeps working for that smoke until it
+expires. This is the photo path for a live smoke — `add_smoke_photo` needs a
+`smokeId`, which only exists after the save, and asking the user to send a photo
+again at the end is the failure this tool exists to remove.
+
+```yaml
+arguments: {}                    # no smoke yet, nothing to name; `image` as on add_smoke_photo
+
+result:
+  photoDropId: pd_01kf
+  uploadUrl: https://cigars.haynesnetwork.com/d/<token>
+  expiresAt: "2026-09-03T20:15:00Z"       # 48h after opening
+  reused: false                  # true when the user already had an open drop — same photos, fresh link
+  photoCount: 0                  # photos already in the drop (meaningful when reused)
+  shareWithUser: "Send the user this link to add photos during the smoke: https://… — every photo of this smoke goes there, and they attach to the review when it is saved. It lasts 48 hours."
+  delivery:                      # as on add_smoke_photo: why no image arrived with the call
+    status: no_image_received
+    detail: "No image arrived with this call."
+
+# With a forwarded image (never observed on this connector — see add_smoke_photo):
+result:
+  photoDropId: pd_01kf
+  uploadUrl: …
+  staged: { photoId: ph_01kg, kind: other, width: 1080, height: 1440 }
+```
+
+- **When to call it: the moment a photo appears, not when the smoke ends.** The
+  server instructions say it in one sentence. The user adds the photo to the drop
+  while they still have it in hand; two hours later the model passes
+  `photoDropId` to `save_smoke` and the photos are on the review. The link takes
+  every later photo of the same smoke, so it is relayed once.
+- **Multi-use, bounded.** The link works for 48 hours and up to twelve photos
+  (`MAX_PHOTOS_PER_SMOKE`); the page shows only the drop's own photos and lets
+  the user set a photo's kind or remove it. A single-use link is right for one
+  photo of a saved smoke; it is wrong for an event that produces several photos
+  over hours.
+- **One open drop per user.** Opening again while a drop is open (unclaimed,
+  unexpired) returns *that* drop — `reused: true`, its `photoCount` — with a
+  fresh token; the earlier link stops working. The raw token is never stored, so
+  reuse must rotate. This is what lets a model that lost the id in a long chat
+  recover the photos by opening again.
+- **Nothing is claimed implicitly.** A drop attaches only through a
+  `photoDropId` the caller passes (`save_smoke`, or `add_smoke_photo` for a late
+  claim). Unclaimed drops expire and are swept seven days after opening.
+- Scope `journal:write`. Errors: `unavailable` when photo storage is unconfigured.
+  The same file intake and `photo_intake` diagnostics as `add_smoke_photo` apply
+  (the record names the tool).
+
 ## add_smoke_photo — write, link-first
 
 Attach a review-bound photo to one of the user's smokes (ADR-007, issue #44).
@@ -1011,13 +1091,22 @@ if the host happened to forward a file with the call, the photo is stored
 directly instead. The image is **never** a tool argument the model writes — it
 arrives attached by the HOST, or not at all — and the tool auto-detects which. A
 photo failure is fully isolated from `save_smoke`: separate tool, separate
-result, its own storage transaction.
+result, its own storage transaction. For a photo taken *during* a smoke that is
+not yet saved, the path is `open_photo_drop` above; this tool is for a photo of
+a smoke that already exists.
 
 ```yaml
 arguments:
   smokeId: sm_01jc8x
   kind: band                     # cigar | band | construction | burn | other (default other)
   caption: "The second band"     # optional; only if the user gave one
+  photoDropId: pd_01kf           # optional — claim a drop the save did not carry (ADR-014)
+
+# Mode C — a drop was named: its photos move onto the smoke, no link is minted
+result:
+  mode: drop_claimed
+  photoDrop: { photoDropId: pd_01kf, status: claimed, attached: 2, pending: 0 }
+                                 # not_found → error photo_drop_not_found; bound_elsewhere → validation_error
 
 # Mode B — the ordinary result: a one-time upload link to hand the user
 result:
@@ -1133,6 +1222,21 @@ what was withdrawn above. That instruction fired on `no_image_received` and
 the path that works either way, and it is phrased as how to maximize the chance —
 never as established behavior — because forwarding has still never been observed
 on this connector (#202).
+
+**Withdrawn 2026-09-01 — the same-turn sentence is gone.** The retest ran: the
+owner attached the image to the *same message* that asked for the photo, and
+`photo_intake_request` recorded `argImage: absent`, `metaFileParams: absent`
+(count 0), no undeclared keys (2026-09-02T01:36:17Z, smoke `04869501-…`). Under
+same-turn attachment and the strict reference schema, the host forwarded nothing:
+issue #202's experiments 1 and 2 are both spent, and developer-mode connectors
+being gated out of `openai/fileParams` is the standing explanation. Advice that
+costs the user a re-attach for a path now shown not to fire is withdrawn from the
+tool description and the server instructions. What replaces it is not advice but
+a design: `open_photo_drop` (ADR-014) takes the photo when it is taken, so nothing
+has to be re-sent at the end. Attached delivery stays implemented on both tools
+for the day a host forwards a file. The strict `image` schema stays as well: it is
+the Apps SDK reference shape, and reverting it would only restore a lenience no
+host has ever exercised.
 
 Errors are now a shorter set: `unavailable` when photo storage is unconfigured (the
 tool is genuinely non-functional — a minted link would 503 on upload),
@@ -1286,8 +1390,13 @@ bug awaiting a retry.
 Two structured log events answer "why did this call not attach a photo", and they
 join on `(sessionId, rpcId)`:
 
-- **`photo_intake`** — one line per `add_smoke_photo` call, both modes, success and
-  failure. Fields: `outcome` (`attached` | `no_delivery` | `not_an_object` |
+Both are written for **both photo tools** — `add_smoke_photo` and
+`open_photo_drop` share one intake path (ADR-014), and each record's `tool` field
+names the call it came from, with every other field identical.
+
+- **`photo_intake`** — one line per photo-tool call that runs the intake, every
+  mode, success and failure (`add_smoke_photo` with a `photoDropId` claims a drop
+  and runs none, so it writes no line). Fields: `tool`, `outcome` (`attached` | `no_delivery` | `not_an_object` |
   `no_url` | `empty_url` | `bad_scheme` | `fetch_failed` | `too_large` |
   `unreadable` | `storage_unavailable`), `channel`
   (`argument` | `request_meta` | `none`), `mode`, the `argument` and `requestMeta`
@@ -1298,7 +1407,7 @@ join on `(sessionId, rpcId)`:
   same `correlationId`.
 - **`photo_intake_request`** — written at the HTTP layer, after bearer auth and
   **before** the SDK validates input, so a call the SDK rejects still leaves a
-  record. Fields: `paramKeys` (the keys of `params` **itself**, so a file handed
+  record. Fields: `tool`, `paramKeys` (the keys of `params` **itself**, so a file handed
   over somewhere the server never reads it still shows up), `argKeys`, `argImage`
   shape, `metaKeys`, `metaFileParams` shape + `count`. This is the class of call
   that previously left no trace at all, and it is what will settle whether the host
@@ -2120,6 +2229,7 @@ error:
 | `cigar_not_found` | yes | `search_first` or use `described` |
 | `cigar_ambiguous` | yes | `ask_user` (candidates included) |
 | `smoke_not_found` | no | none — id came from nowhere; re-query history |
+| `photo_drop_not_found` | no | none — the drop is not the caller's or never existed; `open_photo_drop` returns the user's open drop |
 | `version_conflict` | yes | `retrieve_latest_and_retry` via `get_smoke` |
 | `idempotency_conflict` | no | new `clientRequestId` for a genuinely new intent |
 | `unavailable` | yes | retry once with the same envelope, then tell the user; the fallback below preserves the entry |

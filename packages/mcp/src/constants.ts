@@ -5,7 +5,7 @@
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The tool surface. The first eighteen are the conversational journal contract
+// The tool surface. The first nineteen are the conversational journal contract
 // (reads annotated readOnlyHint). The final fourteen are the admin catalog-curation
 // surface (DESIGN-003 wave 4a/4b, issue #126; the taxonomy five from ADR-012 Wave 3,
 // issue #196): the ops-agent tools, gated on `curation:*` scope AND an admin-role
@@ -23,6 +23,10 @@ export const TOOL_NAMES = [
   "record_purchase",
   "record_purchase_batch",
   "update_smoke",
+  // The two photo verbs. open_photo_drop comes first because it comes first in
+  // time: it takes a photo of the smoke IN PROGRESS, before there is a smokeId
+  // for add_smoke_photo to bind to (ADR-014, issue #263).
+  "open_photo_drop",
   "add_smoke_photo",
   "set_want",
   "set_favorite",
@@ -83,6 +87,10 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   // call instead of fourteen.
   record_purchase_batch: ["journal:write"],
   update_smoke: ["journal:write"],
+  // The drop writes the caller's own photo_drops row and nothing else, so it
+  // rides journal:write like every other personal write — no new scope, and an
+  // already-minted connector token reaches it with no re-consent (ADR-014).
+  open_photo_drop: ["journal:write"],
   add_smoke_photo: ["journal:write"],
   set_want: ["journal:write"],
   set_favorite: ["journal:write"],
@@ -122,12 +130,14 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
 // Personal fields on catalog tools require this additional scope.
 export const PERSONAL_SCOPE = "journal:read";
 
-// OpenAI Apps SDK file-input declaration for add_smoke_photo. A tool must DECLARE
-// which top-level input properties carry files, as a string[] in the tool-level
-// `_meta["openai/fileParams"]` published in tools/list, or ChatGPT never forwards
-// the user's attached image (developers.openai.com/apps-sdk). We list the `image`
-// property (schemas.ts) here and pass this on the registration (server.ts).
-export const ADD_SMOKE_PHOTO_META = { "openai/fileParams": ["image"] } as const;
+// OpenAI Apps SDK file-input declaration, shared by the two photo tools. A tool
+// must DECLARE which top-level input properties carry files, as a string[] in the
+// tool-level `_meta["openai/fileParams"]` published in tools/list, or ChatGPT never
+// forwards the user's attached image (developers.openai.com/apps-sdk). We list the
+// `image` property (schemas.ts) here and pass this on both registrations
+// (server.ts): open_photo_drop takes a forwarded image into the drop exactly as
+// add_smoke_photo takes one onto the smoke (ADR-014).
+export const PHOTO_FILE_PARAMS_META = { "openai/fileParams": ["image"] } as const;
 
 export function isToolName(name: string): name is ToolName {
   return (TOOL_NAMES as readonly string[]).includes(name);
@@ -228,17 +238,21 @@ and never state a per-stick figure without its packaging; name the vendor when i
 is a known shop, otherwise give a source name (and URL). An identical price re-seen
 within a day is skipped; a changed price is always kept.
 
-Photos attach through add_smoke_photo, never save_smoke. Call it with just the
-smoke id: you get back a one-time upload link — relay it to the user, it works
-once and lasts 24 hours, and shareWithUser is the sentence to say. If the host
-forwarded an attached image with the call the photo is stored directly instead and
-no link is needed; delivery.status reports which happened. A host that forwards
-anything is understood to forward only an image attached to the message that
-triggered the call, so when the user wants one stored directly ask them to
-attach (or re-attach) it in the same message as the request; the link works
-either way. Never fill the image argument yourself, and never paste an image, a
-chat file link, or a file id into any field. A photo never blocks saving the
-smoke.
+Photos. The moment the user shares a photo during a smoke, or says they took
+one, call open_photo_drop and relay its link (shareWithUser is the sentence to
+say): they add the photo there right then, and every later photo of the same
+smoke goes to that same link. Keep the photoDropId and pass it to save_smoke,
+which attaches the dropped photos to the saved smoke and reports how many in
+photoDrop.attached — never ask the user to send a photo again at the end; when
+attached is 0 and they meant to add one, say the link is still open and a photo
+added now lands on the saved smoke. Opening a drop while one is open returns
+the same drop with a fresh link. After a save, add_smoke_photo with the smoke
+id returns a one-time upload link for a photo of that saved smoke, and with a
+photoDropId attaches a drop the save did not carry. If the host forwarded an
+attached image with either call the photo is stored directly and no link is
+needed; delivery.status reports which happened. Never fill the image argument
+yourself, and never paste an image, a chat file link, or a file id into any
+field. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.

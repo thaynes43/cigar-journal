@@ -48,7 +48,12 @@ async function deleteWithinTx(
   // Retry keys are specific to this now-deleted aggregate, so they are removed.
   await tx.update(auditLog).set({ smokeId: null }).where(eq(auditLog.smokeId, current.id));
   await tx.delete(idempotencyKeys).where(eq(idempotencyKeys.smokeId, current.id));
-  await tx.delete(smokes).where(eq(smokes.id, current.id)); // cascades progression
+  // Cascades progression, photos and the consumption link. It also CLOSES any
+  // photo drop claimed by this smoke, without a line here: `photo_drops.smoke_id`
+  // is ON DELETE SET NULL (migration 0033), and claimed-with-no-smoke is exactly
+  // how ADR-014 defines a closed drop — its link refuses further uploads and its
+  // remainder is swept on the owner's next open.
+  await tx.delete(smokes).where(eq(smokes.id, current.id));
 
   await tx.insert(auditLog).values({
     userId: principal.userId,

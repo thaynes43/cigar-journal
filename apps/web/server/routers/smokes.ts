@@ -47,6 +47,9 @@ export const smokesRouter = router({
 
   publicJournalExists: publicProcedure.query(({ ctx }) => publicJournalExists(ctx.deps)),
 
+  // `photoDropId` rides the spread into the domain save, which claims the drop
+  // after the write commits (ADR-014). It is passed through, never supplied here:
+  // the server does not name a drop the caller did not.
   save: authedProcedure
     .input(saveSmokeSchema)
     .mutation(({ ctx, input }) => saveSmoke(ctx.deps, ctx.principal, { ...input, provenance: { source: "manual" } })),

@@ -26,6 +26,8 @@ types — marca, vitola de galera, Edición Limitada, wrapper varietals — is i
 | **Smoked-At Provenance** | How a Smoke's timestamp is known: `user` (stated), `system-finalized` (server stamped at save — an observation, not a hallucination), `legacy-document`, or `unknown`; with precision (minute/approximate/day). |
 | **Rating** | 0–100, optional. Never fabricated; null when the user didn't state one. |
 | **Journal Entry** | The narrative representation of a Smoke (title + prose). Not an aggregate — a component of Smoke. Preserves the user's own language. |
+| **Smoke Photo** | A review-bound photo of one Smoke (ADR-007): owner-authored, 1→N per Smoke with a kind (`cigar`/`band`/`construction`/`burn`/`other`) and optional caption. Never promoted into the catalog's product photo. |
+| **Photo Drop** | A User's link for the smoke in progress (ADR-014): opened before the Smoke exists, multi-use for 48 hours, holding **staged** photos until a `save_smoke` names it and claims them onto the new Smoke. One open Drop per User; reopening rotates its token. Nothing is claimed that a caller did not name. |
 | **Provenance** | How a Smoke came to exist: `conversational` (via MCP), `manual` (web form), `imported` (legacy archive). Imported Smokes retain original markdown. |
 | **Personal Profile** | Derived, per-User-per-Cigar view over that User's Smokes: count, recurring Descriptors, rating stats, typical strength. Computed on read, never stored. |
 | **Purchase** | A User's acquisition record: Cigar, date, quantity, packaging, price/PPS, box date, humidor-entry date, Vendor. |

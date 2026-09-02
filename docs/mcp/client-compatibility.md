@@ -37,7 +37,7 @@ spike, since then against production and the Loki record) · `documented`
 | Tool availability late in a long conversation | unverified — a full-length smoke has still never been measured end to end. Real sessions have run since launch, but nothing in the record establishes tool availability late in one, so this stays open rather than being marked green by association | **verified**: tools persist for the session | **verified**: tools persist for the session | client-dependent |
 | Token refresh / long-lived link | **verified** 08-31 — authenticated tool calls from the same connector are in the Loki record on 08-30 and 08-31, days after the 08-26/27 authorization, with no re-consent in between | **verified** 08-26: silent refresh after 10-min token expiry, rotation honored (server `refresh_rotated`) | unverified (session outlived no token in test) | client-dependent |
 | Reconnect after expiry | **verified** 08-31, implied by the row above — the 1h access tokens had long expired, so those calls rode a refresh; not driven as an isolated test | **verified** 08-26: post-expiry call succeeds, no user interaction | unverified | client-dependent |
-| In-chat file attachment → tool args | **unsupported in practice** — verified 08-31: the host forwards nothing on any channel, despite a correct `openai/fileParams` declaration. The upload link is the flow, not a fallback | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported** — Codex source gates `fileParams` to its first-party apps server | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
+| In-chat file attachment → tool args | **unsupported in practice** — verified 08-31 and again 09-01 with the image attached to the *same message* under the strict reference schema: the host forwards nothing on any channel. The photo drop (ADR-014) is the flow for a live smoke; the upload link for a saved one | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported** — Codex source gates `fileParams` to its first-party apps server | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
 
 ¹ Owner's account, Developer Mode, 2026-08-26 (spike). **Production
 verified 2026-08-27**: ChatGPT Web connected to the real server end to end
@@ -275,6 +275,51 @@ server instructions changed, and per the manifest-cache section above an in-flig
 conversation keeps serving the pre-change text. Testing without both is testing the
 old description against the new server, and the result is uninterpretable.
 
+## 2026-09-01 — experiment 2 spent: same-turn attachment forwards nothing; the photo drop
+
+The retest above ran, under the conditions both experiments asked for: strict
+reference schema deployed (#204), fresh chat, and the image attached to the
+**same message** that asked for the photo. The `add_smoke_photo` call for smoke
+`04869501-…` (2026-09-02T01:36:17Z) recorded:
+
+```
+paramKeys:      ["_meta","arguments","name"]
+argKeys:        ["kind","smokeId"]
+argImage:       absent
+metaKeys:       ["openai/locale","openai/organization","openai/session","openai/subject","openai/userAgent","openai/userLocation","timezone"]
+metaFileParams: {"type":"absent"}, count 0
+```
+
+Nothing on either channel, no undeclared key. The published shape was never the
+cause and the invoking turn was not the variable; both of #202's experiments are
+spent, and developer-mode connectors being gated out of `openai/fileParams` stands
+as the explanation for practical purposes. The upload-link fallback then attached
+the photo first time (photoId `191eb2d4-…`, 1080×1440).
+
+**What changed because of it.** The "attach it in the same message" advice is
+withdrawn from the tool description and the server instructions — it cost a
+re-attach for a path now shown not to fire. The strict `image` schema stays: it is
+the reference shape and reverting would only restore a lenience no host exercises.
+And the same session showed the real problem was never forwarding: the user had
+sent the photo in the first third and was asked at the end to find and send it
+again, because `add_smoke_photo` needs a `smokeId` that exists only after the
+save. ADR-014 answers that with the **photo drop** — `open_photo_drop` mints a
+48-hour, multi-photo link the moment a photo appears; `save_smoke { photoDropId }`
+claims it. The photo is added once, when it is taken, on every client.
+
+**Residual for the upstream report:** the Loki signature above is the evidence
+base. Mode A stays implemented on both photo tools.
+
+**Additive surface.** One new tool, `open_photo_drop`, on the existing
+`journal:write` scope — no new scope, so a connector token already minted reaches
+it with no re-consent — plus two **optional** arguments: `save_smoke.photoDropId`
+and `add_smoke_photo.photoDropId`. Omitting both is exactly the behavior that
+shipped before: no drop is claimed, `add_smoke_photo` mints its one-time link,
+and no existing schema changes shape (R-MCP-4). The ChatGPT per-conversation
+schema cache applies as always — the new tool and the two arguments reach an
+in-flight conversation only after a connector refresh and a new chat, and until
+then a `photoDropId` fails validation client-side rather than reaching the server.
+
 ## 2026-08-31 — gap-fill hardened: the two-call path, stated as an invariant
 
 The server `INSTRUCTIONS` "Gap-fill" paragraph and `add_cigar`'s tool description
@@ -371,9 +416,12 @@ and the journal's own record shows conversational smokes alongside the imported
 archive. Remaining watch item, unchanged: connector availability across a very
 long conversation (matrix row above).
 
-**Photos take the upload link, on every client.** No host forwards an in-chat
-attachment into tool arguments (matrix row, and the 08-31 section below);
-`add_smoke_photo` returns a one-time upload link and that is the flow.
+**Photos take a link, on every client.** No host forwards an in-chat attachment
+into tool arguments (matrix row, and the 08-31 and 09-01 sections below). During
+a smoke the model opens a photo drop (`open_photo_drop`, ADR-014) as soon as a
+photo appears and the user adds each photo to it once; `save_smoke` claims the
+drop. For a smoke that is already saved, `add_smoke_photo` returns a one-time
+upload link.
 
 **Fallback (if a client loses write tools):** the model produces the exact
 `save_smoke` payload as text; the user pastes it into the site's import page

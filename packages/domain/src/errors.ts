@@ -12,6 +12,7 @@ export type ErrorCode =
   | "smoke_not_found"
   | "photo_not_found"
   | "photo_limit"
+  | "photo_drop_not_found"
   | "upload_token_invalid"
   | "invite_invalid"
   | "version_conflict"
@@ -145,6 +146,20 @@ export class PhotoLimitError extends DomainError {
   }
   override toPayload(): ErrorPayload {
     return { ...super.toPayload(), limit: this.limit };
+  }
+}
+
+// A photo drop that names nothing, or is not the caller's. The CLAIM never
+// throws this — it reports `not_found` on its result, because by then the smoke
+// is committed and a photo problem may not fail a save (ADR-014). The error
+// exists for the callers that must throw instead of report: add_smoke_photo's
+// `photoDropId` branch has no result to carry a status on.
+export class PhotoDropNotFoundError extends DomainError {
+  readonly code = "photo_drop_not_found" as const;
+  readonly recoverable = false;
+  readonly action: ErrorAction | null = null;
+  constructor() {
+    super("Photo drop not found.");
   }
 }
 

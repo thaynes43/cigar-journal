@@ -17,6 +17,7 @@ import {
   variantRelation,
   identityCoverage,
   identityResidues,
+  journalLinkCompatible,
   rankByIdentity,
   CANDIDATE_POOL,
 } from "./name-heuristics.js";
@@ -85,10 +86,13 @@ describe("strong-link guard predicates", () => {
     ).toBe(false);
   });
 
-  // THE LOAD-BEARING ASYMMETRY. A one-sided residue is one name saying MORE, not
-  // one name saying something else — the blend-level row meeting the vitola-level
-  // one. Refusing this link would mint a second row for every casually named
-  // cigar, which is the duplicate this whole guard exists to prevent.
+  // THE ASYMMETRY, AND WHERE IT STILL LIVES. A one-sided residue is one name
+  // saying MORE, not one name saying something else — the blend-level row meeting
+  // the vitola-level one. This predicate still admits it, because the crawler's
+  // leaf binding, the curation duplicate queue and the candidate RANKING all read
+  // "does this contradict the name", and a name that merely says more does not.
+  // The JOURNAL's link-vs-create verdict no longer rests on it (2026-09-01,
+  // `journalLinkCompatible` below): there, saying more is a question, not a link.
   it("identityTokensCompatible: a one-sided residue stays compatible, both directions", () => {
     expect(
       identityTokensCompatible("Drew Estate Liga Privada No. 9 Flying Pig", "Drew Estate Liga Privada No. 9"),
@@ -290,6 +294,55 @@ describe("strong-link guard predicates", () => {
     expect(variantRelation("Padron 1964 Anniversary Maduro", "Padron 1964 Anniversary Natural")).toBe("different");
   });
 
+  // THE JOURNAL'S OWN VERDICT (production, 2026-09-01). `strongLinkCompatible`
+  // refuses a MUTUAL residue only, and that allowance is what linked `Atabey
+  // Black Ritos` onto the catalog's `Atabey Ritos` — a different blend — since
+  // `ritos` folds to `rito` on both sides and `{black}` sat on the query side
+  // alone. `journalLinkCompatible` links only a candidate making the SAME
+  // identity claims; everything else goes to the ask branch.
+  it("journalLinkCompatible: a residue on either side alone is not a link", () => {
+    expect(strongLinkCompatible("Atabey Black Ritos", "Atabey Ritos")).toBe(true);
+    expect(journalLinkCompatible("Atabey Black Ritos", "Atabey Ritos")).toBe(false);
+    expect(journalLinkCompatible("Atabey Ritos", "Atabey Black Ritos")).toBe(false);
+    // The vitola-level name meeting its blend-level row: a question now, because
+    // the ask branch exists and a silent link costs data the question does not.
+    expect(
+      journalLinkCompatible("Drew Estate Liga Privada No. 9 Flying Pig", "Drew Estate Liga Privada No. 9"),
+    ).toBe(false);
+  });
+
+  // The wrapper axis, three-valued as `variantRelation` reads it: a STATED
+  // disagreement is refused, silence is not a claim and still links.
+  it("journalLinkCompatible: a stated wrapper disagreement is not a link", () => {
+    expect(
+      journalLinkCompatible("Padron 1964 Anniversary Maduro", "Padron 1964 Anniversary Natural"),
+    ).toBe(false);
+    expect(journalLinkCompatible("Padron 1964 Anniversary Maduro", "Padron 1964 Anniversary")).toBe(
+      true,
+    );
+    expect(
+      journalLinkCompatible("Herrera Esteli Norteno Robusto Maduro", "Herrera Esteli Norteno Robusto"),
+    ).toBe(true);
+  });
+
+  // VOCABULARY IS STILL NOT IDENTITY, which is what keeps the stricter rule from
+  // minting a duplicate for every user who says a size or a wrapper out loud:
+  // sizes, containers and wrappers are struck before either residue is built, and
+  // one word spelled two ways is one word.
+  it("journalLinkCompatible: sizes, plurals and spelling variants still link", () => {
+    expect(journalLinkCompatible("Cohiba Robusto", "Cohiba Robustos")).toBe(true);
+    expect(journalLinkCompatible("Cohiba", "Cohiba Robusto")).toBe(true);
+    expect(journalLinkCompatible("Padrón 1964 Aniversario", "Padron 1964 Anniversary")).toBe(true);
+    expect(journalLinkCompatible("Camacho Ecuador Robusto", "Camacho Ecuadorian Robusto")).toBe(true);
+    expect(journalLinkCompatible("Padron 1926 Serie No. 1", "Padron 1926 Serie No. 1")).toBe(true);
+    // The structured claims of difference it inherits unchanged — these create
+    // rather than ask, and the resolver keeps them out of the ask branch.
+    expect(journalLinkCompatible("Davidoff Signature 2000", "Davidoff Signature")).toBe(false);
+    expect(
+      journalLinkCompatible("Davidoff Signature 2000", "Davidoff Signature 2000 Tubos Pack"),
+    ).toBe(false);
+  });
+
   // One wrapper, three vendor spellings, one claim.
   it("variantRelation: normalizes a two-word wrapper onto its single-token key", () => {
     expect(variantRelation("Marca Toro Sun Grown", "Marca Toro sungrown")).toBe("same");
@@ -429,20 +482,32 @@ describe("resolveCigar number-token guard", () => {
     expect(created.canonicalName).toBe("not-a-uuid");
   });
 
-  // THE ONE-SIDED RESIDUE, END TO END. The blend-level row is what most of this
-  // catalog holds, and a user naming the vitola-level product must still land on
-  // it rather than minting a near-twin. This is the case the identity guard is
-  // deliberately silent about, and the reason it reads a MUTUAL residue only.
-  it("still strong-links a vitola-level name onto its blend-level row", async () => {
+  // THE ONE-SIDED RESIDUE, END TO END — AND THE DECISION FLIPPED ON 2026-09-01.
+  // This case used to LINK: the blend-level row is what most of this catalog
+  // holds, and a name reaching one vitola further was read as saying more rather
+  // than saying something else. That reading is what let `Atabey Black Ritos`
+  // land on `Atabey Ritos` in production, and the calculus had changed under it:
+  // when the allowance was written the only alternative to linking was minting a
+  // near-twin row, but the ask branch (#235) now exists, so the choice is between
+  // a round trip and a silent link that contaminates smoke history, ratings,
+  // inventory, prices and enrichment. `Sky Flower` is a claim about which cigar
+  // this is, and only the user knows whether the blend-level row is meant.
+  it("asks instead of linking a vitola-level name onto its blend-level row", async () => {
     const existingId = await h.seedCigar({ canonicalName: "Warped Flor de Valle" });
     expect(await similarity("Warped Flor de Valle Sky Flower", "Warped Flor de Valle")).toBeGreaterThanOrEqual(0.6);
-    const result = await saveSmoke(h.deps, user, {
+    const error = await saveSmoke(h.deps, user, {
       clientRequestId: newRequestId(),
       cigar: { described: { canonicalName: "Warped Flor de Valle Sky Flower" } },
       overallDescriptors: ["cocoa"],
-    });
-    expect(result.smoke.cigar.cigarId).toBe(existingId);
-    expect(result.cigarCreated).toBe(false);
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(CigarAmbiguousError);
+    expect((error as CigarAmbiguousError).candidates.map((c) => c.cigarId)).toContain(existingId);
+    const created = await h.deps.db
+      .select({ id: cigars.id })
+      .from(cigars)
+      .where(eq(cigars.canonicalName, "Warped Flor de Valle Sky Flower"));
+    expect(created).toHaveLength(0);
   });
 });
 
@@ -685,9 +750,15 @@ describe("resolveCigar and search_cigars over a sibling family", () => {
 // one word out of six score alike.
 //
 // The family below is built so the row the query names is TWELFTH on trigram: it
-// is the only candidate the identity guard admits, and every sibling above it
-// contradicts the name. Under `LIMIT 10` the resolver never saw it and asked;
-// with the shared pool it links.
+// is the only candidate that does not CONTRADICT the name, and every sibling
+// above it does. Under `LIMIT 10` the resolver never saw it at all; with the
+// shared pool it is in the candidate list, and ranked first.
+//
+// Since 2026-09-01 that row is offered rather than linked — it says more than the
+// query (`Especial Reserva Toro`), and a name that reaches past the row is the
+// Atabey Black Ritos shape. The pool width is still exactly what this proves: a
+// resolver that cannot see the row cannot offer it either, and the user would be
+// asked to choose between twelve siblings none of which is theirs.
 describe("resolveCigar draws the same candidate pool searchCigars does", () => {
   let h: DomainHarness;
   let user: Principal;
@@ -743,13 +814,17 @@ describe("resolveCigar draws the same candidate pool searchCigars does", () => {
     expect(names.length).toBeLessThanOrEqual(CANDIDATE_POOL);
   });
 
-  it("links the named row that the old ten-row pool could not see", async () => {
-    const result = await addCigar(h.deps, user, {
+  it("offers the named row first — the row the old ten-row pool could not see", async () => {
+    const error = await addCigar(h.deps, user, {
       clientRequestId: newRequestId(),
       cigar: { canonicalName: QUERY, brand: "Tatuaje" },
-    });
-    expect(result.created).toBe(false);
-    expect(result.cigar.cigarId).toBe(namedId);
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(CigarAmbiguousError);
+    const candidates = (error as CigarAmbiguousError).candidates;
+    // Twelfth on trigram, first in the list: the only candidate that does not
+    // contradict the name, which is what `rankByIdentity` sorts on before all else.
+    expect(candidates[0]!.cigarId).toBe(namedId);
   });
 
   // The pool is a DECISION width, not a page width. A user cannot be read fifty
@@ -765,5 +840,131 @@ describe("resolveCigar draws the same candidate pool searchCigars does", () => {
     const candidates = (error as CigarAmbiguousError).candidates;
     expect(candidates.length).toBe(10);
     expect(candidates.length).toBeLessThan(CANDIDATE_POOL);
+  });
+});
+
+// THE REGRESSION PIN (production, 2026-09-01). The catalog held `Atabey Ritos`.
+// A ChatGPT session called `add_cigar` for `Atabey Black Ritos` — Atabey Black is
+// a different blend — and got `created: false, guidance: already_existed`
+// pointing at the Ritos row. `ritos` folds to `rito` on both sides, so the whole
+// disagreement was the residue `{black}` on the QUERY side alone, which the
+// mutual-residue rule called compatible. Retrying with `confirmedDistinct` made
+// the right row, which is the round trip the resolver now asks for by itself.
+//
+// The link was the expensive outcome, not the question: smoke history, ratings,
+// inventory, prices and enrichment all attach to the id, so one silent link
+// contaminates every one of them with no error for anyone to react to.
+describe("resolveCigar journal-link guard — Black Ritos is not Ritos (regression)", () => {
+  let h: DomainHarness;
+  let user: Principal;
+
+  beforeAll(async () => {
+    h = await createHarness();
+    user = await h.createUser("atabey-black@example.com");
+  }, 60_000);
+
+  afterAll(async () => {
+    await h?.stop();
+  });
+
+  async function similarity(a: string, b: string): Promise<number> {
+    const r = await h.deps.db.execute(sql`SELECT similarity(${a}, ${b}) AS s`);
+    return Number((r.rows[0] as { s: number | string }).s);
+  }
+
+  async function cigarCount(): Promise<number> {
+    return (await h.deps.db.select({ id: cigars.id }).from(cigars)).length;
+  }
+
+  it("asks instead of linking Atabey Black Ritos onto Atabey Ritos, then creates on confirmation", async () => {
+    const ritosId = await h.seedCigar({ canonicalName: "Atabey Ritos", brand: "Atabey" });
+    // The pair really is trigram-strong — the guard, not a weak score, is what
+    // decides. This is the assertion that made the production bug possible.
+    expect(await similarity("Atabey Black Ritos", "Atabey Ritos")).toBeGreaterThanOrEqual(0.6);
+    const before = await cigarCount();
+
+    const error = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Atabey Black Ritos", brand: "Atabey" },
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(CigarAmbiguousError);
+    const ambiguous = error as CigarAmbiguousError;
+    expect(ambiguous.toPayload().code).toBe("cigar_ambiguous");
+    expect(ambiguous.candidates.map((c) => c.cigarId)).toContain(ritosId);
+    // Neither linked NOR created: the transaction rolled back.
+    expect(await cigarCount()).toBe(before);
+
+    // The user confirms the Black is not the Ritos, and the same call goes
+    // through — the round trip the session had to take by hand in production.
+    const created = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Atabey Black Ritos", brand: "Atabey" },
+      confirmedDistinct: true,
+    });
+    expect(created.created).toBe(true);
+    expect(created.cigar.canonicalName).toBe("Atabey Black Ritos");
+    expect(created.cigar.cigarId).not.toBe(ritosId);
+  });
+
+  // THE OTHER DIRECTION, which the old rule got wrong just as silently: the
+  // catalog holds only the Black and the user names the plain one, leaving the
+  // residue on the CANDIDATE side. Seeded on a sibling vitola so both directions
+  // live in one database — by now this one holds both Ritos rows, and an exact
+  // name would simply link.
+  it("asks when the residue is on the catalog row instead of the name", async () => {
+    const blackId = await h.seedCigar({ canonicalName: "Atabey Black Divinos", brand: "Atabey" });
+    expect(await similarity("Atabey Divinos", "Atabey Black Divinos")).toBeGreaterThanOrEqual(0.6);
+    const before = await cigarCount();
+
+    const error = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Atabey Divinos", brand: "Atabey" },
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(CigarAmbiguousError);
+    expect((error as CigarAmbiguousError).candidates.map((c) => c.cigarId)).toContain(blackId);
+    expect(await cigarCount()).toBe(before);
+  });
+
+  // THE WRAPPER AXIS. ADR-012 is explicit that wrapper variants a brand sells as
+  // separate products are distinct blends, and the catalog holds exactly one of
+  // the pair — so a described Maduro against a lone Natural row is neither a link
+  // (they are different products) nor a create (the row may be the collapse
+  // bucket that already holds both). `variantRelation` calls the pair
+  // `different`; `strongLinkCompatible` deliberately ignores that and the journal
+  // no longer does.
+  it("asks on a stated wrapper disagreement rather than linking or creating", async () => {
+    const naturalId = await h.seedCigar({
+      canonicalName: "Padron 1964 Anniversary Natural",
+      brand: "Padron",
+    });
+    expect(
+      await similarity("Padron 1964 Anniversary Maduro", "Padron 1964 Anniversary Natural"),
+    ).toBeGreaterThanOrEqual(0.6);
+    const before = await cigarCount();
+
+    const error = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Padron 1964 Anniversary Maduro", brand: "Padron" },
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(CigarAmbiguousError);
+    expect((error as CigarAmbiguousError).candidates.map((c) => c.cigarId)).toContain(naturalId);
+    expect(await cigarCount()).toBe(before);
+  });
+
+  // WHAT STILL LINKS, in the same database and by the same rule: vocabulary is
+  // not identity. A wrapper the row does not state is silence, not a
+  // disagreement, and a size word is not the product's name.
+  it("still links a stated wrapper onto a row that states none", async () => {
+    const existingId = await h.seedCigar({ canonicalName: "Herrera Esteli Norteno Robusto" });
+    const result = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "Herrera Esteli Norteno Robusto Maduro" } },
+      overallDescriptors: ["cocoa"],
+    });
+    expect(result.smoke.cigar.cigarId).toBe(existingId);
+    expect(result.cigarCreated).toBe(false);
   });
 });

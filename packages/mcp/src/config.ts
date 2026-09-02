@@ -35,6 +35,14 @@ export function uploadUrl(token: string): string {
   return `${issuerOrigin()}/u/${token}`;
 }
 
+/** The photo drop's page for a minted token: BETTER_AUTH_URL + /d/<token>.
+ *  A second anonymous, token-authorized surface alongside /u/<token> (ADR-014) —
+ *  multi-use for the drop's lifetime, which is why it is a different path and not
+ *  a mode of the single-use one. */
+export function dropUrl(token: string): string {
+  return `${issuerOrigin()}/d/${token}`;
+}
+
 /** When true, /mcp POST replies as application/json instead of an SSE stream.
  *  Off in production (clients negotiate SSE); on in tests for easy assertions. */
 export function jsonResponseEnabled(): boolean {

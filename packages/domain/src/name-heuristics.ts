@@ -489,6 +489,45 @@ export function strongLinkCompatible(query: string, candidate: string): boolean 
   );
 }
 
+// MAY A DESCRIBED NAME LINK TO THAT ROW? — the JOURNAL's link-vs-create verdict,
+// and deliberately stricter than `strongLinkCompatible` above, which stays what
+// the curation duplicate queue and the crawler read.
+//
+// A CANDIDATE LINKS ONLY IF IT MAKES THE SAME IDENTITY CLAIMS AS THE NAME. Not
+// fewer, not more, and not a different wrapper: `identityResidues` must be empty
+// on BOTH sides and `variantRelation` must not be `different`.
+//
+// The one-sided allowance this replaces was correct when the only alternative to
+// linking was CREATING a near-twin row, and it is not correct now. `resolveCigar`
+// grew an ask branch for Face/Bride (#235), so the choice is no longer
+// link-or-duplicate: a question costs one round trip, while a silent link costs
+// data — smoke history, ratings, inventory, prices and enrichment all land on the
+// wrong product and no error tells anyone.
+//
+// Production, 2026-09-01: the catalog held `Atabey Ritos`; a ChatGPT session
+// called `add_cigar` for `Atabey Black Ritos` — a different blend — and got
+// `created: false` against the Ritos row. `ritos` folds to `rito` on both sides,
+// so the residue was `{black}` on the QUERY side only, which the mutual-residue
+// rule calls compatible. Retried with `confirmedDistinct` it created the right
+// row, which is exactly the round trip this predicate now forces.
+//
+// VOCABULARY IS STILL NOT IDENTITY, so this is narrower than it sounds. Sizes,
+// containers and wrappers are struck before either residue is built, so
+// `Herrera Esteli Norteno Robusto Maduro` still links to `… Robusto` (wrapper
+// `unstated`) and a blend-level name still links to a row that only adds a size
+// word. What no longer links is a name reaching past the row, or the row reaching
+// past the name, on a word that names WHICH CIGAR IT IS.
+export function journalLinkCompatible(query: string, candidate: string): boolean {
+  if (!numbersCompatible(query, candidate)) return false;
+  if (!packagingCompatible(query, candidate)) return false;
+  // A STATED disagreement only: `unstated` is the collapse-bucket signature, not
+  // a contradiction, and refusing it would mint a second row for every user who
+  // says the wrapper out loud (`variantRelation`).
+  if (variantRelation(query, candidate) === "different") return false;
+  const residues = identityResidues(query, candidate);
+  return residues.query.size === 0 && residues.candidate.size === 0;
+}
+
 // The sizes a NAME states, on the same comparison keys every other rule in this
 // file reads — so the spelling table, the phrase join and this scan cannot
 // disagree about what a token became (`Doble` is `double`, `Rothchilde` is

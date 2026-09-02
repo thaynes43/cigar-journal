@@ -16,6 +16,11 @@ import { NextResponse, type NextRequest } from "next/server";
 // The single-use photo upload page (`/u/<token>`) and its POST endpoint
 // (`/api/photo-uploads/*`) are excluded as well: the token IS the authorization,
 // so they must be reachable without a session cookie (ADR-007, issue #44).
+// The photo drop (`/d/<token>`) and its endpoints (`/api/photo-drops/*`) are
+// excluded on the same ground (ADR-014, issue #263): the token IS the
+// authorization there too, so an anonymous request must reach the page rather
+// than be bounced to /signin — a drop link redirected to sign-in is a link the
+// person holding it cannot use at all.
 // The invite redemption page (`/invite/<token>`) is excluded for the same reason
 // (ADR-010, issue #46) — its whole audience is people who have no account yet, so
 // an edge redirect here would make every invite link dead on arrival.
@@ -39,6 +44,6 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!api/auth|api/trpc|api/photos|api/product-photos|api/brand-images|api/photo-uploads|api/health|u/|invite/|oauth|authorize|token|register|revoke|\\.well-known|_next/static|_next/image|favicon.ico).*)",
+    "/((?!api/auth|api/trpc|api/photos|api/product-photos|api/brand-images|api/photo-uploads|api/photo-drops|api/health|u/|d/|invite/|oauth|authorize|token|register|revoke|\\.well-known|_next/static|_next/image|favicon.ico).*)",
   ],
 };

@@ -385,6 +385,15 @@ export const saveSmokeSchema = z
     assessment: assessment.optional(),
     journal: journal.nullish(),
     consumption: consumption.optional(),
+    // The drop this save claims (ADR-014). Explicit and never inferred — a save
+    // without it leaves every open drop the user has untouched, exactly as an
+    // omitted `consumption` block deducts nothing.
+    photoDropId: z
+      .string()
+      .optional()
+      .describe(
+        "The photoDropId from open_photo_drop for this smoke. Its photos attach to the saved smoke and the result reports the count in photoDrop. Omit when no drop was opened.",
+      ),
   })
   .strict();
 
@@ -703,11 +712,37 @@ export const addSmokePhotoSchema = z
       .string()
       .optional()
       .describe("A short caption in the user's words, only if they gave one. Sparse is correct — omit rather than invent."),
+    // The late claim (ADR-014): a drop `save_smoke` did not carry. Present means
+    // "attach this drop", which is a different call entirely — no intake, no link.
+    photoDropId: z
+      .string()
+      .optional()
+      .describe(
+        "A photoDropId from open_photo_drop to attach to this smoke, when the save did not carry it. Omit to get an upload link.",
+      ),
     // `.describe()` BEFORE `.optional()`: the description has to sit on the object
     // itself, since that is the schema the converter emits under `properties.image`.
     image: fileParamHandle
       .describe(
         "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. Omit it and the tool returns a one-time upload link instead.",
+      )
+      .optional(),
+  })
+  .strict();
+
+// ---- photo drop -------------------------------------------------------------
+
+// open_photo_drop takes NO id: the smoke it collects photos for does not exist
+// yet, and the drop it returns is the caller's own (one open drop per user,
+// ADR-014). The only argument is the same host-filled `image` handle
+// add_smoke_photo declares — a forwarded image goes straight into the drop, and
+// the link comes back either way. Strict for the same reason add_smoke_photo is:
+// the published shape is what a host's file hydration reads (issue #202).
+export const openPhotoDropSchema = z
+  .object({
+    image: fileParamHandle
+      .describe(
+        "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. The drop link comes back either way; an image that does arrive is stored into the drop.",
       )
       .optional(),
   })
@@ -1018,6 +1053,11 @@ export const saveSmokeOutput = z
     // replay of an envelope stored before this field existed returns the original
     // result verbatim.
     enrichmentQueued: z.boolean().optional(),
+    // What the claim of `photoDropId` did (ADR-014) — present only when the save
+    // carried one. Reported, never raised: the smoke is committed before the
+    // claim runs, so `not_found` / `bound_elsewhere` / `failed` all arrive here
+    // as a status on a successful save.
+    photoDrop: looseObject.optional(),
     replayed: z.boolean(),
   })
   .passthrough();
@@ -1170,6 +1210,27 @@ export const addSmokePhotoOutput = z
     expiresAt: z.string().optional(),
     shareWithUser: z.string().optional(),
     delivery: looseObject.optional(),
+    // Mode C (ADR-014): a `photoDropId` was named, so the drop's photos moved
+    // onto the smoke and no link was minted.
+    photoDrop: looseObject.optional(),
+  })
+  .passthrough();
+
+// The drop's link, and what is already in it. `shareWithUser` carries the same
+// weight it does on add_smoke_photo — the sentence to say, because a link nobody
+// relays collects nothing. `delivery` and `staged` are the two ends of the same
+// question and never both appear: `staged` when a forwarded image went into the
+// drop, `delivery` (add_smoke_photo's vocabulary) when none did.
+export const openPhotoDropOutput = z
+  .object({
+    photoDropId: z.string(),
+    uploadUrl: z.string(),
+    expiresAt: z.string(),
+    reused: z.boolean(),
+    photoCount: z.number(),
+    shareWithUser: z.string(),
+    delivery: looseObject.optional(),
+    staged: looseObject.optional(),
   })
   .passthrough();
 
@@ -1183,6 +1244,7 @@ export type AddCigarArgs = z.infer<typeof addCigarSchema>;
 export type RecordPurchaseArgs = z.infer<typeof recordPurchaseSchema>;
 export type RecordPurchaseBatchArgs = z.infer<typeof recordPurchaseBatchSchema>;
 export type AddSmokePhotoArgs = z.infer<typeof addSmokePhotoSchema>;
+export type OpenPhotoDropArgs = z.infer<typeof openPhotoDropSchema>;
 
 // ---- curation surface (admin only; DESIGN-003 wave 4a, issue #126) ----------
 //

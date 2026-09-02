@@ -10,9 +10,12 @@ import {
   auditLog,
   enrichmentRequests,
 } from "@cj/db";
+import { createMemoryPhotoStorage } from "@cj/photos";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
-import type { Principal, SaveSmokeInput } from "./index.js";
+import { listSmokePhotos } from "./smoke-photos.js";
+import { getPhotoDropByToken, openPhotoDrop, stagePhotoByToken } from "./photo-drops.js";
+import type { Principal, ProcessedImage, SaveSmokeInput } from "./index.js";
 import { ValidationError, CigarAmbiguousError, IdempotencyConflictError } from "./errors.js";
 
 describe("saveSmoke", () => {
@@ -658,5 +661,117 @@ describe("saveSmoke", () => {
       await h.deps.db.execute(sql`drop trigger cj_test_slow_smoke on smokes`);
       await h.deps.db.execute(sql`drop function cj_test_slow_smoke()`);
     }
+  });
+  // The photo drop's claim (ADR-014): save_smoke's first post-commit step. Every
+  // case here is about the same invariant from a different side — the smoke is
+  // committed before the claim runs, so the claim REPORTS and never raises.
+  describe("photo drop", () => {
+    const image = (): ProcessedImage => ({
+      full: Buffer.from(`full-${newRequestId()}`),
+      thumb: Buffer.from(`thumb-${newRequestId()}`),
+      contentType: "image/jpeg",
+      width: 1600,
+      height: 1200,
+      bytes: 4096,
+    });
+
+    // One open drop per user, so these cases do not share `user`.
+    async function dropWith(photos: number) {
+      const storage = createMemoryPhotoStorage();
+      const owner = await h.createUser(`save-drop-${newRequestId()}@example.com`);
+      const drop = await openPhotoDrop(h.deps, storage, owner);
+      for (let i = 0; i < photos; i++) {
+        await stagePhotoByToken(h.deps, storage, { token: drop.token, image: image() });
+      }
+      return { storage, owner, drop };
+    }
+
+    it("claims the named drop onto the smoke it just saved", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Drop Claim Robusto ${newRequestId()}` });
+      const { owner, drop } = await dropWith(2);
+
+      const result = await saveSmoke(h.deps, owner, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        photoDropId: drop.photoDropId,
+      });
+
+      expect(result.photoDrop).toEqual({
+        photoDropId: drop.photoDropId,
+        status: "claimed",
+        attached: 2,
+        pending: 0,
+      });
+      expect(await listSmokePhotos(h.deps, owner, { smokeId: result.smoke.smokeId })).toHaveLength(2);
+      const view = await getPhotoDropByToken(h.deps, { token: drop.token });
+      expect(view).toMatchObject({ status: "attached", smokeId: result.smoke.smokeId });
+    });
+
+    it("saves the smoke and reports not_found for a drop that names nothing", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Drop Miss Robusto ${newRequestId()}` });
+      const stray = newRequestId();
+
+      const result = await saveSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        photoDropId: stray,
+      });
+
+      // The smoke is committed either way — that is the whole point of the claim
+      // running after it and reporting rather than raising.
+      expect(result.smoke.smokeId).toBeTruthy();
+      expect(await h.deps.db.select().from(smokes).where(eq(smokes.id, result.smoke.smokeId))).toHaveLength(1);
+      expect(result.photoDrop).toEqual({
+        photoDropId: stray,
+        status: "not_found",
+        attached: 0,
+        pending: 0,
+      });
+    });
+
+    it("re-reports the drop on an idempotent replay, which the envelope never stored", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Drop Replay Robusto ${newRequestId()}` });
+      const { owner, drop } = await dropWith(1);
+      const input: SaveSmokeInput = {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        photoDropId: drop.photoDropId,
+      };
+
+      const first = await saveSmoke(h.deps, owner, input);
+      expect(first.photoDrop).toMatchObject({ status: "claimed", attached: 1 });
+
+      const replay = await saveSmoke(h.deps, owner, input);
+      expect(replay.replayed).toBe(true);
+      expect(replay.smoke.smokeId).toBe(first.smoke.smokeId);
+      // Nothing is left to move, and the re-claim says so rather than going silent.
+      expect(replay.photoDrop).toEqual({
+        photoDropId: drop.photoDropId,
+        status: "claimed",
+        attached: 0,
+        pending: 0,
+      });
+      expect(await listSmokePhotos(h.deps, owner, { smokeId: first.smoke.smokeId })).toHaveLength(1);
+    });
+
+    it("claims nothing the caller did not name", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Drop Untouched Robusto ${newRequestId()}` });
+      const { owner, drop } = await dropWith(2);
+
+      const result = await saveSmoke(h.deps, owner, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+      });
+
+      expect(result.photoDrop).toBeUndefined();
+      expect(await listSmokePhotos(h.deps, owner, { smokeId: result.smoke.smokeId })).toHaveLength(0);
+      const view = await getPhotoDropByToken(h.deps, { token: drop.token });
+      expect(view.status).toBe("open");
+      expect(view.photos).toHaveLength(2);
+    });
   });
 });

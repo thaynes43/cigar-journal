@@ -26,8 +26,7 @@ export {
 import {
   numbersCompatible,
   packagingCompatible,
-  identityTokensCompatible,
-  strongLinkCompatible,
+  journalLinkCompatible,
   rankByIdentity,
   CANDIDATE_POOL,
 } from "./name-heuristics.js";
@@ -95,11 +94,11 @@ function rankedCandidates(name: string, rows: CandidateRow[]): CigarCandidate[] 
 
 // Resolve a Smoke's cigar reference to a catalog id, upholding the catalog
 // invariant (ADR-002): a resolved id links; `described` links on a single
-// strong match, errors `cigar_ambiguous` when it can't decide, and otherwise
-// creates an `unverified` entry — all inside the caller's transaction. With
-// `options.confirmedDistinct` (the add_cigar / record_purchase escape hatch)
-// strong-link and ambiguity are skipped and it creates, except a
-// case-insensitive exact-name match still links.
+// candidate that makes the SAME identity claims as the name, errors
+// `cigar_ambiguous` when it can't decide, and otherwise creates an `unverified`
+// entry — all inside the caller's transaction. With `options.confirmedDistinct`
+// (the add_cigar / record_purchase escape hatch) strong-link and ambiguity are
+// skipped and it creates, except a case-insensitive exact-name match still links.
 export async function resolveCigar(
   tx: Tx,
   ref: CigarRef,
@@ -170,8 +169,12 @@ export async function resolveCigar(
       };
     }
   } else {
+    // A candidate links only if it makes the SAME identity claims as the name —
+    // no residue on either side, no stated wrapper disagreement
+    // (`journalLinkCompatible`, which is the journal's own rule and stricter than
+    // the `strongLinkCompatible` the curation queue and the crawler read).
     const nearby = candidates.filter((c) => Number(c.sim) >= STRONG_MATCH);
-    const strong = nearby.filter((c) => strongLinkCompatible(name, c.canonical_name));
+    const strong = nearby.filter((c) => journalLinkCompatible(name, c.canonical_name));
 
     if (strong.length === 1) {
       const match = strong[0]!;
@@ -186,14 +189,25 @@ export async function resolveCigar(
       throw new CigarAmbiguousError(name, rankedCandidates(name, strong));
     }
 
-    // NEITHER LINK NOR CREATE — ASK. A candidate this close (≥ STRONG_MATCH) that
-    // the identity guard alone rejected is the Face/Bride shape: one word apart,
-    // and that word decides whether this is the same cigar under a fuller name or
-    // a sibling the catalog has never seen. Creating silently is the mirror of
-    // the bug this guard fixes — the catalog gains a second row for a cigar it
-    // already holds — so both outcomes go to the user, which is exactly what
-    // `confirmedDistinct` answers (the client shows these candidates, asks, and
-    // re-issues with the flag only if the user says none of them is it).
+    // NEITHER LINK NOR CREATE — ASK. Every candidate this close (≥ STRONG_MATCH)
+    // that survived the number and packaging rules but did not link above is a
+    // word away from the name, and that word decides whether this is the same
+    // cigar under a fuller name or a product the catalog has never seen. Neither
+    // outcome may be taken silently: creating mints a second row for a cigar the
+    // catalog already holds, and linking hangs smoke history, ratings, inventory,
+    // prices and enrichment on the wrong product. Both go to the user, which is
+    // exactly what `confirmedDistinct` answers (the client shows these
+    // candidates, asks, and re-issues with the flag only if none of them is it).
+    //
+    // THE RESIDUE NEED NOT BE MUTUAL, since 2026-09-01. It was — a one-sided
+    // residue linked, on the reasoning that the shorter name said strictly less —
+    // until production proved what that costs: the catalog held `Atabey Ritos`, a
+    // session called `add_cigar` for `Atabey Black Ritos` (a different blend), and
+    // the residue `{black}` on the query side alone read as compatible, so the
+    // Black silently became the Ritos. A stated-wrapper disagreement asks for the
+    // same reason (`Padron 1964 Anniversary Maduro` against a lone `… Natural`).
+    // The ask branch did not exist when the allowance was written; now that it
+    // does, a question costs a round trip and a silent link costs data.
     //
     // A number or packaging rejection deliberately does NOT come here and still
     // creates. Those names make an explicit, structured claim of difference —
@@ -202,7 +216,6 @@ export async function resolveCigar(
     // weaker signal needs the question.
     const siblings = nearby.filter(
       (c) =>
-        !identityTokensCompatible(name, c.canonical_name) &&
         numbersCompatible(name, c.canonical_name) &&
         packagingCompatible(name, c.canonical_name),
     );
