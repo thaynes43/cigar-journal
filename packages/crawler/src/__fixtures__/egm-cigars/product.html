@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- Live shape 2026-09-02, /products/cohiba-siglo-6-slb. Two ld+json blocks, an
+     Organization and a **ProductGroup** — Shopify's shape, and the reason
+     `extractJsonLd` accepts ProductGroup as a Product (#270).
+     Three things this page proves, all live:
+       * the group states `category` and NO breadcrumb node, hence
+         `categorySource: "json-ld-category"`;
+       * the group states no `offers` of its own — the price is on the first
+         variant, which the extractor lifts;
+       * the group states no `image`, and the photo is the 2000x2000
+         `og:image:secure_url` (the `og:image` beside it is the same asset over
+         plain http). Its price key is `og:price:amount`, not
+         `product:price:amount`, and is not read. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Cohiba Siglo VI Cigar - EGM Cigars</title>
+<meta property="og:site_name" content="EGM Cigars" />
+<meta property="og:url" content="https://egmcigars.com/products/cohiba-siglo-6-slb" />
+<meta property="og:title" content="Cohiba Siglo VI Cigar - EGM Cigars" />
+<meta property="og:type" content="product" />
+<meta property="og:image" content="http://egmcigars.com/cdn/shop/files/Cohiba_Siglo_VI_Cigar_Box_of_25_Cigars_EGM_Cigars.jpg?v=1693381836" />
+<meta property="og:image:secure_url" content="https://egmcigars.com/cdn/shop/files/Cohiba_Siglo_VI_Cigar_Box_of_25_Cigars_EGM_Cigars.jpg?v=1693381836" />
+<meta property="og:image:width" content="2000" />
+<meta property="og:image:height" content="2000" />
+<meta property="og:price:amount" content="106.94" />
+<meta property="og:price:currency" content="CHF" />
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Organization","name":"EGM Cigars","url":"https://egmcigars.com"}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"ProductGroup",
+ "name":"Cohiba Siglo VI Cigar",
+ "url":"https://egmcigars.com/products/cohiba-siglo-6-slb",
+ "brand":{"@type":"Brand","name":"Habanos sa"},
+ "category":"Cigars",
+ "description":"Buy your Cohiba Siglo VI, arguably the best Cohiba Cigar, directly from our website.",
+ "productGroupID":"8123456789",
+ "hasVariant":[
+   {"@type":"Product","name":"Cohiba Siglo VI Cigar - Box of 25","sku":"CO-S6-25",
+    "offers":{"@type":"Offer","price":"106.94","priceCurrency":"CHF",
+      "availability":"https://schema.org/InStock",
+      "url":"https://egmcigars.com/products/cohiba-siglo-6-slb?variant=1"}}]}
+</script>
+</head>
+<body><h1>Cohiba Siglo VI Cigar</h1></body>
+</html>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Live shape 2026-09-02, verbatim: a two-child index. sitemap_de.xml carries 21,818 locs, 6,874 of them under /zigarren/; sitemap_en.xml duplicates the catalogue under /en/, which the prefix rejects -->
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://www.cigarworld.de/sitemap_de.xml</loc></sitemap>
+  <sitemap><loc>https://www.cigarworld.de/sitemap_en.xml</loc></sitemap>
+</sitemapindex>

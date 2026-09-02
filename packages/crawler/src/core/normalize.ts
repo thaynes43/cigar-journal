@@ -1,5 +1,5 @@
 import { parsePackagingFacts } from "@cj/domain";
-import type { JsonLdOffer, JsonLdPriceSpecification, JsonLdProduct } from "./jsonld.js";
+import { productImageUrl, type JsonLdOffer, type JsonLdPriceSpecification, type JsonLdProduct } from "./jsonld.js";
 import type { CategorySource, VendorAdapter } from "../adapters/types.js";
 
 // A vendor-neutral listing distilled from a schema.org Product + the category the
@@ -75,13 +75,6 @@ function availabilityToStock(availability: string | undefined): boolean | null {
   return null;
 }
 
-function imageUrl(image: JsonLdProduct["image"]): string | null {
-  const first = firstOf(image);
-  if (typeof first === "string") return first;
-  if (first && typeof first === "object" && typeof first.url === "string") return first.url;
-  return null;
-}
-
 // WooCommerce JSON-LD ships names with HTML entities, sometimes double-encoded
 // ("Figurado &amp;amp; House ..."); decode until stable so catalog names are clean.
 const ENTITIES: Record<string, string> = {
@@ -99,7 +92,12 @@ export function decodeEntities(raw: string): string {
   for (let i = 0; i < 3; i++) {
     const next = value
       .replace(/&(amp|quot|lt|gt|nbsp|#039|#8217);/g, (m) => ENTITIES[m] ?? m)
-      .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)));
+      .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
+      // HEX character references, the Magento 2 spelling: J.J. Fox serves
+      // `og:title="Partagas&#x20;Shorts"` — every space in every og:* value is
+      // `&#x20;` (live 2026-09-02, #270). Without this the catalog name carries
+      // the escape, which no matcher would ever resolve to a cigar.
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 16)));
     if (next === value) break;
     value = next;
   }
@@ -108,11 +106,11 @@ export function decodeEntities(raw: string): string {
 
 // The category as the adapter declared its source (ADR-006 2026-09-02). A
 // breadcrumb trail ENDS WITH THE PRODUCT, so its last crumb is dropped and the
-// taxonomy remains; a keywords tag list is taxonomy end to end and is taken
-// whole — dropping its last token would throw away a real category on any page
-// whose tags happen to end with one.
+// taxonomy remains; every other source is taxonomy END TO END and is taken whole
+// — dropping the last element of a keywords tag list, or of a `category` string
+// that is one term ("Cigars", EGM), would throw away a real category.
 function categoryPathFrom(category: string[], source: CategorySource): string[] {
-  if (source === "keywords-meta") return [...category];
+  if (source !== "breadcrumbs") return [...category];
   return category.length > 1 ? category.slice(0, -1) : [...category];
 }
 
@@ -144,7 +142,7 @@ export function normalizeListing(
     currency,
     priceIsPlaceholder,
     inStock: availabilityToStock(offer?.availability),
-    imageUrl: imageUrl(product.image),
+    imageUrl: productImageUrl(product.image),
     sku: typeof product.sku === "string" ? product.sku : null,
     categoryPath: categoryPathFrom(category, categorySource),
     packaging: packaging.packaging,

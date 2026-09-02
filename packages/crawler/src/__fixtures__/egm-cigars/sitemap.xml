@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Live shape 2026-09-02 has 21 children: products_1 (999 locs) + products_2 (73) = 1,072 products, pages/collections/blogs, an agentic-discovery child, and four localized copies of all of it. Trimmed here to the two that decide the gate — the catalog child, and one locale copy whose /en-gb/products/ locs the prefix must reject so the catalogue is crawled once -->
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://egmcigars.com/sitemap_products_1.xml?from=11256354948&amp;to=9033607840001</loc></sitemap>
+  <sitemap><loc>https://egmcigars.com/en-gb/sitemap_products_1.xml?from=11256354948&amp;to=9033607840001</loc></sitemap>
+</sitemapindex>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The English duplicate of the catalogue. Every loc is under /en/ and is rejected by the prefix, so the shop is crawled once -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://www.cigarworld.de/en/cigars/cuba/regulares/ramon-allones-specially-selected-01025_3430</loc></url>
+  <url><loc>https://www.cigarworld.de/en/cigars/cuba/regulares/partagas-shorts-01008_4003</loc></url>
+</urlset>

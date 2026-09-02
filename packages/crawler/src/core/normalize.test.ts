@@ -10,6 +10,23 @@ function normalize(fixture: string) {
   return normalizeListing(product!, breadcrumbs);
 }
 
+// Magento 2 escapes every space in an og:* value as a HEX character reference
+// (J.J. Fox, live 2026-09-02 #270) — a shape no vendor before it served.
+describe("decodeEntities — hex character references", () => {
+  it("decodes the Magento og:title spelling", () => {
+    expect(decodeEntities("Partagas&#x20;Shorts")).toBe("Partagas Shorts");
+    expect(decodeEntities("Hoyo&#x20;de&#x20;Monterrey&#x20;Epicure&#x20;No.&#x20;2")).toBe(
+      "Hoyo de Monterrey Epicure No. 2",
+    );
+  });
+
+  it("still decodes the named and decimal spellings, and leaves a bare & alone", () => {
+    expect(decodeEntities("Figurado &amp;amp; House")).toBe("Figurado & House");
+    expect(decodeEntities("Don&#8217;t")).toBe("Don\u2019t");
+    expect(decodeEntities("R&D Robusto")).toBe("R&D Robusto");
+  });
+});
+
 describe("normalizeListing", () => {
   it("reads price (cents) from the first priceSpecification and InStock availability", () => {
     const listing = normalize("product-padron.html")!;

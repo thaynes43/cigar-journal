@@ -100,6 +100,17 @@ export function extractKeywords(html: string): string[] {
     .filter((token) => token.length > 0);
 }
 
+// THE PAGE'S OG IMAGE, preferring `og:image:secure_url` (ADR-006 amendment
+// 2026-09-02). The two name the same asset and differ only in scheme — EGM
+// publishes `http://egmcigars.com/cdn/shop/files/....jpg` in `og:image` and the
+// https spelling in `og:image:secure_url` — so taking the secure one costs
+// nothing and avoids a plaintext fetch of a 2000x2000 image. `og:image` remains
+// the answer for every vendor that emits only it (2 Guys serves no secure_url).
+export function extractOgImage(html: string): string | null {
+  const url = metaContent(html, "og:image:secure_url") ?? metaContent(html, "og:image");
+  return url === null ? null : repairImageUrl(url);
+}
+
 // A product exists when the page DECLARES one — `og:type=product` or a
 // `schema.org/Product` itemscope — and names it. A category landing page and a
 // 404 declare neither, so both yield null and the caller writes nothing.
@@ -116,7 +127,7 @@ export function extractOpenGraphProduct(html: string): OpenGraphProduct | null {
   const price = metaContent(html, "product:price:amount");
   const currency = metaContent(html, "product:price:currency");
   const stock = availability(metaContent(html, "og:availability"));
-  const image = metaContent(html, "og:image");
+  const image = extractOgImage(html);
   const brand = metaContent(html, "og:brand");
   const url = canonicalUrl(html) ?? metaContent(html, "og:url");
   const description = metaContent(html, "og:description") ?? metaContent(html, "description");
@@ -128,7 +139,7 @@ export function extractOpenGraphProduct(html: string): OpenGraphProduct | null {
     name,
     ...(url ? { url } : {}),
     ...(description ? { description } : {}),
-    ...(image ? { image: repairImageUrl(image) } : {}),
+    ...(image ? { image } : {}),
     ...(sku ? { sku } : {}),
     ...(brand ? { brand: { "@type": "Brand" as const, name: brand } } : {}),
     // One offer, shaped like the JSON-LD offers normalize already reads. Price and

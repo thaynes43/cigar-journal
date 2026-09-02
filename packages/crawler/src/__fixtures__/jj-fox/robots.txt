@@ -1,0 +1,22 @@
+# Live capture 2026-09-02, verbatim. One `*` group, no Crawl-delay, and
+# nothing that touches a root-level product `.html`. `Disallow: /*?` matters for
+# the photo: the `og:image` carries a resize query and is therefore disallowed,
+# while the bare path `photoUrlRewrite: "strip-query"` produces is not.
+User-agent: *
+Disallow: /index.php/
+Disallow: /search/
+Disallow: /*?
+Disallow: /checkout/
+Disallow: /app/
+Disallow: /lib/
+Disallow: /*.php$
+Disallow: /pkginfo/
+Disallow: /report/
+Disallow: /var/
+Disallow: /catalog/
+Disallow: /customer/
+Disallow: /sendfriend/
+Disallow: /review/
+Disallow: /*SID=
+Disallow: /xnotif/email/stock/
+Sitemap: https://www.jjfox.co.uk/sitemap.xml
