@@ -14,8 +14,16 @@ describe("getCigarOffers", () => {
     await h?.stop();
   });
 
+  // `displayEnabled` is EXPLICIT because the column defaults to false (ADR-015:
+  // "nobody has decided" must not mean "price authority"), and every offer read
+  // now gates on it — a vendor seeded at the default renders no prices at all,
+  // which is a different test than the ones below. The gate itself is covered by
+  // offer-display.test.ts.
   async function addVendor(name: string): Promise<string> {
-    const [v] = await h.deps.db.insert(vendors).values({ name }).returning({ id: vendors.id });
+    const [v] = await h.deps.db
+      .insert(vendors)
+      .values({ name, displayEnabled: true })
+      .returning({ id: vendors.id });
     return v!.id;
   }
 
@@ -159,9 +167,17 @@ describe("getCigarOffers", () => {
     const cigarId = await h.seedCigar({ canonicalName: "Montecristo No. 2", brand: "Montecristo" });
 
     // A registry vendor crawled for depth but not a purchase destination.
+    // `displayEnabled` and `purchaseLinkout` are INDEPENDENT gates: this case is
+    // "shown, but never as a place to buy", so display stays on (ADR-015).
     const [noLink] = await h.deps.db
       .insert(vendors)
-      .values({ name: "Cuban Lou's", focus: "CC", approvalStatus: "unapproved", purchaseLinkout: false })
+      .values({
+        name: "Cuban Lou's",
+        focus: "CC",
+        approvalStatus: "unapproved",
+        purchaseLinkout: false,
+        displayEnabled: true,
+      })
       .returning({ id: vendors.id });
     const noLinkMatch = await addMatch(noLink!.id, cigarId, "cl-monte-2", "auto");
     await addOffer(noLink!.id, noLinkMatch, {

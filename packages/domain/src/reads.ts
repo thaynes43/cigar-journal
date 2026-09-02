@@ -49,6 +49,7 @@ import { toSmokePhotoView } from "./mapping.js";
 import { assessEnrichmentFields } from "./enrichment.js";
 import { validateQueryFilters } from "./validation.js";
 import { isUuid } from "./uuid.js";
+import { vendorDisplaysPricesSql, offerIsDisplayableSql } from "./offer-display.js";
 import { decodeSmokeCursor, encodeSmokeCursor, afterSmokeCursor } from "./smoke-cursor.js";
 import { rankByIdentity, CANDIDATE_POOL } from "./name-heuristics.js";
 
@@ -832,6 +833,9 @@ interface SeriesRow {
 // auto|confirmed listing match (the curator-authoritative link); ad-hoc chat rows
 // link directly via cigar_id with no listing match. DISTINCT ON collapses each
 // append-only series to its latest row — no N+1 across sources/packagings.
+//
+// Both arms carry the ADR-015 display gate (./offer-display.ts): the match status
+// says a price belongs to this cigar, `display_enabled` says it may be SHOWN.
 async function latestSeries(deps: Deps, cigarId: string): Promise<SeriesRow[]> {
   // No series for a malformed id, exactly as for a cigar nobody has priced
   // (./uuid.ts). Guarding here rather than in each caller is what carries the
@@ -850,6 +854,7 @@ async function latestSeries(deps: Deps, cigarId: string): Promise<SeriesRow[]> {
       JOIN listing_matches lm ON lm.id = o.listing_match_id
       JOIN vendors v ON v.id = o.vendor_id
       WHERE lm.cigar_id = ${cigarId} AND lm.status IN ('auto', 'confirmed')
+        AND ${vendorDisplaysPricesSql(sql`v`)}
       UNION ALL
       -- Ad-hoc/chat sources have no vendor row: purchase_linkout defaults TRUE
       -- (nothing to gate; a registry vendor supplies the real flag above).
@@ -862,6 +867,7 @@ async function latestSeries(deps: Deps, cigarId: string): Promise<SeriesRow[]> {
       FROM offers o
       LEFT JOIN vendors v ON v.id = o.vendor_id
       WHERE o.cigar_id = ${cigarId} AND o.listing_match_id IS NULL
+        AND ${offerIsDisplayableSql(sql`o.vendor_id`, sql`v`)}
     )
     SELECT source, is_registry, purchase_linkout, price, currency, in_stock, listing_url, seen_at,
            packaging, sticks_per_package, price_per_stick_cents, price_type
@@ -927,10 +933,14 @@ export async function getCigarOfferHistory(
       SELECT o.seen_at, o.price_per_stick_cents
       FROM offers o
       JOIN listing_matches lm ON lm.id = o.listing_match_id
+      JOIN vendors v ON v.id = o.vendor_id
       WHERE lm.cigar_id = ${args.cigarId} AND lm.status IN ('auto', 'confirmed')
+        AND ${vendorDisplaysPricesSql(sql`v`)}
       UNION ALL
       SELECT o.seen_at, o.price_per_stick_cents FROM offers o
+      LEFT JOIN vendors v ON v.id = o.vendor_id
       WHERE o.cigar_id = ${args.cigarId} AND o.listing_match_id IS NULL
+        AND ${offerIsDisplayableSql(sql`o.vendor_id`, sql`v`)}
     )
     SELECT count(*)::int AS n,
            min(seen_at) AS first_seen, max(seen_at) AS last_seen,
@@ -975,10 +985,14 @@ export async function getCigarPricing(deps: Deps, cigarId: string): Promise<Ciga
       SELECT o.id, o.seen_at
       FROM offers o
       JOIN listing_matches lm ON lm.id = o.listing_match_id
+      JOIN vendors v ON v.id = o.vendor_id
       WHERE lm.cigar_id = ${cigarId} AND lm.status IN ('auto', 'confirmed')
+        AND ${vendorDisplaysPricesSql(sql`v`)}
       UNION ALL
       SELECT o.id, o.seen_at FROM offers o
+      LEFT JOIN vendors v ON v.id = o.vendor_id
       WHERE o.cigar_id = ${cigarId} AND o.listing_match_id IS NULL
+        AND ${offerIsDisplayableSql(sql`o.vendor_id`, sql`v`)}
     )
     SELECT count(*)::int AS n, max(seen_at) AS latest FROM obs
   `);
@@ -1060,11 +1074,15 @@ export async function getCigarPriceHistory(
       SELECT o.seen_at, o.price_per_stick_cents
       FROM offers o
       JOIN listing_matches lm ON lm.id = o.listing_match_id
+      JOIN vendors v ON v.id = o.vendor_id
       WHERE lm.cigar_id = ${args.cigarId} AND lm.status IN ('auto', 'confirmed')
+        AND ${vendorDisplaysPricesSql(sql`v`)}
       UNION ALL
       SELECT o.seen_at, o.price_per_stick_cents
       FROM offers o
+      LEFT JOIN vendors v ON v.id = o.vendor_id
       WHERE o.cigar_id = ${args.cigarId} AND o.listing_match_id IS NULL
+        AND ${offerIsDisplayableSql(sql`o.vendor_id`, sql`v`)}
     )
     SELECT seen_at, price_per_stick_cents
     FROM obs

@@ -14,8 +14,13 @@ describe("getCigarPriceHistory", () => {
     await h?.stop();
   });
 
+  // Explicit `displayEnabled` for the reason cigar-offers.test.ts states: the
+  // column defaults to false and the price reads gate on it (ADR-015).
   async function addVendor(name: string): Promise<string> {
-    const [v] = await h.deps.db.insert(vendors).values({ name }).returning({ id: vendors.id });
+    const [v] = await h.deps.db
+      .insert(vendors)
+      .values({ name, displayEnabled: true })
+      .returning({ id: vendors.id });
     return v!.id;
   }
 

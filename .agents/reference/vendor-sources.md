@@ -19,13 +19,14 @@ has no tier: any enabled vendor feeds brands, lines and leaves. The column is
 admin data — an adapter only seeds a NEW row, and a disagreement is reported by
 the run, never written over it.
 
-**Open, as of 2026-09-02:** `display_enabled` is written (by the crawler's
-`resolveVendor`, by `--import-approved`, by the importer) and read by NOBODY. The
-offers read paths — `reads.ts` `latestSeries` and `catalog-browse.ts`'s
-`OFFER_JOIN` — gate on `listing_matches.status IN ('auto','confirmed')` alone, so
-every crawled vendor's prices render today whatever its tier. Seeding the column
-from the tier is therefore only half of "displayed from tier 1"; wiring the two
-read paths to it is the other half and is not in this change.
+**Closed 2026-09-02:** `display_enabled` was written (by the crawler's
+`resolveVendor`, by `--import-approved`, by the importer) and read by NOBODY, so
+every crawled vendor's prices rendered whatever its tier. Every price surface now
+joins `vendors` and requires it (`@cj/domain` `offer-display.ts`, used by
+`reads.ts`'s four offer queries and `catalog-browse.ts`'s `OFFER_JOIN`): a tier-2
+vendor's offers are recorded, counted as stocking evidence, and invisible.
+Chat observations with no vendor (`offers.vendor_id IS NULL`) belong to no tier
+and stay visible; admin reads (curation queue, match triage) still see everything.
 
 | Vendor | Tier | Platform | Structured path | Verdict |
 |---|---|---|---|---|

@@ -183,13 +183,17 @@ describe("migrations", () => {
   // empty), on the same terms as 0025's vendor correction: what is pinned is that
   // the UPDATE is idempotent, correctly targeted and GUARDED — re-running it must
   // not undo a tier someone has since re-decided.
-  it("0034 promotes only a still-default Fox Cigar to tier 1", async () => {
-    const stmt = sql`UPDATE vendors SET tier = 1 WHERE name = 'Fox Cigar' AND tier = 2`;
+  it("0034 promotes only the still-default tier-1 adapters' rows", async () => {
+    const stmt = sql`UPDATE vendors SET tier = 1
+                      WHERE name IN ('Fox Cigar', '2 Guys Cigars', 'Small Batch Cigar') AND tier = 2`;
 
-    const [atDefault, redecided, other] = await Promise.all([
+    const [atDefault, redecided, other, dormant] = await Promise.all([
       pg.db.insert(vendors).values({ name: "Fox Cigar", tier: 2 }).returning({ id: vendors.id }),
       pg.db.insert(vendors).values({ name: "Fox Cigar", tier: 3 }).returning({ id: vendors.id }),
       pg.db.insert(vendors).values({ name: "Cuban Lou's", tier: 2 }).returning({ id: vendors.id }),
+      // A tier-1 adapter whose lane is not enabled yet: the row is promoted all
+      // the same, so a resolve reports no drift against the adapter.
+      pg.db.insert(vendors).values({ name: "Small Batch Cigar", tier: 2 }).returning({ id: vendors.id }),
     ]);
 
     await pg.db.execute(stmt);
@@ -204,6 +208,7 @@ describe("migrations", () => {
     expect(await tierOf(redecided[0]!.id)).toBe(3);
     // Cuban Lou's is unapproved: it stays at the default, recorded and not shown.
     expect(await tierOf(other[0]!.id)).toBe(2);
+    expect(await tierOf(dormant[0]!.id)).toBe(1);
   });
 
   // 0022: the partial unique index is what keeps /settings from listing rival

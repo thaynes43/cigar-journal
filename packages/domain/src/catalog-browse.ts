@@ -36,6 +36,7 @@ import {
   lookupHierarchyEntity,
 } from "./catalog-hierarchy.js";
 import { isUuid } from "./uuid.js";
+import { vendorDisplaysPricesSql, offerIsDisplayableSql } from "./offer-display.js";
 import { isDecimal, isPgTimestamp } from "./cursor-keys.js";
 
 // The poster library reads (PRD-002 phase 2 / PRD-003 R-UNI). Browse descends
@@ -228,6 +229,12 @@ const REMAINING_AGG = sql`greatest(coalesce(max(pur.acquired), 0) - coalesce(max
 // derivable (ties toward singles), else the lowest package price. `best_pps_cents`
 // is the price sort key and the per-stick display figure (null → the tile shows
 // the package price); `has_in_stock` backs the inStock filter.
+//
+// Both arms carry the ADR-015 display gate (./offer-display.ts), so a tile's
+// price, the price sort and the inStock filter all speak for tier 1 alone — the
+// same set `latestSeries` shows on the detail page. A vendor whose offers are
+// recorded but not displayed leaves its cigars looking unpriced here, which is
+// what "displayed only from tier 1" means for a tile.
 const OFFER_JOIN = sql`
   LEFT JOIN (
     WITH obs AS (
@@ -237,7 +244,7 @@ const OFFER_JOIN = sql`
       FROM offers o
       JOIN listing_matches lm ON lm.id = o.listing_match_id
       JOIN vendors v ON v.id = o.vendor_id
-      WHERE lm.status IN ('auto', 'confirmed')
+      WHERE lm.status IN ('auto', 'confirmed') AND ${vendorDisplaysPricesSql(sql`v`)}
       UNION ALL
       SELECT o.cigar_id AS cigar_id, COALESCE(v.name, o.source_name) AS source,
              o.in_stock, o.price, o.currency, o.seen_at, o.created_at, o.id,
@@ -245,6 +252,7 @@ const OFFER_JOIN = sql`
       FROM offers o
       LEFT JOIN vendors v ON v.id = o.vendor_id
       WHERE o.listing_match_id IS NULL AND o.cigar_id IS NOT NULL
+        AND ${offerIsDisplayableSql(sql`o.vendor_id`, sql`v`)}
     ),
     latest AS (
       SELECT DISTINCT ON (cigar_id, source, packaging) *

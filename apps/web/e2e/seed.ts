@@ -430,7 +430,16 @@ export async function seed(opts: {
     // vendor creates no user, so it is safe ahead of the first-run admin.
     const vendorRows = await deps.db
       .insert(vendors)
-      .values({ name: "E2E Cigars", focus: "NC", crawlEnabled: true, approvalStatus: "owner-added" })
+      // `displayEnabled` explicitly: it defaults to false and every price read
+      // requires it (ADR-015), so without it this vendor's offer below is
+      // recorded and invisible — and the in-stock screens have nothing to show.
+      .values({
+        name: "E2E Cigars",
+        focus: "NC",
+        crawlEnabled: true,
+        approvalStatus: "owner-added",
+        displayEnabled: true,
+      })
       .returning({ id: vendors.id });
     await deps.db.insert(crawlRuns).values({
       vendorId: vendorRows[0]!.id,

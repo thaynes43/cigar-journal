@@ -45,12 +45,12 @@ export const cubanLous: PrefixVendorAdapter = {
   approvalStatus: "unapproved",
   // Tier 2 (ADR-015): off the r/cubancigars approved list, so it is not the price
   // authority. Its offers are still RECORDED — a promotion is then a flag flip
-  // rather than a re-crawl — and are meant not to be SHOWN: `display_enabled` is
-  // seeded from the tier (false here), and this row already exists in prod, so the
-  // run reports the disagreement rather than writing it. Note the gate is only
-  // half-wired: nothing in the offers read paths consults `display_enabled` yet
-  // (see .agents/reference/vendor-sources.md). Its photos, meanwhile, fill only
-  // the slots tier 1 could not, and a tier-1 capture supersedes them.
+  // rather than a re-crawl — and are not SHOWN: `display_enabled` is seeded from
+  // the tier (false here) and every price read now requires it (@cj/domain
+  // `offer-display.ts`). This row already exists in prod, so the run REPORTS a
+  // disagreement rather than writing it — an admin flipping the flag is what
+  // shows these prices. Its photos, meanwhile, fill only the slots tier 1 could
+  // not, and a tier-1 capture supersedes them.
   tier: 2,
   // Never a purchase destination either (owner ruling 2026-08-29).
   purchaseLinkout: false,

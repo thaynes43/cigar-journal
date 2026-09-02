@@ -39,10 +39,11 @@ export const vendors = pgTable("vendors", {
   // lower tiers' offers are still recorded, so promoting a shop is a flag flip
   // rather than a re-crawl. An admin's value on an existing row always wins.
   //
-  // WRITTEN, NOT YET READ (2026-09-02): no offers read path joins on this column —
-  // `reads.ts` latestSeries and catalog-browse's OFFER_JOIN gate on the listing
-  // match's status alone. So the tier decides what this column says and the column
-  // does not yet decide what renders.
+  // READ BY EVERY PRICE SURFACE since 2026-09-02 (@cj/domain `offer-display.ts`):
+  // `reads.ts`'s four offer queries and catalog-browse's OFFER_JOIN join `vendors`
+  // and require it, so a row with this false is recorded and invisible. It gates
+  // DISPLAY only — the offers still count as stocking evidence for the evidenced
+  // market and the stockist facts.
   displayEnabled: boolean("display_enabled").notNull().default(false),
   // Is this vendor a place to buy? (owner ruling 2026-08-29, ADR-006, migration
   // 0018). false = offers/photos still ingested and shown, but never as a

@@ -25,14 +25,25 @@ ALTER TABLE vendors
   ADD COLUMN tier smallint NOT NULL DEFAULT 2,
   ADD CONSTRAINT vendors_tier_check CHECK (tier BETWEEN 1 AND 9);
 
--- The backfill, and it is only two rows because the fleet is only two vendors
--- deep (#270). Guarded on `tier = 2` — the value the ADD COLUMN just gave every
--- row — so it is idempotent and so a later deliberate re-tiering is never undone
--- by a re-run, the same discipline 0025's vendor correction uses.
+-- The backfill: the registry rows whose ADAPTER declares tier 1, so a resolve
+-- after this migration reports no drift between the row and the adapter that
+-- seeds it. Guarded on `tier = 2` — the value the ADD COLUMN just gave every row
+-- — so it is idempotent and so a later deliberate re-tiering is never undone by
+-- a re-run, the same discipline 0025's vendor correction uses.
 --
--- Fox Cigar -> 1: an NC shop the owner buys from and links out to, and today the
--- only vendor with an offers walk, so it is already the de-facto price authority.
+-- All three are the owner's linkout NC shops. Fox Cigar is the only one crawling
+-- today, and the only vendor with an offers walk, so it is already the de-facto
+-- price authority; 2 Guys and Small Batch are `crawl_enabled = false` behind
+-- their in-cluster probes, and a tier is a posture, not a promise the lane runs.
+-- Their rows may not exist yet — the UPDATE simply matches nothing then, and the
+-- adapter seeds tier 1 on first resolve.
+--
 -- Cuban Lou's stays at the default 2: it is off the r/cubancigars approved list
 -- (`approval_status = 'unapproved'`, `purchase_linkout = false`), so its offers
 -- are recorded and never shown and its photos fill only what tier 1 could not.
-UPDATE vendors SET tier = 1 WHERE name = 'Fox Cigar' AND tier = 2;
+--
+-- `display_enabled` is NOT touched on any existing row. The tier seeds it for a
+-- NEW row only (the crawler's `adapterPosture`); on a row that already exists it
+-- is admin data, and an admin's value outranks a migration.
+UPDATE vendors SET tier = 1
+ WHERE name IN ('Fox Cigar', '2 Guys Cigars', 'Small Batch Cigar') AND tier = 2;

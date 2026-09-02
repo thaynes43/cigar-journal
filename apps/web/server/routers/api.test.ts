@@ -289,9 +289,12 @@ describe("tRPC API", () => {
   // left unexposed, so the web could not tell "never offered" from "lapsed".
   it("summarises a cigar's whole offer series, counting observations with no per-stick price", async () => {
     const cigarId = await h.seedCigar({ canonicalName: `Lapsed ${newRequestId()}`, brand: "LA" });
+    // Display-enabled explicitly: the column defaults to false and the offer
+    // reads gate on it (ADR-015), and this case is about a lapsed price that IS
+    // shown, not a vendor that is not.
     const [vendor] = await h.deps.db
       .insert(vendors)
-      .values({ name: `Lapsed Shop ${newRequestId()}` })
+      .values({ name: `Lapsed Shop ${newRequestId()}`, displayEnabled: true })
       .returning({ id: vendors.id });
     const [match] = await h.deps.db
       .insert(listingMatches)

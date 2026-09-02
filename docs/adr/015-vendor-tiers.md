@@ -39,7 +39,15 @@ CronJob pair in haynes-ops because the CLI takes one `--vendor` (#156).
 - **Prices are recorded from every crawled vendor and displayed only from
   tier 1.** `display_enabled` stays the display gate and is true only for
   tier 1; lower tiers' offers are kept (so a promotion is a flag flip, not a
-  re-crawl) and never rendered.
+  re-crawl) and never rendered. Every read that puts a price in front of a
+  user requires it (`@cj/domain` `offer-display.ts`, wired 2026-09-02 —
+  before that the column was written and read by nothing). What is gated is
+  DISPLAY alone: a lower tier's offers still count as stocking evidence for
+  the evidenced market and the stockist facts, and admin surfaces see them.
+  An observation that names no vendor (chat, ADR-009 `source_name`) belongs
+  to no tier and is never gated; one whose named source RESOLVED to a
+  registry vendor is that vendor's price and takes that vendor's gate, so a
+  shop cannot be display-grade through chat and hidden through the crawl.
 - **Photos fall down the tier list.** The enrich drain for a vendor of tier
   *t* may take an ask only when every enabled vendor of a higher tier that
   covers the ask's market has already looked and missed (`enrichment_attempts`
