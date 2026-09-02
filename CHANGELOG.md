@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.1](https://github.com/thaynes43/cigar-journal/compare/v0.40.0...v0.40.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **crawler,db:** a bare Fox/Cigarworld/J.J. Fox listing is a single — impliedPackaging + backfill 0035 (DESIGN-005) ([#282](https://github.com/thaynes43/cigar-journal/issues/282)) ([dbe8666](https://github.com/thaynes43/cigar-journal/commit/dbe866694ef10ce07d782a8b0ab55e1a858385d7))
+
 ## [0.40.0](https://github.com/thaynes43/cigar-journal/compare/v0.39.1...v0.40.0) (2026-09-02)
 
 
