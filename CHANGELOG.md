@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.0](https://github.com/thaynes43/cigar-journal/compare/v0.39.1...v0.40.0) (2026-09-02)
+
+
+### Features
+
+* **web,domain:** prices by packaging — tiered Price section, from-per-stick tiles, bestSingle (DESIGN-005) ([#280](https://github.com/thaynes43/cigar-journal/issues/280)) ([fa55c5f](https://github.com/thaynes43/cigar-journal/commit/fa55c5f536185a6acd958353998b4e3122eeb47c))
+
 ## [0.39.1](https://github.com/thaynes43/cigar-journal/compare/v0.39.0...v0.39.1) (2026-09-02)
 
 
