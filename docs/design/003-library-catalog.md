@@ -274,9 +274,10 @@ sequence (rights-honest, fastest visible fix first):
    ambiguous → proposal queue. Owner's 2026-08-29 direction authorizes
    sourcing from retailer/brand sites; per-site robots/ToS reads remain
    mandatory before any automated fetch (ADR-006 rule).
-3. **NC adapters:** 2 Guys Cigars and Small Batch Cigar next (same
-   sitemap+JSON-LD shape as Fox), each after a live robots/ToS read from
-   the crawl pod. **Cigars International is dropped** (bot defenses +
+3. **NC adapters:** 2 Guys Cigars and Small Batch Cigar next (both
+   sitemap-enumerated; Small Batch's shape is Fox's, 2 Guys serves
+   OpenGraph/microdata and no JSON-LD at all — ADR-006 2026-09-02), each
+   after a live robots/ToS read from the crawl pod. **Cigars International is dropped** (bot defenses +
    sister-site ToS scraping ban).
 4. **CC sources:** per ADR-006 the registry decision stands — Cuban Lou's
    (WooCommerce, softest target) for catalog/photo depth with

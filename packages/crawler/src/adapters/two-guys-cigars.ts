@@ -10,8 +10,8 @@ import type { ExclusionVendorAdapter } from "./types.js";
 // disallowed outright. We are not among them, `/` is allowed, and the 5s delay is
 // honored by `minIntervalMs` below.
 //
-// `crawlEnabled: false` still, and it CANNOT go true yet: see "the standing
-// blocker" at the bottom.
+// `crawlEnabled: false` still: the parser blocker is fixed (#252) but no probe
+// has run on this build — see the bottom of the file for what is left.
 //
 // --- how the gate got here (three in-cluster probes) -------------------------
 // 2026-08-30 (#179): `productPathPrefix: "/store/"` admitted 1,462 locs, all of
@@ -91,6 +91,22 @@ export const twoGuysCigars: ExclusionVendorAdapter = {
   productPathSegments: { min: 1, max: 1 },
   // No prefix to ask robots about, and products sit at the root, so the gate path
   // is `/` (the default). Stated by omission, as Small Batch does.
+  //
+  // --- page shape (ADR-006 amendment 2026-09-02, issue #252) -----------------
+  // This vendor serves NO `application/ld+json` on any page. Its product facts
+  // are OpenGraph (`og:type=product`, `product:price:amount`/`:currency`,
+  // `og:availability`, `og:upc`, `og:brand`, `og:image`) over a
+  // `schema.org/Product` itemscope whose only itemprop is `name`.
+  productMarkup: "opengraph",
+  // And its product breadcrumb is "Home / <brand>" by design ("ticket 126909:
+  // Home and brand URL instead of Breadcrumbs on product pages"), so the category
+  // comes from the vendor's own tag list instead. Live: a cigar page's keywords
+  // carry a literal `Cigars` token (`30 nick anniversary nicaragua,Cigars,Perdomo
+  // 30th Sun Grown`), an accessory's name its own aisle (`,Air Freshening,Air
+  // Freshening Accessories`) — so the two patterns below read the tags exactly as
+  // they read a breadcrumb path elsewhere, and a page with NO keywords tag yields
+  // an empty path and is refused.
+  categorySource: "keywords-meta",
   cigarCategoryPattern: /cigar/i,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?/i,
   excludeNamePattern: /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b/i,
@@ -112,24 +128,22 @@ export const twoGuysCigars: ExclusionVendorAdapter = {
   maxPages: 500,
 };
 
-// --- the standing blocker (found 2026-09-01, NOT fixed here) -----------------
-// This adapter now selects the right URLs and still cannot produce a listing:
-// 2 Guys serves NO `application/ld+json` AT ALL. Zero blocks in all 18 pages
-// fetched, product pages included. What a product page does carry:
+// --- what still stands between this adapter and `crawlEnabled: true` ---------
+// The parser blocker is GONE (issue #252): the OG/microdata extractor and the
+// keywords category source above read this vendor's pages, and the fixtures in
+// `__fixtures__/two-guys/` parse to listings — the two cigars admitted, the
+// candle refused as an accessory. What is left is verification and plumbing, in
+// order:
 //
-//   <meta property="og:type" content="product">        og:title / og:image
-//   <meta property="product:price:amount" content="13.79">   product:price:currency
-//   <meta property="og:availability" content="instock">      og:upc / og:brand
-//   <div itemscope itemtype="https://schema.org/Product"> … <h1 itemprop="name">
+//   1. An in-cluster `--probe` passing the #179 seven-point bar ON THIS BUILD.
+//      The dev pod cannot reach the domain, so every number here is a fixture
+//      claim until a Job says otherwise: `product-locs` should read 3,841,
+//      `parsed>=2` and `cigars>=1` are the two this change exists to move, and
+//      the accepted count against 4,888 one-segment locs is the ratio to watch.
+//   2. A controller pair in haynes-ops (seed + offers lanes), and
+//   3. A seed run — with `maxPages` raised deliberately, since 500 is a
+//      probe-era cap well under the 3,841 the gate accepts.
 //
-// and its breadcrumb is deliberately "Home / <brand>" — no category path (the
-// page's own comment: "ticket 126909: Home and brand URL instead of Breadcrumbs
-// on product pages"). CATEGORY pages keep a real `Home > Cigars > <line>` trail.
-//
-// `extractJsonLd` reads `<script type="application/ld+json">` only, so a probe
-// against this gate reports `sampled=3 parsed=0` and the note "no schema.org
-// Product JSON-LD". That is now a TRUE and correctly-attributed reading, and it
-// is the reason `crawlEnabled` stays false: a second extractor (OG + microdata)
-// is a core change with an ADR question behind it — whether OG counts as a
-// structured source, and where the category comes from when the product page
-// does not state one. Tracked separately; see the ADR-006 amendment 2026-09-01.
+// `crawlEnabled` stays false until 1 passes; enabling is additionally gated on
+// #196 Wave 5. See the ADR-006 amendments of 2026-09-01 (the gate and the live
+// shape) and 2026-09-02 (OG/microdata as a structured source).

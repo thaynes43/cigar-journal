@@ -1,13 +1,14 @@
 import { parsePackagingFacts } from "@cj/domain";
 import type { JsonLdOffer, JsonLdPriceSpecification, JsonLdProduct } from "./jsonld.js";
-import type { VendorAdapter } from "../adapters/types.js";
+import type { CategorySource, VendorAdapter } from "../adapters/types.js";
 
-// A vendor-neutral listing distilled from a schema.org Product + its breadcrumb
-// trail. Price is carried in integer cents (the offers table stores a decimal;
-// ingest converts on write); availability collapses schema.org InStock/OutOfStock
-// to a tristate, unknown → null (never guessed). `categoryPath` is the breadcrumb
-// names with the product itself dropped, so the category filter reasons over the
-// taxonomy, not the product name.
+// A vendor-neutral listing distilled from a schema.org Product + the category the
+// page states. Price is carried in integer cents (the offers table stores a
+// decimal; ingest converts on write); availability collapses schema.org
+// InStock/OutOfStock to a tristate, unknown → null (never guessed).
+// `categoryPath` is the taxonomy the cigar gate reasons over, never the product
+// name: a breadcrumb trail with its trailing product crumb dropped, or the
+// vendor's keywords tag list whole (ADR-006 2026-09-02, `categorySource`).
 export interface NormalizedListing {
   name: string;
   priceCents: number | null;
@@ -99,7 +100,21 @@ export function decodeEntities(raw: string): string {
   return value;
 }
 
-export function normalizeListing(product: JsonLdProduct, breadcrumbs: string[]): NormalizedListing | null {
+// The category as the adapter declared its source (ADR-006 2026-09-02). A
+// breadcrumb trail ENDS WITH THE PRODUCT, so its last crumb is dropped and the
+// taxonomy remains; a keywords tag list is taxonomy end to end and is taken
+// whole — dropping its last token would throw away a real category on any page
+// whose tags happen to end with one.
+function categoryPathFrom(category: string[], source: CategorySource): string[] {
+  if (source === "keywords-meta") return [...category];
+  return category.length > 1 ? category.slice(0, -1) : [...category];
+}
+
+export function normalizeListing(
+  product: JsonLdProduct,
+  category: string[],
+  categorySource: CategorySource = "breadcrumbs",
+): NormalizedListing | null {
   const name = typeof product.name === "string" ? decodeEntities(product.name.trim()) : "";
   if (!name) return null;
 
@@ -114,15 +129,15 @@ export function normalizeListing(product: JsonLdProduct, breadcrumbs: string[]):
     inStock: availabilityToStock(offer?.availability),
     imageUrl: imageUrl(product.image),
     sku: typeof product.sku === "string" ? product.sku : null,
-    // Drop the trailing breadcrumb (the product itself); the rest is taxonomy.
-    categoryPath: breadcrumbs.length > 1 ? breadcrumbs.slice(0, -1) : [...breadcrumbs],
+    categoryPath: categoryPathFrom(category, categorySource),
     packaging: packaging.packaging,
     sticksPerPackage: packaging.sticksPerPackage,
   };
 }
 
-// A listing is a cigar when its breadcrumb taxonomy names a cigar category and
-// is not an accessory/sampler/etc. (adapter-configured). Samplers are excluded
+// A listing is a cigar when its taxonomy names a cigar category and is not an
+// accessory/sampler/etc. (adapter-configured). An EMPTY path matches nothing and
+// is therefore refused — the ruling for a page that states no category at all. Samplers are excluded
 // on purpose — a mixed box is not one catalog cigar.
 export function isCigarCategory(categoryPath: string[], adapter: VendorAdapter): boolean {
   const joined = categoryPath.join(" / ");

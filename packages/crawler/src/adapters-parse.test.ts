@@ -10,7 +10,8 @@ import type { VendorAdapter } from "./adapters/types.js";
 // so each new adapter carries a HAND-WRITTEN representative robots/sitemap/product
 // set. We drive it through runProbe — the same read the coordinator runs
 // in-cluster before enabling the vendor — to prove OUR pipeline parses the shape
-// the adapter declares (product gate, sitemap kind, JSON-LD, category gate). The
+// the adapter declares (product gate, sitemap kind, structured markup, category
+// gate). The
 // live shapes themselves still need the in-cluster probe to confirm.
 
 interface AdapterCase {
@@ -27,12 +28,14 @@ interface AdapterCase {
   expectedKind: "urlset" | "sitemapindex";
 }
 
-// 2 Guys is deliberately NOT in this list. The harness asserts `verdict=ok` and
-// a parsed product, and 2 Guys cannot produce one: the 2026-09-01 live read
-// (#217) found no `application/ld+json` on its pages at all. Its fixtures are
-// real captures and its probe is asserted, honestly, as needs-attention in
-// `core/probe.test.ts`. Putting it back here would mean re-writing a page it does
-// not serve, which is the mistake this whole lane has been unwinding.
+// 2 Guys is still NOT in this list, for a different reason than before. It CAN
+// now produce a parsed product — the OG/microdata extractor and the keywords
+// category source landed with #252 — but this harness is shaped for a
+// hand-written pair (`product.html` + `product-cutter.html`, exactly one cigar).
+// 2 Guys' fixtures are verbatim live captures under their own names and its probe
+// samples three of them, so its full parse is asserted against the real bytes in
+// `core/probe.test.ts` instead. Re-writing its pages to fit this shape is the
+// mistake this whole lane has been unwinding.
 const cases: AdapterCase[] = [
   {
     adapter: smallBatchCigar,
