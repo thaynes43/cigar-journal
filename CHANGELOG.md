@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.38.0](https://github.com/thaynes43/cigar-journal/compare/v0.37.0...v0.38.0) (2026-09-02)
+
+
+### Features
+
+* **crawler:** OpenGraph/microdata product extractor and keywords-meta category for 2 Guys ([#252](https://github.com/thaynes43/cigar-journal/issues/252)) ([#271](https://github.com/thaynes43/cigar-journal/issues/271)) ([4c122e8](https://github.com/thaynes43/cigar-journal/commit/4c122e8199131ed488b832917a0d6ba570c33b6d))
+
+
+### Bug Fixes
+
+* **crawler:** Small Batch adapter matches the live site; zero JSON-LD prices are unknown, not $0 ([#270](https://github.com/thaynes43/cigar-journal/issues/270)) ([#274](https://github.com/thaynes43/cigar-journal/issues/274)) ([08d99b2](https://github.com/thaynes43/cigar-journal/commit/08d99b2c8d633c6c2675a9322bf189fdb1dbc706))
+* **domain:** deleteSmoke removes its photo objects; kind changes through the drop are audited ([#264](https://github.com/thaynes43/cigar-journal/issues/264), [#267](https://github.com/thaynes43/cigar-journal/issues/267)) ([#268](https://github.com/thaynes43/cigar-journal/issues/268)) ([853830d](https://github.com/thaynes43/cigar-journal/commit/853830d2763049f2b22f01b32dac44cf765dcb98))
+
 ## [0.37.0](https://github.com/thaynes43/cigar-journal/compare/v0.36.1...v0.37.0) (2026-09-02)
 
 
