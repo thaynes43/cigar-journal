@@ -82,6 +82,46 @@ LLM-created cigars accumulate until curated.
 
 ## Amendments
 
+- **2026-09-02 — the first Habanos picture sources, and two extractor
+  gaps the probe exposed (ADR-015, issue #270).** Fifteen candidate Habanos
+  retailers were probed from the cluster for robots, sitemap, structured
+  markup, coverage of the eight queued Cuban asks, photo size and terms.
+  Four are adopted as **tier-2 to tier-5 sources** — pictures and catalog
+  structure, prices recorded and never displayed — in fallback order:
+  **Montefortuna Cigars** (Geneva/Madrid; WooCommerce, JSON-LD Product with
+  sku and marca, 2,087 products, 8/8 asks, 677×902 product shots, no prices
+  on the page), **EGM Cigars** (Balerna; Shopify, 2000×2000 photos, 8/8),
+  **Cigarworld.de** (Arnold André; JSON-LD with sku/mpn/brand/category and
+  real EUR prices, 6,874 cigar URLs, 8/8, 3000-px studio strips), and
+  **J.J. Fox** (London/Dublin; Magento, OpenGraph + keywords-meta — the
+  2 Guys shape — real GBP prices, 8/8). None publishes an anti-scraping or
+  automated-access clause. Montefortuna's robots carries
+  `Content-Signal: search=yes,ai-train=no,use=reference`, an express DSM
+  Art. 4 reservation: a catalog and photo crawl shown with attribution is
+  `use=reference`, which it permits, and nothing here trains a model;
+  recorded as a stated reservation. Cigarworld's terms forbid commercial
+  resale of its *goods*, not data use. Rejected: TopCubans (no product
+  markup, soft-404s, keyword-stuffed pages), Cigar Terminal (photos are
+  450×58 strips; single-crumb breadcrumb), Noblego (no category source
+  reachable), C.Gars/Turmeaus/Havana House (Cloudflare 403), Pacific Cigar
+  and Havana House Canada (unreachable), cigare.com (parked).
+  - **The photo is not always the JSON-LD `image`.** Cigarworld's `image`
+    is a 300×51 thumbnail while its `og:image` is the full asset; J.J. Fox's
+    `og:image` carries a `?width=265` resize the bare path drops. Adapters
+    may therefore declare a **photo source** (`json-ld` | `og:image`) and
+    a **photo URL rewrite** (a pattern pair, or "strip the query"), applied
+    only to the URL the photo is fetched from — the listing itself is
+    unchanged.
+  - **`ProductGroup` is a `Product`.** Shopify emits `@type: ProductGroup`
+    with `hasVariant`; the JSON-LD extractor treats it as a Product node.
+    And a page whose JSON-LD carries `category` but no breadcrumb may
+    declare `categorySource: "json-ld-category"` — EGM sets
+    `"category": "Cigars"` and nothing else.
+  Each adapter ships `crawlEnabled: false` until its own in-cluster
+  `--probe` passes the bar and the registry row is enabled; tiers are set in
+  the adapter posture (Montefortuna 2, EGM 3, Cigarworld 4, J.J. Fox 5) so
+  `--all-enabled` walks them in that order.
+
 - **2026-09-02 — vendors are TIERED, and three of this ADR's rules are now read
   through the tier (ADR-015, issue #270).** Nothing here is retracted; what
   changes is the ordering laid over it. `vendors.tier` (migration 0034, 1 is

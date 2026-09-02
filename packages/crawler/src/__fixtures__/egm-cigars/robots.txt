@@ -1,0 +1,31 @@
+# Live capture 2026-09-02, trimmed. The live file opens with a long agent
+# preamble pointing at a UCP/MCP endpoint and forbidding automated CHECKOUT and
+# PAYMENT; we never transact, so nothing there bears on reading product pages.
+# Terms of Service: https://www.shopify.com/legal/terms
+User-agent: *
+Allow: /
+Allow: /products/account
+Allow: /collections/account
+
+# Private / transactional
+Disallow: /admin
+Disallow: /cart/
+Disallow: /checkout
+Disallow: /checkouts/
+Disallow: /orders
+Disallow: /account
+
+# Shopify-internal endpoints not meant for crawlers
+Disallow: /services
+Disallow: /sf_*
+
+# AJAX surfaces: agents should use UCP/MCP instead
+Disallow: /cart.js
+Disallow: /recommendations/products
+
+# Filters, sort, previews, language-picker crawl traps
+Disallow: /collections/*sort_by*
+Disallow: /collections/*filter*&*filter*
+Disallow: /*?*preview_theme_id=*
+
+Sitemap: https://egmcigars.com/sitemap.xml

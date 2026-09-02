@@ -15,6 +15,10 @@ import { foxCigar } from "../adapters/fox-cigar.js";
 import { cubanLous } from "../adapters/cuban-lous.js";
 import { smallBatchCigar } from "../adapters/small-batch-cigar.js";
 import { twoGuysCigars } from "../adapters/two-guys-cigars.js";
+import { montefortuna } from "../adapters/montefortuna.js";
+import { egmCigars } from "../adapters/egm-cigars.js";
+import { cigarworldDe } from "../adapters/cigarworld-de.js";
+import { jjFox } from "../adapters/jj-fox.js";
 import { parseSitemap } from "./sitemap.js";
 import { loadFixture } from "../testing/fixtures.js";
 
@@ -521,5 +525,102 @@ describe("registry invariant", () => {
     expect(halfwheel.focus).toBeUndefined();
     // Referenced so the bindings above are not dead code the linter strips.
     expect([withFocus, asDestination, marketless]).toHaveLength(3);
+  });
+});
+
+// --- the 2026-09-02 Habanos picture sources (#270) ---------------------------
+// Every URL below is a real loc from the in-cluster probe log, so these are the
+// gates answering the live catalogue rather than a shape we invented.
+describe("Habanos picture sources — the gate against live locs", () => {
+  const cases: { adapter: typeof montefortuna | typeof jjFox; accept: string[]; reject: string[] }[] = [
+    {
+      adapter: montefortuna,
+      accept: [
+        "https://www.montefortunacigars.com/shop/cohiba-siglo-vi/",
+        "https://www.montefortunacigars.com/shop/2-boxes-of-25-montecristo-no-4/",
+        // Admitted on shape and dropped later, by the JSON-LD that is not there.
+        "https://www.montefortunacigars.com/shop/",
+      ],
+      reject: [
+        "https://www.montefortunacigars.com/shop/brands/cohiba/",
+        "https://www.montefortunacigars.com/shop/page/2/",
+        "https://www.montefortunacigars.com/product-type/cigars/cohiba/",
+        "https://www.montefortunacigars.com/",
+      ],
+    },
+    {
+      adapter: egmCigars,
+      accept: [
+        "https://egmcigars.com/products/cohiba-siglo-6-slb",
+        "https://egmcigars.com/products/halo-onyx-cigar-cutter",
+      ],
+      reject: [
+        // The locale copies of the same catalogue — crawled once, not four times.
+        "https://egmcigars.com/en-gb/products/cohiba-siglo-6-slb",
+        "https://egmcigars.com/en-cn/products/cohiba-siglo-6-slb",
+        "https://egmcigars.com/collections/cuban-single-cigars",
+        "https://egmcigars.com/pages/cigar-accessories",
+      ],
+    },
+    {
+      adapter: cigarworldDe,
+      accept: [
+        "https://www.cigarworld.de/zigarren/kuba/regulares/cohiba-siglo-vi-01002_5618",
+        "https://www.cigarworld.de/zigarren/dominikanische-republik/ashton-classic-01102",
+      ],
+      reject: [
+        // The one this prefix exists to get right: `zubehoer` sits where the
+        // separator must be, so a `startsWith` keeps the accessory tree out.
+        "https://www.cigarworld.de/zigarrenzubehoer/humidor/habanos-grosstubo-cohiba-siglo-vi-6396530-90016744_49422",
+        "https://www.cigarworld.de/zigarillos/kuba/guantanamera-cristales-01050_1234",
+        "https://www.cigarworld.de/zigarren/sampler/kuba-einsteiger-sampler-90012345",
+        "https://www.cigarworld.de/zigarren/marken/cohiba",
+        "https://www.cigarworld.de/en/cigars/cuba/regulares/partagas-shorts-01008_4003",
+      ],
+    },
+    {
+      adapter: jjFox,
+      accept: [
+        "https://www.jjfox.co.uk/partagas-shorts-842.html",
+        "https://www.jjfox.co.uk/cohiba-siglo-vi.html",
+        "https://www.jjfox.co.uk/hoyo-epicure-2-tubos-1s-152180.html",
+      ],
+      reject: [
+        "https://www.jjfox.co.uk/",
+        "https://www.jjfox.co.uk/cigars.html",
+        "https://www.jjfox.co.uk/cigars/country/cuban-cigars.html",
+        "https://www.jjfox.co.uk/cigar-accessories/humidors.html",
+        "https://www.jjfox.co.uk/cigar-gifts/view-all.html",
+        "https://www.jjfox.co.uk/pipes-and-tobacco.html",
+        "https://www.jjfox.co.uk/best-sellers.html",
+        "https://www.jjfox.co.uk/new-arrivals.html",
+        "https://www.jjfox.co.uk/event-tickets.html",
+        "https://www.jjfox.co.uk/rare-limited-edition-cigars.html",
+        "https://www.jjfox.co.uk/brands",
+        "https://www.jjfox.co.uk/brand/james-j-fox.html",
+        "https://www.jjfox.co.uk/who-we-are",
+        "https://www.jjfox.co.uk/store",
+        "https://www.jjfox.co.uk/events",
+        "https://www.jjfox.co.uk/customer/account/create/",
+        "https://www.jjfox.co.uk/index.php",
+      ],
+    },
+  ];
+
+  for (const c of cases) {
+    it(`${c.adapter.slug}: admits its products and rejects the rest`, () => {
+      for (const url of c.accept) expect([url, isProductUrl(url, c.adapter)]).toEqual([url, true]);
+      for (const url of c.reject) expect([url, isProductUrl(url, c.adapter)]).toEqual([url, false]);
+    });
+  }
+
+  // A hyphen is not a segment boundary — the trap that let Small Batch's
+  // `^\/cart\b` eat `/cart-blanche-robusto/`. Each new pattern is checked against
+  // a slug that merely STARTS with one of its reserved words.
+  it("ends every reserved word at a segment boundary, never at a hyphen", () => {
+    expect(isProductUrl("https://www.montefortunacigars.com/shop/brands-of-cuba-sampler/", montefortuna)).toBe(true);
+    expect(isProductUrl("https://www.jjfox.co.uk/store-anniversary-selection-77.html", jjFox)).toBe(true);
+    expect(isProductUrl("https://www.jjfox.co.uk/brands-of-havana-12.html", jjFox)).toBe(true);
+    expect(isProductUrl("https://www.cigarworld.de/zigarren/samplerino-01001_9", cigarworldDe)).toBe(true);
   });
 });

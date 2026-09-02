@@ -1,0 +1,35 @@
+# Live capture 2026-09-02, trimmed to the groups that decide our access.
+# One `*` group: account/cart/order/payment/search/ajax, the placeholder images
+# and six non-German language roots. NOTHING touches /zigarren/, and there is NO
+# Crawl-delay for `*` — the adapter's minIntervalMs is our own politeness.
+# CCBot and BLEXBot are named and disallowed outright; we are neither.
+User-agent: *
+Disallow: */meinkonto/
+Disallow: */warenkorb/
+Disallow: */bestellung/
+Disallow: */payment/
+Disallow: */shop/assistent
+Disallow: */shop/suche
+Disallow: */ajax/
+Disallow: */placeholder*.jpg
+Disallow: /*forcedesktop=
+Disallow: /*phsort=
+Disallow: /es/
+Disallow: /fr/
+Disallow: /it/
+Disallow: /nl/
+Disallow: /pl/
+Disallow: /pt/
+Disallow: /zh/
+
+User-agent: msnbot
+Crawl-delay: 10
+User-agent: SemrushBot
+Crawl-delay: 30
+User-agent: CCBot
+Disallow: /
+User-agent: BLEXBot
+Disallow: /
+
+Sitemap: https://www.cigarworld.de/sitemap.xml
+Sitemap: https://www.cigarworld.de/sitemap_image.xml

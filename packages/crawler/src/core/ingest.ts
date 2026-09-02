@@ -372,10 +372,18 @@ async function capturePhoto(
   vendorId: string,
   posture: VendorPosture,
   cigarId: string,
-  listing: NormalizedListing,
+  // THE URL THE PHOTO IS FETCHED FROM, resolved by `extractProductMarkup` from the
+  // adapter's `photoSource`/`photoUrlRewrite` (ADR-006 amendment 2026-09-02).
+  // Separate from `listing.imageUrl` — which is what the markup published and what
+  // the offer's raw payload carries — because for two of the 2026-09-02 vendors
+  // they differ: Cigarworld's JSON-LD `image` is a 300x51 thumbnail of the asset
+  // its `og:image` names, and J.J. Fox's `og:image` carries a 265px resize query.
+  // It is also what `product_photos.source_url` records, since that column is the
+  // provenance of the bytes in the slot, not of the listing.
+  photoUrl: string | null,
   stats: IngestStats,
 ): Promise<PhotoCapture> {
-  if (!deps.storage || !listing.imageUrl) return "skipped";
+  if (!deps.storage || !photoUrl) return "skipped";
   const { focus, tier } = posture;
 
   // ONE READ FOR BOTH QUESTIONS — may this vendor write the slot (market
@@ -403,7 +411,7 @@ async function capturePhoto(
   // Bounded: a vendor's product image is whatever their CMS holds, and an
   // oversize one throws — both call sites already isolate a photo failure into
   // stats.errors rather than losing the offer (ADR-007).
-  const image = await deps.fetcher.fetchBinary(listing.imageUrl, MAX_IMAGE_BYTES);
+  const image = await deps.fetcher.fetchBinary(photoUrl, MAX_IMAGE_BYTES);
   if (image.status !== 200) {
     stats.errors += 1;
     return "skipped";
@@ -436,7 +444,7 @@ async function capturePhoto(
         const updated = await tx.execute(sql`
           UPDATE product_photos
              SET vendor_id = ${vendorId}::uuid,
-                 source_url = ${listing.imageUrl},
+                 source_url = ${photoUrl},
                  object_key = ${objectKey},
                  thumb_key = ${thumbKey},
                  content_type = ${processed.contentType},
@@ -476,7 +484,7 @@ async function capturePhoto(
             rights: "pending",
             objectKey,
             thumbKey,
-            sourceUrl: listing.imageUrl,
+            sourceUrl: photoUrl,
           },
           correlationId: null,
         });
@@ -524,7 +532,7 @@ async function capturePhoto(
     const inserted = await deps.db.execute(sql`
       INSERT INTO product_photos
         (cigar_id, vendor_id, source_url, object_key, thumb_key, content_type, width, height, bytes, rights)
-      SELECT ${cigarId}::uuid, ${vendorId}::uuid, ${listing.imageUrl}, ${objectKey}, ${thumbKey},
+      SELECT ${cigarId}::uuid, ${vendorId}::uuid, ${photoUrl}, ${objectKey}, ${thumbKey},
              ${processed.contentType}, ${processed.width}, ${processed.height}, ${processed.full.length},
              'pending'
       WHERE ${mayWriteCatalogPhotoSql(focus, sql`${cigarId}::uuid`)}
@@ -571,6 +579,7 @@ async function ingestListing(
   url: string,
   listing: NormalizedListing,
   product: JsonLdProduct,
+  photoUrl: string | null,
   stats: IngestStats,
 ): Promise<void> {
   const now = deps.now();
@@ -770,7 +779,7 @@ async function ingestListing(
 
   if (cigarId) {
     try {
-      await capturePhoto(deps, options.vendorId, posture, cigarId, listing, stats);
+      await capturePhoto(deps, options.vendorId, posture, cigarId, photoUrl, stats);
     } catch (error) {
       // Photo ingestion is isolated from the offer write (ADR-007).
       stats.errors += 1;
@@ -807,7 +816,7 @@ async function walkListings(
         stats.errors += 1;
         continue;
       }
-      const { product, category, categorySource } = extractProductMarkup(body, adapter);
+      const { product, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
       if (!product) continue;
       const listing = normalizeListing(product, category, categorySource);
       if (!listing) continue;
@@ -827,7 +836,7 @@ async function walkListings(
         continue;
       }
 
-      await ingestListing(deps, options, posture, crawlRunId, url, listing, product, stats);
+      await ingestListing(deps, options, posture, crawlRunId, url, listing, product, photoUrl, stats);
     } catch (error) {
       stats.errors += 1;
       void error;
@@ -1096,7 +1105,13 @@ async function tryEnrichCandidates(
   // Did we actually READ this vendor's catalogue? A 200 is not enough — see the
   // header: a gate that admits non-product pages answers 200 and parses nothing.
   let parsed = false;
-  const admitted: { url: string; listing: NormalizedListing; product: JsonLdProduct; sim: number }[] = [];
+  const admitted: {
+    url: string;
+    listing: NormalizedListing;
+    product: JsonLdProduct;
+    photoUrl: string | null;
+    sim: number;
+  }[] = [];
 
   for (const candidate of ranked) {
     const { status, body } = await deps.fetcher.fetchText(candidate.url);
@@ -1104,7 +1119,7 @@ async function tryEnrichCandidates(
       stats.errors += 1;
       continue;
     }
-    const { product, category, categorySource } = extractProductMarkup(body, adapter);
+    const { product, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
     if (!product) continue;
     const listing = normalizeListing(product, category, categorySource);
     if (!listing) continue;
@@ -1140,6 +1155,7 @@ async function tryEnrichCandidates(
       url: candidate.url,
       listing,
       product,
+      photoUrl,
       sim: await nameSimilarity(deps, ask.canonicalName, listing.name),
     });
   }
@@ -1299,7 +1315,7 @@ async function tryEnrichCandidates(
     // make on its own.
     let captured: PhotoCapture = "skipped";
     try {
-      captured = await capturePhoto(deps, options.vendorId, posture, ask.cigarId, listing, stats);
+      captured = await capturePhoto(deps, options.vendorId, posture, ask.cigarId, best.photoUrl, stats);
     } catch {
       stats.errors += 1;
     }

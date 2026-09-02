@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Five of the 1,001 locs in the live child, chosen to carry every shape the gate has to separate: the /shop/ root (admitted, parses to nothing), a pagination and a brand archive (both subtracted by nonProductPathPattern), one cigar, two multi-pack/condition lots the name pattern refuses, and an accessory the category pattern refuses -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://www.montefortunacigars.com/shop/</loc></url>
+  <url><loc>https://www.montefortunacigars.com/shop/page/2/</loc></url>
+  <url><loc>https://www.montefortunacigars.com/shop/brands/cohiba/</loc></url>
+  <url><loc>https://www.montefortunacigars.com/shop/partagas-shorts-single/</loc></url>
+  <url><loc>https://www.montefortunacigars.com/shop/cohiba-siglo-vi/</loc></url>
+  <url><loc>https://www.montefortunacigars.com/shop/2-boxes-of-25-montecristo-no-4/</loc></url>
+  <url><loc>https://www.montefortunacigars.com/shop/xikar-xi3-cutter/</loc></url>
+</urlset>
