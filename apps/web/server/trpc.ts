@@ -23,6 +23,7 @@ const DOMAIN_TO_TRPC: Record<ErrorCode, TRPCErrorCode> = {
   smoke_not_found: "NOT_FOUND",
   photo_not_found: "NOT_FOUND",
   photo_limit: "CONFLICT",
+  photo_drop_not_found: "NOT_FOUND",
   // Photo upload links never flow through tRPC (the upload page's own route
   // handles them); mapped only to keep this record exhaustive over ErrorCode.
   upload_token_invalid: "BAD_REQUEST",

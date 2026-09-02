@@ -429,3 +429,23 @@ init container at startup (ADR-003).
   they surface one at a time as the crawler re-decides them — the same property
   0031 leaned on. Re-runnable: after the first execution no `status='auto'` row
   remains in the window.
+- `0033_photo_drops.sql` — the photo drop (ADR-014): `photo_drops` +
+  `staged_smoke_photos`, the link that collects a smoke's photos before the smoke
+  exists. `add_smoke_photo` binds to a `smokeId` and a live smoke is journaled as
+  ONE `save_smoke` at the end, so every photo taken during it had to be sent a
+  second time afterwards; the in-chat attachment never reaches the server on any
+  host we have (issue #202's probe), so the upload link is the only path and it
+  was bound to the wrong thing. A drop is bound to the USER instead: opened when
+  the first photo appears, multi-use for 48 hours, claimed by the save that
+  follows. Only the token's SHA-256 is stored (photo_upload_tokens/invites
+  discipline), which is also WHY re-opening rotates it — the raw token is not
+  re-derivable, so handing a drop back means minting a new link and killing the
+  old one. `staged_smoke_photos` is smoke_photos' shape bound to a drop, because
+  the claim MOVES rows across keeping the id and both object keys: no bucket copy,
+  at the price of a `drop/` prefix on a claimed photo's `object_key` — keys were
+  never load-bearing (ADR-007 authorizes at the route). Two FK rules carry the
+  lifecycle with no job: staged rows cascade from the drop, and
+  `photo_drops.smoke_id` is ON DELETE SET NULL so deleting a smoke CLOSES its drop
+  (claimed with no smoke reads `closed`) instead of erasing the claim. The 7-day
+  sweep of an unclaimed drop and its objects runs lazily, when the same user next
+  opens one.

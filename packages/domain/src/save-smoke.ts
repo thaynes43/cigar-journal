@@ -1,7 +1,7 @@
 import { auditLog, smokes, smokeProgression } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
-import type { SaveSmokeInput, SaveSmokeResult } from "./types.js";
+import type { PhotoDropClaimResult, SaveSmokeInput, SaveSmokeResult } from "./types.js";
 import { validateSaveInput } from "./validation.js";
 import { fingerprint } from "./fingerprint.js";
 import { normalizeDescriptors, verbatimDescriptors } from "./descriptors.js";
@@ -11,6 +11,7 @@ import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation
 import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
 import { applyConsumptionOnSave } from "./consumption.js";
 import { deriveHoldingSummary } from "./inventory.js";
+import { claimPhotoDrop } from "./photo-drops.js";
 
 // Persist one finished Smoke. Validate → resolve cigar (create unverified if
 // described) → write smoke + progression + idempotency key + audit row in ONE
@@ -22,7 +23,16 @@ export async function saveSmoke(
 ): Promise<SaveSmokeResult> {
   validateSaveInput(input);
   const requestFingerprint = fingerprint(input);
+  const saved = await commit(deps, principal, input, requestFingerprint);
+  return withPhotoDrop(deps, principal, input, saved);
+}
 
+async function commit(
+  deps: Deps,
+  principal: Principal,
+  input: SaveSmokeInput,
+  requestFingerprint: string,
+): Promise<SaveSmokeResult> {
   try {
     return await deps.db.transaction((tx) => saveWithinTx(tx, deps, principal, input, requestFingerprint));
   } catch (error) {
@@ -36,6 +46,40 @@ export async function saveSmoke(
     }
     throw error;
   }
+}
+
+// The photo drop's claim (ADR-014) — save_smoke's first post-commit step, and
+// isolated by construction. It runs AFTER the transaction, in its own; every
+// error it can raise is caught and reported as `failed`, because the smoke is
+// already written and a photo problem may never turn a committed save into an
+// error the caller will retry (ADR-007 failure isolation).
+//
+// It attaches to the RETURNED result only, never to the stored idempotency
+// envelope — which is why it also runs on a REPLAY. The envelope was written
+// before the claim existed, so a replayed save has nothing to read back; re-running
+// is safe because the claim is idempotent (a second claim of the same smoke moves
+// whatever is staged, usually nothing, and reports `claimed` again).
+//
+// Nothing is claimed that the caller did not name: no `photoDropId`, no claim, no
+// matter how many open drops the user has (ADR-014 — explicit, never inferred).
+async function withPhotoDrop(
+  deps: Deps,
+  principal: Principal,
+  input: SaveSmokeInput,
+  result: SaveSmokeResult,
+): Promise<SaveSmokeResult> {
+  const photoDropId = input.photoDropId;
+  if (photoDropId === undefined) return result;
+
+  const failed: PhotoDropClaimResult = { photoDropId, status: "failed", attached: 0, pending: 0 };
+  const photoDrop = await claimPhotoDrop(deps, principal, {
+    photoDropId,
+    smokeId: result.smoke.smokeId,
+    correlationId: input.correlationId ?? input.clientRequestId,
+    actor: provenanceToActor(input.provenance?.source ?? "llm-conversation"),
+  }).catch(() => failed);
+
+  return { ...result, photoDrop };
 }
 
 async function saveWithinTx(

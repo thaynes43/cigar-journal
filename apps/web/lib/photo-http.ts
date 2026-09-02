@@ -39,6 +39,7 @@ const DOMAIN_TO_STATUS: Record<ErrorCode, number> = {
   smoke_not_found: 404,
   photo_not_found: 404,
   photo_limit: 409,
+  photo_drop_not_found: 404,
   upload_token_invalid: 410,
   invite_invalid: 410,
   version_conflict: 409,

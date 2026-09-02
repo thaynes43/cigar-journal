@@ -62,7 +62,9 @@ export interface ConsumedProductUploadToken {
 export type ConsumedPhotoUploadToken = ConsumedSmokeUploadToken | ConsumedProductUploadToken;
 
 // SHA-256 hex — the at-rest form of the token (mirrors @cj/oauth's hashToken).
-function hashToken(token: string): string {
+// Shared with ./photo-drops.ts: both are URL tokens under the same at-rest rule,
+// and two transcriptions of "how a link is stored" is how one of them drifts.
+export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
