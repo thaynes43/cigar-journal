@@ -17,6 +17,7 @@ import {
 import {
   claimInvite,
   createInvite,
+  openPhotoDrop,
   reserveInvite,
   revokeInvite,
   saveSmoke,
@@ -25,6 +26,7 @@ import {
   type Deps,
   type Principal,
 } from "@cj/domain";
+import { createMemoryPhotoStorage } from "@cj/photos";
 import { createAuth } from "@cj/auth";
 
 // The e2e fixture: seed a real Postgres with catalog cigars, a signed-in admin
@@ -121,6 +123,10 @@ export interface Handoff {
     // Structured down to the brand only — the row the `line=unfiled` card drills to.
     unfiled: { id: string; canonicalName: string };
   };
+  // An OPEN photo drop belonging to the admin (ADR-014), and the raw token of the
+  // link it minted. The drop page is reached with the token alone, so the spec
+  // that drives it never signs in.
+  photoDrop: { token: string };
   publicSmoke: { id: string; cigarName: string; narrativeSnippet: string };
   privateSmokeId: string;
   // Journal entries with no title, so the smoke-detail h1 falls back to the
@@ -542,6 +548,13 @@ export async function seed(opts: {
     ).rows[0]!.id;
     await claimInvite(deps, { inviteId: nonAdminReserved.inviteId, userId: nonAdminId });
 
+    // --- An open photo drop (ADR-014) --------------------------------------
+    // The link the drop page is opened with. Storage is only reached from here by
+    // the retention sweep, which has nothing to sweep in a database this fresh, so
+    // the in-memory implementation is enough — the photos the SPEC uploads travel
+    // through the app's own S3 client into the harness object store.
+    const photoDrop = await openPhotoDrop(deps, createMemoryPhotoStorage(), admin);
+
     // --- Invites for the redemption specs -----------------------------------
     const openInvites: { token: string; email: string }[] = [];
     for (const attempt of [0, 1]) {
@@ -666,6 +679,7 @@ export async function seed(opts: {
         },
         unfiled: { id: undercrown, canonicalName: "Drew Estate Undercrown Gordito" },
       },
+      photoDrop: { token: photoDrop.token },
       publicSmoke: {
         id: publicSave.smoke.smokeId,
         cigarName: "Cohiba Siglo VI",

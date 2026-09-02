@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
+import { startObjectStorage, type ObjectStorageShim } from "./object-storage.js";
 import { seed, ALLOWLIST } from "./seed.js";
 
 // The e2e server harness — the single command Playwright's `webServer` runs. It
@@ -10,10 +11,12 @@ import { seed, ALLOWLIST } from "./seed.js";
 // rig the domain tests and the local preview use), seeds it through the real
 // domain services, writes the storage-state + handoff artifacts the specs read,
 // then launches a PRODUCTION `next start` (never `next dev`) on a fixed port with
-// the auth env quartet. It stays in the foreground; Playwright polls the health
-// URL to know the app is ready and later signals this process to tear the whole
-// rig down. A prior `next build` is a prerequisite (the CI job and the local gate
-// both build before running e2e).
+// the auth env quartet and a loopback object store (object-storage.ts) — without
+// a bucket `photosEnabled` is false and every photo surface answers 503, so the
+// drop page (ADR-014) could not be clicked through at all. It stays in the
+// foreground; Playwright polls the health URL to know the app is ready and later
+// signals this process to tear the whole rig down. A prior `next build` is a
+// prerequisite (the CI job and the local gate both build before running e2e).
 
 const E2E_DIR = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = dirname(E2E_DIR);
@@ -28,6 +31,7 @@ const BASE_URL = `http://${HOST}:${PORT}`;
 const SECRET = "e2e-better-auth-secret-value-that-is-plenty-long-0123456789";
 
 let pg: TestPostgres | undefined;
+let storage: ObjectStorageShim | undefined;
 let child: ChildProcess | undefined;
 let tearingDown = false;
 
@@ -35,13 +39,16 @@ async function teardown(code = 0): Promise<void> {
   if (tearingDown) return;
   tearingDown = true;
   if (child && child.exitCode === null) child.kill("SIGTERM");
+  await storage?.stop().catch(() => {});
   await pg?.stop().catch(() => {});
   process.exit(code);
 }
 
 async function main(): Promise<void> {
-  // 1) Real Postgres, migrated to head.
+  // 1) Real Postgres, migrated to head, and the object store the photo routes
+  // wire themselves from.
   pg = await startTestPostgres();
+  storage = await startObjectStorage();
 
   // 2) Seed catalog + accounts + journals; capture the session storage states.
   const { handoff, adminState, nonAdminState } = await seed({
@@ -68,6 +75,7 @@ async function main(): Promise<void> {
       BETTER_AUTH_SECRET: SECRET,
       BETTER_AUTH_URL: BASE_URL,
       BOOTSTRAP_ADMIN_EMAILS: ALLOWLIST.join(","),
+      ...storage.env,
       PORT: String(PORT),
     },
   });
