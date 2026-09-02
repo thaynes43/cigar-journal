@@ -35,8 +35,25 @@ export interface PurchaseWriteResult {
   note: NeedsReview | null;
 }
 
+// The archive's retailer column is shorthand — "Fox", "2 Guys" — for shops the
+// registry knows by their full names, which is what the owner merged the split
+// rows onto by hand on 2026-09-02 (#270). Resolving through this map is what
+// keeps a re-import from minting the shorthand right back alongside the canonical
+// row and splitting one shop's purchase history in two. Keyed on the lowercased
+// spelling; anything unlisted resolves as written — the map corrects known
+// aliases, it never renames a shop nobody has decided about.
+const VENDOR_ALIASES = new Map<string, string>([
+  ["fox", "Fox Cigar"],
+  ["2 guys", "2 Guys Cigars"],
+]);
+
+function canonicalVendorName(name: string): string {
+  return VENDOR_ALIASES.get(name.trim().toLowerCase()) ?? name;
+}
+
 // Vendors carry over as owner-added with crawl/display disabled (flow 006).
-async function resolveVendor(tx: Tx, name: string): Promise<{ id: string; created: boolean }> {
+async function resolveVendor(tx: Tx, retailer: string): Promise<{ id: string; created: boolean }> {
+  const name = canonicalVendorName(retailer);
   const existing = await tx.select({ id: vendors.id }).from(vendors).where(eq(vendors.name, name)).limit(1);
   if (existing[0]) return { id: existing[0].id, created: false };
   const inserted = await tx

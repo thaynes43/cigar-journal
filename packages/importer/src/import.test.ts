@@ -5,6 +5,7 @@ import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
 import { users, smokes, purchases, vendors, cigars, idempotencyKeys } from "@cj/db";
 import type { Deps, Principal } from "@cj/domain";
 import { runImport } from "./run.js";
+import { writePurchase } from "./purchase-writer.js";
 
 // End-to-end against a real embedded Postgres (migrated to head): a full import
 // of the fixture archive, then a second identical run to prove idempotency.
@@ -50,11 +51,13 @@ describe("runImport (embedded Postgres)", () => {
     expect(await countVendors()).toBe(5);
     expect(await countKeys()).toBe(18); // 6 smoke + 12 purchase keys
 
-    // Vendors carried over disabled + owner-added.
-    const fox = (await pg.db.select().from(vendors).where(eq(vendors.name, "Fox")))[0]!;
+    // Vendors carried over disabled + owner-added, under the registry's canonical
+    // name — the archive column says "Fox", the shop is "Fox Cigar" (#270).
+    const fox = (await pg.db.select().from(vendors).where(eq(vendors.name, "Fox Cigar")))[0]!;
     expect(fox.approvalStatus).toBe("owner-added");
     expect(fox.crawlEnabled).toBe(false);
     expect(fox.displayEnabled).toBe(false);
+    expect(await pg.db.select().from(vendors).where(eq(vendors.name, "Fox"))).toHaveLength(0);
 
     // God of Fire: rating attached (82), day-precision legacy-document provenance,
     // prose preserved verbatim in originalMarkdown, narrative left null, nothing synthesized.
@@ -102,6 +105,46 @@ describe("runImport (embedded Postgres)", () => {
     expect(await countPurchases()).toBe(12);
     expect(await countVendors()).toBe(5);
     expect(await countKeys()).toBe(18);
+  });
+
+  // The owner merged the archive's shorthand retailers onto the registry's names
+  // by hand (#270); an import that minted "Fox" again would split one shop's
+  // purchase history back in two the next time the ledger ran.
+  it("resolves a shorthand retailer onto the canonical vendor row, creating nothing", async () => {
+    const before = await countVendors();
+    const result = await writePurchase(
+      deps,
+      principal,
+      {
+        rowNumber: 99,
+        cigar: "Liga Privada No. 9",
+        brand: "Drew Estate",
+        canonicalName: "Drew Estate Liga Privada No. 9",
+        packaging: "Loose",
+        quantity: 1,
+        vitola: "Toro",
+        type: "NC",
+        lengthInches: 6,
+        ringGauge: 52,
+        purchasedAt: "2026-09-02",
+        humidorAt: null,
+        boxDate: null,
+        retailer: "Fox",
+        pricePerStick: null,
+        notes: null,
+        placeholderNotes: [],
+        brandDrift: null,
+      },
+      { clientRequestId: "alias-fox-purchase", ref: "purchase-history.md#99" },
+    );
+
+    expect(result.status).toBe("imported");
+    expect(result.vendorCreated).toBe(false);
+    expect(await countVendors()).toBe(before);
+
+    const fox = (await pg.db.select().from(vendors).where(eq(vendors.name, "Fox Cigar")))[0]!;
+    const landed = await pg.db.select().from(purchases).where(eq(purchases.vendorId, fox.id));
+    expect(landed.some((row) => row.purchasedAt === "2026-09-02")).toBe(true);
   });
 
   it("dry-run classifies already-imported rows and writes nothing", async () => {
