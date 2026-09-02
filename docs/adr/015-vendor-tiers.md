@@ -66,11 +66,20 @@ CronJob pair in haynes-ops because the CLI takes one `--vendor` (#156).
   model was built on and removes the concurrent-drain slot race the old
   per-vendor calendar existed to avoid. Per-vendor deadlines become a
   per-vendor page cap and a fleet-level `activeDeadlineSeconds`.
-- **The approved list still arrives as an admin-supplied snapshot**
-  (`--import-approved`, ADR-006): reddit.com is unreachable from the cluster
-  and the anonymous scrape path is refused. The r/cubancigars *stock watch*
-  is treated the same way — a snapshot the admin supplies, an input the
-  admin reviews — and is not crawled.
+- **The approved list is synced by the backend, not pasted.** The owner's
+  ruling (2026-09-02): the tool periodically checks the r/cubancigars wiki and
+  updates vendor recommendations from what the wiki recommends; a one-time
+  snapshot from the admin is not the design, and neither is opening the
+  dev pod's egress. A weekly `wiki-sync` job in the crawl role reads the
+  online-stores wiki — and the Stock Watch page — through Reddit's **official
+  Data API** (an app registered by the owner, app-only OAuth, identifying
+  user agent, well under the free-tier rate), parses the store list with the
+  existing `approved-import` parser, and applies additions and revocations
+  to `approval_status` automatically, audited and attributed (ADR-006's
+  "admin-reviewed diff" is superseded for this feed; the admin still decides
+  crawl enablement, which needs an adapter and a passing probe). The
+  anonymous `.json` path stays refused. Until the app credentials exist the
+  job cannot run; `--import-approved <file>` remains as the manual fallback.
 
 ## Consequences
 
@@ -97,5 +106,7 @@ CronJob pair in haynes-ops because the CLI takes one `--vendor` (#156).
 - Keep first-writer-wins for the slot and only order the drains — a lower
   tier that answers first (a new tier-1 store enabled later) would then be
   permanent; replacement is what makes the order recoverable.
-- Crawl the subreddit wiki directly — unreachable from the cluster and
-  against the house rule on Reddit's anonymous path.
+- Paste the wiki once, or open the dev pod's egress to Reddit — rejected by
+  the owner: the backend is what keeps the registry in step with the wiki.
+- Crawl the wiki over Reddit's anonymous `.json` path — refused; the official
+  API is the route, and it costs one app registration.
