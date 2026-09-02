@@ -162,6 +162,50 @@ describe("migrations", () => {
     expect((ledger.rows[0] as { n: number }).n).toBe(0);
   });
 
+  // 0034: the vendor tier (ADR-015). The CHECK is the point — a tier is an
+  // ORDINAL an admin types, and a typo outside the band would silently sort a shop
+  // to the front of the fleet, into the display gate and onto the photo slot.
+  it("0034 defaults the tier to 2 and refuses one outside [1, 9]", async () => {
+    const [defaulted] = await pg.db
+      .insert(vendors)
+      .values({ name: "Tier Default Shop" })
+      .returning({ id: vendors.id, tier: vendors.tier });
+    // Never 1: "nobody has decided" must not mean "price authority".
+    expect(defaulted!.tier).toBe(2);
+
+    await expect(pg.db.insert(vendors).values({ name: "Tier Zero", tier: 0 })).rejects.toThrow();
+    await expect(pg.db.insert(vendors).values({ name: "Tier Ten", tier: 10 })).rejects.toThrow();
+    await expect(pg.db.insert(vendors).values({ name: "Tier Top", tier: 1 })).resolves.toBeDefined();
+    await expect(pg.db.insert(vendors).values({ name: "Tier Floor", tier: 9 })).resolves.toBeDefined();
+  });
+
+  // The backfill, asserted on rows this test inserts (the test database starts
+  // empty), on the same terms as 0025's vendor correction: what is pinned is that
+  // the UPDATE is idempotent, correctly targeted and GUARDED — re-running it must
+  // not undo a tier someone has since re-decided.
+  it("0034 promotes only a still-default Fox Cigar to tier 1", async () => {
+    const stmt = sql`UPDATE vendors SET tier = 1 WHERE name = 'Fox Cigar' AND tier = 2`;
+
+    const [atDefault, redecided, other] = await Promise.all([
+      pg.db.insert(vendors).values({ name: "Fox Cigar", tier: 2 }).returning({ id: vendors.id }),
+      pg.db.insert(vendors).values({ name: "Fox Cigar", tier: 3 }).returning({ id: vendors.id }),
+      pg.db.insert(vendors).values({ name: "Cuban Lou's", tier: 2 }).returning({ id: vendors.id }),
+    ]);
+
+    await pg.db.execute(stmt);
+    // Idempotent: the second run is a no-op, not a second promotion.
+    await pg.db.execute(stmt);
+
+    const tierOf = async (id: string) =>
+      (await pg.db.select({ tier: vendors.tier }).from(vendors).where(eq(vendors.id, id)))[0]?.tier;
+
+    expect(await tierOf(atDefault[0]!.id)).toBe(1);
+    // Guarded on tier = 2, so a deliberate later decision stands.
+    expect(await tierOf(redecided[0]!.id)).toBe(3);
+    // Cuban Lou's is unapproved: it stays at the default, recorded and not shown.
+    expect(await tierOf(other[0]!.id)).toBe(2);
+  });
+
   // 0022: the partial unique index is what keeps /settings from listing rival
   // links for one address. It must bind only OPEN invites, so a redeemed or
   // revoked one frees the address again.
