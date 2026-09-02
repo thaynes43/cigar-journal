@@ -47,6 +47,29 @@ and stay visible; admin reads (curation queue, match triage) still see everythin
 | J.J. Fox | 5 | Magento 2 | flat sitemap urlset (1,502 locs, 913 root-level `.html`) + **OpenGraph/microdata** | live-probed 2026-09-02 (#270); 2 Guys' page shape on a Magento store, so it needed no new extractor. **Gate**: Mode B — one path segment, minus the root, the nine category roots and their subtrees, four named landing pages and `*.php`. **Markup**: **zero** `application/ld+json` blocks; `og:type=product`, `og:title`, `og:image`, `product:price:amount`/`:currency` over a bare `schema.org/Product` itemscope. **No `og:upc`, no `og:brand`, no `og:availability`** → no sku, no brand, unknown stock. Magento escapes every space in an og:* value as a HEX character reference (`Partagas&#x20;Shorts`), which `decodeEntities` learned to read. **Category**: `<meta name="keywords">` = `"Cuban Cigar, Cigar, Habanos, <marca>"`; category pages carry no keywords, no og:type and no itemscope, so they parse to nothing. **Photos**: `media/catalog/product/…?width=265&…` — a 265×265 resize; the bare path serves 600×562, so the adapter strips the query (which also lifts it out of the robots' `Disallow: /*?`). **Price caveat**: an out-of-stock line serves `product:price:amount = "0"`, which normalize reads as unknown and the probe FAILS the vendor on — expect that on its live probe. **Asks**: 8/8. **ToS** `/terms-conditions/`: no scraping/automated-access clause. **Probed 2026-09-02 on v0.39.0: a FALSE `ok`, CORRECTED here — re-probe pending.** All three samples were admitted as cigars and none is one: `Integra Boost 69% - 8g Pack` (keywords `integra boost / cigar humidity / cigar humidification / humidity levels`) and `EMS Humidified Resealable Cigar Pouch` (`ems / humidified / cigar / pouch`) are humidification accessories whose keywords contain no "humidor" while every one carries the `cigar` token the category gate reads — so `excludePattern` now matches the stem **`humid`**, which a real listing's `Cuban Cigar, Cigar, Habanos, <marca>` never contains. `Habanos Seleccion Robusto Gift Box` (£347, a mixed selection under a real cigar's keywords) is refused by adding `\bgift box(?:es)?\b` to `excludeNamePattern`; `selecci[oó]n` was deliberately NOT added, since it would take `Selección Reserva`. Also seen and left alone: `/19-st-james-street` (the one product-shaped loc with no `.html`) is admitted by the gate and parses to nothing — one wasted fetch, and safer than a fifth literal in the pattern |
 | r/cubancigars approved stores | 1 (on onboarding) | — | — | The Habanos price authority per ADR-015, `approval_status = 'approved'`. None is adapted or probed yet; the approved-list import mints a registry row at the default tier 2, and promoting one to tier 1 is an admin act after its adapter and in-cluster probe exist |
 
+### Implied packaging — what a BARE listing is at each shop
+
+A bare listing is one whose name — and, on an OpenGraph vendor, whose
+`og:description` — states no packaging at all. `impliedPackaging` (adapter
+field, DESIGN-005 amendment 2026-09-02, migration 0035) declares what such a
+listing IS at that shop. It is a **vendor fact**: nothing readable off a name
+separates Fox's `Padron 1964 Anniversary Maduro Torpedo` (one stick, $12.10)
+from Cuban Lou's `Cohiba Robustos` (a 19-stick outlet lot, $735). Absent — the
+norm — the packaging stays null and DESIGN-005 renders the offer under `Not
+stated`, which is why leaving it global made 6,894 of Fox's 7,169 offers the
+exception rather than the rule.
+
+| Vendor | `impliedPackaging` | Why |
+|---|---|---|
+| Fox Cigar | `single` | Lists one stick by default and NAMES every other unit. Its own 275 packaged rows arrived through the name parse alone: tubo 142, pack 78, tin 36, 2/5/3-pack 15, bundle 2, box 2 |
+| Cigarworld.de | `single` | Per-stick EUR prices on bare names (`Ramon Allones Specially Selected`, EUR 18.00); a multi-stick line names its container (`Kuba Sortiment 6 Zigarren`, `… Etui`), which `excludeNamePattern` refuses anyway |
+| J.J. Fox | `single` | Per-stick GBP prices on bare names (`Partagas Shorts`, GBP 24.50); a box listing says `Box of 25`. Its `og:description` is a one-line blurb that states no count, so the posture is what answers a bare listing here |
+| 2 Guys Cigars | — | Its `og:description` IS a spec line and states the unit (`5 X 54 - Sun Grown - Single`, `… - Bundle of 10`), so the description rule already answers every listing; a posture would only mask a shape change in it |
+| Small Batch Cigar | — | Every cigar page is a nopCommerce GROUPED parent whose real per-pack figures live in HTML. A bare name there states nothing and the shop sells no default unit — `Not stated` is the honest reading |
+| Cuban Lou's | — | Bundles and quantity SKUs dominate (`Cohiba Robustos (Outlet - D - 19 CIGARS)`, $735). A bare name is the LAST thing that means one stick here |
+| Montefortuna Cigars | — | It writes the unit into the title at both ends — `Quintero Favoritos - Single`, `2 Boxes of 25 …`, `… Sevilla Jar (19)` — so the name parse already answers, and what a bare line means was never measured. Its JSON-LD carries no price at all, so nothing turns on it |
+| EGM Cigars | — | Shopify ProductGroup whose price comes from the first variant; not measured, and an unmeasured shop gets no posture |
+
 Cross-cutting: build the crawler on sitemap enumeration + structured product
 markup (JSON-LD where a vendor serves it, OpenGraph/microdata where it does not —
 ADR-006 amendment 2026-09-02, declared per adapter), low rate, cached, with an
