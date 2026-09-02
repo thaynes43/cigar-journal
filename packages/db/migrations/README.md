@@ -475,3 +475,39 @@ init container at startup (ADR-003).
   discipline 0025's vendor correction uses. No index: `vendors` is a handful of
   rows, and both new readers scan it inside a correlated subquery that is already
   bounded by the drain's `LIMIT`.
+- `0035_implied_single_packaging.sql` — a bare listing at a single-stick shop IS
+  a single (DESIGN-005 amendment 2026-09-02, issue #270). DESIGN-005 rule 1
+  renders an offer whose packaging is not stated under `Not stated`, with
+  `packaging not stated`, no per-stick, sorted last and never the headline — a
+  rule written for a shop whose bare listing genuinely states nothing (Small
+  Batch's grouped parents, Cuban Lou's bundles) and, applied globally, one that
+  turned the common case into the exception: **6,894 of Fox Cigar's 7,169 offers
+  carried `packaging NULL`** on prod, on the one tier-1 vendor whose offers are
+  actually displayed. foxcigar.com lists a single stick by default and NAMES
+  every other unit, which its own 275 packaged rows (tubo 142, pack 78, tin 36,
+  2/5/3-pack 15, bundle 2, box 2) prove from inside the same catalogue — they
+  reached the column through the NAME parse, which is why `packaging IS NULL`
+  excludes them without a literal. Cigarworld.de (per-stick EUR on bare names)
+  and J.J. Fox (per-stick GBP; a box says `Box of 25`) are the same shop shape
+  and are named too, for the seed walks that follow rather than for the 1 and 1
+  offers they hold. Changes **6,045 rows** (Fox 6,044, Cigarworld 1, J.J. Fox 0).
+  `price_per_stick_cents` **mirrors the single writer exactly**:
+  `computePricePerStickCents` is `round(priceCents / sticks)` over a `priceCents`
+  of `round(price * 100)`, so at one stick it is `round(price*100)::int` —
+  currency neither converted nor consulted, as the writer does not consult it.
+  Two rows are deliberately left alone. 846 Fox rows have `price IS NULL`: a null
+  price has no per-stick, so rewriting their packaging buys nothing today and
+  spends the only mark that they predate the fix — the crawler re-derives both
+  facts from the page. And 4 have `packaging IS NULL` beside a
+  `sticks_per_package` the count vocabulary read off the title
+  (`Undercrown El Tigre 5ct Promo Pack`, `Davidoff Premium Selection 12 Count`),
+  which is why `sticks_per_package IS NULL` is in the predicate and not
+  decoration: without it a 12-count pack at $312 would become a $312 single —
+  the defect DESIGN-005 exists to prevent, inverted. The guard also makes the SQL
+  agree with the code, since `packagingOf` consults the adapter's
+  `impliedPackaging` only when NEITHER a label NOR a count was derived. No
+  `price > 0` guard, deliberately: the writer has none either, and
+  `normalizeListing` already stores a non-positive price as NULL, so no such row
+  exists (min $3.73, max $2,487.50 on Fox). Re-runnable — after the first
+  execution no row in the population still has `packaging IS NULL` — and inert on
+  any database that never held these vendors.

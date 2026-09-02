@@ -818,7 +818,7 @@ async function walkListings(
       }
       const { product, productMarkup, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
       if (!product) continue;
-      const listing = normalizeListing(product, category, categorySource, productMarkup);
+      const listing = normalizeListing(product, category, categorySource, productMarkup, adapter.impliedPackaging);
       if (!listing) continue;
       stats.listingsParsed += 1;
 
@@ -1121,7 +1121,7 @@ async function tryEnrichCandidates(
     }
     const { product, productMarkup, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
     if (!product) continue;
-    const listing = normalizeListing(product, category, categorySource, productMarkup);
+    const listing = normalizeListing(product, category, categorySource, productMarkup, adapter.impliedPackaging);
     if (!listing) continue;
     parsed = true;
     stats.listingsParsed += 1;

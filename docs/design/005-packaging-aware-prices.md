@@ -112,3 +112,58 @@ stated` · `in stock` · `out of stock` · `seen 2 Sep` · `unapproved source` �
 
 Price alerts, per-vendor currency conversion (offers keep their currency and
 are shown in it), and a packaging selector on the record-purchase form.
+
+## Amendment, 2026-09-02 — a bare listing at a single-stick shop is a single
+
+**Rule 1 as written turned the common case into the exception.** Measured on
+prod the same day this design shipped: **6,894 of Fox Cigar's 7,169 offers
+carried `packaging NULL`**, so the price authority's entire catalogue — the one
+vendor whose offers are actually displayed — rendered under `Not stated`, with
+`packaging not stated`, no per-stick, sorted last and never the headline.
+
+The reason is that foxcigar.com sells **one stick by default** and names every
+other unit. Its own 275 packaged rows are the proof, and they came from inside
+the same catalogue through the name parse alone: `tubo` 142, `pack` 78, `tin`
+36, 2/5/3-pack 15, `bundle` 2, `box` 2. A name with no container word there is
+not silence, it is the shop's default unit. Cigarworld.de (per-stick EUR on bare
+names) and J.J. Fox (per-stick GBP; a box listing says `Box of 25`) are the same
+shape.
+
+**This is a vendor fact, so it lives in the adapter, not in a global guess.**
+Nothing readable off a name separates Fox's `Padron 1964 Anniversary Maduro
+Torpedo` (one stick, $12.10) from Cuban Lou's `Cohiba Robustos` (a 19-stick
+outlet lot, $735) — only the shop they came from does.
+
+Rule 1 is therefore refined:
+
+> **1. Never a bare package price either — and a bare listing is only bare
+> where the vendor has not said otherwise.** A vendor whose bare listing IS one
+> stick declares `impliedPackaging: "single"` in its adapter, and its offers
+> that state no packaging in the name (nor, on an OpenGraph vendor, in the
+> `og:description`) are recorded as `single` / 1 stick, so per-stick derives
+> from the price. Everywhere else the original rule stands: a price whose
+> packaging is not stated renders with the words `packaging not stated`, sorts
+> last, and is never the headline while any packaged offer exists.
+
+`Not stated` keeps its job, and it is a real one — it is for a shop whose bare
+listing genuinely states nothing: Small Batch's grouped parent products (whose
+prices live per variant in HTML), Cuban Lou's bundle-dominated outlet. It is
+never for the everyday single-stick shop.
+
+Three properties keep the refinement conservative, and each is asserted in
+`packages/crawler/src/core/normalize.test.ts`:
+
+- **A stated packaging always wins.** The posture is consulted last, after the
+  name and after an OpenGraph description, so a Fox `Box of 20` is a box exactly
+  as before.
+- **A count with no label is a statement too.** `Davidoff Premium Selection 12
+  Count` parses to `packaging: null, sticksPerPackage: 12`; the posture does not
+  fire, because something *was* derived.
+- **It is a claim about the unit, not about the price.** A listing with no price
+  — or with a placeholder one, which normalize already stores as NULL — becomes
+  a single with no per-stick.
+
+Existing rows are corrected by migration `0035_implied_single_packaging.sql`
+(6,045 rows: Fox 6,044, Cigarworld 1, J.J. Fox 0), whose `price_per_stick_cents`
+mirrors `computePricePerStickCents` exactly. The per-vendor posture is recorded
+in [`.agents/reference/vendor-sources.md`](../../.agents/reference/vendor-sources.md).

@@ -72,6 +72,29 @@ export type PhotoSource = "json-ld" | "og:image";
 // stateful across pages). "strip-query" drops everything from the first `?`.
 export type PhotoUrlRewrite = { pattern: RegExp; replacement: string } | "strip-query";
 
+// --- implied packaging (DESIGN-005 amendment 2026-09-02, issue #270) ---------
+// WHAT A BARE LISTING IS AT THIS SHOP. A bare listing is one whose name — and,
+// on an OpenGraph vendor, whose `og:description` — states no packaging at all.
+// A vendor that sells ONE STICK by default and NAMES every other unit (`Box of
+// 20`, `5 Pack`, `Tubos`, `Tin`) declares `"single"` here, and normalize reads
+// its bare listings as singles, so per-stick derives from the price.
+//
+// ABSENT — the norm, and the behaviour every adapter had before this field —
+// means A BARE LISTING STATES NOTHING and its packaging stays null (ADR-009:
+// absent is never inferred). That is the right reading for a shop whose bare
+// listings are genuinely not singles: Small Batch's grouped parent products,
+// Cuban Lou's bundle-dominated catalogue.
+//
+// IT IS A VENDOR FACT, which is why it rides the adapter beside the rest of the
+// vendor's page shape and not inside the normalizer. Nothing readable off a name
+// separates Fox's `Padron 1964 Anniversary Maduro Torpedo` (one stick, $12.10)
+// from Cuban Lou's `Cohiba Robustos` (a 19-stick outlet lot, $735) — only the
+// shop they came from does. DESIGN-005 rule 1's `Not stated` was written for the
+// second kind and, left global, swallowed the first: 6,894 of Fox's 7,169 offers
+// carried `packaging NULL` on 2026-09-02, which turned the everyday case into
+// the exception.
+export type ImpliedPackaging = "single";
+
 // Everything that is true of an adapter whatever kind of source it points at.
 export interface VendorAdapterShape {
   // Registry key, used on the CLI (`--vendor <slug>`) and as the adapter id.
@@ -134,6 +157,10 @@ export interface VendorAdapterShape {
   // A correction applied to that URL and to nothing else. Absent — the norm —
   // fetches exactly the URL the page stated.
   photoUrlRewrite?: PhotoUrlRewrite;
+  // WHAT A BARE LISTING AT THIS VENDOR IS — see `ImpliedPackaging` above. Fox
+  // Cigar, Cigarworld.de and J.J. Fox declare "single"; every other adapter
+  // omits it and its bare listings stay `packaging: null`.
+  impliedPackaging?: ImpliedPackaging;
   // A breadcrumb path (joined) matching this is a cigar category…
   cigarCategoryPattern: RegExp;
   // …unless it also matches this (accessories, samplers, humidors, etc.).

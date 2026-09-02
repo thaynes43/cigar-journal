@@ -5,6 +5,7 @@ import { migrate } from "../scripts/migrate.js";
 import { vendors } from "./vendors.js";
 import { cigars } from "./cigars.js";
 import { productPhotos } from "./product-photos.js";
+import { offers } from "./offers.js";
 import { listingMatches, type SuggestedParse } from "./listing-matches.js";
 
 // Migrations apply cleanly from empty against a real Postgres 16 (embedded
@@ -209,6 +210,77 @@ describe("migrations", () => {
     // Cuban Lou's is unapproved: it stays at the default, recorded and not shown.
     expect(await tierOf(other[0]!.id)).toBe(2);
     expect(await tierOf(dormant[0]!.id)).toBe(1);
+  });
+
+  // 0035: a bare listing at a single-stick shop IS a single (DESIGN-005 amendment
+  // 2026-09-02). Asserted on rows this test inserts, as 0034's is — the test
+  // database starts empty, so the migration itself moved nothing. What is pinned
+  // is the PREDICATE: who is in scope, who is out, and that the per-stick figure
+  // is the one `computePricePerStickCents` would have written.
+  it("0035 makes a bare Fox listing a single and leaves every stated packaging alone", async () => {
+    const stmt = sql`UPDATE offers o
+                        SET packaging = 'single',
+                            sticks_per_package = 1,
+                            price_per_stick_cents = round(o.price * 100)::int
+                       FROM vendors v
+                      WHERE v.id = o.vendor_id
+                        AND v.name IN ('Fox Cigar', 'Cigarworld.de', 'J.J. Fox')
+                        AND o.packaging IS NULL
+                        AND o.sticks_per_package IS NULL
+                        AND o.price IS NOT NULL`;
+
+    const [fox] = await pg.db.insert(vendors).values({ name: "Fox Cigar", tier: 1 }).returning({ id: vendors.id });
+    const [smallBatch] = await pg.db
+      .insert(vendors)
+      .values({ name: "Small Batch Cigar", tier: 1 })
+      .returning({ id: vendors.id });
+
+    const offer = async (vendorId: string, values: Partial<typeof offers.$inferInsert>) =>
+      (await pg.db.insert(offers).values({ vendorId, currency: "USD", ...values }).returning({ id: offers.id }))[0]!.id;
+
+    // The population: a name that states no packaging, at a shop that sells one
+    // stick by default. 6,044 Fox rows looked like this on 2026-09-02.
+    const bare = await offer(fox!.id, { price: "12.10", listingUrl: "https://foxcigar.com/shop/padron-torpedo/" });
+    // Stated in the name — untouched, and the reason the predicate needs no
+    // literal list of container words.
+    const box = await offer(fox!.id, {
+      price: "460.00",
+      packaging: "box",
+      sticksPerPackage: 20,
+      pricePerStickCents: 2300,
+    });
+    // A count with no label (`Davidoff Premium Selection 12 Count`). Without the
+    // `sticks_per_package IS NULL` guard this becomes a $312 SINGLE — DESIGN-005's
+    // own defect, inverted — and the SQL would disagree with `packagingOf`, which
+    // consults the vendor's posture only when neither a label nor a count exists.
+    const counted = await offer(fox!.id, { price: "312.00", sticksPerPackage: 12, pricePerStickCents: 2600 });
+    // A null price has no per-stick; the next crawl re-derives both facts.
+    const priceless = await offer(fox!.id, { price: null });
+    // A vendor that declares no posture: its bare listing genuinely states nothing.
+    const grouped = await offer(smallBatch!.id, { price: "11.00" });
+
+    await pg.db.execute(stmt);
+    // Idempotent: the second run finds no `packaging IS NULL` row left in scope.
+    await pg.db.execute(stmt);
+
+    const facts = async (id: string) =>
+      (
+        await pg.db
+          .select({
+            packaging: offers.packaging,
+            sticks: offers.sticksPerPackage,
+            perStick: offers.pricePerStickCents,
+          })
+          .from(offers)
+          .where(eq(offers.id, id))
+      )[0]!;
+
+    // Per-stick mirrors `computePricePerStickCents` at one stick: round(price*100).
+    expect(await facts(bare)).toEqual({ packaging: "single", sticks: 1, perStick: 1210 });
+    expect(await facts(box)).toEqual({ packaging: "box", sticks: 20, perStick: 2300 });
+    expect(await facts(counted)).toEqual({ packaging: null, sticks: 12, perStick: 2600 });
+    expect(await facts(priceless)).toEqual({ packaging: null, sticks: null, perStick: null });
+    expect(await facts(grouped)).toEqual({ packaging: null, sticks: null, perStick: null });
   });
 
   // 0022: the partial unique index is what keeps /settings from listing rival
