@@ -1,5 +1,6 @@
 import { parsePackagingFacts, type PackagingFacts } from "@cj/domain";
 import { productImageUrl, type JsonLdOffer, type JsonLdPriceSpecification, type JsonLdProduct } from "./jsonld.js";
+import type { VariantPrice } from "./variant-prices.js";
 import type { CategorySource, ImpliedPackaging, ProductMarkup, VendorAdapter } from "../adapters/types.js";
 
 // A vendor-neutral listing distilled from a schema.org Product + the category the
@@ -31,6 +32,30 @@ export interface NormalizedListing {
   // derived.
   packaging: string | null;
   sticksPerPackage: number | null;
+  // THE PAGE'S PER-PACK PRICES, where the vendor declares an HTML source for
+  // them (`adapter.variantPrices`, ADR-015). Empty for every other vendor and
+  // for a simple product at a vendor that declares one, in which case the four
+  // fields above are the whole of what this listing says about money.
+  //
+  // NON-EMPTY, IT REPLACES THEM AS THE OFFER SET: a grouped product's parent has
+  // no price of its own to record, so ingest writes ONE OFFER PER VARIANT and
+  // none for the parent. Each carries its own packaging tier, so each is its own
+  // observation series (ADR-009) and per-stick derives per pack (DESIGN-005).
+  variants: NormalizedVariant[];
+}
+
+// One priced pack of a grouped product, put through the SAME packaging
+// vocabulary a listing name goes through — so `Box of 14` on a variant label and
+// `Box of 14` in a product title record the identical facts.
+export interface NormalizedVariant {
+  // The label as the shop wrote it, decoded. Kept for the offer's raw payload:
+  // it is the evidence for the packaging fields beside it.
+  label: string;
+  packaging: string | null;
+  sticksPerPackage: number | null;
+  priceCents: number | null;
+  currency: string | null;
+  inStock: boolean | null;
 }
 
 // Conservative packaging parse (ADR-009): recognize only unambiguous pack/box
@@ -189,6 +214,10 @@ export function normalizeListing(
   // `packagingOf`; omitted, nothing is implied and an unstated packaging stays
   // null, which is what every caller got before this argument existed.
   impliedPackaging?: ImpliedPackaging,
+  // The page's declared HTML variant rows, from `extractProductMarkup`. Empty —
+  // the default, and every vendor but Small Batch — leaves this function exactly
+  // as it was.
+  variantPrices: readonly VariantPrice[] = [],
 ): NormalizedListing | null {
   const name = typeof product.name === "string" ? decodeEntities(product.name.trim()) : "";
   if (!name) return null;
@@ -204,12 +233,24 @@ export function normalizeListing(
   // stick sort would have ranked first. Unknown is the honest reading; the rest of
   // the listing (name, sku, stock, image) is good and is carried through, and an
   // offer row with a null price still records availability.
-  const priceIsPlaceholder = cents != null && cents <= 0;
+  //
+  // …UNLESS THE PAGE PUBLISHES THE REAL FIGURES SOMEWHERE ELSE (ADR-015). A
+  // parent at 0.00 with priced variants beneath it is not a shop that failed to
+  // state a price; it is a shop that states one per pack. The refusal is
+  // unchanged for a TRUE placeholder — a zero with no variant row carrying money
+  // is still `priceIsPlaceholder`, and the probe still fails the vendor on it.
+  //
+  // The parent's own price is null either way when it is zero: nothing may write
+  // a $0.00 offer, and where variants exist they are the offer set.
+  const parentZero = cents != null && cents <= 0;
+  const variants = normalizeVariants(variantPrices);
+  const variantsPriced = variants.some((v) => v.priceCents != null && v.priceCents > 0);
+  const priceIsPlaceholder = parentZero && !variantsPriced;
   const packaging = packagingOf(product, name, productMarkup, impliedPackaging);
 
   return {
     name,
-    priceCents: priceIsPlaceholder ? null : cents,
+    priceCents: parentZero ? null : cents,
     currency,
     priceIsPlaceholder,
     inStock: availabilityToStock(offer?.availability),
@@ -218,7 +259,31 @@ export function normalizeListing(
     categoryPath: categoryPathFrom(category, categorySource),
     packaging: packaging.packaging,
     sticksPerPackage: packaging.sticksPerPackage,
+    variants,
   };
+}
+
+// A variant's packaging comes off its UNIT — the label's tail — and falls back to
+// the whole label only when the shop wrote no separator. Same vocabulary as a
+// listing name (`parsePackaging`), so `Box of 14` records `box`/14 wherever it is
+// written, and a unit the vocabulary does not recognize stays null rather than
+// being guessed (ADR-009).
+function normalizeVariants(variants: readonly VariantPrice[]): NormalizedVariant[] {
+  return variants.map((variant) => {
+    const fromUnit = variant.unit != null ? parsePackaging(variant.unit) : { packaging: null, sticksPerPackage: null };
+    const facts =
+      fromUnit.packaging != null || fromUnit.sticksPerPackage != null ? fromUnit : parsePackaging(variant.label);
+    return {
+      label: variant.label,
+      packaging: facts.packaging,
+      sticksPerPackage: facts.sticksPerPackage,
+      // A variant priced at zero is a placeholder in exactly the way the parent's
+      // is, and it must not become a $0.00 offer either.
+      priceCents: variant.priceCents != null && variant.priceCents > 0 ? variant.priceCents : null,
+      currency: variant.currency,
+      inStock: variant.inStock,
+    };
+  });
 }
 
 // A listing is a cigar when its taxonomy names a cigar category and is not an

@@ -18,8 +18,11 @@ function normalize(fixture: string) {
 // The whole adapter-driven read, as ingest and the probe run it: extract with the
 // markup the adapter declares, normalize with its packaging posture.
 function normalizeFor(adapter: VendorAdapter, fixture: string, dir: string) {
-  const { product, category, categorySource, productMarkup } = extractProductMarkup(loadFixture(fixture, dir), adapter);
-  return normalizeListing(product!, category, categorySource, productMarkup, adapter.impliedPackaging);
+  const { product, category, categorySource, productMarkup, variants } = extractProductMarkup(
+    loadFixture(fixture, dir),
+    adapter,
+  );
+  return normalizeListing(product!, category, categorySource, productMarkup, adapter.impliedPackaging, variants);
 }
 
 // Magento 2 escapes every space in an og:* value as a HEX character reference
@@ -150,6 +153,7 @@ describe("isCigarListing", () => {
     categoryPath: ["Home", "Shop", "Cigars"],
     packaging: null,
     sticksPerPackage: null,
+    variants: [],
   });
 
   it("rejects sets, kits, and mixed cases living under cigar categories", () => {
@@ -296,13 +300,14 @@ describe("normalizeListing — the adapter's implied packaging", () => {
   it("implies nothing at a vendor that declares nothing", () => {
     // Small Batch's cigar pages are GROUPED parents: the bare name states no
     // unit and the shop does not sell one by default, so `Not stated` is the
-    // honest reading and its adapter stays silent. Its price is the `0.00`
-    // placeholder, and a placeholder yields no per-stick either way.
+    // honest reading FOR THE PARENT and its adapter stays silent. The parent's
+    // own price is the `0.00` a grouped node always publishes, and it yields no
+    // per-stick — the packs below it are where both facts actually live.
     const listing = normalizeFor(smallBatchCigar, "product-eastern-standard-sungrown-toro-extra.html", "small-batch")!;
 
     expect(smallBatchCigar.impliedPackaging).toBeUndefined();
     expect(facts(listing)).toEqual({ packaging: null, sticksPerPackage: null });
-    expect(listing.priceIsPlaceholder).toBe(true);
+    expect(listing.priceCents).toBeNull();
     expect(computePricePerStickCents(listing.priceCents, listing.sticksPerPackage)).toBeNull();
   });
 

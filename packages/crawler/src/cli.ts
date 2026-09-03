@@ -244,6 +244,15 @@ function formatSummary(
       `matches-auto=${s.matchesAuto} cigars-created=${s.cigarsCreated} offers=${s.offersWritten} ` +
       `photos=${s.photosCaptured} errors=${s.errors}`,
   ];
+  // WHAT THE ERRORS WERE, on the line under the count (#270). A bare `errors=47`
+  // is a number an operator can only act on by reproducing the run: the
+  // 2026-09-03 Cigarworld drain needed an in-cluster fetch Job to learn that all
+  // 47 were one status the run had already seen. Printed only when non-empty, so
+  // a clean run's report is unchanged.
+  const kinds = Object.entries(s.errorKinds ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  if (kinds.length > 0) {
+    lines.push(`  errors by kind: ${kinds.map(([kind, count]) => `${kind}=${count}`).join(" ")}`);
+  }
   const sampling = s.sitemapSampling;
   if (sampling) {
     lines.push(

@@ -128,6 +128,19 @@ export interface IngestStats {
   // siblings, so a run that annotated nothing serialises unchanged.
   linksAnnotated?: number;
   errors: number;
+  // WHAT THE ERRORS WERE (#270). `errors` has always been one number over three
+  // unlike things — a non-200, a throw from the fetch layer, a photo pipeline
+  // failure — and the throw was swallowed with `void error`, so the nightly
+  // report said `errors=47` and nothing else. Diagnosing the 2026-09-03 fleet run
+  // took an in-cluster fetch Job to discover that all 47 were one status code
+  // (Cigarworld's `429 PageViewCount restriction`), which the run itself had
+  // already seen and thrown away.
+  //
+  // Keys are coarse and stable, so they can be counted across runs: `http-<code>`
+  // for a status, `fetch` for a throw out of the fetcher, `photo` for a capture
+  // that threw. Absent when empty, like its siblings, so a clean run's JSONB is
+  // unchanged.
+  errorKinds?: Record<string, number>;
   // Present only for a vendor with sitemapSampling configured — absent keeps the
   // JSONB byte-identical for every other vendor.
   sitemapSampling?: {
@@ -419,7 +432,7 @@ async function capturePhoto(
   // stats.errors rather than losing the offer (ADR-007).
   const image = await deps.fetcher.fetchBinary(photoUrl, MAX_IMAGE_BYTES);
   if (image.status !== 200) {
-    stats.errors += 1;
+    countError(stats, `photo-http-${image.status}`);
     return "skipped";
   }
 
@@ -749,23 +762,15 @@ async function ingestListing(
     // One offers write path shared with record_price — the 24h dedupe skips an
     // identical observation (ADR-009). Crawler offers link to their cigar through
     // the listing match (curator-authoritative), so cigar_id stays null here.
-    const observation = await recordPriceObservation(tx, {
-      cigarId: null,
+    // One row, or one per pack on a grouped product — see `recordListingOffers`.
+    stats.offersWritten += await recordListingOffers(tx, {
       vendorId: options.vendorId,
-      sourceName: null,
-      sourceUrl: null,
       listingMatchId: match.id,
       listingUrl: url,
-      packaging: listing.packaging,
-      sticksPerPackage: listing.sticksPerPackage,
-      priceCents: listing.priceCents,
-      currency: listing.currency,
-      inStock: listing.inStock,
-      priceType: "retail",
-      raw: { listing, product },
-      seenAt: now,
+      listing,
+      product,
+      now,
     });
-    if (observation.inserted) stats.offersWritten += 1;
 
     // THE ROW'S DECISION, NOT THIS RUN'S CANDIDATE. `linkedCigarId` is what the
     // resolver computed a moment ago; `match.cigarId` is what the listing_matches
@@ -788,10 +793,99 @@ async function ingestListing(
       await capturePhoto(deps, options.vendorId, posture, cigarId, photoUrl, stats);
     } catch (error) {
       // Photo ingestion is isolated from the offer write (ADR-007).
-      stats.errors += 1;
+      countError(stats, "photo");
       void error;
     }
   }
+}
+
+// The ONE place `stats.errors` moves, so the total and the breakdown cannot
+// disagree about the same failure. `kind` is coarse on purpose — `http-429` and
+// `fetch` are what an operator acts on; a stack trace in a nightly summary is
+// not (see `IngestStats.errorKinds`).
+function countError(stats: IngestStats, kind: string): void {
+  stats.errors += 1;
+  stats.errorKinds = { ...(stats.errorKinds ?? {}), [kind]: (stats.errorKinds?.[kind] ?? 0) + 1 };
+}
+
+// EVERY OFFER THIS LISTING IS EVIDENCE FOR — one row, or one per pack.
+//
+// A listing has always written exactly one observation, because a product page
+// has always published exactly one price. A GROUPED product does not (ADR-015):
+// Small Batch's parent node carries `0.00` and the money is one figure per pack
+// size in the page's HTML, so the honest record of that page is N observations,
+// not one. Each variant carries its own packaging tier, which is what makes them
+// N SERIES rather than N rewrites of one — `recordPriceObservation` keys its 24h
+// dedupe on (listing, source, packaging), so `5-pack` and `box` never collide,
+// and per-stick derives per pack (DESIGN-005).
+//
+// When the page states no variants — every vendor but Small Batch, and Small
+// Batch's own simple products — this is the single parent observation the
+// crawler has always written, byte for byte.
+//
+// Shared by the seed/offers walk and the enrich drain: two writers of one rule is
+// how the two paths would come to disagree about what a page said.
+async function recordListingOffers(
+  tx: Parameters<Parameters<Database["transaction"]>[0]>[0],
+  input: {
+    vendorId: string;
+    listingMatchId: string;
+    listingUrl: string;
+    listing: NormalizedListing;
+    product: JsonLdProduct;
+    now: Date;
+  },
+): Promise<number> {
+  const { listing } = input;
+  // The listing WITHOUT its variant list, for a per-variant row's raw payload:
+  // the row names its own variant, and repeating all of them on each of them
+  // would store the page's price table once per price in it.
+  const { variants, ...parentListing } = listing;
+  void variants;
+  const rows =
+    listing.variants.length > 0
+      ? listing.variants.map((variant) => ({
+          packaging: variant.packaging,
+          sticksPerPackage: variant.sticksPerPackage,
+          priceCents: variant.priceCents,
+          currency: variant.currency,
+          inStock: variant.inStock,
+          // The variant is named IN the raw payload, so a curator reading the
+          // offer can see which pack the number was for without re-fetching.
+          raw: { listing: parentListing, product: input.product, variant } as unknown,
+        }))
+      : [
+          {
+            packaging: listing.packaging,
+            sticksPerPackage: listing.sticksPerPackage,
+            priceCents: listing.priceCents,
+            currency: listing.currency,
+            inStock: listing.inStock,
+            raw: { listing, product: input.product } as unknown,
+          },
+        ];
+
+  let written = 0;
+  for (const row of rows) {
+    const observation = await recordPriceObservation(tx, {
+      cigarId: null,
+      vendorId: input.vendorId,
+      sourceName: null,
+      sourceUrl: null,
+      listingMatchId: input.listingMatchId,
+      listingUrl: input.listingUrl,
+      packaging: row.packaging,
+      sticksPerPackage: row.sticksPerPackage,
+      priceCents: row.priceCents,
+      currency: row.currency,
+      inStock: row.inStock,
+      priceType: "retail",
+      raw: row.raw,
+      seenAt: input.now,
+    });
+    if (observation.inserted) written += 1;
+  }
+  return written;
 }
 
 // --- mode: seed / offers -----------------------------------------------------
@@ -819,12 +913,22 @@ async function walkListings(
     try {
       const { status, body } = await deps.fetcher.fetchText(url);
       if (status !== 200) {
-        stats.errors += 1;
+        countError(stats, `http-${status}`);
         continue;
       }
-      const { product, productMarkup, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
+      const { product, productMarkup, category, categorySource, photoUrl, variants } = extractProductMarkup(
+        body,
+        adapter,
+      );
       if (!product) continue;
-      const listing = normalizeListing(product, category, categorySource, productMarkup, adapter.impliedPackaging);
+      const listing = normalizeListing(
+        product,
+        category,
+        categorySource,
+        productMarkup,
+        adapter.impliedPackaging,
+        variants,
+      );
       if (!listing) continue;
       stats.listingsParsed += 1;
 
@@ -844,7 +948,7 @@ async function walkListings(
 
       await ingestListing(deps, options, posture, crawlRunId, url, listing, product, photoUrl, stats);
     } catch (error) {
-      stats.errors += 1;
+      countError(stats, "fetch");
       void error;
     }
   }
@@ -1111,6 +1215,26 @@ async function tryEnrichCandidates(
   // Did we actually READ this vendor's catalogue? A 200 is not enough — see the
   // header: a gate that admits non-product pages answers 200 and parses nothing.
   let parsed = false;
+  // …and neither is a 200 enough to say we read NOTHING (#270). A page that
+  // carries the vendor's own structured taxonomy and no product is a page of its
+  // catalogue: Small Batch's brand and line indexes sit at one-segment slugs that
+  // no URL pattern can tell from a product's, and its own header says ~23% of what
+  // the gate accepts is one. The 2026-09-03 fleet drain fetched eight of them per
+  // ask — `/tatuaje`, `/tatuaje-black-label`, `/tatuaje-samplers`, … — for five
+  // asks and called every one an ERROR, because `parsed` was the only signal.
+  //
+  // That verdict is wrong in the direction that costs the most. An error burns no
+  // attempt, so the ask never retires; the same eight pages are re-fetched every
+  // night, forever, and ERROR_BUDGET eventually retires the request as `blocked`
+  // — "nobody could reach this vendor" — about a vendor we read eight pages of.
+  // The honest reading is the one this module already states for a brand-only
+  // shortlist: "we read this shop's Tatuajes and it does not carry the cigar."
+  //
+  // It is NOT the 2 Guys case the error rule was written for. There the gate
+  // admitted gift-registry pages carrying NO structured markup at all, and that
+  // is still an error: `catalogTaxonomy` is the JSON-LD BreadcrumbList and an
+  // OpenGraph vendor's pages never have one, so 2 Guys cannot reach this arm.
+  let readTaxonomy = false;
   const admitted: {
     url: string;
     listing: NormalizedListing;
@@ -1122,12 +1246,21 @@ async function tryEnrichCandidates(
   for (const candidate of ranked) {
     const { status, body } = await deps.fetcher.fetchText(candidate.url);
     if (status !== 200) {
-      stats.errors += 1;
+      countError(stats, `http-${status}`);
       continue;
     }
-    const { product, productMarkup, category, categorySource, photoUrl } = extractProductMarkup(body, adapter);
+    const { product, productMarkup, category, categorySource, photoUrl, variants, catalogTaxonomy } =
+      extractProductMarkup(body, adapter);
+    if (catalogTaxonomy) readTaxonomy = true;
     if (!product) continue;
-    const listing = normalizeListing(product, category, categorySource, productMarkup, adapter.impliedPackaging);
+    const listing = normalizeListing(
+      product,
+      category,
+      categorySource,
+      productMarkup,
+      adapter.impliedPackaging,
+      variants,
+    );
     if (!listing) continue;
     parsed = true;
     stats.listingsParsed += 1;
@@ -1170,7 +1303,9 @@ async function tryEnrichCandidates(
   // order, which is the slug-overlap rank the candidates arrived in.
   admitted.sort((a, b) => b.sim - a.sim);
   const best = admitted[0];
-  if (!best) return parsed ? "miss" : "error";
+  // A product parsed, OR the vendor's own taxonomy did: either way this look READ
+  // the catalogue and its silence is evidence about it (see `readTaxonomy`).
+  if (!best) return parsed || readTaxonomy ? "miss" : "error";
 
   {
     const candidate = { url: best.url };
@@ -1251,23 +1386,14 @@ async function tryEnrichCandidates(
       // whoever owns the verdict. Discarding an observation because a human
       // decided the link differently would throw away the price history the
       // curator's own row depends on.
-      const observation = await recordPriceObservation(tx, {
-        cigarId: null,
+      stats.offersWritten += await recordListingOffers(tx, {
         vendorId: options.vendorId,
-        sourceName: null,
-        sourceUrl: null,
         listingMatchId: match.id,
         listingUrl: candidate.url,
-        packaging: listing.packaging,
-        sticksPerPackage: listing.sticksPerPackage,
-        priceCents: listing.priceCents,
-        currency: listing.currency,
-        inStock: listing.inStock,
-        priceType: "retail",
-        raw: { listing, product },
-        seenAt: now,
+        listing,
+        product,
+        now,
       });
-      if (observation.inserted) stats.offersWritten += 1;
       return committed ? "linked" : "declined";
     });
 
@@ -1323,7 +1449,7 @@ async function tryEnrichCandidates(
     try {
       captured = await capturePhoto(deps, options.vendorId, posture, ask.cigarId, best.photoUrl, stats);
     } catch {
-      stats.errors += 1;
+      countError(stats, "photo");
     }
     return captured === "refused" ? "photo_refused" : "match";
   }

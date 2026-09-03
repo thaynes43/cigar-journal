@@ -229,12 +229,12 @@ export async function runProbe(fetcher: Fetcher, adapter: VendorAdapter): Promis
     for (const index of spreadIndices(productUrls.length, PRODUCT_SAMPLES)) {
       const url = productUrls[index]!;
       const res = await fetcher.fetchText(url);
-      const { product, productMarkup, category, categorySource, photoUrl } = extractProductMarkup(
+      const { product, productMarkup, category, categorySource, photoUrl, variants } = extractProductMarkup(
         res.status === 200 ? res.body : "",
         adapter,
       );
       const listing = product
-        ? normalizeListing(product, category, categorySource, productMarkup, adapter.impliedPackaging)
+        ? normalizeListing(product, category, categorySource, productMarkup, adapter.impliedPackaging, variants)
         : null;
       if (res.status !== 200) notes.push(`sample product ${url} returned ${res.status}.`);
       else if (!product) notes.push(`sample product ${url} has no ${markupLabel(adapter)} — parsing yields nothing.`);

@@ -118,3 +118,70 @@ CronJob pair in haynes-ops because the CLI takes one `--vendor` (#156).
   the owner: the backend is what keeps the registry in step with the wiki.
 - Crawl the wiki over Reddit's anonymous `.json` path — refused; the official
   API is the route, and it costs one app registration.
+
+## Amendments
+
+- **2026-09-03 — the nopCommerce variant-price extractor, and one listing may
+  now write several offers (issue #270, first unattended fleet run).** This ADR
+  named the extractor and left it unbuilt, so Small Batch Cigar — a tier-1
+  linkout shop — crawled for a night with every offer priceless. Its cigar
+  pages are nopCommerce GROUPED products: the parent has no price of its own,
+  publishes `offers.price: "0.00"`, and puts one priced row per pack size in the
+  page's HTML. Live-read in-cluster: `Sobremesa Solita Short Churchill - Pack of
+  5` at $71.00 (`Low stock`) beside `… - Box of 14` at $198.00 (`In stock`).
+  - **The source is DECLARED, never sniffed.** An adapter may name a
+    `variantPrices` source (`"nopcommerce-variant-overview"` today), read only
+    through that declaration, exactly as `productMarkup` and `categorySource`
+    are. Small Batch is the only declarer; every other vendor's HTML is never
+    read for money.
+  - **A grouped listing writes ONE OFFER PER PACK.** Each variant carries its
+    own packaging tier through the same `parsePackaging` vocabulary a listing
+    name goes through, so each is its own observation series (ADR-009 keys the
+    24h dedupe on packaging) and per-stick derives per pack (DESIGN-005). The
+    parent writes no offer of its own: it is not a thing for sale.
+  - **The placeholder refusal is unchanged.** A parent at `0.00` whose page
+    states no pack price is still a placeholder, still stores a NULL price, and
+    still fails the probe bar. What changed is that the parent's zero is no
+    longer the last word on a page that states prices elsewhere.
+  - **A page that carries the vendor's taxonomy and no product is a READ of the
+    catalogue.** Small Batch's brand and line indexes sit at one-segment slugs a
+    Mode-B gate cannot tell from products, and the drain's shortlist for a
+    brand-only ask is made of them. Scoring those looks as `error` (the rule
+    written for 2 Guys' gift-registry pages, which carry no structured markup at
+    all) meant the ask never retired, the same eight pages were re-fetched every
+    night, and `ERROR_BUDGET` would have retired it as `blocked` — "nobody could
+    reach this vendor" — about a shop we had read eight pages of. A JSON-LD
+    BreadcrumbList with no Product now completes the look as a `miss`.
+
+- **2026-09-03 — a vendor's rate limit is a fact about the vendor, and the
+  fetcher honours it (issue #270).** Cigarworld.de's robots.txt names no
+  `Crawl-delay`, and its Apache runs a page-view counter regardless: crossing it
+  returns `429` with `Retry-After: 6` and a `PageViewCount restriction` body.
+  Measured in-cluster, 26 requests at the adapter's 4s interval trips it, and at
+  that interval it never recovers — every further request feeds the same window.
+  The first unattended fleet drain fetched 29 pages and then took 47 consecutive
+  429s, which the run reported as a bare `errors=47`.
+  - The polite fetcher now **retries a 429/503 once after the delay the vendor
+    named** (default 5s, capped at 60s) and puts that delay on the **shared
+    limiter**, not just on the one call — the vendor's rule is about the client,
+    not about a URL. A second throttled response is returned rather than thrown:
+    one page error is the right price for one page, and a throw costs the vendor
+    its whole run.
+  - Cigarworld's `minIntervalMs` rises 4s → 8s, the interval a bounded fetch Job
+    measured clean. A full seed of its 6,603 gated URLs is therefore ~14.7h and
+    needs a deliberately raised page cap and a matching deadline.
+  - Run stats gain **`errorKinds`** (`http-429`, `fetch`, `photo`…), printed
+    under the count as `errors by kind:`. The previous total was one number over
+    three unlike failures with the cause discarded, and diagnosing this one took
+    an in-cluster fetch Job to recover a status code the run had already seen.
+
+- **2026-09-03 — the adapters' `crawlEnabled` constants follow the registry
+  rows (issue #270).** The operator probed and enabled all eight vendors through
+  2026-09-02 while the constants sat at their pre-probe `false`, so the first
+  fleet run printed a `vendor posture drift` paragraph for seven of eight
+  vendors — none of them a fault, and loud enough to bury a real drift. The
+  constants are aligned to the rows the operator chose, and
+  `vendor-posture.test.ts` pins each against a transcript of the prod registry so
+  the report stays empty. Registration is still insert-if-absent and a new
+  adapter still ships `crawlEnabled: false` until its own probe passes: what
+  the constant does for an existing row is get compared, and it should agree.
