@@ -520,3 +520,18 @@ init container at startup (ADR-003).
   and rewriting it would invent one. `photo_upload_tokens.kind` keeps its own
   `other` default: @cj/domain always writes that column explicitly, so the
   default is unreachable from any shipped path.
+- `0037_smoke_timing.sql` — `smokes.started_at`/`started_at_source`
+  (`user` | `photo-drop`) and `ended_at`/`ended_at_source`
+  (`user` | `system-finalized`) (ADR-016, issue #289): the two instants that
+  bound a session. The duration is derived on read and never stored — a stored
+  number would go stale the moment either instant is corrected — so no column
+  holds it. All four are nullable and a paired CHECK makes an instant without
+  its provenance, or a provenance without its instant, unrepresentable. No
+  backfill: both instants are observations, and no observation exists for a row
+  written before this migration, so every existing smoke keeps a null pair and
+  a null duration until a user states one. Also adds
+  `photo_drops.session_started_at` + `last_opened_at`, both NOT NULL and
+  backfilled from `created_at`: one open drop per user (ADR-014) means a drop is
+  re-used for evenings on end — the drop the 2026-09-02 save claimed was created
+  23 hours before the smoke it bounded — so the drop's creation is not the
+  session start, its current run of opens is.

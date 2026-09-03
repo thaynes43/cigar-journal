@@ -1,4 +1,5 @@
-import { auditLog, smokes, smokeProgression } from "@cj/db";
+import { and, eq } from "drizzle-orm";
+import { auditLog, photoDrops, smokes, smokeProgression } from "@cj/db";
 import type { Deps, Principal, Tx } from "./deps.js";
 import { auditActor } from "./audit-attribution.js";
 import type { PhotoDropClaimResult, SaveSmokeInput, SaveSmokeResult } from "./types.js";
@@ -8,7 +9,13 @@ import { normalizeDescriptors, verbatimDescriptors } from "./descriptors.js";
 import { resolveCigar } from "./cigar-resolution.js";
 import { queueEnrichmentSafely } from "./enrichment.js";
 import { loadIdempotency, assertReplayable, recordIdempotency, isUniqueViolation } from "./idempotency.js";
-import { provenanceToActor, stampSmokedAt, smokeSnapshot } from "./mapping.js";
+import {
+  provenanceToActor,
+  stampSmokeTiming,
+  smokeSnapshot,
+  deriveDurationMinutes,
+} from "./mapping.js";
+import { isUuid } from "./uuid.js";
 import { applyConsumptionOnSave } from "./consumption.js";
 import { deriveHoldingSummary } from "./inventory.js";
 import { claimPhotoDrop } from "./photo-drops.js";
@@ -82,6 +89,28 @@ async function withPhotoDrop(
   return { ...result, photoDrop };
 }
 
+// When the drop this save names began its current session — the moment tonight's
+// first photo appeared (ADR-014/016). NOT `created_at`: one open drop per user
+// means the same drop carries evening after evening, so its creation says when
+// the user first ever sent a photo, not when this smoke was lit.
+//
+// Owner-checked, and every miss is silent: a read may not fail a save, and a
+// missing or foreign drop simply derives nothing. A malformed id is refused
+// before the query rather than raising 22P02 inside this transaction (./uuid.ts).
+async function dropSessionStart(
+  tx: Tx,
+  principal: Principal,
+  photoDropId: string | undefined,
+): Promise<Date | null> {
+  if (photoDropId === undefined || !isUuid(photoDropId)) return null;
+  const rows = await tx
+    .select({ sessionStartedAt: photoDrops.sessionStartedAt })
+    .from(photoDrops)
+    .where(and(eq(photoDrops.id, photoDropId), eq(photoDrops.userId, principal.userId)))
+    .limit(1);
+  return rows[0]?.sessionStartedAt ?? null;
+}
+
 async function saveWithinTx(
   tx: Tx,
   deps: Deps,
@@ -97,7 +126,15 @@ async function saveWithinTx(
 
   const provenanceSource = input.provenance?.source ?? "llm-conversation";
   const cigar = await resolveCigar(tx, input.cigar);
-  const smokedAt = stampSmokedAt(input.smokedAt, provenanceSource, deps.now);
+  // The drop's session start is the earliest observation of when the smoke was
+  // lit (ADR-016/014). Read INSIDE this transaction, but only as an observation:
+  // a drop that is missing, another user's, or unnamed derives nothing and never
+  // fails the save. The CLAIM itself stays post-commit, exactly as ADR-014 rules.
+  const observedStart = input.startedAt
+    ? null
+    : await dropSessionStart(tx, principal, input.photoDropId);
+  const timing = stampSmokeTiming(input, provenanceSource, deps.now, observedStart);
+  const smokedAt = timing.smokedAt;
 
   const insertedSmoke = await tx
     .insert(smokes)
@@ -107,6 +144,10 @@ async function saveWithinTx(
       smokedAt: smokedAt.value ? new Date(smokedAt.value) : null,
       smokedAtSource: smokedAt.source,
       smokedAtPrecision: smokedAt.precision,
+      startedAt: timing.startedAt ? new Date(timing.startedAt.value) : null,
+      startedAtSource: timing.startedAt?.source ?? null,
+      endedAt: timing.endedAt ? new Date(timing.endedAt.value) : null,
+      endedAtSource: timing.endedAt?.source ?? null,
       context: input.context ?? null,
       overallDescriptors: normalizeDescriptors(input.overallDescriptors),
       draw: input.construction?.draw ?? null,
@@ -203,6 +244,11 @@ async function saveWithinTx(
       smokeId: smoke.id,
       version: smoke.version,
       cigar: { cigarId: cigar.cigarId, canonicalName: cigar.canonicalName, verification: cigar.verification },
+      // What this save established about the session (ADR-016) — reported back
+      // so the caller can say how long it took without a follow-up read.
+      startedAt: timing.startedAt,
+      endedAt: timing.endedAt,
+      durationMinutes: deriveDurationMinutes(timing.startedAt?.value, timing.endedAt?.value),
     },
     cigarCreated: cigar.created,
     enrichmentQueued,

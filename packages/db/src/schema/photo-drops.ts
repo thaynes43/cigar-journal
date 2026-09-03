@@ -24,6 +24,15 @@ export const photoDrops = pgTable("photo_drops", {
   smokeId: uuid("smoke_id").references(() => smokes.id, { onDelete: "set null" }),
   claimedAt: timestamp("claimed_at", { withTimezone: true }),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  // The drop's SESSION window (ADR-016). One open drop per user means a drop is
+  // routinely re-used across evenings, so `created_at` is not when this smoke
+  // began: `sessionStartedAt` is the start of the current run of opens, reset
+  // whenever an open lands more than DROP_SESSION_GAP_HOURS after the last one,
+  // and `lastOpenedAt` is what that gap is measured from. Maintained only by
+  // `openPhotoDrop`; the save and the claim read `sessionStartedAt` as the
+  // earliest observation of when the smoke was lit.
+  sessionStartedAt: timestamp("session_started_at", { withTimezone: true }).notNull().defaultNow(),
+  lastOpenedAt: timestamp("last_opened_at", { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -18,6 +18,11 @@ export { fingerprint } from "./fingerprint.js";
 // the same answer, and a second copy of the regex is a second contract (#206).
 export { isUuid } from "./uuid.js";
 
+// The one derivation of a smoke's length (ADR-016). Exported because the reads
+// are not its only reader — the duration is never stored, so anything that wants
+// it asks this function rather than keeping a second rule.
+export { deriveDurationMinutes, MAX_SMOKE_DURATION_HOURS } from "./mapping.js";
+
 export { saveSmoke } from "./save-smoke.js";
 export { addCigar } from "./add-cigar.js";
 export { recordPurchase } from "./record-purchase.js";
@@ -406,6 +411,7 @@ export {
 export {
   PHOTO_DROP_TTL_SECONDS,
   PHOTO_DROP_RETENTION_SECONDS,
+  DROP_SESSION_GAP_HOURS,
   MAX_PHOTOS_PER_DROP,
   MAX_PHOTO_CAPTION_LENGTH,
   openPhotoDrop,

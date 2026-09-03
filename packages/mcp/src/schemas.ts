@@ -121,6 +121,32 @@ const smokedAt = z
     "When the smoke happened. Omit entirely if the user never said — the server stamps finalize time.",
   );
 
+// The session's bounds (ADR-016). Value only — the source is server-owned, as it
+// is for smokedAt: a stated bound is `user` by definition, and the observed
+// sources (`photo-drop`, `system-finalized`) are the server's to assert. The
+// duration is derived from the pair and is never sent.
+function sessionBound(bound: "started" | "ended") {
+  const word = bound === "started" ? "lit" : "put down";
+  return z
+    .object({
+      value: z
+        .string()
+        .describe(
+          `When the user ${word} the cigar, as an RFC 3339 timestamp (e.g. '2026-09-02T21:04:00-04:00').`,
+        ),
+    })
+    .strict()
+    .describe(
+      `When the cigar was ${word}. Send it only when the user stated it — never inferred. ` +
+        (bound === "started"
+          ? "Omit it and a save carrying the photo drop takes the start from the drop instead."
+          : "Omit it and a live save takes the end from the moment it is saved."),
+    );
+}
+
+const startedAt = sessionBound("started");
+const endedAt = sessionBound("ended");
+
 // Context is intentionally open (SmokeContext is shapeless JSONB, ADR-003), so
 // unknown keys pass through rather than being rejected.
 const context = z
@@ -370,6 +396,8 @@ export const saveSmokeSchema = z
       ),
     cigar: cigarRef,
     smokedAt: smokedAt.optional(),
+    startedAt: startedAt.optional(),
+    endedAt: endedAt.optional(),
     context: context.nullish(),
     overallDescriptors: z
       .array(z.string())
@@ -411,6 +439,9 @@ const updateChanges = z
       .optional()
       .describe("Correct the linked cigar."),
     smokedAt: smokedAt.optional(),
+    // Explicit null clears the bound and its source with it (ADR-016).
+    startedAt: startedAt.nullish(),
+    endedAt: endedAt.nullish(),
     context: context.nullish(),
     assessment: assessment.optional(),
     construction: construction.optional(),
@@ -1013,6 +1044,11 @@ const smokeSummaryOutput = z
     smokeId: z.string(),
     cigar: looseObject,
     smokedAt: looseObject.nullish(),
+    // The session's bounds and its derived length (ADR-016) — null when the
+    // smoke carries no such observation.
+    startedAt: looseObject.nullish(),
+    endedAt: looseObject.nullish(),
+    durationMinutes: z.number().nullish(),
     rating: z.number().nullish(),
     liked: z.boolean().nullish(),
     descriptors: z.array(z.string()).optional(),
@@ -1040,6 +1076,11 @@ export const saveSmokeOutput = z
         version: z.number(),
         url: z.string(),
         cigar: looseObject,
+        // What the save established about the session (ADR-016). Optional
+        // because an idempotent replay returns an envelope that may predate it.
+        startedAt: looseObject.nullish(),
+        endedAt: looseObject.nullish(),
+        durationMinutes: z.number().nullish(),
       })
       .passthrough(),
     holdingAfter: z

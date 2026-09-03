@@ -1,4 +1,5 @@
 import type { PublicSmokeView } from "@cj/domain";
+import { formatDuration } from "@/lib/format";
 import { Chips } from "./chips";
 import { RatingSeal } from "./rating-seal";
 import { BurnLine } from "./burn-line";
@@ -18,12 +19,18 @@ import { OriginalMarkdown } from "./original-markdown";
 // name renders as plain text — no link, no dead href.
 export function PublicSmokeDetail({ smoke }: { smoke: PublicSmokeView }) {
   const { assessment, construction } = smoke;
+  // The smoke's length beside its date (ADR-016) — journal content, so the
+  // public reader gets it exactly as the owner does.
+  const duration = formatDuration(smoke.durationMinutes);
 
   return (
     <article className="mx-auto flex max-w-3xl flex-col gap-8">
       <header className="flex items-start gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-2">
-          <LocalDate format="smokedAt" value={smoke.smokedAt} className="label-caps" />
+          <div className="label-caps">
+            <LocalDate format="smokedAt" value={smoke.smokedAt} />
+            {duration ? <span>{` · ${duration}`}</span> : null}
+          </div>
           {smoke.journal.title ? (
             <>
               <h1 className="font-display text-3xl leading-tight font-semibold text-ink">

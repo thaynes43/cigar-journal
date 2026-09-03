@@ -258,7 +258,7 @@ Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
 - approximatePosition and any position is a 0-1 fraction through the smoke (0 = light, 1 = nub).
 - descriptors are normalized kebab-case tags; specificDescriptors are the user's exact, unusual words kept verbatim.
-- smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time.
+- smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time. Started and ended times are the same: state them only when the user gave them; a save that carries the photo drop takes its start from the drop, and the server derives the duration.
 - get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - Combine related corrections into one update_smoke call rather than several.

@@ -12,6 +12,9 @@ const hostile: PublicSmokeView = {
   smokeId: "00000000-0000-0000-0000-000000000001",
   cigar: { canonicalName: "<script>alert('cigar')</script>" },
   smokedAt: { value: "2026-06-01T12:00:00.000Z", source: "user", precision: "minute" },
+  startedAt: null,
+  endedAt: null,
+  durationMinutes: null,
   journal: {
     title: "<script>alert('title')</script>",
     narrative: "Lovely <script>alert('narrative')</script> draw.",

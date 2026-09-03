@@ -46,7 +46,7 @@ import { HIERARCHY_UNFILED } from "./types.js";
 import { brandSlug } from "./catalog-browse.js";
 import { SmokeNotFoundError, CigarNotFoundError } from "./errors.js";
 import { normalizeDescriptor } from "./descriptors.js";
-import { toSmokePhotoView } from "./mapping.js";
+import { toSmokePhotoView, smokeTimingView } from "./mapping.js";
 import { assessEnrichmentFields } from "./enrichment.js";
 import { validateQueryFilters } from "./validation.js";
 import { isUuid } from "./uuid.js";
@@ -103,6 +103,7 @@ function toSmokeView(
       source: smoke.smokedAtSource,
       precision: smoke.smokedAtPrecision,
     },
+    ...smokeTimingView(smoke),
     context: smoke.context ?? null,
     overallDescriptors: smoke.overallDescriptors,
     progression: progression.map((p) => ({
@@ -388,6 +389,7 @@ export async function queryMySmokes(
         source: row.smoke.smokedAtSource,
         precision: row.smoke.smokedAtPrecision,
       },
+      ...smokeTimingView(row.smoke),
       rating: row.smoke.rating,
       liked: row.smoke.liked,
       descriptors: row.smoke.overallDescriptors,

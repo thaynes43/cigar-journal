@@ -35,6 +35,10 @@ const smokedAtInput = z.object({
   precision: z.enum(["minute", "approximate", "day"]).optional(),
 });
 
+// The session's bounds (ADR-016). Value only — the source is server-owned, so a
+// stated bound is `user` and the observed ones are never client-assertable.
+const smokeTimingInput = z.object({ value: z.string() });
+
 const progressionEntry = z.object({
   stage: z.string().nullish(),
   approximatePosition: z.number().nullish(),
@@ -73,6 +77,8 @@ export const saveSmokeSchema = z.object({
   clientRequestId: z.string(),
   cigar: cigarRef,
   smokedAt: smokedAtInput.optional(),
+  startedAt: smokeTimingInput.optional(),
+  endedAt: smokeTimingInput.optional(),
   overallDescriptors: z.array(z.string()).optional(),
   progression: z.array(progressionEntry).optional(),
   construction: constructionInput.optional(),
@@ -94,6 +100,9 @@ export const updateSmokeSchema = z.object({
   changes: z.object({
     cigar: z.object({ resolveTo: z.string() }).optional(),
     smokedAt: smokedAtInput.optional(),
+    // Explicit null clears the bound and its source with it (ADR-016).
+    startedAt: smokeTimingInput.nullish(),
+    endedAt: smokeTimingInput.nullish(),
     assessment: assessmentInput.optional(),
     construction: constructionInput.optional(),
     journal: journalInput.optional(),

@@ -31,7 +31,7 @@ import {
   type ProcessedImage,
   type SmokePhotoObject,
 } from "./smoke-photos.js";
-import { smokePhotoSnapshot } from "./mapping.js";
+import { smokePhotoSnapshot, withinSmokeWindow } from "./mapping.js";
 import { isUuid } from "./uuid.js";
 
 // The photo drop (ADR-014): a link bound to the user's smoke IN PROGRESS, opened
@@ -72,6 +72,15 @@ export const MAX_PHOTOS_PER_DROP = MAX_PHOTOS_PER_SMOKE;
 // column written from an anonymous request, so the bound lives here and the route
 // enforces it (#288).
 export const MAX_PHOTO_CAPTION_LENGTH = 200;
+
+// How long a gap between opens ends the drop's session (ADR-016). One open drop
+// per user means the SAME drop carries evening after evening — the drop the
+// 2026-09-02 save claimed had been created 23 hours earlier and was re-opened at
+// 01:04Z for that night's first photo — so a re-open after this long starts a new
+// session rather than continuing a stale one. Four hours: longer than any smoke
+// and the conversation around it, shorter than the gap to the next evening.
+export const DROP_SESSION_GAP_HOURS = 4;
+const DROP_SESSION_GAP_MS = DROP_SESSION_GAP_HOURS * 3600 * 1000;
 
 export interface OpenPhotoDropInput {
   correlationId?: string;
@@ -151,8 +160,20 @@ export async function openPhotoDrop(
   const existing = open[0];
 
   if (existing) {
+    // The re-open either continues this drop's session or begins a new one
+    // (ADR-016): a gap longer than DROP_SESSION_GAP_HOURS means the previous run
+    // is over and tonight's first photo starts the clock. `last_opened_at`
+    // always advances — it is what the next gap is measured from.
+    const continues = now.getTime() - existing.lastOpenedAt.getTime() <= DROP_SESSION_GAP_MS;
     await deps.db.transaction(async (tx) => {
-      await tx.update(photoDrops).set({ tokenHash }).where(eq(photoDrops.id, existing.id));
+      await tx
+        .update(photoDrops)
+        .set({
+          tokenHash,
+          lastOpenedAt: now,
+          ...(continues ? {} : { sessionStartedAt: now }),
+        })
+        .where(eq(photoDrops.id, existing.id));
       await tx.insert(auditLog).values({
         userId: principal.userId,
         ...auditActor(principal, input.actor ?? "web"),
@@ -183,7 +204,14 @@ export async function openPhotoDrop(
   const photoDropId = await deps.db.transaction(async (tx) => {
     const inserted = await tx
       .insert(photoDrops)
-      .values({ userId: principal.userId, tokenHash, expiresAt })
+      // A fresh drop opens its own session: both stamps are this open (ADR-016).
+      .values({
+        userId: principal.userId,
+        tokenHash,
+        expiresAt,
+        sessionStartedAt: now,
+        lastOpenedAt: now,
+      })
       .returning();
     const row = inserted[0]!;
     await tx.insert(auditLog).values({
@@ -307,6 +335,22 @@ export async function claimPhotoDrop(
         claimedAt: sql`coalesce(${photoDrops.claimedAt}, ${now})`,
       })
       .where(eq(photoDrops.id, drop.id));
+
+    // A LATE claim establishes the start the save could not (ADR-016): the
+    // drop's session began when that night's first photo appeared, which is the
+    // earliest observation the system has of the smoke. COALESCE on both
+    // columns, so a stated start — or one an earlier claim already set — is
+    // never overwritten, and the pair's CHECK stays satisfied. Skipped when the
+    // session start lands outside the twelve-hour window from the smoke's end.
+    if (withinSmokeWindow(drop.sessionStartedAt, smoke.endedAt ?? smoke.smokedAt ?? now)) {
+      await tx
+        .update(smokes)
+        .set({
+          startedAt: sql`coalesce(${smokes.startedAt}, ${drop.sessionStartedAt})`,
+          startedAtSource: sql`coalesce(${smokes.startedAtSource}, 'photo-drop')`,
+        })
+        .where(eq(smokes.id, input.smokeId));
+    }
 
     const pending = staged.length - moving.length;
     await tx.insert(auditLog).values({

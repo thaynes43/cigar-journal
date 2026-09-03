@@ -32,6 +32,16 @@ export const smokes = pgTable("smokes", {
     .notNull()
     .default("unknown"),
   smokedAtPrecision: text("smoked_at_precision").$type<"minute" | "approximate" | "day">(),
+  // The session's bounds (ADR-016). Both nullable, each paired with its
+  // provenance by a CHECK — a stated `user` value, the drop's opening
+  // (`photo-drop`, ADR-014), or the save that finalized the smoke
+  // (`system-finalized`). The duration is DERIVED on read from the pair
+  // (`deriveDurationMinutes` in @cj/domain) and deliberately has no column: a
+  // corrected instant would leave a stored number stale beside it.
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  startedAtSource: text("started_at_source").$type<"user" | "photo-drop">(),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
+  endedAtSource: text("ended_at_source").$type<"user" | "system-finalized">(),
   context: jsonb("context").$type<SmokeContext>(),
   overallDescriptors: text("overall_descriptors")
     .array()

@@ -882,6 +882,144 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  // ---- session timing (ADR-016) ---------------------------------------------
+
+  // The bounds are an INPUT the model may only fill from what the user said, and
+  // an OUTPUT on every smoke shape the tools publish. Both halves are contract,
+  // so both are asserted over the real HTTP surface rather than in the domain.
+  it("save_smoke takes stated bounds and reports the derived duration on every smoke shape", async () => {
+    await withClient(ownerFull, async (client) => {
+      const saved = payloadOf(
+        await call(client, "save_smoke", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId: primaryCigarId },
+          startedAt: { value: "2026-09-02T01:04:00.000Z" },
+          endedAt: { value: "2026-09-02T02:20:00.000Z" },
+          journal: { narrative: "Session timing contract marker." },
+        }),
+      ) as {
+        smoke: {
+          smokeId: string;
+          startedAt: { value: string; source: string };
+          endedAt: { value: string; source: string };
+          durationMinutes: number;
+        };
+      };
+
+      // Stated beats observed: the client may assert only the value, and the
+      // server assigns `user` — the one provenance a statement can carry.
+      expect(saved.smoke.startedAt).toEqual({
+        value: "2026-09-02T01:04:00.000Z",
+        source: "user",
+      });
+      expect(saved.smoke.endedAt).toEqual({ value: "2026-09-02T02:20:00.000Z", source: "user" });
+      expect(saved.smoke.durationMinutes).toBe(76);
+
+      const detail = payloadOf(await call(client, "get_smoke", { smokeId: saved.smoke.smokeId })) as {
+        smoke: { startedAt: unknown; endedAt: unknown; durationMinutes: number };
+      };
+      expect(detail.smoke.durationMinutes).toBe(76);
+      expect(detail.smoke.startedAt).toEqual(saved.smoke.startedAt);
+
+      const list = payloadOf(
+        await call(client, "get_my_smokes", { text: "Session timing contract marker." }),
+      ) as { smokes: Record<string, unknown>[] };
+      expect(list.smokes[0]).toMatchObject({
+        smokeId: saved.smoke.smokeId,
+        durationMinutes: 76,
+      });
+      expect(list.smokes[0]!.startedAt).toEqual(saved.smoke.startedAt);
+    });
+  });
+
+  it("update_smoke corrects a bound, names it in changedFields, and clears it on null", async () => {
+    await withClient(ownerFull, async (client) => {
+      const smokeId = (
+        payloadOf(
+          await call(client, "save_smoke", {
+            clientRequestId: randomUUID(),
+            cigar: { cigarId: primaryCigarId },
+            overallDescriptors: ["cedar"],
+          }),
+        ) as { smoke: { smokeId: string } }
+      ).smoke.smokeId;
+
+      const corrected = payloadOf(
+        await call(client, "update_smoke", {
+          clientRequestId: randomUUID(),
+          smokeId,
+          changes: {
+            startedAt: { value: "2026-09-02T01:04:00.000Z" },
+            endedAt: { value: "2026-09-02T02:20:00.000Z" },
+          },
+        }),
+      ) as { changedFields: string[] };
+      expect(corrected.changedFields).toEqual(expect.arrayContaining(["startedAt", "endedAt"]));
+
+      const after = payloadOf(await call(client, "get_smoke", { smokeId })) as {
+        smoke: { durationMinutes: number | null };
+      };
+      expect(after.smoke.durationMinutes).toBe(76);
+
+      // An explicit null clears the bound; the duration has no op of its own and
+      // simply stops being derivable.
+      await call(client, "update_smoke", {
+        clientRequestId: randomUUID(),
+        smokeId,
+        changes: { startedAt: null },
+      });
+      const cleared = payloadOf(await call(client, "get_smoke", { smokeId })) as {
+        smoke: { startedAt: unknown; durationMinutes: number | null };
+      };
+      expect(cleared.smoke.startedAt).toBeNull();
+      expect(cleared.smoke.durationMinutes).toBeNull();
+    });
+  });
+
+  it("an end before its start is a validation_error naming the field", async () => {
+    await withClient(ownerFull, async (client) => {
+      const result = await call(client, "save_smoke", {
+        clientRequestId: randomUUID(),
+        cigar: { cigarId: primaryCigarId },
+        overallDescriptors: ["cedar"],
+        startedAt: { value: "2026-09-02T02:20:00.000Z" },
+        endedAt: { value: "2026-09-02T01:04:00.000Z" },
+      });
+      const error = errorOf(result);
+      expect(error.code).toBe("validation_error");
+      expect((error.fields as { path: string }[]).map((f) => f.path)).toContain("endedAt.value");
+    });
+  });
+
+  it("tools/list publishes the bounds as value-only, told never to infer them", async () => {
+    interface JsonSchemaNode {
+      description?: string;
+      properties?: Record<string, JsonSchemaNode>;
+      anyOf?: JsonSchemaNode[];
+    }
+
+    await withClient(ownerFull, async (client) => {
+      const tools = (await client.listTools()).tools;
+      for (const name of ["save_smoke", "update_smoke"] as const) {
+        const tool = tools.find((t) => t.name === name)!;
+        const schema = tool.inputSchema as { properties: Record<string, JsonSchemaNode> };
+        const props =
+          name === "save_smoke" ? schema.properties : schema.properties.changes!.properties!;
+        for (const bound of ["startedAt", "endedAt"] as const) {
+          const published = props[bound] as JsonSchemaNode;
+          expect(published, `${name}.${bound} is not published`).toBeDefined();
+          // On update_smoke the op is nullable — explicit null clears — so the
+          // object rides inside an anyOf beside the null. Read through it.
+          const object = published.anyOf?.find((b) => b.properties) ?? published;
+          // Value only — the source is server-owned, so the model has no way to
+          // assert `photo-drop` or `system-finalized`.
+          expect(Object.keys(object.properties ?? {})).toEqual(["value"]);
+          expect(object.description).toContain("only when the user stated it — never inferred");
+        }
+      }
+    });
+  });
+
   // ---- error shapes ---------------------------------------------------------
 
   it("cigar_ambiguous: described name matching two catalog rows returns candidates", async () => {

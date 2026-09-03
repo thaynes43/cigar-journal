@@ -1,6 +1,9 @@
 # ADR-002: Smoke is the aggregate; the journal entry is a view of it
 
 - **Status:** accepted
+- **Amended by ADR-016 (2026-09-03):** `system-finalized` is the server's best
+  observation of when the smoke happened — the session start when one is
+  established, else the finalize instant.
 - **Date:** 2026-08-26
 
 ## Context
