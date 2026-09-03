@@ -59,7 +59,10 @@ export const egmCigars: PrefixVendorAdapter = {
   sitemapUrl: "https://egmcigars.com/sitemap.xml",
   kind: "vendor",
   focus: "both",
-  crawlEnabled: false,
+  // Live in the registry since 2026-09-02 (#270) — probed in-cluster, and the
+  // 2026-09-03 fleet drain matched an ask and wrote its photo. The constant
+  // FOLLOWS the row; see `adapters/index.ts` for why that is the direction.
+  crawlEnabled: true,
   approvalStatus: "unapproved",
   // Tier 3 (ADR-015): the biggest pictures in the fleet, behind Montefortuna
   // only because its catalogue is a third of the size and its Habanos brand

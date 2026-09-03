@@ -150,6 +150,15 @@ listing genuinely states nothing: Small Batch's grouped parent products (whose
 prices live per variant in HTML), Cuban Lou's bundle-dominated outlet. It is
 never for the everyday single-stick shop.
 
+**A grouped product states its packaging per pack, not per listing**
+(2026-09-03, ADR-015 amendment, issue #270). Where a vendor declares an HTML
+variant-price source, one product page yields one offer PER PACK — `5-pack` / 5
+sticks at $67.50 beside `box` / 20 at $249.95 — each parsed through the same
+vocabulary above and each its own observation series, so per-stick derives per
+pack and the tiered Price section renders the shop's actual ladder. The parent
+writes no offer: it is not a thing for sale. `Not stated` still covers the
+parent's own silence wherever the page states nothing else.
+
 Three properties keep the refinement conservative, and each is asserted in
 `packages/crawler/src/core/normalize.test.ts`:
 

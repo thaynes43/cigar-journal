@@ -10,18 +10,11 @@ import type { PrefixVendorAdapter } from "./types.js";
 // link-out). Also carries the US-embargo exposure flag on surfacing Habanos
 // price data (vendor-sources.md) — an admin/registry decision, not this lane's.
 //
-// robots/ToS NOT yet live-verified — coordinator runs the in-cluster probe before
-// the registry enables crawling (ADR-006 rule; the dev pod cannot reach this
-// domain). `crawlEnabled: false` until it passes.
-//
-// Probe MUST confirm, and the coordinator correct the adapter where wrong:
-//   1. robots.txt allows our UA on the product path (WooCommerce default disallows
-//      only /wp-admin/ — read it; installs vary).
-//   2. sitemapUrl exists (WooCommerce SEO plugins usually emit /sitemap.xml, often
-//      a sitemapindex — verify the root path and shape).
-//   3. productPathPrefix: WooCommerce ships `/product/` by default, but Fox uses a
-//      custom `/shop/` base — confirm Cuban Lou's real prefix from one product URL.
-//   4. Product pages embed a schema.org Product in JSON-LD (WooCommerce norm).
+// Live-verified in-cluster and enabled in the registry; the 2026-09-03 fleet
+// drain walked 75 pages and parsed 73 listings here. The four points the probe
+// had to settle — robots on the product path, the sitemap's root and shape, the
+// real product prefix (WooCommerce ships `/product/`, this shop does not), and
+// schema.org Product in the page's JSON-LD — are settled and encoded below.
 export const cubanLous: PrefixVendorAdapter = {
   slug: "cuban-lous",
   name: "Cuban Lou's",
@@ -41,7 +34,10 @@ export const cubanLous: PrefixVendorAdapter = {
   // that are not. Migration 0025 corrects the existing registry row; this value
   // only seeds a fresh one (`resolveVendor` is insert-if-absent).
   focus: "both",
-  crawlEnabled: false,
+  // Live in the registry since before ADR-015 and re-confirmed by the operator on
+  // 2026-09-02 (#270). The constant FOLLOWS the row; see `adapters/index.ts` for
+  // why that is the direction.
+  crawlEnabled: true,
   approvalStatus: "unapproved",
   // Tier 2 (ADR-015): off the r/cubancigars approved list, so it is not the price
   // authority. Its offers are still RECORDED — a promotion is then a flag flip

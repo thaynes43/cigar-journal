@@ -57,11 +57,13 @@ export const twoGuysCigars: ExclusionVendorAdapter = {
   sitemapUrl: "https://www.2guyscigars.com/sitemap.xml",
   kind: "vendor",
   focus: "NC",
-  crawlEnabled: false,
+  // Live in the registry since 2026-09-02 (#270) — probed in-cluster, then
+  // enabled with `display_enabled` held back until DESIGN-005's packaging-aware
+  // prices shipped, and now both. The constant FOLLOWS the row; see
+  // `adapters/index.ts` for why that is the direction.
+  crawlEnabled: true,
   approvalStatus: "owner-added",
-  // Tier 1 (ADR-015): one of the owner's linkout NC shops. The tier is a posture,
-  // not a promise the lane runs — the parser blocker below still keeps
-  // `crawlEnabled` false, and nothing is displayed from a vendor that never ran.
+  // Tier 1 (ADR-015): one of the owner's linkout NC shops.
   tier: 1,
   purchaseLinkout: true,
   // Exclusion gate (Mode B), two branches, both anchored:
@@ -141,22 +143,15 @@ export const twoGuysCigars: ExclusionVendorAdapter = {
   maxPages: 500,
 };
 
-// --- what still stands between this adapter and `crawlEnabled: true` ---------
+// --- what the live probe settled, and what is left ---------------------------
 // The parser blocker is GONE (issue #252): the OG/microdata extractor and the
-// keywords category source above read this vendor's pages, and the fixtures in
-// `__fixtures__/two-guys/` parse to listings — the two cigars admitted, the
-// candle refused as an accessory. What is left is verification and plumbing, in
-// order:
+// keywords category source above read this vendor's pages. The in-cluster probe
+// of 2026-09-02 then passed on this build — `product-locs` 3,843, 3 of 3 parsed,
+// 3 cigars — and the operator enabled the row; the first fleet drain
+// (2026-09-03) walked 45 pages, parsed 40 listings and matched one.
 //
-//   1. An in-cluster `--probe` passing the #179 seven-point bar ON THIS BUILD.
-//      The dev pod cannot reach the domain, so every number here is a fixture
-//      claim until a Job says otherwise: `product-locs` should read 3,841,
-//      `parsed>=2` and `cigars>=1` are the two this change exists to move, and
-//      the accepted count against 4,888 one-segment locs is the ratio to watch.
-//   2. A controller pair in haynes-ops (seed + offers lanes), and
-//   3. A seed run — with `maxPages` raised deliberately, since 500 is a
-//      probe-era cap well under the 3,841 the gate accepts.
-//
-// `crawlEnabled` stays false until 1 passes; enabling is additionally gated on
-// #196 Wave 5. See the ADR-006 amendments of 2026-09-01 (the gate and the live
-// shape) and 2026-09-02 (OG/microdata as a structured source).
+// What is left is a SEED, not an enablement: `maxPages: 500` is a probe-era cap
+// well under the 3,841 the gate accepts, so a full catalogue pass needs the cap
+// raised deliberately and a deadline long enough to finish. See the ADR-006
+// amendments of 2026-09-01 (the gate and the live shape) and 2026-09-02
+// (OG/microdata as a structured source).

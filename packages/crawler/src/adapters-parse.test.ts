@@ -171,22 +171,23 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
     expect(fetcher.pagesFetched).toBeLessThanOrEqual(probeFetchBudget(twoGuysCigars));
   });
 
-  it("ships every unprobed adapter crawl_enabled=false until a live probe passes", () => {
-    for (const c of cases) {
-      expect(c.adapter.crawlEnabled).toBe(false);
-    }
-    expect(montefortuna.crawlEnabled).toBe(false);
-    // The two outside `cases` are the ones that most need saying — both have now
-    // been live-probed, and both failed. Enabling either is a registry decision
-    // an operator makes; it is never an adapter edit.
-    expect(twoGuysCigars.crawlEnabled).toBe(false);
-    expect(smallBatchCigar.crawlEnabled).toBe(false);
-    // Cuban Lou's posture: unapproved + no purchase link-out (owner ruling).
+  // Every adapter in the fleet has now been live-probed and enabled by the
+  // operator, so `crawlEnabled` is true across the board and the constants say so
+  // (#270 — see `adapters/index.ts`, and `vendor-posture.test.ts` for the rows
+  // they are pinned against). The posture that is NOT a probe outcome is what
+  // this test still holds still.
+  it("keeps the link-out posture each vendor was given, whatever its probe said", () => {
+    // Cuban Lou's: unapproved + no purchase link-out (owner ruling 2026-08-29).
     expect(cubanLous.approvalStatus).toBe("unapproved");
     expect(cubanLous.purchaseLinkout).toBe(false);
     // NC vendors keep their link-out.
     expect(twoGuysCigars.purchaseLinkout).toBe(true);
     expect(smallBatchCigar.purchaseLinkout).toBe(true);
+    // And the whole enabled fleet is enabled in code as well as in the registry,
+    // which is what keeps the nightly drift report empty.
+    for (const adapter of [...cases.map((c) => c.adapter), montefortuna, twoGuysCigars, smallBatchCigar]) {
+      expect([adapter.slug, adapter.crawlEnabled]).toEqual([adapter.slug, true]);
+    }
   });
 
   // ADR-015 / ADR-006 amendment 2026-09-02 (#270). These four exist for the one
@@ -204,12 +205,13 @@ describe("new vendor adapters — representative fixture parse (via runProbe)", 
       expect([adapter.slug, adapter.focus]).toEqual([adapter.slug, "both"]);
       expect([adapter.slug, adapter.approvalStatus]).toEqual([adapter.slug, "unapproved"]);
       expect([adapter.slug, adapter.purchaseLinkout]).toEqual([adapter.slug, false]);
-      expect([adapter.slug, adapter.crawlEnabled]).toEqual([adapter.slug, false]);
       // A cap is not optional on any of them: the smallest gate here accepts 913
-      // URLs and the largest 6,604, and the fetcher THROWS at the cap.
+      // URLs and the largest 6,603, and the fetcher THROWS at the cap.
       expect([adapter.slug, (adapter.maxPages ?? 0) > 0]).toEqual([adapter.slug, true]);
-      // None of these vendors asks for a Crawl-delay, so every interval here is
-      // our own politeness above the 2.5s floor.
+      // None of these vendors ASKS for a Crawl-delay in robots.txt, so every
+      // interval here starts as our own politeness above the 2.5s floor —
+      // Cigarworld's 8s is the exception that proves the rule, measured against
+      // the 429 its Apache serves rather than against anything it published.
       expect([adapter.slug, (adapter.minIntervalMs ?? 0) >= 3000]).toEqual([adapter.slug, true]);
     }
   });

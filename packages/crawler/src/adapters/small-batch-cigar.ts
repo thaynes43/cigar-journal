@@ -21,9 +21,18 @@ import type { ExclusionVendorAdapter } from "./types.js";
 //               (images.smallbatchcigar.com) are trustworthy. `offers.price` is
 //               "0.00" on 20/20 cigar products — a nopCommerce GROUPED product
 //               publishes the parent at zero and keeps the real prices in HTML
-//               `variant-overview` blocks, one per pack size. normalizeListing
-//               reads a zero as UNKNOWN, never as $0 (normalize.ts); a real
-//               price extractor is ADR-015 work, not this adapter's.
+//               `variant-overview` blocks, one per pack size.
+//   variants    THE PRICES, live-read again 2026-09-03 (#270) and now extracted:
+//               `variantPrices` below points `core/variant-prices.ts` at the
+//               page's `product-variant-list`, whose `product-variant-line`
+//               blocks carry a label, a stock word and a price keyed to one
+//               `data-productid` — `Sobremesa Solita Short Churchill - Pack of 5`
+//               $71.00 (Low stock) beside `… - Box of 14` $198.00 (In stock).
+//               ingest writes ONE OFFER PER PACK, each with its own packaging
+//               tier and per-stick (DESIGN-005). A SIMPLE product here has no
+//               variant list and a real JSON-LD price, and is untouched by any of
+//               this; a parent at 0.00 with no variant prices is still refused as
+//               a placeholder (normalize.ts).
 //   taxonomy    breadcrumbs are `SHOP BY BRAND / <brand> / [<line>]`, or a
 //               house-line root (`Modern Tobacconist`, `Amendola Signature
 //               Series`, `Connecticut Valley Reserve`). The word "cigars" appears
@@ -31,9 +40,6 @@ import type { ExclusionVendorAdapter } from "./types.js";
 //               passed 4 of 20 real cigars.
 //
 // Catalogue depth for the asks this unblocks: Caldwell 89 locs, Tatuaje 120.
-//
-// `crawlEnabled` stays false in code — flipping it is the operator's registry
-// decision after an in-cluster probe, never an adapter edit (ADR-006).
 export const smallBatchCigar: ExclusionVendorAdapter = {
   slug: "small-batch-cigar",
   name: "Small Batch Cigar",
@@ -41,7 +47,11 @@ export const smallBatchCigar: ExclusionVendorAdapter = {
   sitemapUrl: "https://www.smallbatchcigar.com/sitemap.xml",
   kind: "vendor",
   focus: "NC",
-  crawlEnabled: false,
+  // Live in the registry since 2026-09-02 (#270) — probed in-cluster, then a
+  // one-off drain that matched 19 asks and wrote 19 photos (three Caldwells and
+  // eleven Tatuaje Monsters among them). The constant FOLLOWS the row; see
+  // `adapters/index.ts` for why that is the direction.
+  crawlEnabled: true,
   approvalStatus: "owner-added",
   // Tier 1 (ADR-015): one of the owner's linkout NC shops, so its prices are
   // display-grade the day its probe passes and its row is enabled.
@@ -77,6 +87,10 @@ export const smallBatchCigar: ExclusionVendorAdapter = {
   // live taxonomy has, and every accessory's path contains it. An empty
   // breadcrumb trail still fails `/./`, so a page with no taxonomy is never
   // claimed as a cigar.
+  // THE PRICES ARE IN THE HTML, and this is the declaration that says so
+  // (ADR-015; see the `variants` note in the header and `core/variant-prices.ts`).
+  // The only adapter in the fleet that names one.
+  variantPrices: "nopcommerce-variant-overview",
   cigarCategoryPattern: /./,
   excludePattern: /accessor|ashtray|lighter|cutter|humidor|sampler?|gift.?card/i,
   excludeNamePattern: /\bsamplers?\b|\bsets?\b|\bkits?\b|\bduo\b|\bcases?\b|\bassortments?\b|\bcombos?\b|\bhumidors?\b/i,

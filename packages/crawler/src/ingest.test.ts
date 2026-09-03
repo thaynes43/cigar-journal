@@ -1461,6 +1461,10 @@ describe("crawler ingest (embedded Postgres)", () => {
 
     const first = await enrichRun(only, brokenRoutes);
     expect(first.stats.enrich).toMatchObject({ requests: 1, looked: 0, matched: 0, errored: 1, spent: 0 });
+    // WHAT the error was, not just that there was one (#270). A bare `errors=47`
+    // in the nightly report cost an in-cluster fetch Job to explain; the status
+    // code was in the run's hands the whole time.
+    expect(first.stats.errorKinds).toEqual({ "http-500": 1 });
     let row = await requestRow(requestId);
     expect(row.status).toBe("pending");
     expect(row.attempts).toBe(0);
@@ -1544,6 +1548,64 @@ describe("crawler ingest (embedded Postgres)", () => {
     const third = await enrichRun(only, gateRoutes);
     expect(third.stats.enrich).toMatchObject({ spent: 0, blocked: 1 });
     expect((await requestRow(requestId)).status).not.toBe("exhausted");
+  });
+
+  // THE SMALL BATCH SHAPE, and the line the 2026-09-03 fleet run put on the wrong
+  // side of (#270). Its drain reported `requests=8 looked=3 matched=0 errors=5`,
+  // and the five were asks whose whole eight-URL shortlist was this shop's own
+  // BRAND and LINE index pages — `/tatuaje`, `/tatuaje-black-label`,
+  // `/tatuaje-samplers`, … — because a Mode-B gate cannot tell a one-segment
+  // landing slug from a one-segment product slug and the ask's only ranking key
+  // was its marca. Those pages answer 200 and carry a BreadcrumbList and no
+  // Product.
+  //
+  // That is NOT the gift-registry case above, and treating it as one cost the
+  // most where it hurt: an error burns no attempt, so the ask never retired, the
+  // same eight pages were re-fetched nightly, and ERROR_BUDGET would eventually
+  // retire the request as `blocked` — "nobody could reach this vendor" — about a
+  // shop we had read eight pages of. It is a MISS: we read this shop's Tatuajes
+  // and the cigar is not among them.
+  it("a vendor's own brand index is a completed look, not an error", async () => {
+    const only = await makeVendor("Small Batch Landing", "NC");
+    await arrange([only]);
+
+    const cigarId = await seedCigar("Tatuaje Monster Smash Krueger", "NC");
+    const requestId = await seedRequest(cigarId);
+
+    const SB = "https://www.smallbatchcigar.com";
+    const BRAND = `${SB}/tatuaje`;
+    const LINE = `${SB}/tatuaje-black-label`;
+    // Both rank on the marca and neither carries a Product node — the exact
+    // shortlist the live drain built for this ask.
+    const routes = {
+      [`${SB}/robots.txt`]: { body: loadFixture("robots.txt", "small-batch") },
+      [smallBatchCigar.sitemapUrl]: { body: urlsetXml([BRAND, LINE]) },
+      [BRAND]: { body: loadFixture("landing-caldwell.html", "small-batch") },
+      [LINE]: { body: loadFixture("landing-caldwell.html", "small-batch") },
+    };
+
+    const run = await runIngest(deps(createMockFetcher(routes), null), {
+      adapter: smallBatchCigar,
+      vendorId: only,
+      mode: "enrich",
+    });
+
+    // Nothing parsed as a listing — and it is still a look.
+    expect(run.stats.listingsParsed).toBe(0);
+    expect(run.stats.enrich).toMatchObject({ requests: 1, looked: 1, matched: 0, errored: 0 });
+    const ledger = await ledgerRows(requestId);
+    expect(ledger[0]!.attempts).toBe(1);
+    expect(ledger[0]!.errors).toBe(0);
+    expect(ledger[0]!.lastOutcome).toBe("miss");
+
+    // And it therefore RETIRES, at the vendor budget, instead of re-fetching the
+    // same two pages every night forever.
+    await runIngest(deps(createMockFetcher(routes), null), {
+      adapter: smallBatchCigar,
+      vendorId: only,
+      mode: "enrich",
+    });
+    expect((await requestRow(requestId)).status).toBe("exhausted");
   });
 
   // The other side of that line: a page that DOES parse as a product and simply is
@@ -1793,19 +1855,27 @@ describe("crawler ingest (embedded Postgres)", () => {
     // and parses to nothing, so it is not among the three listings.
     expect(result.stats.listingsParsed).toBe(3);
     expect(result.stats.skippedNonCigar).toBe(1); // the cutter
-    expect(result.stats.offersWritten).toBe(2);
+    // THREE offers from TWO listings (ADR-015): Eastern Standard is a grouped
+    // product with two packs and each pack is its own observation series, while
+    // the Tatuaje has one.
+    expect(result.stats.offersWritten).toBe(3);
   });
 
-  // What the zero-price guard actually does to the database (#270). The row is
-  // still written — availability is a real observation and the listing match
-  // hangs off it — with NO price rather than a $0.00 one, because $0.00 is not a
-  // cheap cigar, it is a lie the market view would rank first.
-  it("writes a priceless offer row, never a $0.00 one, for a placeholder-priced listing", async () => {
+  // WHAT A GROUPED PRODUCT WRITES (ADR-015, #270). The parent's `0.00` is still
+  // never a price; the page's per-pack prices are, and each pack is its own row
+  // with its own packaging tier and its own per-stick (DESIGN-005). Before the
+  // HTML extractor existed this page wrote ONE priceless row, which is why every
+  // Small Batch offer on prod carried no price at all.
+  const smallBatchVendor = async (name: string): Promise<string> => {
     const inserted = await pg.db
       .insert(vendors)
-      .values({ name: "Small Batch placeholder", url: "https://placeholder.example", focus: "NC", approvalStatus: "owner-added" })
+      .values({ name, url: "https://placeholder.example", focus: "NC", approvalStatus: "owner-added" })
       .returning({ id: vendors.id });
-    const sbVendorId = inserted[0]!.id;
+    return inserted[0]!.id;
+  };
+
+  it("writes one priced offer per pack for a grouped product, each with its own per-stick", async () => {
+    const sbVendorId = await smallBatchVendor("Small Batch grouped");
 
     const SB = "https://www.smallbatchcigar.com";
     const EASTERN = `${SB}/eastern-standard-sungrown-toro-extra`;
@@ -1813,6 +1883,48 @@ describe("crawler ingest (embedded Postgres)", () => {
       [`${SB}/robots.txt`]: { body: loadFixture("robots.txt", "small-batch") },
       [smallBatchCigar.sitemapUrl]: { body: urlsetXml([EASTERN]) },
       [EASTERN]: { body: loadFixture("product-eastern-standard-sungrown-toro-extra.html", "small-batch") },
+    });
+
+    await runIngest(deps(fetcher, null), { adapter: smallBatchCigar, vendorId: sbVendorId, mode: "offers" });
+
+    const rows = await pg.db.select().from(offers).where(eq(offers.vendorId, sbVendorId));
+    expect(
+      rows
+        .map((r) => ({
+          packaging: r.packaging,
+          sticks: r.sticksPerPackage,
+          price: r.price,
+          perStick: r.pricePerStickCents,
+          inStock: r.inStock,
+          listingUrl: r.listingUrl,
+        }))
+        .sort((a, b) => (a.packaging ?? "").localeCompare(b.packaging ?? "")),
+    ).toEqual([
+      { packaging: "5-pack", sticks: 5, price: "67.50", perStick: 1350, inStock: true, listingUrl: EASTERN },
+      // $249.95 / 20 = 1249.75 ¢, rounded to the stored integer cent.
+      { packaging: "box", sticks: 20, price: "249.95", perStick: 1250, inStock: true, listingUrl: EASTERN },
+    ]);
+  });
+
+  // The guard the extractor did NOT weaken. A grouped parent whose page states no
+  // pack price is still a listing with no price — the row is written, because
+  // availability is a real observation and the listing match hangs off it, but
+  // with NO price rather than a $0.00 one: $0.00 is not a cheap cigar, it is a
+  // lie the market view would rank first.
+  it("writes a priceless offer row, never a $0.00 one, when the page states no pack price", async () => {
+    const sbVendorId = await smallBatchVendor("Small Batch placeholder");
+
+    const SB = "https://www.smallbatchcigar.com";
+    const EASTERN = `${SB}/eastern-standard-sungrown-toro-extra`;
+    // The same page with its variant list removed — a true placeholder.
+    const noVariants = loadFixture("product-eastern-standard-sungrown-toro-extra.html", "small-batch").replace(
+      /<div class="product-variant-list">[\s\S]*<\/div>/,
+      "",
+    );
+    const fetcher = createMockFetcher({
+      [`${SB}/robots.txt`]: { body: loadFixture("robots.txt", "small-batch") },
+      [smallBatchCigar.sitemapUrl]: { body: urlsetXml([EASTERN]) },
+      [EASTERN]: { body: noVariants },
     });
 
     await runIngest(deps(fetcher, null), { adapter: smallBatchCigar, vendorId: sbVendorId, mode: "offers" });

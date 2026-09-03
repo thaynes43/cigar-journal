@@ -9,6 +9,7 @@
 
 import { extractJsonLd, productImageUrl, type JsonLdProduct } from "./jsonld.js";
 import { extractKeywords, extractOgImage, extractOpenGraphProduct } from "./opengraph.js";
+import { extractVariantPrices, type VariantPrice } from "./variant-prices.js";
 import type { CategorySource, PhotoUrlRewrite, ProductMarkup, VendorAdapter } from "../adapters/types.js";
 
 export interface ExtractedMarkup {
@@ -27,6 +28,21 @@ export interface ExtractedMarkup {
   // `imageUrl` and the offer's raw payload keep what the markup published. Null
   // when the page names no image, which `capturePhoto` reads as "no photo".
   photoUrl: string | null;
+  // The page's declared HTML per-pack prices (ADR-015, `adapter.variantPrices`).
+  // Empty for every vendor that declares no source. Read by `normalizeListing`.
+  variants: VariantPrice[];
+  // DID THIS PAGE STATE THE VENDOR'S OWN STRUCTURED TAXONOMY, whether or not it
+  // carried a product? Only a JSON-LD vendor can: it is the BreadcrumbList, the
+  // trail every page of such a catalogue publishes, and an OpenGraph vendor's
+  // product pages state none at all (2 Guys' is "Home / <brand>" by design), so
+  // this is false there without qualification.
+  //
+  // It exists because the enrich drain has to tell apart two page shapes that a
+  // 200 alone cannot (#270): Small Batch's BRAND and LINE landing pages, which
+  // sit at product-shaped one-segment URLs and ARE a real read of the shop's
+  // shelf, versus a page carrying no structured markup at all, which says
+  // nothing about any catalogue. See `tryEnrichCandidates`.
+  catalogTaxonomy: boolean;
 }
 
 // The JSON-LD Product's own taxonomy string. Split on `>` or `/` because both
@@ -81,7 +97,17 @@ export function extractProductMarkup(html: string, adapter: VendorAdapter): Extr
   const photoUrl =
     product && statedPhoto ? rewritePhotoUrl(statedPhoto, adapter.photoUrlRewrite) : null;
 
-  return { product, productMarkup, category, categorySource, photoUrl };
+  return {
+    product,
+    productMarkup,
+    category,
+    categorySource,
+    photoUrl,
+    // Read for EVERY page, product or not: a landing page has no product and its
+    // variant list is empty, and a grouped product's is where its prices live.
+    variants: extractVariantPrices(html, adapter.variantPrices),
+    catalogTaxonomy: breadcrumbs.length > 0,
+  };
 }
 
 // What a probe note calls the markup it did not find. Naming the DECLARED format

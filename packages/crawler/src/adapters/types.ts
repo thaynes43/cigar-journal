@@ -187,6 +187,25 @@ export type PhotoUrlRewrite = { pattern: RegExp; replacement: string } | "strip-
 // the exception.
 export type ImpliedPackaging = "single";
 
+// --- HTML variant prices (ADR-015, issue #270) -------------------------------
+// WHERE A GROUPED PRODUCT'S REAL PRICES ARE, on a shop whose structured markup
+// does not carry them. Declared, never sniffed, exactly like `productMarkup`.
+//
+// "nopcommerce-variant-overview" is Small Batch Cigar's shape and the one
+// ADR-015 named. A nopCommerce GROUPED product publishes the parent at
+// `offers.price: "0.00"` — there is no single price for a parent — and puts one
+// priced row per pack size in the page's `product-variant-list`. Live-read
+// 2026-09-03: `Sobremesa Solita Short Churchill - Pack of 5` at $71.00 (Low
+// stock) beside `… - Box of 14` at $198.00 (In stock), with the parent Product
+// node at 0.00/InStock for both.
+//
+// ABSENT — the norm — means the structured markup is the only price source, so
+// nothing reads the page's HTML for money. A vendor whose parent price is a real
+// zero (a genuine placeholder, no variants) still trips the placeholder refusal
+// in `normalizeListing`; declaring this does not weaken that guard, it only
+// gives the page a second, stated place to publish a price.
+export type VariantPriceSource = "nopcommerce-variant-overview";
+
 // Everything that is true of an adapter whatever kind of source it points at.
 export interface VendorAdapterShape {
   // Registry key, used on the CLI (`--vendor <slug>`) and as the adapter id.
@@ -259,6 +278,10 @@ export interface VendorAdapterShape {
   // Cigar, Cigarworld.de and J.J. Fox declare "single"; every other adapter
   // omits it and its bare listings stay `packaging: null`.
   impliedPackaging?: ImpliedPackaging;
+  // WHERE A GROUPED PRODUCT'S PER-PACK PRICES ARE — see `VariantPriceSource`
+  // above. Small Batch Cigar is the sole declarer; every other adapter omits it
+  // and its pages' HTML is never read for prices.
+  variantPrices?: VariantPriceSource;
   // A breadcrumb path (joined) matching this is a cigar category…
   //
   // A REVIEWER's category is its own taxonomy for the thing it reviewed

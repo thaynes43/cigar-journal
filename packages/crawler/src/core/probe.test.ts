@@ -681,7 +681,7 @@ describe("2 Guys, live shape — the OG/microdata extractor reads it", () => {
 // `variant-overview` price extractor (ADR-015) rewrites these deliberately; until
 // then this is the honest verdict, and it is why Small Batch is not in the
 // `cases` harness in `adapters-parse.test.ts`.
-describe("Small Batch, live shape — the gate is right and every cigar price is a placeholder", () => {
+describe("Small Batch, live shape — a grouped catalogue whose prices are in the HTML", () => {
   const sb = (path: string): string => `https://www.smallbatchcigar.com${path}`;
   const EASTERN = sb("/eastern-standard-sungrown-toro-extra");
   const TATUAJE = sb("/tatuaje-black-label-petite-lancero");
@@ -719,7 +719,12 @@ describe("Small Batch, live shape — the gate is right and every cigar price is
     expectWithinBudget(fetcher, smallBatchCigar);
   });
 
-  it("reports needs-attention because the grouped cigar publishes no price", async () => {
+  // The verdict this vendor could not reach until the variant extractor existed
+  // (ADR-015, #270). Nothing about the placeholder RULE changed — a grouped
+  // parent still publishes `0.00` and that is still never a price — what changed
+  // is that the page's other, stated price source is now read, so the parent's
+  // zero is no longer the last word on the page.
+  it("passes now that the grouped cigar's per-pack prices are read", async () => {
     const result = await runProbe(createMockFetcher(liveRoutes()), smallBatchCigar);
 
     // spreadIndices(4, 3) draws the first product, the landing page and the
@@ -727,12 +732,12 @@ describe("Small Batch, live shape — the gate is right and every cigar price is
     // ~23% of what the gate accepts and cannot be excluded by URL shape.
     expect(result.products.map((p) => p.url)).toEqual([EASTERN, CALDWELL, CUTTER]);
     expect(result.products[1]!.hasProduct).toBe(false); // /caldwell is a brand page
-    expect(result.productSummary).toEqual({ sampled: 3, parsed: 2, cigars: 1, placeholderPrices: 1 });
-    expect(result.verdict).toBe("needs-attention");
-    expect(result.notes.join(" ")).toMatch(/publishes a PLACEHOLDER price of 0/);
+    expect(result.productSummary).toEqual({ sampled: 3, parsed: 2, cigars: 1, placeholderPrices: 0 });
+    expect(result.verdict).toBe("ok");
+    expect(result.notes.join(" ")).not.toMatch(/PLACEHOLDER price/);
   });
 
-  it("parses the cigar itself correctly — only the price is missing", async () => {
+  it("parses the cigar itself correctly, and its two packs carry the prices", async () => {
     const result = await runProbe(createMockFetcher(liveRoutes()), smallBatchCigar);
     const eastern = result.products[0]!;
 
@@ -745,14 +750,30 @@ describe("Small Batch, live shape — the gate is right and every cigar price is
       "Eastern Standard Sungrown Toro Extra",
     ]);
     expect(eastern.isCigar).toBe(true);
+    // The PARENT still has no price of its own, and is no longer a placeholder:
+    // the page states two, one per pack, and ingest writes an offer for each.
     expect(eastern.priceCents).toBeNull();
-    expect(eastern.priceIsPlaceholder).toBe(true);
-    // The accessory is a single SKU and does carry a real price — the placeholder
-    // is a grouped-product property, not a property of the site.
+    expect(eastern.priceIsPlaceholder).toBe(false);
+    // The accessory is a SIMPLE product: no variant list, a real JSON-LD price,
+    // and untouched by any of the above.
     const cutter = result.products[2]!;
     expect(cutter.priceCents).toBe(6499);
     expect(cutter.priceIsPlaceholder).toBe(false);
     expect(cutter.isCigar).toBe(false);
+  });
+
+  // The refusal is intact where it belongs: a grouped parent at 0.00 whose page
+  // states NO variant price is still a vendor we will not record offers from.
+  it("still fails a grouped product that publishes a zero and no variants", async () => {
+    const stripped = loadFixture("product-eastern-standard-sungrown-toro-extra.html", "small-batch").replace(
+      /<div class="product-variant-list">[\s\S]*<\/div>/,
+      "",
+    );
+    const result = await runProbe(createMockFetcher({ ...liveRoutes(), [EASTERN]: { body: stripped } }), smallBatchCigar);
+
+    expect(result.productSummary.placeholderPrices).toBe(1);
+    expect(result.verdict).toBe("needs-attention");
+    expect(result.notes.join(" ")).toMatch(/publishes a PLACEHOLDER price of 0/);
   });
 });
 
@@ -901,6 +922,7 @@ describe("Montefortuna, live shape — a Yoast index, a marca breadcrumb and no 
       categoryPath: ["Home", "Shop", "Quintero"],
       packaging: null,
       sticksPerPackage: null,
+      variants: [],
     });
 
     expect(isCigarListing(listing("Quintero Favoritos - Single"), montefortuna)).toBe(true);
@@ -1132,6 +1154,7 @@ describe("J.J. Fox, live shape — 2 Guys' markup on a Magento store", () => {
       categoryPath: keywords,
       packaging: null,
       sticksPerPackage: null,
+      variants: [],
     });
 
     // `humidity`/`humidification`/`humidified` contain no "humidor", and each of

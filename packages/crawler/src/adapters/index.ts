@@ -23,9 +23,7 @@ export type { VendorAdapter } from "./types.js";
 // The adapter registry — slug → adapter. Admin data in code for now (ADR-006:
 // the vendor registry is admin-managed, the admin UI lands later). Each adapter
 // carries its own registry posture (focus/approval/linkout/crawlEnabled/tier);
-// the CLI's resolveVendor seeds the vendors row from it. Only Fox is
-// probe-verified (crawlEnabled true); the rest ship crawlEnabled false until the
-// coordinator's in-cluster probe passes a live robots/ToS read.
+// the CLI's resolveVendor seeds the vendors row from it.
 //
 // Listed in tier order, which is also the order `--all-enabled` walks the fleet
 // (ADR-015): the tier-1 NC shops, then the Habanos picture sources tier 2..5
@@ -37,6 +35,26 @@ export type { VendorAdapter } from "./types.js";
 // archive instead of a sitemap. It sorts last because it competes for none of the
 // three things a tier orders — it publishes no offers, takes no enrich asks and
 // writes no photos — so its position can never be read as authority over a shop.
+//
+// --- WHY EVERY `crawlEnabled` NOW READS `true` (#270, 2026-09-03) ------------
+// It is not a claim that the adapter enabled anything. `resolveVendor` is
+// INSERT-IF-ABSENT, so for a vendor that already has a registry row — all eight
+// of these — this constant seeds nothing and switches nothing; the row is the
+// switch and the operator owns it. What the constant still does is get COMPARED:
+// `vendorPostureDrift` prints a six-line paragraph per vendor whose row disagrees
+// with its adapter, on every run.
+//
+// The operator probed and enabled all eight rows through 2026-09-02, and the
+// constants stayed at their pre-probe `false`. The first unattended fleet run
+// (2026-09-03 02:00 UTC) therefore printed that paragraph for SEVEN of eight
+// vendors — a drift report that says only "the operator did what the operator
+// meant to do", and noise loud enough to bury a real drift. Aligning the
+// constants to the rows is what makes the report mean something again: it prints
+// nothing for these eight, so the next line it prints is a fact.
+//
+// A NEW adapter still ships `crawlEnabled: false` and still waits on an
+// in-cluster probe. Nothing about that rule changed — these eight have passed it,
+// and halfwheel, added since, has not.
 export const adapters: Record<string, VendorAdapter> = {
   [foxCigar.slug]: foxCigar,
   [twoGuysCigars.slug]: twoGuysCigars,

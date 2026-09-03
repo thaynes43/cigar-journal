@@ -2,9 +2,13 @@
 <!-- A nopCommerce GROUPED product, in the shape the live read of 2026-09-02
      (#270) found on 20 of 20 cigar pages: the Product node publishes
      `price: "0.00"` because the parent has no single price, and the real figures
-     live only in the per-pack `variant-overview` blocks of the HTML below.
+     live only in the per-pack `product-variant-line` blocks of the HTML below.
      Synthetic bytes, faithful structure — `sku`, `availability`, `image` and the
-     brand-first breadcrumb trail are all as the live pages carry them.
+     brand-first breadcrumb trail are all as the live pages carry them, and the
+     variant markup was CORRECTED to the live shape on 2026-09-03 (#270) from the
+     pages recorded beside it as `live-product-*.html`: a `product-variant-list`
+     of `product-variant-line` blocks whose label, stock word and price are keyed
+     to one `data-productid`.
 
      The taxonomy names no "cigars" category anywhere. That is the whole reason
      this adapter's `cigarCategoryPattern` is `/./`. -->
@@ -47,9 +51,7 @@
 </head>
 <body>
 <h1>Eastern Standard Sungrown Toro Extra</h1>
-<!-- Where the real prices are, and why extracting them is ADR-015 work rather
-     than something normalizeListing can reach. -->
-<div class="variant-overview"><span class="variant-name">Single</span><span class="price-value">$13.50</span></div>
-<div class="variant-overview"><span class="variant-name">Box of 20</span><span class="price-value">$249.95</span></div>
+<!-- Where the real prices are: two packs, so two offers (ADR-015). -->
+<div class="product-variant-list"><div class="product-variant-line" data-productid="11001"><div class="variant-overview"><div class="variant-name">Eastern Standard Sungrown Toro Extra - Pack of 5</div><div class="availability"><div class="stock"><span class="label" style="color:#4cc6f5;padding-left:0;font-size:80%">FREE SHIPPING</span> <span class="value" id="stock-availability-value-11001">In stock</span></div></div><div class="additional-details"></div><style>.variant-overview .variant-name{margin:0;padding:0}.variant-overview{margin-bottom:30px}</style><div class="prices"><div class="product-price"><span id="price-value-11001" class="price-value-11001"> $67.50 </span></div></div></div></div><div class="product-variant-line" data-productid="11002"><div class="variant-overview"><div class="variant-name">Eastern Standard Sungrown Toro Extra - Box of 20</div><div class="availability"><div class="stock"><span class="label" style="color:#4cc6f5;padding-left:0;font-size:80%">FREE SHIPPING</span> <span class="value" id="stock-availability-value-11002">In stock</span></div></div><div class="additional-details"></div><style>.variant-overview .variant-name{margin:0;padding:0}.variant-overview{margin-bottom:30px}</style><div class="prices"><div class="product-price"><span id="price-value-11002" class="price-value-11002"> $249.95 </span></div></div></div></div></div>
 </body>
 </html>

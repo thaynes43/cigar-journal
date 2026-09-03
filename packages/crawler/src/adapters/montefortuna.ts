@@ -57,7 +57,10 @@ export const montefortuna: PrefixVendorAdapter = {
   // Cuban and non-Cuban in one catalogue, so this shop's listings assert nothing
   // about a cigar's market — the same reading Cuban Lou's got on 2026-08-31.
   focus: "both",
-  crawlEnabled: false,
+  // Live in the registry since 2026-09-02 (#270) — probed in-cluster, then a
+  // 45-look drain that matched 30 and wrote 30 photos. The constant FOLLOWS the
+  // row; see `adapters/index.ts` for why that is the direction.
+  crawlEnabled: true,
   // Not on the r/cubancigars approved list, so its Habanos rows are labeled and
   // it is never offered as a place to buy.
   approvalStatus: "unapproved",

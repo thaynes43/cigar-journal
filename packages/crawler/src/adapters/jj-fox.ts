@@ -73,7 +73,11 @@ export const jjFox: ExclusionVendorAdapter = {
   sitemapUrl: "https://www.jjfox.co.uk/sitemap.xml",
   kind: "vendor",
   focus: "both",
-  crawlEnabled: false,
+  // Live in the registry since 2026-09-02 (#270) — the deterministic probe's
+  // samples were three non-cigars (correctly refused) and the live drain is what
+  // proved the adapter. The constant FOLLOWS the row; see `adapters/index.ts`
+  // for why that is the direction.
+  crawlEnabled: true,
   approvalStatus: "unapproved",
   // Tier 5 (ADR-015): the last resort of the four. Its photos are the smallest
   // (600px against EGM's 2000), it publishes neither sku nor brand, and an
