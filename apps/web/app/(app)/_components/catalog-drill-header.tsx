@@ -1,5 +1,7 @@
 import Link from "next/link";
+import type { SurfaceScores } from "@cj/domain";
 import { CATALOG_GROUP_STRINGS } from "./catalog-registry";
+import { ScoreRows } from "./score-rows";
 
 // The drill header (DESIGN-004 D-04): what a drilled screen opens with — the way
 // back, the entity you are inside, and how many cigars that is.
@@ -19,9 +21,20 @@ export interface DrillHeaderProps {
   backLabel: string;
   title: string;
   count: number;
+  // The two labelled aggregates for the entity this header names (DESIGN-006),
+  // computed AT that level — so no caption: the header IS the scope. Absent for a
+  // vitola drill, which is not a level the aggregates are defined at, and for a
+  // level nobody has reviewed or rated.
+  scores?: SurfaceScores;
 }
 
-export function CatalogDrillHeader({ backHref, backLabel, title, count }: DrillHeaderProps) {
+export function CatalogDrillHeader({
+  backHref,
+  backLabel,
+  title,
+  count,
+  scores,
+}: DrillHeaderProps) {
   return (
     <div className="flex flex-col gap-1">
       <Link
@@ -34,6 +47,7 @@ export function CatalogDrillHeader({ backHref, backLabel, title, count }: DrillH
       </Link>
       <h2 className="font-display text-xl leading-tight font-semibold text-ink">{title}</h2>
       <span className="label-caps tabular-nums">{CATALOG_GROUP_STRINGS.subtitle(count)}</span>
+      {scores ? <ScoreRows scores={scores} /> : null}
     </div>
   );
 }

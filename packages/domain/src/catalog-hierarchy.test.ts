@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { sql } from "drizzle-orm";
 import { brands, lines, blends, blenders, blendBlenders, productPhotos, offers } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
@@ -11,6 +12,7 @@ import {
   brandSlug,
 } from "./catalog-browse.js";
 import { resolveCatalogHierarchy } from "./catalog-hierarchy.js";
+import { recordReviewObservation } from "./review-observations.js";
 import { mintRegistrySlug } from "./taxonomy-writes.js";
 import { getCigar } from "./reads.js";
 import type { Principal } from "./index.js";
@@ -1126,20 +1128,26 @@ describe("catalog hierarchy", () => {
         line: plainLine.name,
         vitola,
       });
-      expect(resolved.brand).toEqual({ slug: plain.slug, name: plain.name });
-      expect(resolved.line).toEqual({ slug: plainLine.slug, name: plainLine.name });
-      expect(resolved.vitola).toEqual({ slug: brandSlug(vitola), name: vitola });
+      expect(resolved.brand).toEqual({ slug: plain.slug, name: plain.name, id: plain.id });
+      expect(resolved.line).toEqual({ slug: plainLine.slug, name: plainLine.name, id: plainLine.id });
+      // A vitola has no registry row (ADR-012), so its id IS its derived key.
+      expect(resolved.vitola).toEqual({
+        slug: brandSlug(vitola),
+        name: vitola,
+        id: brandSlug(vitola),
+      });
 
       expect((await resolveCatalogHierarchy(h.deps, { brand: accented.name })).brand).toEqual({
         slug: accented.slug,
         name: accented.name,
+        id: accented.id,
       });
 
       // A raw name under the WRONG ancestor still resolves to nothing — the
       // fallback widens the spelling a param may take, never the scope it means.
       expect(
         await resolveCatalogHierarchy(h.deps, { brand: accented.name, line: plainLine.name }),
-      ).toEqual({ brand: { slug: accented.slug, name: accented.name } });
+      ).toEqual({ brand: { slug: accented.slug, name: accented.name, id: accented.id } });
     });
 
     // THE NEGATIVE PIN. `padron-test-<tag>` is the ASCII marca's own slug; the
@@ -1157,6 +1165,7 @@ describe("catalog hierarchy", () => {
       expect((await resolveCatalogHierarchy(h.deps, { brand: ascii.slug })).brand).toEqual({
         slug: ascii.slug,
         name: ascii.name,
+        id: ascii.id,
       });
     });
 
@@ -1263,6 +1272,7 @@ describe("catalog hierarchy", () => {
       expect((await resolveCatalogHierarchy(h.deps, { brand: `padr-n-${tag}` })).brand).toEqual({
         slug: renamed.slug,
         name: renamed.name,
+        id: renamed.id,
       });
     });
 
@@ -1273,6 +1283,7 @@ describe("catalog hierarchy", () => {
       expect((await resolveCatalogHierarchy(h.deps, { brand: renamed.name })).brand).toEqual({
         slug: renamed.slug,
         name: renamed.name,
+        id: renamed.id,
       });
     });
 
@@ -1295,6 +1306,7 @@ describe("catalog hierarchy", () => {
       expect((await resolveCatalogHierarchy(h.deps, { brand: sibling.slug })).brand).toEqual({
         slug: sibling.slug,
         name: sibling.name,
+        id: sibling.id,
       });
     });
 
@@ -1320,8 +1332,8 @@ describe("catalog hierarchy", () => {
         brand: `padr-n-${tag}`,
         line: line.slug,
       });
-      expect(resolved.brand).toEqual({ slug: renamed.slug, name: renamed.name });
-      expect(resolved.line).toEqual({ slug: line.slug, name: line.name });
+      expect(resolved.brand).toEqual({ slug: renamed.slug, name: renamed.name, id: renamed.id });
+      expect(resolved.line).toEqual({ slug: line.slug, name: line.name, id: line.id });
     });
   });
 
@@ -1333,9 +1345,10 @@ describe("catalog hierarchy", () => {
       const brandTwo = await seedBrand(`ResolveTwo ${tag}`);
       // The SAME line slug under two brands — unique per brand, ambiguous globally.
       const lineOne = await seedLine(brandOne.id, `Reserva ${tag}`);
-      await h.deps.db
+      const lineTwo = await h.deps.db
         .insert(lines)
-        .values({ brandId: brandTwo.id, name: `Reserva ${tag}`, slug: lineOne.slug });
+        .values({ brandId: brandTwo.id, name: `Reserva ${tag}`, slug: lineOne.slug })
+        .returning({ id: lines.id });
       const blend = await seedBlend(lineOne.id, `Doble ${tag}`);
       await h.seedCigar({ canonicalName: `Resolve ${tag} Leaf`, vitolaName: `Gordo ${tag}` });
 
@@ -1345,10 +1358,14 @@ describe("catalog hierarchy", () => {
         blend: blend.slug,
         vitola: brandSlug(`Gordo ${tag}`),
       });
-      expect(resolved.brand).toEqual({ slug: brandOne.slug, name: brandOne.name });
-      expect(resolved.line).toEqual({ slug: lineOne.slug, name: lineOne.name });
-      expect(resolved.blend).toEqual({ slug: blend.slug, name: blend.name });
-      expect(resolved.vitola).toEqual({ slug: brandSlug(`Gordo ${tag}`), name: `Gordo ${tag}` });
+      expect(resolved.brand).toEqual({ slug: brandOne.slug, name: brandOne.name, id: brandOne.id });
+      expect(resolved.line).toEqual({ slug: lineOne.slug, name: lineOne.name, id: lineOne.id });
+      expect(resolved.blend).toEqual({ slug: blend.slug, name: blend.name, id: blend.id });
+      expect(resolved.vitola).toEqual({
+        slug: brandSlug(`Gordo ${tag}`),
+        name: `Gordo ${tag}`,
+        id: brandSlug(`Gordo ${tag}`),
+      });
 
       // Scoped by the ancestor: the same line slug under the other brand is a
       // different row, and the blend hanging off brandOne's line is not reachable.
@@ -1357,7 +1374,12 @@ describe("catalog hierarchy", () => {
         line: lineOne.slug,
         blend: blend.slug,
       });
-      expect(wrongScope.line).toEqual({ slug: lineOne.slug, name: `Reserva ${tag}` });
+      // The other brand's row — same slug, different id, which is the whole point.
+      expect(wrongScope.line).toEqual({
+        slug: lineOne.slug,
+        name: `Reserva ${tag}`,
+        id: lineTwo[0]!.id,
+      });
       expect(wrongScope.blend).toBeUndefined();
     });
 
@@ -1366,7 +1388,8 @@ describe("catalog hierarchy", () => {
         brand: "unfiled",
         line: `ghost-${tag}`,
       });
-      expect(resolved.brand).toEqual({ slug: "unfiled", name: "Unfiled" });
+      // Unfiled is a drill target with no registry row behind it, so it has no id.
+      expect(resolved.brand).toEqual({ slug: "unfiled", name: "Unfiled", id: null });
       expect(resolved.line).toBeUndefined();
       expect(await resolveCatalogHierarchy(h.deps, {})).toEqual({});
     });
@@ -1378,7 +1401,107 @@ describe("catalog hierarchy", () => {
       expect((await resolveCatalogHierarchy(h.deps, { brand: brand.slug })).brand).toEqual({
         slug: brand.slug,
         name: brand.name,
+        id: brand.id,
       });
+    });
+  });
+
+
+  // --- the group card's two labelled aggregates (ADR-013 §3, DESIGN-006) ----
+
+  describe("group card scores", () => {
+    it("carries both populations at the card's OWN level, whole-numbered", async () => {
+      const brand = await seedBrand(`ScoreBrand ${tag}`);
+      const line = await seedLine(brand.id, `Score Line ${tag}`);
+      const blend = await seedBlend(line.id, `Score Blend ${tag}`);
+      const q = `ScoreCards ${tag}`;
+      const one = await h.seedCigar({
+        canonicalName: `${q} One`,
+        brandId: brand.id,
+        lineId: line.id,
+        blendId: blend.id,
+        type: "NC",
+      });
+      const two = await h.seedCigar({
+        canonicalName: `${q} Two`,
+        brandId: brand.id,
+        lineId: line.id,
+        blendId: blend.id,
+        type: "NC",
+      });
+      await recordReviewObservation(h.deps.db, {
+        source: `cards-${tag}`,
+        url: `https://critic.example/cards/${tag}-1`,
+        nativeScale: "0-100",
+        nativeScore: 90,
+        cigarId: one,
+        seenAt: new Date("2026-09-03T09:00:00.000Z"),
+      });
+      await recordReviewObservation(h.deps.db, {
+        source: `cards-${tag}`,
+        url: `https://critic.example/cards/${tag}-2`,
+        nativeScale: "0-100",
+        nativeScore: 81,
+        cigarId: two,
+        seenAt: new Date("2026-09-03T09:00:00.000Z"),
+      });
+      // userA publishes, so their ratings are in the community population.
+      await h.deps.db.execute(
+        sql`UPDATE users SET journal_visibility = 'public' WHERE id = ${userA.userId}`,
+      );
+      await saveSmoke(h.deps, userA, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId: one },
+        assessment: { rating: 71, impression: "Mine." },
+      });
+
+      // 90 + 81 = 171 / 2 = 85.5 → 86, over 2 observations; one journal at 71.
+      const byBlend = await browseCatalogGroups(h.deps, userA, { q, by: "blend" });
+      expect(byBlend.groups).toHaveLength(1);
+      expect(byBlend.groups[0]!.critics).toEqual({ score: 86, count: 2 });
+      expect(byBlend.groups[0]!.journal).toEqual({ score: 71, count: 1 });
+
+      // The same rows seen at the line and the brand recompute from the raw
+      // observations at THAT level — never by averaging the level below.
+      const byBrand = await browseCatalogGroups(h.deps, userA, { q, by: "brand" });
+      expect(byBrand.groups[0]!.critics).toEqual({ score: 86, count: 2 });
+    });
+
+    it("gives a vitola card no scores, and the Unfiled bucket none either", async () => {
+      // A vitola is a size label spanning every marca that uses it, so a number
+      // there would average unrelated products; Unfiled is the absence of a level.
+      const brand = await seedBrand(`ScoreVitola ${tag}`);
+      const q = `ScoreVitola ${tag}`;
+      const leaf = await h.seedCigar({
+        canonicalName: `${q} Robusto`,
+        brandId: brand.id,
+        vitolaName: "Robusto",
+        type: "NC",
+      });
+      await h.seedCigar({ canonicalName: `${q} Nameless`, brandId: brand.id, type: "NC" });
+      await recordReviewObservation(h.deps.db, {
+        source: `cards-${tag}`,
+        url: `https://critic.example/cards/${tag}-v`,
+        nativeScale: "0-100",
+        nativeScore: 95,
+        cigarId: leaf,
+        seenAt: new Date("2026-09-03T09:00:00.000Z"),
+      });
+
+      const byVitola = await browseCatalogGroups(h.deps, userA, { q, by: "vitola" });
+      expect(byVitola.groups.every((g) => g.critics === null && g.journal === null)).toBe(true);
+      // The evidence is not lost — it counts at the brand, which is a level.
+      const byBrand = await browseCatalogGroups(h.deps, userA, { q, by: "brand" });
+      expect(byBrand.groups[0]!.critics).toEqual({ score: 95, count: 1 });
+    });
+
+    it("leaves both null where nothing has been observed", async () => {
+      const brand = await seedBrand(`ScoreNone ${tag}`);
+      const q = `ScoreNone ${tag}`;
+      await h.seedCigar({ canonicalName: `${q} Leaf`, brandId: brand.id, type: "NC" });
+      const byBrand = await browseCatalogGroups(h.deps, userA, { q, by: "brand" });
+      expect(byBrand.groups[0]!.critics).toBeNull();
+      expect(byBrand.groups[0]!.journal).toBeNull();
     });
   });
 

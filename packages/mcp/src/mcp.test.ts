@@ -19,6 +19,8 @@ import { createHarness, type DomainHarness } from "@cj/domain/testing";
 import {
   assertPhotoDropUsable,
   getPhotoDropByToken,
+  recordReviewObservation,
+  saveSmoke,
   stagePhotoByToken,
   type Principal,
 } from "@cj/domain";
@@ -427,6 +429,36 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  it("tools/list publishes browse_catalog's sort vocabulary and critic floor (manifest stability)", async () => {
+    // A PIN. The sort tokens and `criticScoreMin` are the PUBLISHED contract a
+    // model plans against — `critic-score` is the canonical DESIGN-006 key — and
+    // a client that has learned the enum cannot discover a silent change to it.
+    // Dropping or renaming a value here breaks every stored plan that used it, so
+    // the whole enum is compared as a set rather than probed for one member.
+    await withClient(ownerFull, async (client) => {
+      const { tools } = await client.listTools();
+      const browse = tools.find((t) => t.name === "browse_catalog")!;
+      const properties = (browse.inputSchema as { properties: Record<string, unknown> }).properties;
+
+      expect((properties.sort as { enum: string[] }).enum).toEqual([
+        "name",
+        "my-rating",
+        "recently-added",
+        "price",
+        "critic-score",
+      ]);
+
+      const floor = properties.criticScoreMin as Record<string, unknown>;
+      expect(floor.type).toBe("integer");
+      expect(floor.minimum).toBe(0);
+      expect(floor.maximum).toBe(100);
+      // Optional, like every other filter: browsing with no floor is the default.
+      expect((browse.inputSchema as { required?: string[] }).required ?? []).not.toContain(
+        "criticScoreMin",
+      );
+    });
+  });
+
   it("tools/list publishes the exact add_smoke_photo `image` schema (manifest stability)", async () => {
     // A PIN, not a nicety, and after issue #202 experiment 1 it is the experiment's
     // own assertion: the published shape IS the change. Integrations that reportedly
@@ -530,6 +562,89 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  // ---- scores (ADR-013 §3 / DESIGN-006) -------------------------------------
+
+  interface ScoresPayload {
+    scores: {
+      critics: { score: number; count: number; scope: string } | null;
+      journal: { score: number; count: number; scope: string } | null;
+    };
+  }
+
+  it("get_cigar carries both labelled aggregates, present even when empty", async () => {
+    const brand = `MScores-${randomUUID().slice(0, 8)}`;
+    const cigarId = await h.seedCigar({ canonicalName: `${brand} Toro`, brand, type: "NC" });
+
+    // Nothing observed yet: the block is PRESENT with both members null. "Nobody
+    // has scored this" is an answer the model must be able to give, and an absent
+    // key would read as "the tool did not say".
+    await withClient(ownerCatalogOnly, async (client) => {
+      const data = payloadOf(await call(client, "get_cigar", { cigarId })) as ScoresPayload;
+      expect(data.scores).toEqual({ critics: null, journal: null });
+    });
+
+    await recordReviewObservation(h.deps.db, {
+      source: `mcp-${brand}`,
+      url: `https://critic.example/mcp/${brand}-1`,
+      nativeScale: "0-100",
+      nativeScore: 90,
+      cigarId,
+      seenAt: new Date("2026-09-03T09:00:00.000Z"),
+    });
+    await recordReviewObservation(h.deps.db, {
+      source: `mcp-${brand}`,
+      url: `https://critic.example/mcp/${brand}-2`,
+      nativeScale: "0-100",
+      nativeScore: 81,
+      cigarId,
+      seenAt: new Date("2026-09-03T09:00:00.000Z"),
+    });
+
+    await withClient(ownerCatalogJournal, async (client) => {
+      const result = await call(client, "get_cigar", { cigarId });
+      expect(result.structuredContent).toEqual(payloadOf(result)); // SDK-validated
+      const data = payloadOf(result) as ScoresPayload;
+      // 90 + 81 = 171 / 2 = 85.5 → 86, a whole number on the 0-100 axis, carrying
+      // its observation count and the level it was computed at.
+      expect(data.scores.critics).toEqual({ score: 86, count: 2, scope: "cigar" });
+      expect(data.scores.journal).toBeNull();
+    });
+  });
+
+  it("get_cigar's journal aggregate is journal:read-bounded; the critic half is not", async () => {
+    const brand = `MScopedScores-${randomUUID().slice(0, 8)}`;
+    const cigarId = await h.seedCigar({ canonicalName: `${brand} Toro`, brand, type: "NC" });
+    // The owner's journal is PRIVATE (the default), so their own rating enters the
+    // aggregate only through the viewer population — which needs journal:read.
+    await saveSmoke(h.deps, { userId: owner.userId, role: "user" }, {
+      clientRequestId: randomUUID(),
+      cigar: { cigarId },
+      assessment: { rating: 77, impression: "Mine." },
+    });
+    await recordReviewObservation(h.deps.db, {
+      source: `mcp-${brand}`,
+      url: `https://critic.example/mcp/${brand}-1`,
+      nativeScale: "0-100",
+      nativeScore: 64,
+      cigarId,
+      seenAt: new Date("2026-09-03T09:00:00.000Z"),
+    });
+
+    await withClient(ownerCatalogJournal, async (client) => {
+      const data = payloadOf(await call(client, "get_cigar", { cigarId })) as ScoresPayload;
+      expect(data.scores.journal).toEqual({ score: 77, count: 1, scope: "cigar" });
+    });
+
+    // Without journal:read the community population is all there is, and it is
+    // empty — a catalog-only token must not read a number the caller's own
+    // private rating moved. The critic half is catalog data and is unchanged.
+    await withClient(ownerCatalogOnly, async (client) => {
+      const data = payloadOf(await call(client, "get_cigar", { cigarId })) as ScoresPayload;
+      expect(data.scores.journal).toBeNull();
+      expect(data.scores.critics).toEqual({ score: 64, count: 1, scope: "cigar" });
+    });
+  });
+
   // ---- browse_catalog (PRD-003 R-MCP-1) -------------------------------------
 
   interface BrowseTilePayload {
@@ -542,6 +657,7 @@ describe("@cj/mcp adapter", () => {
       currency: string | null;
       seenAt: string;
     } | null;
+    critics: { score: number; count: number } | null;
     smokeCount?: number;
     myRating?: number | null;
     remaining?: number;
@@ -661,6 +777,57 @@ describe("@cj/mcp adapter", () => {
       // cursor, with no dupes or gaps.
       expect(seen).toEqual([cheap, mid, noPrice]);
       expect(new Set(seen).size).toBe(3);
+    });
+  });
+
+  it("browse_catalog tiles carry the critic score, sort by it, and filter on it", async () => {
+    const brand = `MCritic-${randomUUID().slice(0, 8)}`;
+    const best = await h.seedCigar({ canonicalName: `${brand} Best`, brand });
+    const worse = await h.seedCigar({ canonicalName: `${brand} Worse`, brand });
+    const unreviewed = await h.seedCigar({ canonicalName: `${brand} Unreviewed`, brand });
+    let seq = 0;
+    const review = async (cigarId: string, nativeScore: number) => {
+      seq += 1;
+      await recordReviewObservation(h.deps.db, {
+        source: `mcp-${brand}`,
+        url: `https://critic.example/mcp/${brand}-${seq}`,
+        nativeScale: "0-100",
+        nativeScore,
+        cigarId,
+        seenAt: new Date("2026-09-03T09:00:00.000Z"),
+      });
+    };
+    await review(best, 95);
+    await review(best, 92);
+    await review(worse, 70);
+
+    // Catalog data, so `critics` is present for a catalog:read-only token.
+    await withClient(ownerCatalogOnly, async (client) => {
+      const data = payloadOf(await call(client, "browse_catalog", { q: brand })) as BrowsePayload;
+      const byId = new Map(data.cigars.map((c) => [c.cigarId, c]));
+      // 95 + 92 = 187 / 2 = 93.5 → 94, with its observation count.
+      expect(byId.get(best)!.critics).toEqual({ score: 94, count: 2 });
+      // Null, not zero — the client must be able to tell "unreviewed" apart.
+      expect(byId.get(unreviewed)!.critics).toBeNull();
+    });
+
+    await withClient(ownerFull, async (client) => {
+      const sorted = payloadOf(
+        await call(client, "browse_catalog", { q: brand, sort: "critic-score" }),
+      ) as BrowsePayload;
+      // Best reviewed first with no explicit direction — the published default —
+      // and the unreviewed cigar last rather than interleaved as a zero.
+      expect(sorted.cigars.map((c) => c.cigarId)).toEqual([best, worse, unreviewed]);
+
+      const floored = payloadOf(
+        await call(client, "browse_catalog", { q: brand, criticScoreMin: 94 }),
+      ) as BrowsePayload;
+      // The floor compares the same whole number the tile shows: 94 keeps `best`.
+      expect(floored.cigars.map((c) => c.cigarId)).toEqual([best]);
+      expect(floored.totalCount).toBe(1);
+
+      // Out of range is a schema-shape violation, like a bad enum.
+      expect((await call(client, "browse_catalog", { criticScoreMin: 101 })).isError).toBe(true);
     });
   });
 

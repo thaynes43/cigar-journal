@@ -6,6 +6,7 @@ import {
   browseCatalogGroups,
   catalogFacetOptions,
   resolveCatalogHierarchy,
+  getSurfaceScores,
   CATALOG_SORTS,
   CATALOG_DIMENSIONS,
 } from "@cj/domain";
@@ -109,6 +110,29 @@ export const catalogRouter = router({
       }),
     )
     .query(({ ctx, input }) => catalogFacetOptions(ctx.deps, ctx.principal, input)),
+
+  // The two labelled aggregates for the entities a surface is about to render
+  // (ADR-013 §3, DESIGN-006) — today the drill header, which asks about the ONE
+  // entity it names. Group cards get theirs inside `groups`, and the leaf page
+  // gets its own (own-else-blend) inside `cigars.get`; this is the level-scoped
+  // case neither of those covers.
+  //
+  // Principal-scoped: the journal aggregate's population is public journals plus
+  // the caller's own (DESIGN-006 rule 1), so this is not a cacheable catalog read.
+  scores: authedProcedure
+    .input(
+      z.object({
+        level: z.enum(["cigar", "blend", "line", "brand"]),
+        ids: z.array(z.string()).max(100),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const map = await getSurfaceScores(ctx.deps.db, input.level, input.ids, {
+        userId: ctx.principal.userId,
+      });
+      // A Map does not survive the wire; the object keeps the caller's own ids.
+      return Object.fromEntries(map);
+    }),
 
   // The names behind the pinned slugs, for the drill header (D-04). Deliberately
   // unfaceted: it answers "what did I drill into", a fact about the URL, so

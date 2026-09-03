@@ -1,12 +1,20 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
-import { brandImages, cigars, productPhotos, offers } from "@cj/db";
+import { blends, brandImages, brands, cigars, lines, productPhotos, offers } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import { recordPurchase } from "./record-purchase.js";
 import { setWant } from "./wants.js";
 import { setFavorite } from "./favorites.js";
-import { browseBrands, getBrand, browseCatalog, brandSlug } from "./catalog-browse.js";
+import { recordReviewObservation } from "./review-observations.js";
+import {
+  browseBrands,
+  getBrand,
+  browseCatalog,
+  browseCatalogGroups,
+  catalogFacetOptions,
+  brandSlug,
+} from "./catalog-browse.js";
 import { CigarNotFoundError } from "./errors.js";
 import type { Principal } from "./index.js";
 
@@ -910,4 +918,218 @@ describe("catalog browse", () => {
     await setCatalogStatus(cigarId, "active");
     expect((await browseCatalog(h.deps, userA, { q: brand })).cigars.map((c) => c.cigarId)).toEqual([cigarId]);
   });
+
+  // ---- Critic score on the leaf grid (ADR-013 §3, DESIGN-006) --------------
+  //
+  // The tile's `critics`, the `critic-score` ordering and the `criticScoreMin`
+  // floor are three views of ONE number — the leaf's own critic mean, rounded —
+  // and the point of these is that they never disagree about it.
+  describe("critic score (DESIGN-006)", () => {
+    const scoreTag = `critics-${tag}`;
+    let high = "";
+    let mid = "";
+    let low = "";
+    let unscored = "";
+    let blendOnly = "";
+    let blendId = "";
+    let seq = 0;
+
+    const review = async (target: { cigarId?: string; blendId?: string }, score: number) => {
+      seq += 1;
+      await recordReviewObservation(h.deps.db, {
+        source: `browse-${tag}`,
+        url: `https://critic.example/b/${tag}-${seq}`,
+        nativeScale: "0-100",
+        nativeScore: score,
+        ...target,
+        seenAt: new Date("2026-09-03T09:00:00.000Z"),
+      });
+    };
+
+    beforeAll(async () => {
+      const brandRow = await h.deps.db
+        .insert(brands)
+        .values({ name: `Critic Brand ${tag}`, slug: brandSlug(`Critic Brand ${tag}`) })
+        .returning({ id: brands.id });
+      const lineRow = await h.deps.db
+        .insert(lines)
+        .values({ brandId: brandRow[0]!.id, name: "Critic Line", slug: brandSlug(`Critic Line ${tag}`) })
+        .returning({ id: lines.id });
+      const blendRow = await h.deps.db
+        .insert(blends)
+        .values({ lineId: lineRow[0]!.id, name: "Critic Blend", slug: brandSlug(`Critic Blend ${tag}`) })
+        .returning({ id: blends.id });
+      blendId = blendRow[0]!.id;
+
+      const leaf = (name: string) =>
+        h.seedCigar({
+          canonicalName: `${scoreTag} ${name}`,
+          brandId: brandRow[0]!.id,
+          lineId: lineRow[0]!.id,
+          blendId,
+          type: "NC",
+        });
+      high = await leaf("High");
+      mid = await leaf("Mid");
+      low = await leaf("Low");
+      unscored = await leaf("Unscored");
+      blendOnly = await leaf("BlendOnly");
+
+      // 95 and 92 → 187 / 2 = 93.5 → 94, so the tile figure is a real rounding
+      // rather than a whole number that would pass under either rule.
+      await review({ cigarId: high }, 95);
+      await review({ cigarId: high }, 92);
+      await review({ cigarId: mid }, 84);
+      await review({ cigarId: low }, 61);
+      // Stated about the BLEND. It must not decorate any leaf's tile.
+      await review({ blendId }, 100);
+    }, 60_000);
+
+    it("puts the leaf's own critic mean on the tile, rounded, with its count", async () => {
+      const { cigars: page } = await browseCatalog(h.deps, userA, { q: scoreTag, limit: 96 });
+      const byId = new Map(page.map((t) => [t.cigarId, t]));
+      expect(byId.get(high)!.critics).toEqual({ score: 94, count: 2 });
+      expect(byId.get(mid)!.critics).toEqual({ score: 84, count: 1 });
+      // Never reviewed → null, not zero: the tile then renders no badge at all.
+      expect(byId.get(unscored)!.critics).toBeNull();
+    });
+
+    it("never lends a blend's observation to a leaf tile", async () => {
+      // The 100 is the blend's verdict. A tile states no scope, so borrowing it
+      // would be a blend score presented as this vitola's (ADR-013 §1) — and it
+      // would put a 100 at the top of the critic sort that belongs to no cigar.
+      const { cigars: page } = await browseCatalog(h.deps, userA, { q: scoreTag, limit: 96 });
+      const byId = new Map(page.map((t) => [t.cigarId, t]));
+      expect(byId.get(blendOnly)!.critics).toBeNull();
+      expect(page.every((t) => t.critics == null || t.critics.score !== 100)).toBe(true);
+    });
+
+    it("sorts best first under the canonical critic-score:desc, unscored last", async () => {
+      const { cigars: page } = await browseCatalog(h.deps, userA, {
+        q: scoreTag,
+        sort: "critic-score",
+        limit: 96,
+      });
+      const scored = page.filter((t) => t.critics != null).map((t) => t.cigarId);
+      expect(scored).toEqual([high, mid, low]);
+      // The two unscored leaves are the tail, in both directions.
+      expect(page.slice(3).every((t) => t.critics == null)).toBe(true);
+    });
+
+    it("keeps the unscored tail LAST when the direction flips", async () => {
+      // The unscored break is a rendering boundary, not a value: reversing must
+      // not fill the first screen with cigars the sort has nothing to say about.
+      const { cigars: page } = await browseCatalog(h.deps, userA, {
+        q: scoreTag,
+        sort: "critic-score",
+        sortDir: "asc",
+        limit: 96,
+      });
+      const scored = page.filter((t) => t.critics != null).map((t) => t.cigarId);
+      expect(scored).toEqual([low, mid, high]);
+      expect(page.slice(3).every((t) => t.critics == null)).toBe(true);
+    });
+
+    it("defaults the direction to best-first when the caller does not say", async () => {
+      // The MCP surface omits `sortDir`, and `browse_catalog`'s published contract
+      // says critic-score means best reviewed first.
+      const { cigars: page } = await browseCatalog(h.deps, userA, {
+        q: scoreTag,
+        sort: "critic-score",
+        limit: 96,
+      });
+      expect(page[0]!.cigarId).toBe(high);
+    });
+
+    it("pages the critic sort through its keyset without dup or gap", async () => {
+      const seen: string[] = [];
+      let cursor: string | null | undefined;
+      for (let i = 0; i < 6; i += 1) {
+        const page = await browseCatalog(h.deps, userA, {
+          q: scoreTag,
+          sort: "critic-score",
+          limit: 1,
+          cursor,
+        });
+        seen.push(...page.cigars.map((t) => t.cigarId));
+        cursor = page.nextCursor;
+        if (cursor == null) break;
+      }
+      expect(seen.slice(0, 3)).toEqual([high, mid, low]);
+      expect(new Set(seen).size).toBe(seen.length);
+      expect(seen).toHaveLength(5);
+    });
+
+    it("filters on the same rounded number the tile shows", async () => {
+      // `high` renders 94. A floor of 94 must keep it — comparing the unrounded
+      // 93.5 would drop the very tile the filter was aimed at.
+      const at94 = await browseCatalog(h.deps, userA, {
+        q: scoreTag,
+        criticScoreMin: 94,
+        limit: 96,
+      });
+      expect(at94.cigars.map((t) => t.cigarId)).toEqual([high]);
+      expect(at94.totalCount).toBe(1);
+
+      const at84 = await browseCatalog(h.deps, userA, {
+        q: scoreTag,
+        criticScoreMin: 84,
+        limit: 96,
+      });
+      expect(new Set(at84.cigars.map((t) => t.cigarId))).toEqual(new Set([high, mid]));
+      expect(at84.totalCount).toBe(2);
+    });
+
+    it("excludes the unreviewed from any floor, including zero", async () => {
+      // A cigar nobody has scored does not clear a bar. `0` is a real score, so
+      // treating a null as one would put every unreviewed row in the result.
+      const atZero = await browseCatalog(h.deps, userA, {
+        q: scoreTag,
+        criticScoreMin: 0,
+        limit: 96,
+      });
+      expect(new Set(atZero.cigars.map((t) => t.cigarId))).toEqual(new Set([high, mid, low]));
+      expect(atZero.totalCount).toBe(3);
+    });
+
+    // D-01: one membership definition, shared by the grid, the group cards and
+    // the chip counts — so a card's count equals the drill it opens. The floor
+    // reaches all three through `catalogFilters`, and each read has to carry the
+    // join it references or the statement does not compile at all.
+    it("is the same membership for the grid, the group cards and the chip counts", async () => {
+      const grid = await browseCatalog(h.deps, userA, {
+        q: scoreTag,
+        criticScoreMin: 84,
+        limit: 96,
+      });
+      const cards = await browseCatalogGroups(h.deps, userA, {
+        q: scoreTag,
+        criticScoreMin: 84,
+        by: "blend",
+      });
+      const chips = await catalogFacetOptions(h.deps, userA, {
+        q: scoreTag,
+        criticScoreMin: 84,
+        dimension: "blend",
+      });
+      expect(grid.totalCount).toBe(2);
+      expect(cards.groups.reduce((n, g) => n + g.cigarCount, 0)).toBe(grid.totalCount);
+      expect(chips.options.reduce((n, o) => n + o.count, 0)).toBe(grid.totalCount);
+    });
+
+    it("composes the floor with the other filters, and the count agrees with the page", async () => {
+      await setWant(h.deps, userA, { cigarId: high, wanted: true });
+      const result = await browseCatalog(h.deps, userA, {
+        q: scoreTag,
+        criticScoreMin: 60,
+        wanted: true,
+        limit: 96,
+      });
+      expect(result.cigars.map((t) => t.cigarId)).toEqual([high]);
+      // The count query carries the critic join only when the floor is active;
+      // a total that disagreed with the page would mean it did not.
+      expect(result.totalCount).toBe(result.cigars.length);
+    });
+  });
+
 });

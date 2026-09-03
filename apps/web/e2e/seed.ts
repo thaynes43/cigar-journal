@@ -21,6 +21,7 @@ import {
   openPhotoDrop,
   reserveInvite,
   revokeInvite,
+  recordReviewObservation,
   saveSmoke,
   setFavorite,
   setWant,
@@ -127,6 +128,20 @@ export interface Handoff {
     untyped: { id: string; canonicalName: string };
     // Structured down to the brand only — the row the `line=unfiled` card drills to.
     unfiled: { id: string; canonicalName: string };
+  };
+  // The critic/journal figures the DESIGN-006 surfaces render, computed in the
+  // seed's comments and asserted verbatim by the spec — so a spec failure names
+  // the number that moved rather than a locator that vanished.
+  scores: {
+    // The leaf with observations of ITS OWN: its detail page shows the cigar's
+    // figures and no `Across` caption.
+    ownScored: { id: string; name: string; critics: string; journal: string };
+    // The sibling with none: its figures are the blend's, and it says so.
+    blendScoped: { id: string; name: string; critics: string; journal: string; across: string };
+    // The blend surface itself — the drill header and the group card.
+    blend: { slug: string; name: string; critics: string; journal: string; subtitle: string };
+    // The tile badge the critic sort turns on, and the row it ranks first.
+    topTile: { name: string; badge: string };
   };
   // An OPEN photo drop belonging to the admin (ADR-014), and the raw token of the
   // link it minted. The drop page is reached with the token alone, so the spec
@@ -380,7 +395,7 @@ export async function seed(opts: {
       lengthInches: "6",
       ringGauge: 52,
     });
-    await insertCigar(deps, {
+    const ligaNo9Robusto = await insertCigar(deps, {
       ...structured,
       blendId: noNine!.id,
       canonicalName: "Drew Estate Liga Privada No. 9 Robusto",
@@ -727,6 +742,47 @@ export async function seed(opts: {
       journal: { narrative: "A short story with no title of its own." },
     });
 
+    // --- Critic and journal scores (ADR-013 / DESIGN-006) ------------------
+    //
+    // Every figure the score specs assert is fixed here, and each is a mean the
+    // wrong rule would get wrong:
+    //
+    //   Toro   two of its OWN reviews, 95 and 92 → 187 / 2 = 93.5 → `Critics 94`
+    //   No. 9  those two plus one stated on the BLEND, 88 → 275 / 3 = 91.67 → 92
+    //   journal one public rating of 86 on the Toro → `Journal 86 · 1 journal`
+    //
+    // The Robusto is deliberately left unreviewed and unrated, so its detail page
+    // is the blend-fallback case: it must show the BLEND's 92 and say so.
+    //
+    // `publicOwner`'s journal is public, so their rating is in the community
+    // population; nobody else has rated a No. 9, which is what makes the sample
+    // count exactly one — the case ADR-013 §1 is strictest about.
+    const review = (url: string, score: number, target: { cigarId?: string; blendId?: string }) =>
+      recordReviewObservation(deps.db, {
+        source: "e2e-reviewer",
+        url,
+        reviewer: "E2E Reviewer",
+        nativeScale: "0-100",
+        nativeScore: score,
+        reviewedAt: "2026-08-01",
+        ...target,
+        seenAt: new Date("2026-08-30T12:00:00.000Z"),
+      });
+    await review("https://e2e.example/reviews/liga-no9-toro", 95, { cigarId: ligaNo9Toro });
+    await review("https://e2e.example/reviews/liga-no9-toro-2", 92, { cigarId: ligaNo9Toro });
+    await review("https://e2e.example/reviews/liga-no9-blend", 88, { blendId: noNine!.id });
+    // A second, distinctly worse-reviewed leaf, so the critic sort has an order to
+    // demonstrate rather than a single row.
+    await review("https://e2e.example/reviews/undercrown", 70, { cigarId: undercrown });
+    await saveSmoke(deps, publicOwner, {
+      clientRequestId: randomUUID(),
+      cigar: { cigarId: ligaNo9Toro },
+      smokedAt: { value: "2026-08-26T20:00" },
+      overallDescriptors: ["espresso", "earth"],
+      assessment: { rating: 86, liked: true, strength: "full", body: "full", impression: null },
+      journal: { title: "The No. 9", narrative: "Espresso and earth, exactly as advertised." },
+    });
+
     // --- An agent run that overflows one page of rows (#173) ---------------
     // Written as raw audit rows rather than through the curation services: the
     // fixture only has to be READABLE, and 101 real curation writes would mutate
@@ -805,6 +861,32 @@ export async function seed(opts: {
           canonicalName: "Drew Estate Liga Privada No. 9 Corona Doble",
         },
         unfiled: { id: undercrown, canonicalName: "Drew Estate Undercrown Gordito" },
+      },
+      scores: {
+        ownScored: {
+          id: ligaNo9Toro,
+          name: "Drew Estate Liga Privada No. 9 Toro",
+          critics: "Critics 94 · 2 reviews",
+          journal: "Journal 86 · 1 journal",
+        },
+        blendScoped: {
+          id: ligaNo9Robusto,
+          name: "Drew Estate Liga Privada No. 9 Robusto",
+          critics: "Critics 92 · 3 reviews",
+          journal: "Journal 86 · 1 journal",
+          across: "Across No. 9",
+        },
+        blend: {
+          slug: "no-9",
+          name: "No. 9",
+          critics: "Critics 92 · 3 reviews",
+          journal: "Journal 86 · 1 journal",
+          subtitle: "Critics 92 · Journal 86",
+        },
+        topTile: {
+          name: "Drew Estate Liga Privada No. 9 Toro",
+          badge: "Critics 94",
+        },
       },
       photoDrop: { token: photoDrop.token },
       multiPhotoDrop: { token: multiPhotoDrop.token, cigarId: sigloVi },

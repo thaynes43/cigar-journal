@@ -105,12 +105,25 @@ async function drillHeader(state: CatalogState): Promise<Omit<DrillHeaderProps, 
     return resolved[dimension]?.name ?? slug ?? "";
   };
 
+  // The header's own score pair (DESIGN-006): computed at the level the header
+  // NAMES, so it needs no caption — the header is the scope. Asked for only where
+  // the aggregates are defined: `vitola` is a size label spanning every marca that
+  // uses it, and Unfiled is the absence of a level, so neither resolves an id and
+  // neither gets a number.
+  const level = out.dimension === "vitola" ? null : out.dimension;
+  const scoredId = level ? (resolved[level]?.id ?? null) : null;
+  const scores =
+    level && scoredId
+      ? await caller.catalog.scores({ level, ids: [scoredId] }).then((m) => m[scoredId])
+      : undefined;
+
   return {
     backHref: catalogUrl("/cigars", out.state),
     // Back to the parent entity by name when one still frames the screen, else
     // to the whole group screen you came from.
     backLabel: out.parent ? nameOf(out.parent) : CATALOG_DIMENSION_META[out.dimension].back,
     title: nameOf(out.dimension),
+    scores,
   };
 }
 

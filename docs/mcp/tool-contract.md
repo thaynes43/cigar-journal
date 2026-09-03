@@ -56,11 +56,14 @@ fields are omitted entirely. **browse_catalog's personal *filters*
 (`inHumidor`/`wanted`/`smoked`) are journal:read-bounded too** — without that
 scope they are dropped rather than applied, so the result set never leaks the
 caller's own state; the catalog/market filters and sorts (`q`/`brand`/`type`/
-`inStock`/`price`) and the catalog-scoped price-at-a-glance always apply. The
-additive `get_cigar` `enrichment` and `pricing` blocks, browse_catalog's tile
-`price`, and get_offers' whole payload are catalog-scoped (market/catalog data,
-identical for every viewer) and ride `catalog:read`. Data returned never exceeds
-the scopes presented.
+`inStock`/`price`/`criticScoreMin`/`critic-score`) and the catalog-scoped
+price-at-a-glance always apply. The additive `get_cigar` `enrichment`, `pricing`
+and `scores` blocks, browse_catalog's tile `price` and `critics`, and get_offers'
+whole payload are catalog-scoped (market/catalog data, identical for every
+viewer) and ride `catalog:read` — with one narrowing inside `scores`: its
+`journal` aggregate adds the caller's own journal to the public population only
+under `journal:read`, so a catalog-only token reads the community number alone.
+Data returned never exceeds the scopes presented.
 
 ## Server instructions (sent to every client at initialize)
 
@@ -436,6 +439,15 @@ result:
     sourceCount: 2             #   distinct sources with a current observation
     observationCount: 9        #   total observations recorded for the cigar
     refreshRecommended: false  #   latest observation older than the 30d window
+  scores:                      # additive (ADR-013 / DESIGN-006); always present
+    critics:                   #   external reviewers; null when nobody has scored it
+      score: 91                #   whole number on the 0-100 axis
+      count: 12                #   observations behind it
+      scope: cigar             #   cigar = this vitola's own; blend = its blend's
+    journal:                   #   smoke ratings; null when the population is empty
+      score: 86
+      count: 3                 #   JOURNALS, not smokes — one voice per journal
+      scope: blend
   personalProfile:             # present only with journal:read; null if never smoked
     smokeCount: 3
     recurringDescriptors: [citrus, baking-spice, earth]
@@ -447,6 +459,20 @@ result:
 
 The want and favorite `note`s are web-detail display only and stay off this
 payload; the model sets/reads the flags through `set_want` and `set_favorite`.
+
+**Scores (ADR-013 §3, DESIGN-006).** Two populations, **never mixed**: `critics`
+averages external review observations and counts them; `journal` averages one
+voice per journal — each user's own ratings collapse to their mean first — and
+counts **journals, not smokes**. Both are whole numbers on the 0-100 axis, both
+are `null` when their population is empty (never `0`, which is a real score), and
+the `scores` object itself is always present. `scope` says which level produced
+the number: `cigar` when this vitola has observations of its own, `blend` when it
+does not and the blend's were used instead. **Quote the scope with the number** —
+a blend-scoped figure is the blend's verdict, not this vitola's — and always
+quote the count with the score: a `journal` of 86 over 1 journal is one person's
+opinion. The journal population is public journals plus the caller's own under
+`journal:read`; under `catalog:read` alone it is public journals only, so a
+caller's private ratings never move a number a catalog-scoped token can read.
 
 **Enrichment + pricing hints (ADR-009, additive, catalog-scoped).** `enrichment`
 reports whether a background lookup would help (`recommended`), the missing
@@ -476,7 +502,8 @@ arguments:                       # all optional; combine freely
   wanted: true                   # personal (journal:read): on the want list (false = not)
   smoked: false                  # personal (journal:read): smoked ≥ once (false = never)
   inStock: true                  # market: has a current in-stock offer (false = none)
-  sort: price                    # name (default) | my-rating | recently-added | price
+  criticScoreMin: 90             # market: critic score at least this (0-100); unscored excluded
+  sort: critic-score             # name (default) | my-rating | recently-added | price | critic-score
   cursor: null                   # keyset cursor from a prior nextCursor; omit for page 1
   limit: 48                      # default 48, max 96
 
@@ -496,6 +523,9 @@ result:
         sticksPerPackage: 20
         currency: USD
         seenAt: "2026-08-20T00:00:00Z"
+      critics:                   # catalog-scoped — always present (null if unreviewed)
+        score: 91                #   THIS vitola's own critic mean, never its blend's
+        count: 12                #   observations behind it
       smokeCount: 3              # personal overlay — present only with journal:read
       myRating: 88               #   the caller's rounded average, null if unrated
       remaining: 5               #   derived stock (acquired − consumed), floored at zero
@@ -511,10 +541,15 @@ independent and tri-state — omitted applies no filter, `true` requires the
 property, `false` requires its absence — and they **AND together in one call**
 (unlike the web's single exclusive `own` toolbar). `sort: price` orders by the
 best current per-stick offer; unpriced cigars group **after** priced ones (nulls
-last), never interleaved as zero.
+last), never interleaved as zero. `sort: critic-score` orders by the tile's own
+`critics.score`, best first, with unscored cigars grouped last the same way —
+and `criticScoreMin` filters on that same whole number, so a tile showing
+`critics.score: 90` is never excluded by `criticScoreMin: 90`. A cigar nobody has
+reviewed fails any `criticScoreMin`: no opinion is not a low score.
 
-**Scope-bounding.** The tile `price` (price-at-a-glance) is catalog/market data,
-present for every caller. The personal overlay (`smokeCount`, `myRating`,
+**Scope-bounding.** The tile `price` (price-at-a-glance) and `critics` (the
+cigar's own critic aggregate) are catalog/market data, present for every
+caller. The personal overlay (`smokeCount`, `myRating`,
 `remaining`, `wanted`, `favorited`) is present only under `journal:read`; without
 it those fields are omitted **and** the personal filters (`inHumidor`/`wanted`/
 `smoked`) are dropped rather than applied, so the result set never leaks the

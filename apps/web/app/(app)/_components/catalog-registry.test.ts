@@ -158,6 +158,9 @@ describe("sort tokens and the two-state cycle (D-04)", () => {
       ["my-rating", "desc"],
       ["recently-added", "desc"],
       ["price", "desc"],
+      // DESIGN-006's `Critics` pill. Its canonical token IS `critic-score:desc`,
+      // so best-first is both the rule and the published contract.
+      ["critic-score", "desc"],
     ]);
     expect(GROUP_SORTS.map((s) => [s.key, s.firstDir])).toEqual([
       ["name", "asc"],

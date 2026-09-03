@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
-import type { CigarHierarchy, CigarView, GetCigarResult, Tobacco } from "@cj/domain";
+import type { CigarHierarchy, CigarView, GetCigarResult, SurfaceScores, Tobacco } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
 import { requireAuth } from "@/lib/require-auth";
 import { formatPrice, formatSeenDate } from "@/lib/format";
@@ -25,6 +25,7 @@ import { HoldingPanel } from "../../_components/holding-panel";
 import { PriceSpark } from "../../_components/price-spark";
 import { LocalDate } from "../../_components/local-date";
 import { ProductPhotoAdmin } from "../../_components/product-photo-admin";
+import { ScoreRows } from "../../_components/score-rows";
 
 function vitola(cigar: CigarView): string | null {
   const dims =
@@ -141,19 +142,27 @@ function Breadcrumb({ hierarchy }: { hierarchy: CigarHierarchy }) {
   );
 }
 
-// The reserved score slot (DESIGN-004 D-08). It lands with ADR-013 as TWO
+// The reserved score slot, filled (DESIGN-004 D-08, now DESIGN-006). TWO
 // labelled aggregates carrying their sample counts — `Critics 91 · 12 reviews`
-// and `Journal 8.6 · 3 smokes` — never one blended number, and never a bare
+// and `Journal 86 · 3 journals` — never one blended number, and never a bare
 // score without the population it came from.
 //
-// Until those observations exist it renders NOTHING. The slot is reserved here
-// rather than left to be rediscovered, because the rule it protects is the one
-// ADR-013 is strictest about: a single smoke's rating must never be presented as
-// a blend-, line- or brand-level number. The tile's rating seal stays exactly
-// what it is — the viewer's own per-cigar rating — and this is the only place a
-// higher-level score may ever appear.
-function ScoreSlot() {
-  return null;
+// It renders NOTHING while both populations are empty, which is still most of the
+// catalogue: absent, not zeroed. The rule the slot protects is the one ADR-013 is
+// strictest about — a single smoke's rating must never be presented as a blend-,
+// line- or brand-level number — and it is the reason the caption exists. When the
+// leaf has no observations of its own, the figures are the BLEND's, and
+// `Across <blend name>` says so rather than letting the blend's verdict read as
+// this vitola's. The tile's rating seal stays exactly what it is: the viewer's own
+// per-cigar rating.
+function ScoreSlot({
+  scores,
+  hierarchy,
+}: {
+  scores: SurfaceScores;
+  hierarchy: CigarHierarchy;
+}) {
+  return <ScoreRows scores={scores} fallbackBlendName={hierarchy.blend?.name ?? null} />;
 }
 
 export default async function CigarDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -170,7 +179,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
     throw error;
   }
 
-  const { cigar, personalProfile, pricing, hasProductPhoto, productPhotoId, wanted, wantNote, favorited, favoriteNote, hierarchy } =
+  const { cigar, personalProfile, pricing, hasProductPhoto, productPhotoId, wanted, wantNote, favorited, favoriteNote, hierarchy, scores } =
     data;
   const [{ smokes }, offers, offerHistory, priceHistory, holding] = await Promise.all([
     caller.smokes.list({ cigarId: id, limit: 50 }),
@@ -220,7 +229,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
               {cigar.canonicalName}
             </h1>
             <Breadcrumb hierarchy={hierarchy} />
-            <ScoreSlot />
+            <ScoreSlot scores={scores} hierarchy={hierarchy} />
             {cigar.verification === "unverified" ? (
               <span className={`${ui.chipOutline} self-start`}>unverified</span>
             ) : null}

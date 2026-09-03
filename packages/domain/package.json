@@ -9,7 +9,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "bench:scores": "tsx src/scripts/bench-score-aggregates.ts"
+    "bench:scores": "tsx src/scripts/bench-score-aggregates.ts",
+    "bench:surfaces": "tsx src/scripts/bench-score-surfaces.ts"
   },
   "dependencies": {
     "@cj/db": "workspace:*",

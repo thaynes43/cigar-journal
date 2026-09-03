@@ -6,6 +6,7 @@ import type {
   BrowseBrandsResult,
   CatalogCigarTile,
   CatalogTilePrice,
+  CatalogTileCritics,
   CigarType,
   CigarNameSource,
   GetBrandResult,
@@ -36,6 +37,7 @@ import {
   lookupHierarchyEntity,
 } from "./catalog-hierarchy.js";
 import { isUuid } from "./uuid.js";
+import { getSurfaceScores } from "./score-aggregates.js";
 import { vendorDisplaysPricesSql, offerIsDisplayableSql } from "./offer-display.js";
 import { isDecimal, isPgTimestamp } from "./cursor-keys.js";
 
@@ -53,7 +55,7 @@ const MAX_BROWSE_LIMIT = 96;
 // it sorts by. Stays in step with the CatalogSort union in types.ts. `price`
 // keys off ADR-009's stored per-stick offer column (`price_per_stick_cents`),
 // unpriced cigars grouped last (see sortSpec / OFFER_JOIN).
-export const CATALOG_SORTS = ["name", "my-rating", "recently-added", "price"] as const satisfies readonly CatalogSort[];
+export const CATALOG_SORTS = ["name", "my-rating", "recently-added", "price", "critic-score"] as const satisfies readonly CatalogSort[];
 
 // A URL/data-model-stable brand key: lowercase, every run of non-alphanumerics
 // collapsed to one hyphen, ends trimmed. Deterministic, so the same brand slugs
@@ -89,6 +91,10 @@ const DEFAULT_SORT_DIR: Record<CatalogSort, CatalogSortDir> = {
   "my-rating": "desc",
   "recently-added": "desc",
   price: "asc",
+  // DESIGN-006 pins the canonical token as `critic-score:desc` — "best first" —
+  // so this is the one key whose documented default IS its firstDir, and the MCP
+  // surface gets the same ordering the pill enters at.
+  "critic-score": "desc",
 };
 
 // The cursor's stored sort IDENTITY: the field AND its direction. A direction
@@ -158,8 +164,13 @@ function decodeCursor(raw: string | null | undefined, identity: string, keyType:
 //   price   — `price`, a number OR the NULL_PRICE_KEY sentinel that walks the
 //             unpriced tail; the sentinel is compared before the cast, so it is
 //             the one non-numeric key this lane can legitimately hold.
+//   score   — `critic-score`, the same shape as `price`: a number or the
+//             NULL_SCORE_KEY sentinel walking the unscored tail. Named
+//             separately from `price` because the two sentinels are different
+//             values in different lanes, and a shared name would invite one
+//             lane's cursor to be validated against the other's tail.
 //   instant — `recently-added`, spent as `${cur.key}::timestamptz`.
-type CursorKeyType = "text" | "number" | "price" | "instant";
+type CursorKeyType = "text" | "number" | "price" | "score" | "instant";
 
 function keyMatchesType(key: string, keyType: CursorKeyType): boolean {
   switch (keyType) {
@@ -169,6 +180,8 @@ function keyMatchesType(key: string, keyType: CursorKeyType): boolean {
       return isDecimal(key);
     case "price":
       return key === NULL_PRICE_KEY || isDecimal(key);
+    case "score":
+      return key === NULL_SCORE_KEY || isDecimal(key);
     case "instant":
       return isPgTimestamp(key);
   }
@@ -287,6 +300,49 @@ const OFFER_JOIN = sql`
   ) co ON co.cigar_id = c.id
 `;
 
+// The leaf's OWN critic aggregate (ADR-013 §3, DESIGN-006), pre-aggregated to one
+// row per cigar and folded in as a 1:1 LEFT JOIN — so it never fans out the
+// GROUP BY, and a grid that neither sorts nor filters by it pays only for the
+// aggregation itself.
+//
+// IT READS THE SCOPE VIEW, NOT `review_observations` DIRECTLY, even though the
+// leaf branch of that view is very nearly this query. `review_observation_scope`
+// is where migration 0028 DEFINES what counts — the `catalog_status = 'active'`
+// gate it inherits from `cigar_ancestry` above all — and a second spelling here
+// would be a second definition that could drift from the one the detail page,
+// the drill header and the group cards all read. The `cigar_id IS NOT NULL`
+// restriction selects the view's leaf branch; its blend branch emits a constant
+// NULL there, so the planner eliminates that half outright rather than scanning
+// it and discarding rows.
+//
+// LEAF-LINKED OBSERVATIONS ONLY, therefore — no blend fallback. A tile states no
+// scope, so a blend's number on one would be a blend score presented as a leaf's
+// (ADR-013 §1). It is also what makes the sort coherent: every row in the grid is
+// ranked by the same quantity, and the unscored tail is genuinely "nobody has
+// reviewed this vitola" rather than "nobody has reviewed this vitola or its
+// blend".
+//
+// `round(avg(...))` here and not in TypeScript: the tile, the sort and
+// `criticScoreMin` must all speak about the SAME number, or a tile badged
+// `Critics 90` could be excluded by a `criticScoreMin: 90` that compared the
+// unrounded 89.6 behind it.
+const CRITIC_JOIN = sql`
+  LEFT JOIN (
+    SELECT ros.cigar_id,
+           round(avg(ros.normalized_score), 0)::int AS critic_score,
+           count(*)::int AS critic_count
+    FROM review_observation_scope ros
+    WHERE ros.cigar_id IS NOT NULL
+    GROUP BY ros.cigar_id
+  ) cs ON cs.cigar_id = c.id
+`;
+
+// The critic-sort keyset's unscored-tail sentinel, mirroring NULL_PRICE_KEY: the
+// ordering is `critic_score DESC/ASC NULLS LAST`, so a numeric key pages within
+// the scored rows and this walks the null tail. Not a valid number, so it can
+// never collide with a real score.
+const NULL_SCORE_KEY = "~";
+
 // The price-sort keyset encodes an unpriced (null per-stick) tail row with this
 // sentinel key, since the sort orders `best_pps_cents ASC NULLS LAST`: a numeric
 // key pages within the priced rows (and then into the null tail), this sentinel
@@ -355,7 +411,8 @@ function overlayFilters(principal: Principal, args: CatalogFilterArgs): SQL[] {
 
 // Which joins the COUNT query needs for the active filters (the page query's
 // tileSelect always carries all of them). `own`/inHumidor/wanted need the
-// ownershipJoins; inStock needs the OFFER_JOIN; a hierarchy filter needs
+// ownershipJoins; inStock needs the OFFER_JOIN; criticScoreMin needs the
+// CRITIC_JOIN; a hierarchy filter needs
 // HIERARCHY_JOINS only where it pins a real slug at brand/line/blend — the
 // `unfiled` forms and both vitola forms read straight off `cigars`
 // (hierarchyActive). brand/type/q/smoked/favorited need nothing (plain columns
@@ -365,7 +422,8 @@ function countJoinsFor(principal: Principal, args: CatalogFilterArgs, facet: SQL
     facet != null || args.inHumidor !== undefined || args.wanted !== undefined;
   const needsOffers = args.inStock !== undefined;
   const needsHierarchy = hierarchyActive(args.hierarchy);
-  return sql`${needsHierarchy ? HIERARCHY_JOINS : sql``}${needsOwnership ? ownershipJoins(principal) : sql``}${needsOffers ? OFFER_JOIN : sql``}`;
+  const needsCritics = args.criticScoreMin != null;
+  return sql`${needsHierarchy ? HIERARCHY_JOINS : sql``}${needsOwnership ? ownershipJoins(principal) : sql``}${needsOffers ? OFFER_JOIN : sql``}${needsCritics ? CRITIC_JOIN : sql``}`;
 }
 
 // The one membership definition every catalog read shares (DESIGN-004 D-01: a
@@ -393,6 +451,12 @@ function catalogFilters(
   if (args.type) filters.push(sql`c.type = ${args.type}`);
   const facet = ownershipCondition(args.own);
   if (facet) filters.push(facet);
+  // The critic floor (DESIGN-006). Compared against the ROUNDED score the tile
+  // renders — see CRITIC_JOIN — and a null (nobody has reviewed this leaf) fails
+  // it rather than passing as a zero: "no opinion" is not a low score.
+  if (args.criticScoreMin != null) {
+    filters.push(sql`cs.critic_score >= ${Math.round(args.criticScoreMin)}`);
+  }
   filters.push(...overlayFilters(principal, args));
   filters.push(...hierarchyConditions(hierarchy));
   return filters;
@@ -467,6 +531,33 @@ function sortSpec(sort: CatalogSort, dir: CatalogSortDir): SortSpec {
             : asc
               ? sql`(co.best_pps_cents > ${Number(cur.key)} OR (co.best_pps_cents = ${Number(cur.key)} AND c.id > ${cur.id}::uuid) OR co.best_pps_cents IS NULL)`
               : sql`(co.best_pps_cents < ${Number(cur.key)} OR (co.best_pps_cents = ${Number(cur.key)} AND c.id > ${cur.id}::uuid) OR co.best_pps_cents IS NULL)`,
+        having: null,
+      };
+    case "critic-score":
+      // The leaf's own critic mean (DESIGN-006). NULLS LAST in BOTH directions,
+      // for the same reason `price` does it: the unscored break is a rendering
+      // boundary rather than a value, so flipping to worst-first must not
+      // teleport every unreviewed cigar to the top and fill the first screen with
+      // rows the sort has nothing to say about. `desc` is the canonical
+      // `critic-score:desc` — best first. id ASC breaks ties in both directions.
+      //
+      // The key is a per-cigar column of a 1:1 join, available pre-group, so the
+      // cursor continues the page in WHERE rather than HAVING; ORDER BY reads the
+      // aggregated max() form because the page groups by c.id, and max() over a
+      // 1:1 join is that join's own value.
+      return {
+        orderBy: asc
+          ? sql`max(cs.critic_score) ASC NULLS LAST, c.id ASC`
+          : sql`max(cs.critic_score) DESC NULLS LAST, c.id ASC`,
+        cursorKey: (row) =>
+          row.critic_score != null ? String(Number(row.critic_score)) : NULL_SCORE_KEY,
+        keyType: "score",
+        where: (cur) =>
+          cur.key === NULL_SCORE_KEY
+            ? sql`(cs.critic_score IS NULL AND c.id > ${cur.id}::uuid)`
+            : asc
+              ? sql`(cs.critic_score > ${Number(cur.key)} OR (cs.critic_score = ${Number(cur.key)} AND c.id > ${cur.id}::uuid) OR cs.critic_score IS NULL)`
+              : sql`(cs.critic_score < ${Number(cur.key)} OR (cs.critic_score = ${Number(cur.key)} AND c.id > ${cur.id}::uuid) OR cs.critic_score IS NULL)`,
         having: null,
       };
     case "recently-added":
@@ -612,6 +703,11 @@ interface CatalogTileRow {
   best_packaging: string | null;
   best_sticks: number | string | null;
   best_seen_at: string | null;
+  // The leaf's own critic aggregate (DESIGN-006), from CRITIC_JOIN. Both null
+  // together when nobody has reviewed this vitola; `critic_score` is also the
+  // `critic-score` sort key and what `criticScoreMin` compares against.
+  critic_score: number | string | null;
+  critic_count: number | string | null;
   // Ordering-only column for the "recently added" keyset cursor; not surfaced on
   // the public tile (CatalogCigarTile stays personal-overlay-only).
   created_at: string | Date;
@@ -643,6 +739,15 @@ function toTilePrice(row: CatalogTileRow): CatalogTilePrice | null {
   return null;
 }
 
+// The tile's critic aggregate (DESIGN-006). Null unless the leaf has at least one
+// observation of its own — never a zero, and never the blend's number, which a
+// tile has no way to label as such.
+function toTileCritics(row: CatalogTileRow): CatalogTileCritics | null {
+  if (row.critic_score == null || row.critic_count == null) return null;
+  const count = Number(row.critic_count);
+  return count > 0 ? { score: Number(row.critic_score), count } : null;
+}
+
 function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
   return {
     cigarId: row.id,
@@ -664,6 +769,7 @@ function toCatalogTile(row: CatalogTileRow): CatalogCigarTile {
     wanted: row.wanted === true,
     favorited: row.favorited === true,
     price: toTilePrice(row),
+    critics: toTileCritics(row),
     nameSource: row.name_source,
     structuralBrand: row.structural_brand ?? null,
     structuralLine: row.structural_line ?? null,
@@ -708,13 +814,16 @@ function tileSelect(principal: Principal): SQL {
       max(co.best_currency) AS best_currency,
       max(co.best_packaging) AS best_packaging,
       max(co.best_sticks)::int AS best_sticks,
-      max(co.best_seen_at) AS best_seen_at
+      max(co.best_seen_at) AS best_seen_at,
+      max(cs.critic_score)::int AS critic_score,
+      max(cs.critic_count)::int AS critic_count
     FROM cigars c
     LEFT JOIN smokes s ON s.cigar_id = c.id AND s.user_id = ${principal.userId}
     LEFT JOIN product_photos pp ON pp.cigar_id = c.id AND pp.rights <> 'suppressed'
     ${ownershipJoins(principal)}
     LEFT JOIN favorites f ON f.cigar_id = c.id AND f.user_id = ${principal.userId}
     ${OFFER_JOIN}
+    ${CRITIC_JOIN}
     ${HIERARCHY_JOINS}
   `;
 }
@@ -934,9 +1043,17 @@ export async function browseCatalogGroups(
   const filters = catalogFilters(principal, args, args.hierarchy);
   const where = sql`WHERE ${sql.join(filters, sql` AND `)}`;
   // ownershipJoins are UNCONDITIONAL here, unlike in the count query: the badge
-  // counts read them even when no ownership filter is active. The offer join is
-  // still conditional — only the inStock filter touches it.
+  // counts read them even when no ownership filter is active. The offer and
+  // critic joins stay conditional — only `inStock` and `criticScoreMin` touch
+  // them, and a grouped view that filters by neither should pay for neither.
+  //
+  // The critic join is carried for the FILTER, not for the cards' own scores:
+  // those are the group's aggregate at its own level, read separately below. It
+  // is here because `catalogFilters` is the ONE membership definition the grid,
+  // the cards and the chip counts share (D-01) — a card's count has to equal the
+  // drill it opens, so any filter the grid can apply must resolve here too.
   const offerJoin = args.inStock !== undefined ? OFFER_JOIN : sql``;
+  const criticJoin = args.criticScoreMin != null ? CRITIC_JOIN : sql``;
 
   const result = await deps.db.execute(sql`
     SELECT
@@ -958,6 +1075,7 @@ export async function browseCatalogGroups(
     LEFT JOIN product_photos pp ON pp.cigar_id = c.id AND pp.rights <> 'suppressed'
     ${ownershipJoins(principal)}
     ${offerJoin}
+    ${criticJoin}
     ${where}
     GROUP BY ${spec.key}
     ORDER BY ${groupOrderBy(spec, args.groupSort)}
@@ -1010,7 +1128,37 @@ export async function browseCatalogGroups(
       inHumidorCount,
       wantedCount,
       covers,
+      // Filled in below, once every card's key is known: one batched read beats
+      // one query per card, and the ids are not all in hand until this loop ends.
+      critics: null,
+      journal: null,
     });
+  }
+
+  // The two labelled aggregates on the subtitle (DESIGN-006), in ONE round trip
+  // for the whole grid — the read `getSurfaceScores` exists for.
+  //
+  // NOT FOR `vitola`, and not for Unfiled. ADR-013 defines the aggregates at
+  // brand, line, blend and blender; a vitola is a size label spanning every marca
+  // that uses it (`Robusto`), so a number there would average unrelated products,
+  // and Unfiled is the absence of a level rather than a level. Both simply carry
+  // no scores, which is the same shape as a group nobody has reviewed.
+  //
+  // The journal population is the VIEWER's (public journals plus their own), so
+  // these cards are principal-scoped in a way the counts above already are.
+  if (args.by !== "vitola" && groups.length > 0) {
+    const scores = await getSurfaceScores(
+      deps.db,
+      args.by,
+      groups.map((group) => group.id),
+      { userId: principal.userId },
+    );
+    for (const group of groups) {
+      const pair = scores.get(group.id);
+      if (pair == null) continue;
+      group.critics = pair.critics && { score: pair.critics.score, count: pair.critics.count };
+      group.journal = pair.journal && { score: pair.journal.score, count: pair.journal.count };
+    }
   }
 
   return { groups, unfiled };
@@ -1075,6 +1223,7 @@ export async function catalogFacetOptions(
     ${spec.joins}
     ${needsOwnership ? ownershipJoins(principal) : sql``}
     ${args.inStock !== undefined ? OFFER_JOIN : sql``}
+    ${args.criticScoreMin != null ? CRITIC_JOIN : sql``}
     ${where}
     GROUP BY ${spec.key}
     ORDER BY ${spec.name} ASC, ${spec.keyText} ASC
@@ -1133,6 +1282,7 @@ export async function catalogFacetOptions(
         ${spec.joins}
         ${needsOwnership ? ownershipJoins(principal) : sql``}
         ${args.inStock !== undefined ? OFFER_JOIN : sql``}
+        ${args.criticScoreMin != null ? CRITIC_JOIN : sql``}
         WHERE ${sql.join(activeFilters, sql` AND `)}
       `);
       const option: CatalogFacetOption = {
