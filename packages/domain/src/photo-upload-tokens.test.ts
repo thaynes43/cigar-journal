@@ -91,6 +91,16 @@ describe("photo upload tokens", () => {
     expect(rows[0]!.usedAt).not.toBeNull();
   });
 
+  it("mints with kind cigar when the caller named none", async () => {
+    // #287. The kind is decided at MINT, not at upload, so the /u link is the one
+    // path where a default that is not `cigar` would survive the change.
+    const minted = await mintPhotoUploadToken(h.deps, user, { smokeId });
+    const consumed = await consumePhotoUploadToken(h.deps, { token: minted.token });
+    if (consumed.targetKind !== "smoke") throw new Error("expected a smoke token");
+    expect(consumed.kind).toBe("cigar");
+    expect(consumed.caption).toBeNull();
+  });
+
   it("is single-use: two concurrent consumes, exactly one wins", async () => {
     const minted = await mintPhotoUploadToken(h.deps, user, { smokeId });
     const results = await Promise.allSettled([

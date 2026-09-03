@@ -706,7 +706,7 @@ export const addSmokePhotoSchema = z
       .enum(["cigar", "band", "construction", "burn", "other"])
       .optional()
       .describe(
-        "What the photo shows: cigar (the whole stick), band, construction (cap/foot/wrapper detail), burn (ash or burn line), or other. Omit to default to 'other'.",
+        "What the photo shows: cigar (the whole stick), band, construction (cap/foot/wrapper detail), burn (ash or burn line), or other. Omit to default to 'cigar'.",
       ),
     caption: z
       .string()

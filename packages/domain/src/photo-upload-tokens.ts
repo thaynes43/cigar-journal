@@ -6,6 +6,7 @@ import { auditActor } from "./audit-attribution.js";
 import type { SmokePhotoKind } from "./types.js";
 import { CigarNotFoundError, SmokeNotFoundError, UnauthorizedError, UploadTokenInvalidError } from "./errors.js";
 import { isUuid } from "./uuid.js";
+import { DEFAULT_PHOTO_KIND } from "./smoke-photos.js";
 
 // Single-use, 24h photo upload links (ADR-007, issue #44 part 2; extended
 // for product photos in DESIGN-003 §Images, issue #127). Two kinds share the
@@ -99,7 +100,9 @@ export async function mintPhotoUploadToken(
         userId: principal.userId,
         targetKind: "smoke",
         smokeId: input.smokeId,
-        kind: input.kind ?? "other",
+        // The kind the /u link will carry into addSmokePhoto — the same default
+        // the direct paths use (#287), decided here because the token stores it.
+        kind: input.kind ?? DEFAULT_PHOTO_KIND,
         caption: input.caption ?? null,
         expiresAt,
       })

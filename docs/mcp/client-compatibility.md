@@ -310,6 +310,29 @@ claims it. The photo is added once, when it is taken, on every client.
 **Residual for the upstream report:** the Loki signature above is the evidence
 base. Mode A stays implemented on both photo tools.
 
+## 2026-09-03 — the third data point, and forwarding stops reading as a failure
+
+Three `open_photo_drop` calls (01:04:08Z, 01:18:09Z, 01:21:46Z) recorded the same
+signature a third time — `paramKeys ["_meta","arguments","name"]`, `argKeys []`,
+`argImage absent`, `metaFileParams {"type":"absent"}` count 0,
+`photo_intake outcome no_delivery, channel none, mode upload_url` — and the
+upload link then carried the photo (`photoId 10edfb52-…`, 1080×1440). Nothing new
+about the mechanism; the value is that the drop's own tool now shows it, with no
+`image` argument published for a model to fill.
+
+**What changed because of it (#288).** The wording, not the intake. The
+`delivery.detail` for `no_image_received` now reads
+
+> No image arrived with this call. Chat attachments are not forwarded to this
+> server by any current client, so the upload link is the path — relay it. This is
+> the expected outcome, not a failure.
+
+and `open_photo_drop` / `add_smoke_photo` each carry one sentence saying
+`no_image_received` is the normal outcome on every current client and must not be
+reported as a problem. The old sentence ("No image arrived with this call.") was
+true and read as a fault, which cost the owner a turn of the model apologizing
+before it relayed the link that works.
+
 **Additive surface.** One new tool, `open_photo_drop`, on the existing
 `journal:write` scope — no new scope, so a connector token already minted reaches
 it with no re-consent — plus two **optional** arguments: `save_smoke.photoDropId`

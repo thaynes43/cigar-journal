@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, count, eq } from "drizzle-orm";
+import { and, asc, count, eq } from "drizzle-orm";
 import { auditLog, smokePhotos, smokes, users } from "@cj/db";
 import type { PhotoStorage } from "@cj/photos";
 import type { Deps, Principal } from "./deps.js";
@@ -16,6 +16,13 @@ import { toSmokePhotoView, smokePhotoSnapshot } from "./mapping.js";
 // is the sole thing this module borrows from @cj/photos.
 
 export const MAX_PHOTOS_PER_SMOKE = 12;
+
+// What a photo shows when the caller did not say (#287). The overwhelmingly
+// common photo of a smoke is the cigar itself; `other` is the fallback, and
+// making it the default cost the owner a correction on every drop upload. The
+// column defaults agree (migration 0036), so a row written without the field
+// says the same thing.
+export const DEFAULT_PHOTO_KIND: SmokePhotoKind = "cigar";
 
 // The pipeline output plus its stored byte size, as the adapter hands it over.
 export interface ProcessedImage {
@@ -96,7 +103,7 @@ export async function addSmokePhoto(
         .values({
           smokeId: input.smokeId,
           userId: principal.userId,
-          kind: input.kind ?? "other",
+          kind: input.kind ?? DEFAULT_PHOTO_KIND,
           caption: input.caption ?? null,
           objectKey,
           thumbKey,
@@ -130,6 +137,11 @@ export async function addSmokePhoto(
 
 // The caller's photos for one smoke, oldest first. Owner-scoped by the photo's
 // own user_id, so a non-owner simply gets nothing.
+//
+// `created_at, id` — the id is the TIE-BREAK, not decoration (#288): three photos
+// dropped in one burst can share a millisecond, and `created_at` alone leaves
+// their order to the planner, so two reads of the same smoke could disagree.
+// Every read of these two tables sorts the same way for that reason.
 export async function listSmokePhotos(
   deps: Deps,
   principal: Principal,
@@ -144,7 +156,7 @@ export async function listSmokePhotos(
     .select()
     .from(smokePhotos)
     .where(and(eq(smokePhotos.smokeId, args.smokeId), eq(smokePhotos.userId, principal.userId)))
-    .orderBy(smokePhotos.createdAt);
+    .orderBy(asc(smokePhotos.createdAt), asc(smokePhotos.id));
   return rows.map(toSmokePhotoView);
 }
 

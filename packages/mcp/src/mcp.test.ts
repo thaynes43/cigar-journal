@@ -2888,7 +2888,7 @@ describe("@cj/mcp adapter", () => {
           })) as CallToolResult;
 
           const data = payloadOf(result) as OpenedDrop;
-          expect(data.staged?.kind).toBe("other");
+          expect(data.staged?.kind).toBe("cigar");
           expect(data.staged?.width).toBeGreaterThan(0);
           expect(data.photoCount).toBe(1);
           // Exactly one of the two: a stored image leaves nothing for `delivery`

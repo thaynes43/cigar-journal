@@ -45,6 +45,7 @@ const PNG_1X1 = Buffer.from(
 interface PhotoBody {
   photoId: string;
   kind: string;
+  caption: string | null;
   attached: boolean;
 }
 
@@ -125,11 +126,53 @@ describe("/api/photo-drops/[token]/photos/[id]", () => {
 
   it("reclassifies a photo on a chip tap", async () => {
     const photo = (await (await stage(token)).json()) as PhotoBody;
-    expect(photo.kind).toBe("other");
+    // A fresh upload arrives as `cigar` (#287), so the chips open on Cigar.
+    expect(photo.kind).toBe("cigar");
 
     const res = await patch(token, photo.photoId, { kind: "band" });
     expect(res.status).toBe(200);
     expect(((await res.json()) as PhotoBody).kind).toBe("band");
+  });
+
+  it("takes a caption on its own, and an empty one clears it", async () => {
+    // #288: the page sends `kind` on a chip tap and `caption` on a blur, through
+    // the one endpoint. Each field alone, and neither erases the other.
+    const photo = (await (await stage(token)).json()) as PhotoBody;
+    expect(photo.caption).toBeNull();
+
+    const captioned = (await (
+      await patch(token, photo.photoId, { caption: "First third" })
+    ).json()) as PhotoBody;
+    expect(captioned).toMatchObject({ caption: "First third", kind: "cigar" });
+
+    // A later chip tap leaves the caption where it is.
+    const rekinded = (await (await patch(token, photo.photoId, { kind: "burn" })).json()) as PhotoBody;
+    expect(rekinded).toMatchObject({ caption: "First third", kind: "burn" });
+
+    // Blank is the erase, and so is an explicit null.
+    expect(
+      ((await (await patch(token, photo.photoId, { caption: "" })).json()) as PhotoBody).caption,
+    ).toBeNull();
+    expect((await patch(token, photo.photoId, { caption: null })).status).toBe(200);
+  });
+
+  it("refuses a caption that is not a string of at most 200 characters", async () => {
+    const photo = (await (await stage(token)).json()) as PhotoBody;
+    for (const caption of ["x".repeat(201), 42, { text: "hi" }, ["hi"]]) {
+      const res = await patch(token, photo.photoId, { caption });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe("validation_error");
+    }
+    expect((await patch(token, photo.photoId, { caption: "x".repeat(200) })).status).toBe(200);
+  });
+
+  it("refuses a body naming neither field", async () => {
+    // Not a no-op 200: a PATCH with nothing to change is a client bug, and
+    // answering success would hide it.
+    const photo = (await (await stage(token)).json()) as PhotoBody;
+    for (const body of [{}, { nickname: "hi" }, null, "kind=band", []]) {
+      expect((await patch(token, photo.photoId, body)).status).toBe(400);
+    }
   });
 
   it("refuses a kind that is not one of the five", async () => {

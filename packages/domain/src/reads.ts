@@ -168,11 +168,14 @@ export async function getSmoke(
     .where(eq(smokeProgression.smokeId, args.smokeId))
     .orderBy(smokeProgression.ordinal);
 
+  // `created_at, id` everywhere smoke photos are listed (#288): a burst of
+  // uploads can share a millisecond, and the id is what keeps two reads of the
+  // same smoke from disagreeing about their order.
   const photos = await deps.db
     .select()
     .from(smokePhotos)
     .where(eq(smokePhotos.smokeId, args.smokeId))
-    .orderBy(smokePhotos.createdAt);
+    .orderBy(asc(smokePhotos.createdAt), asc(smokePhotos.id));
 
   // The explicit humidor link, if any (ADR-008). At most one per smoke.
   const consumptionRows = await deps.db

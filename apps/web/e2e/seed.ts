@@ -132,6 +132,11 @@ export interface Handoff {
   // link it minted. The drop page is reached with the token alone, so the spec
   // that drives it never signs in.
   photoDrop: { token: string };
+  // A SECOND open drop, on the non-admin account, for the multi-photo walk
+  // (#288). It cannot share the admin's: one open drop per user means opening a
+  // second would rotate the first drop's token and kill the link the anon spec
+  // is holding. `cigarId` is what the smoke that claims it is saved against.
+  multiPhotoDrop: { token: string; cigarId: string };
   publicSmoke: { id: string; cigarName: string; narrativeSnippet: string };
   privateSmokeId: string;
   // Journal entries with no title, so the smoke-detail h1 falls back to the
@@ -668,6 +673,13 @@ export async function seed(opts: {
     // the in-memory implementation is enough — the photos the SPEC uploads travel
     // through the app's own S3 client into the harness object store.
     const photoDrop = await openPhotoDrop(deps, createMemoryPhotoStorage(), admin);
+    // The multi-photo walk's own drop, on the NON-ADMIN account (#288). One open
+    // drop per user, so a second open on `admin` would rotate the token above and
+    // leave the anon spec holding a dead link.
+    const multiPhotoDrop = await openPhotoDrop(deps, createMemoryPhotoStorage(), {
+      userId: nonAdminId,
+      role: "user",
+    });
 
     // --- Invites for the redemption specs -----------------------------------
     const openInvites: { token: string; email: string }[] = [];
@@ -795,6 +807,7 @@ export async function seed(opts: {
         unfiled: { id: undercrown, canonicalName: "Drew Estate Undercrown Gordito" },
       },
       photoDrop: { token: photoDrop.token },
+      multiPhotoDrop: { token: multiPhotoDrop.token, cigarId: sigloVi },
       publicSmoke: {
         id: publicSave.smoke.smokeId,
         cigarName: "Cohiba Siglo VI",

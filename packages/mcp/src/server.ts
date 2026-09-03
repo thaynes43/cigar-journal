@@ -216,8 +216,15 @@ type DeliveryStatus =
   | "image_fetch_failed"
   | "image_unreadable";
 
+// `no_image_received` is the EXPECTED outcome, not a failure, and the detail now
+// says so (#288). No current client forwards a chat attachment to this server —
+// three `open_photo_drop` calls on 2026-09-03 carried `argKeys []` and
+// `metaFileParams absent, count 0`, the third live data point with the same
+// signature — so a model that reads the old sentence as a fault reports a
+// problem to the user and delays the one thing that works: relaying the link.
 const DELIVERY_DETAIL: Record<DeliveryStatus, string> = {
-  no_image_received: "No image arrived with this call.",
+  no_image_received:
+    "No image arrived with this call. Chat attachments are not forwarded to this server by any current client, so the upload link is the path — relay it. This is the expected outcome, not a failure.",
   image_reference_unusable: "An image reference arrived, but it carried nothing the server can read.",
   image_fetch_failed: "An image reference arrived, but the image could not be retrieved.",
   image_unreadable: "An image arrived, but it is not a readable photo.",
@@ -1190,7 +1197,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // multi-use for its 48 hours, so re-minting per photo would train the user to
       // wait for a new link they do not need.
       description:
-        "Open a photo drop for the smoke in progress: a link the user adds photos to at any point during the smoke, before it is saved. Call it the moment a photo appears in the conversation or the user says they took one, and relay the link (shareWithUser is the sentence to say); the same link takes every later photo of this smoke, so relay it once. Keep the photoDropId and pass it to save_smoke, which attaches the dropped photos to the saved smoke; the link then keeps working for that smoke until it expires (48 hours). Opening again while a drop is open returns that drop with a fresh link. If the client forwarded an attached image with the call it is stored into the drop directly (delivery reports which happened). Never fill the image argument yourself — no URLs, ids, or invented fields.",
+        "Open a photo drop for the smoke in progress: a link the user adds photos to at any point during the smoke, before it is saved. Call it the moment a photo appears in the conversation or the user says they took one, and relay the link (shareWithUser is the sentence to say); the same link takes every later photo of this smoke, so relay it once. Keep the photoDropId and pass it to save_smoke, which attaches the dropped photos to the saved smoke; the link then keeps working for that smoke until it expires (48 hours). Opening again while a drop is open returns that drop with a fresh link. If the client forwarded an attached image with the call it is stored into the drop directly (delivery reports which happened). Never fill the image argument yourself — no URLs, ids, or invented fields. delivery.status no_image_received is the normal outcome on every current client — relay the link and do not report it as a problem.",
       inputSchema: openPhotoDropSchema,
       outputSchema: openPhotoDropOutput,
       // The same file-input declaration add_smoke_photo publishes: a host that
@@ -1295,7 +1302,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // vocabulary (below): it earns its place by telling the model the truth about
       // what arrived, which is exactly what the probe was built to learn.
       description:
-        "Add a photo to a smoke that is already saved. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. With photoDropId it instead attaches the photos of that drop to the smoke (for a drop save_smoke did not carry) and mints no link. If the client forwarded an attached image with the call, the photo is stored directly and no link is needed (delivery reports which happened). For a photo taken during a smoke that is not saved yet, use open_photo_drop. Never fill the image argument yourself — no URLs, ids, or invented fields.",
+        "Add a photo to a smoke that is already saved. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. With photoDropId it instead attaches the photos of that drop to the smoke (for a drop save_smoke did not carry) and mints no link. If the client forwarded an attached image with the call, the photo is stored directly and no link is needed (delivery reports which happened). For a photo taken during a smoke that is not saved yet, use open_photo_drop. Never fill the image argument yourself — no URLs, ids, or invented fields. delivery.status no_image_received is the normal outcome on every current client — relay the upload link and do not report it as a problem.",
       inputSchema: addSmokePhotoSchema,
       outputSchema: addSmokePhotoOutput,
       // Declare `image` as a file input so ChatGPT forwards the attached photo.

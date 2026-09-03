@@ -511,3 +511,12 @@ init container at startup (ADR-003).
   exists (min $3.73, max $2,487.50 on Fox). Re-runnable — after the first
   execution no row in the population still has `packaging IS NULL` — and inert on
   any database that never held these vendors.
+- `0036_photo_kind_default_cigar.sql` — `smoke_photos.kind` and
+  `staged_smoke_photos.kind` default to `cigar` instead of `other` (#287). The
+  overwhelmingly common photo of a smoke is the cigar itself, and the
+  2026-09-02 Padrón 1926 live test showed the cost of the old default: the
+  drop-page upload landed as `other` and the owner had to tap `Cigar` before
+  saving. No backfill — an existing `other` was never a claim the user made,
+  and rewriting it would invent one. `photo_upload_tokens.kind` keeps its own
+  `other` default: @cj/domain always writes that column explicitly, so the
+  default is unreachable from any shipped path.

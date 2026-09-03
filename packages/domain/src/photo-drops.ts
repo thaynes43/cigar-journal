@@ -23,7 +23,14 @@ import type {
 } from "./types.js";
 import { PhotoLimitError, PhotoNotFoundError, SmokeNotFoundError, UploadTokenInvalidError } from "./errors.js";
 import { hashToken } from "./photo-upload-tokens.js";
-import { addSmokePhoto, removeSmokePhoto, MAX_PHOTOS_PER_SMOKE, type ProcessedImage, type SmokePhotoObject } from "./smoke-photos.js";
+import {
+  addSmokePhoto,
+  removeSmokePhoto,
+  DEFAULT_PHOTO_KIND,
+  MAX_PHOTOS_PER_SMOKE,
+  type ProcessedImage,
+  type SmokePhotoObject,
+} from "./smoke-photos.js";
 import { smokePhotoSnapshot } from "./mapping.js";
 import { isUuid } from "./uuid.js";
 
@@ -61,6 +68,11 @@ export const PHOTO_DROP_RETENTION_SECONDS = 7 * 86_400;
 // nothing can ever attach.
 export const MAX_PHOTOS_PER_DROP = MAX_PHOTOS_PER_SMOKE;
 
+// One line under a photo, not a second journal. `caption` is free text in a text
+// column written from an anonymous request, so the bound lives here and the route
+// enforces it (#288).
+export const MAX_PHOTO_CAPTION_LENGTH = 200;
+
 export interface OpenPhotoDropInput {
   correlationId?: string;
   // Which adapter drove the open, for the audit row. Defaults to "web".
@@ -84,10 +96,15 @@ export interface StagePhotoByTokenInput {
   correlationId?: string;
 }
 
-export interface SetPhotoDropPhotoKindInput {
+// What one PATCH on a drop photo may change. Both fields are OPTIONAL and
+// absence means "leave it alone", which is what lets a kind tap and a caption
+// blur reach the same endpoint without either erasing the other. A `null`
+// caption is the erase, and it is only reachable by saying so.
+export interface UpdatePhotoDropPhotoInput {
   token: string;
   photoId: string;
-  kind: SmokePhotoKind;
+  kind?: SmokePhotoKind;
+  caption?: string | null;
 }
 
 export interface RemovePhotoDropPhotoInput {
@@ -232,7 +249,7 @@ export async function claimPhotoDrop(
       .select()
       .from(stagedSmokePhotos)
       .where(eq(stagedSmokePhotos.dropId, drop.id))
-      .orderBy(asc(stagedSmokePhotos.createdAt));
+      .orderBy(asc(stagedSmokePhotos.createdAt), asc(stagedSmokePhotos.id));
     const held = await tx
       .select({ value: count() })
       .from(smokePhotos)
@@ -437,7 +454,7 @@ export async function stagePhotoByToken(
         .values({
           dropId: drop.id,
           userId: drop.userId,
-          kind: input.kind ?? "other",
+          kind: input.kind ?? DEFAULT_PHOTO_KIND,
           objectKey,
           thumbKey,
           contentType: input.image.contentType,
@@ -470,61 +487,87 @@ export async function stagePhotoByToken(
   }
 }
 
-// Reclassify one of the drop's photos, staged or already on the smoke. The update
-// and its audit row go in ONE transaction, as every other mutation on these two
-// tables does (#267): the writer being an anonymous token holder is a reason to
-// record the change, not to skip it. Re-selecting the kind already stored still
-// returns the view but writes nothing — a row whose before equals its after says
-// nothing about the photo. Both rows are attributed to the drop's OWNER with no
-// client, exactly as stagePhotoByToken attributes its own writes: the token is
-// the authorization, so there is no principal and no credential to name.
-export async function setPhotoDropPhotoKind(
+// Change what one of the drop's photos says about itself — its `kind`, its
+// `caption`, or both — staged or already on the smoke. The update and its audit
+// rows go in ONE transaction, as every other mutation on these two tables does
+// (#267): the writer being an anonymous token holder is a reason to record the
+// change, not to skip it. Writing back a value already stored still returns the
+// view but writes nothing — a row whose before equals its after says nothing
+// about the photo — and a call that changes neither field touches no table at
+// all. Every row is attributed to the drop's OWNER with no client, exactly as
+// stagePhotoByToken attributes its own writes: the token is the authorization, so
+// there is no principal and no credential to name.
+//
+// ONE AUDIT ROW PER FIELD (`*.kind`, `*.caption`), not one per call: the kind
+// actions predate the caption and a reader of the trail already knows what
+// `staged_photo.kind` means, so a combined row would re-cut a settled vocabulary
+// for nothing.
+export async function updatePhotoDropPhoto(
   deps: Deps,
-  args: SetPhotoDropPhotoKindInput,
+  args: UpdatePhotoDropPhotoInput,
 ): Promise<PhotoDropPhotoView> {
   const drop = await loadDropByToken(deps, args.token);
   const ref = await resolveDropPhoto(deps, drop, args.photoId);
-  const before = ref.row.kind;
 
-  if (ref.where === "staged") {
-    if (before === args.kind) return toStagedView(ref.row);
-    return deps.db.transaction(async (tx) => {
-      const updated = await tx
-        .update(stagedSmokePhotos)
-        .set({ kind: args.kind })
-        .where(eq(stagedSmokePhotos.id, ref.row.id))
-        .returning();
+  // Blank IS the erase: a user who clears the box means the photo has no caption,
+  // and storing "" beside NULL would leave the column two ways to say so.
+  const caption = args.caption === undefined ? undefined : normalizeCaption(args.caption);
+  const kindChanged = args.kind !== undefined && args.kind !== ref.row.kind;
+  const captionChanged = caption !== undefined && caption !== ref.row.caption;
+
+  if (!kindChanged && !captionChanged) {
+    return ref.where === "staged" ? toStagedView(ref.row) : toAttachedView(ref.row);
+  }
+
+  const changes = {
+    ...(kindChanged ? { kind: args.kind } : {}),
+    ...(captionChanged ? { caption } : {}),
+  };
+  // A staged photo is bound to the drop, not a smoke, so its audit rows have
+  // nothing to point at.
+  const smokeId = ref.where === "staged" ? null : ref.row.smokeId;
+  const subject = ref.where === "staged" ? "staged_photo" : "smoke_photo";
+
+  return deps.db.transaction(async (tx) => {
+    const updated =
+      ref.where === "staged"
+        ? await tx
+            .update(stagedSmokePhotos)
+            .set(changes)
+            .where(eq(stagedSmokePhotos.id, ref.row.id))
+            .returning()
+        : await tx
+            .update(smokePhotos)
+            .set(changes)
+            .where(eq(smokePhotos.id, ref.row.id))
+            .returning();
+
+    if (kindChanged) {
       await tx.insert(auditLog).values({
         userId: drop.userId,
         ...auditActor(undefined, "web"),
-        action: "staged_photo.kind",
-        // Nothing to point at: a staged photo is bound to the drop, not a smoke.
-        smokeId: null,
-        before: { photoId: ref.row.id, kind: before },
+        action: `${subject}.kind`,
+        smokeId,
+        before: { photoId: ref.row.id, kind: ref.row.kind },
         after: { photoId: ref.row.id, kind: args.kind },
         correlationId: null,
       });
-      return toStagedView(updated[0]!);
-    });
-  }
+    }
+    if (captionChanged) {
+      await tx.insert(auditLog).values({
+        userId: drop.userId,
+        ...auditActor(undefined, "web"),
+        action: `${subject}.caption`,
+        smokeId,
+        before: { photoId: ref.row.id, caption: ref.row.caption },
+        after: { photoId: ref.row.id, caption },
+        correlationId: null,
+      });
+    }
 
-  if (before === args.kind) return toAttachedView(ref.row);
-  return deps.db.transaction(async (tx) => {
-    const updated = await tx
-      .update(smokePhotos)
-      .set({ kind: args.kind })
-      .where(eq(smokePhotos.id, ref.row.id))
-      .returning();
-    await tx.insert(auditLog).values({
-      userId: drop.userId,
-      ...auditActor(undefined, "web"),
-      action: "smoke_photo.kind",
-      smokeId: ref.row.smokeId,
-      before: { photoId: ref.row.id, kind: before },
-      after: { photoId: ref.row.id, kind: args.kind },
-      correlationId: null,
-    });
-    return toAttachedView(updated[0]!);
+    return ref.where === "staged"
+      ? toStagedView(updated[0] as StagedSmokePhotoRow)
+      : toAttachedView(updated[0] as SmokePhotoRow);
   });
 }
 
@@ -653,14 +696,14 @@ async function dropPhotos(deps: Deps, drop: PhotoDropRow, status: PhotoDropStatu
       .select()
       .from(smokePhotos)
       .where(and(eq(smokePhotos.smokeId, drop.smokeId), eq(smokePhotos.userId, drop.userId)))
-      .orderBy(asc(smokePhotos.createdAt));
+      .orderBy(asc(smokePhotos.createdAt), asc(smokePhotos.id));
     views.push(...attached.map(toAttachedView));
   }
   const staged = await deps.db
     .select()
     .from(stagedSmokePhotos)
     .where(eq(stagedSmokePhotos.dropId, drop.id))
-    .orderBy(asc(stagedSmokePhotos.createdAt));
+    .orderBy(asc(stagedSmokePhotos.createdAt), asc(stagedSmokePhotos.id));
   views.push(...staged.map(toStagedView));
   return views;
 }
@@ -687,6 +730,14 @@ function toAttachedView(row: SmokePhotoRow): PhotoDropPhotoView {
     createdAt: row.createdAt.toISOString(),
     attached: true,
   };
+}
+
+// Trimmed, and blank collapses to NULL — the column carries a caption or it
+// carries nothing.
+function normalizeCaption(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 // The staged counterpart of smokePhotoSnapshot — the full row, storage keys

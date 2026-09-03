@@ -28,6 +28,8 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: `Image exceeds the ${MAX_UPLOAD_LABEL} limit.` }, { status: 413 });
   }
 
+  // Omitted (the strip never sends one) means `cigar` — the domain's default
+  // since #287, not this route's business to restate.
   const kindRaw = form.get("kind");
   const kind =
     typeof kindRaw === "string" && KINDS.includes(kindRaw as SmokePhotoKind)

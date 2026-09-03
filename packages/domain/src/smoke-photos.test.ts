@@ -87,9 +87,11 @@ describe("smoke photos", () => {
     expect(smoke.photos[0]!.photoId).toBe(view.photoId);
   });
 
-  it("defaults kind to other and keeps caption nullable", async () => {
+  it("defaults kind to cigar and keeps caption nullable", async () => {
+    // #287: the overwhelmingly common photo of a smoke is the cigar itself, so
+    // `other` is the fallback and not the default a silent caller lands on.
     const view = await addSmokePhoto(h.deps, storage, user, { smokeId, image: image() });
-    expect(view.kind).toBe("other");
+    expect(view.kind).toBe("cigar");
     expect(view.caption).toBeNull();
   });
 

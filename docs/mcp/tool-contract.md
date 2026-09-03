@@ -1062,13 +1062,13 @@ result:
   shareWithUser: "Send the user this link to add photos during the smoke: https://… — every photo of this smoke goes there, and they attach to the review when it is saved. It lasts 48 hours."
   delivery:                      # as on add_smoke_photo: why no image arrived with the call
     status: no_image_received
-    detail: "No image arrived with this call."
+    detail: "No image arrived with this call. Chat attachments are not forwarded to this server by any current client, so the upload link is the path — relay it. This is the expected outcome, not a failure."
 
 # With a forwarded image (never observed on this connector — see add_smoke_photo):
 result:
   photoDropId: pd_01kf
   uploadUrl: …
-  staged: { photoId: ph_01kg, kind: other, width: 1080, height: 1440 }
+  staged: { photoId: ph_01kg, kind: cigar, width: 1080, height: 1440 }
 ```
 
 - **When to call it: the moment a photo appears, not when the smoke ends.** The
@@ -1078,9 +1078,9 @@ result:
   every later photo of the same smoke, so it is relayed once.
 - **Multi-use, bounded.** The link works for 48 hours and up to twelve photos
   (`MAX_PHOTOS_PER_SMOKE`); the page shows only the drop's own photos and lets
-  the user set a photo's kind or remove it. A single-use link is right for one
-  photo of a saved smoke; it is wrong for an event that produces several photos
-  over hours.
+  the user set a photo's kind, caption it, or remove it. A single-use link is
+  right for one photo of a saved smoke; it is wrong for an event that produces
+  several photos over hours.
 - **One open drop per user.** Opening again while a drop is open (unclaimed,
   unexpired) returns *that* drop — `reused: true`, its `photoCount` — with a
   fresh token; the earlier link stops working. The raw token is never stored, so
@@ -1108,7 +1108,7 @@ a smoke that already exists.
 ```yaml
 arguments:
   smokeId: sm_01jc8x
-  kind: band                     # cigar | band | construction | burn | other (default other)
+  kind: band                     # cigar | band | construction | burn | other (default cigar)
   caption: "The second band"     # optional; only if the user gave one
   photoDropId: pd_01kf           # optional — claim a drop the save did not carry (ADR-014)
 
@@ -1126,7 +1126,7 @@ result:
   shareWithUser: "Send the user this link to add their photo: https://… — it works once and is valid for 24 hours."
   delivery:                      # why there is no photo, in terms the model can act on
     status: no_image_received    # | image_reference_unusable | image_fetch_failed | image_unreadable
-    detail: "No image arrived with this call."
+    detail: "No image arrived with this call. Chat attachments are not forwarded to this server by any current client, so the upload link is the path — relay it. This is the expected outcome, not a failure."
 
 # Mode A — opportunistic: a host forwarded a file with the call
 result:
@@ -1198,7 +1198,7 @@ though with attachment unobserved, the current non-`attached` rate is 100%.
 
 | `delivery.status` | Meaning | What the model should do |
 |---|---|---|
-| `no_image_received` | Nothing was forwarded on either channel. | Hand over the link. |
+| `no_image_received` | Nothing was forwarded on either channel — the normal outcome on every current client. | Hand over the link. Never report it as a problem. |
 | `image_reference_unusable` | A file handle arrived carrying nothing the server can read. | Hand over the link. |
 | `image_fetch_failed` | A reference arrived but the image could not be retrieved. | Hand over the link. |
 | `image_unreadable` | Bytes arrived but are not a readable photo. | Hand over the link. |
@@ -1247,6 +1247,18 @@ has to be re-sent at the end. Attached delivery stays implemented on both tools
 for the day a host forwards a file. The strict `image` schema stays as well: it is
 the Apps SDK reference shape, and reverting it would only restore a lenience no
 host has ever exercised.
+
+**Amended 2026-09-03 — forwarding is not a failure (#288).** Three
+`open_photo_drop` calls that night (01:04:08Z, 01:18:09Z, 01:21:46Z) recorded the
+settled signature a third time: `paramKeys ["_meta","arguments","name"]`,
+`argKeys []`, `argImage absent`, `metaFileParams {"type":"absent"}` count 0,
+`photo_intake outcome no_delivery, channel none, mode upload_url`. The link then
+carried the photo (`photoId 10edfb52`, 1080×1440). What still cost the owner a
+turn was the wording: `no_image_received` read as a fault, so the model reported
+one before relaying the link. The `delivery.detail` for that status now names the
+outcome as expected and points at the link, and both tool descriptions carry one
+sentence saying the same thing. Nothing about the intake changed — only what the
+model is told the result means.
 
 Errors are now a shorter set: `unavailable` when photo storage is unconfigured (the
 tool is genuinely non-functional — a minted link would 503 on upload),

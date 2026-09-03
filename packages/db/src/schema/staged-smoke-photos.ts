@@ -10,7 +10,8 @@ import type { SmokePhotoKind } from "./smoke-photos.js";
 // object_key simply keeps its `drop/` prefix (ADR-007 — keys are unguessable, not
 // authorization). Cascades with the drop; the storage objects are cleaned up by
 // @cj/domain's sweep, not the DB. The authoritative DDL (kind CHECK, UNIQUE keys)
-// lives in migration 0033.
+// lives in migration 0033; the `cigar` default is migration 0036 (#287),
+// matching smoke_photos so a claim never changes what a photo says it shows.
 export const stagedSmokePhotos = pgTable(
   "staged_smoke_photos",
   {
@@ -21,7 +22,7 @@ export const stagedSmokePhotos = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id),
-    kind: text("kind").$type<SmokePhotoKind>().notNull().default("other"),
+    kind: text("kind").$type<SmokePhotoKind>().notNull().default("cigar"),
     caption: text("caption"),
     objectKey: text("object_key").notNull().unique(),
     thumbKey: text("thumb_key").notNull().unique(),

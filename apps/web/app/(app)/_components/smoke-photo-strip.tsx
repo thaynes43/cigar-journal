@@ -8,7 +8,8 @@ import { ui } from "@/lib/ui";
 // no fields, no form). The tile opens the picker directly; upload starts on
 // selection and the strip updates in place — photos are instant attachments,
 // deliberately outside the edit form and its Save button. Kind and caption
-// stay agent vocabulary (MCP add_smoke_photo); the web sends kind "other".
+// stay agent vocabulary (MCP add_smoke_photo); the web sends no kind, which
+// means "cigar" (#287).
 export function SmokePhotoStrip({
   smokeId,
   photos: initial,
