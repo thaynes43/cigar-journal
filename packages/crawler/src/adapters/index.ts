@@ -7,6 +7,7 @@ import { montefortuna } from "./montefortuna.js";
 import { egmCigars } from "./egm-cigars.js";
 import { cigarworldDe } from "./cigarworld-de.js";
 import { jjFox } from "./jj-fox.js";
+import { halfwheel } from "./halfwheel.js";
 
 export { foxCigar } from "./fox-cigar.js";
 export { twoGuysCigars } from "./two-guys-cigars.js";
@@ -16,6 +17,7 @@ export { montefortuna } from "./montefortuna.js";
 export { egmCigars } from "./egm-cigars.js";
 export { cigarworldDe } from "./cigarworld-de.js";
 export { jjFox } from "./jj-fox.js";
+export { halfwheel } from "./halfwheel.js";
 export type { VendorAdapter } from "./types.js";
 
 // The adapter registry — slug → adapter. Admin data in code for now (ADR-006:
@@ -29,6 +31,12 @@ export type { VendorAdapter } from "./types.js";
 // (ADR-015): the tier-1 NC shops, then the Habanos picture sources tier 2..5
 // added 2026-09-02 (#270), whose offers are recorded and never displayed and
 // whose job is the one catalogue-photo slot and the enrich drain's fallback.
+//
+// halfwheel closes the list at tier 9 and is NOT A SHOP (ADR-013 §4, #199 slice
+// 2a): `kind: "reviewer"`, no `focus`, no linkout, and a lane that walks a review
+// archive instead of a sitemap. It sorts last because it competes for none of the
+// three things a tier orders — it publishes no offers, takes no enrich asks and
+// writes no photos — so its position can never be read as authority over a shop.
 export const adapters: Record<string, VendorAdapter> = {
   [foxCigar.slug]: foxCigar,
   [twoGuysCigars.slug]: twoGuysCigars,
@@ -38,6 +46,7 @@ export const adapters: Record<string, VendorAdapter> = {
   [egmCigars.slug]: egmCigars,
   [cigarworldDe.slug]: cigarworldDe,
   [jjFox.slug]: jjFox,
+  [halfwheel.slug]: halfwheel,
 };
 
 export function getAdapter(slug: string): VendorAdapter | undefined {

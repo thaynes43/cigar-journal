@@ -43,6 +43,7 @@ import {
   type EnrichAsk,
 } from "./match.js";
 import { parseRobots } from "./robots.js";
+import { emptyReviewStats, reviewSourceOf, walkReviews, type ReviewWalkStats } from "./reviews.js";
 import { openCrawlRun, reclaimStrandedRuns, type SignalHost } from "./run-record.js";
 import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
 
@@ -191,6 +192,11 @@ export interface IngestStats {
     // Absent when zero, like its siblings.
     noCandidate?: number;
   };
+  // Present only on a REVIEWER source's run (ADR-013 §4, #199 slice 2a), on the
+  // same terms as `enrich` above: absent everywhere else, so every shop's crawl
+  // JSONB stays byte-identical to what it was before this field existed. See
+  // `ReviewWalkStats` for what each counter means and why they are counted apart.
+  reviews?: ReviewWalkStats;
 }
 
 export interface IngestDeps {
@@ -1425,6 +1431,51 @@ async function finalizeEnrichment(
   });
 }
 
+// --- mode: reviewer ----------------------------------------------------------
+
+// A reviewer's lane runs in `enrich` and does NOTHING in `seed` or `offers`.
+//
+// SUCCEEDING WITH NOTHING DONE IS THE DELIBERATE PART, and it is the opposite of
+// this file's usual posture (`SitemapEnumerationEmptyError` exists precisely to
+// refuse a silent zero). The difference is that a silent zero there is a FAILURE
+// wearing a success — a vendor whose sitemap went empty looks healthy — while
+// this one is a fact about the source: the weekly `crawl-offers-fleet` asks every
+// enabled row for its offers, and halfwheel has none because it sells nothing.
+// Failing would take the whole fleet's exit code down for a source behaving
+// exactly as designed. So the run succeeds and SAYS SO in the report, which is
+// the line an operator reads to tell "not applicable" from "did not run".
+async function runReviewLane(
+  deps: IngestDeps,
+  options: IngestOptions,
+  review: NonNullable<ReturnType<typeof reviewSourceOf>>,
+  crawlRunId: string | null,
+  stats: IngestStats,
+  report: string[],
+): Promise<void> {
+  if (options.mode !== "enrich") {
+    report.push(
+      `${options.adapter.slug} is a reviewer source — it sells nothing, so ${options.mode} does nothing here. ` +
+        "Its review walk runs under --mode enrich.",
+    );
+    return;
+  }
+  const reviewStats = emptyReviewStats();
+  stats.reviews = reviewStats;
+  const outcome = await walkReviews(
+    { db: deps.db, fetcher: deps.fetcher, now: deps.now },
+    {
+      adapter: options.adapter,
+      review,
+      crawlRunId,
+      limit: options.limit,
+      dryRun: options.dryRun,
+    },
+    reviewStats,
+    report,
+  );
+  stats.errors += outcome.errors;
+}
+
 // --- entry -------------------------------------------------------------------
 
 // PRECONDITION, and it is not enforceable from here: a non-dry run must be entered
@@ -1463,8 +1514,16 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
   // The crawl_runs row this pass belongs to, threaded to the write sites so an
   // audited write (a market downgrade unlinking a listing) names the run that made
   // it. Null on a dry run, which opens no row to name.
+  // A NON-SHOP SOURCE TAKES A DIFFERENT LANE, chosen by what the source IS rather
+  // than by the mode it was invoked with. `fleet.ts` deliberately gates only on
+  // `crawl_enabled` and leaves "what the modes mean" to the adapter (ADR-013 §4),
+  // and this is the adapter cashing that in: a reviewer's nightly work is its
+  // review walk, so it rides the existing enrich fleet rather than needing a
+  // schedule of its own.
+  const review = reviewSourceOf(options.adapter);
   const run = async (crawlRunId: string | null): Promise<void> => {
-    if (options.mode === "enrich") await drainEnrichment(deps, options, posture, crawlRunId, stats, report);
+    if (review) await runReviewLane(deps, options, review, crawlRunId, stats, report);
+    else if (options.mode === "enrich") await drainEnrichment(deps, options, posture, crawlRunId, stats, report);
     else await walkListings(deps, options, posture, crawlRunId, stats, report);
   };
 

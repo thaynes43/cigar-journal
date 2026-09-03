@@ -1,3 +1,5 @@
+import type { ReviewScale } from "@cj/domain";
+
 // A vendor adapter is small, disposable configuration (ADR-006): where the
 // sitemap lives, how to recognize a product URL, which structured markup its
 // pages carry, and which category paths are cigars vs accessories. The generic
@@ -29,18 +31,108 @@ export interface VendorSourceKind {
   purchaseLinkout: boolean;
 }
 
-// A reviewer (halfwheel) or a reference (a spec database). It stocks nothing, so
-// `focus` is FORBIDDEN — any focus it carried would be a stocking claim from a
-// site with no inventory, which is the exact mechanism of the #170 defect — and
-// it is never a purchase destination, so `purchaseLinkout` narrows to `false`
-// rather than merely defaulting there (the column default is `true`).
-export interface NonVendorSourceKind {
-  kind: "reviewer" | "reference";
+// A reviewer (halfwheel). It stocks nothing, so `focus` is FORBIDDEN — any focus
+// it carried would be a stocking claim from a site with no inventory, which is
+// the exact mechanism of the #170 defect — and it is never a purchase
+// destination, so `purchaseLinkout` narrows to `false` rather than merely
+// defaulting there (the column default is `true`).
+//
+// `review` is REQUIRED, and that is the whole reason this kind is its own
+// interface rather than sharing one with `reference`. A reviewer adapter with no
+// review shape is an enabled registry row whose nightly lane has nothing to walk
+// — a silent no-op that reads as a healthy run. Required here, it is a compile
+// error on the adapter line instead.
+export interface ReviewerSourceKind {
+  kind: "reviewer";
   focus?: never;
   purchaseLinkout: false;
+  review: ReviewSourceShape;
 }
 
+// A reference source (a spec database). Same non-shop posture as a reviewer, and
+// no review walk — it publishes facts about cigars, not verdicts on them. `review`
+// is `?: never` for the same reason `focus` is: the mistake fails where it is made.
+export interface ReferenceSourceKind {
+  kind: "reference";
+  focus?: never;
+  purchaseLinkout: false;
+  review?: never;
+}
+
+export type NonVendorSourceKind = ReviewerSourceKind | ReferenceSourceKind;
+
 export type SourceKind = VendorSourceKind | NonVendorSourceKind;
+
+// --- the review walk (ADR-013 §2, migration 0028) ----------------------------
+// WHAT ONE ENTRY OF A SOURCE'S REVIEW INDEX SAYS. The index is the cheap surface:
+// one fetch yields many entries, and on a well-built archive it already carries
+// most of the observation — the URL, the cigar's name, the byline, the day and
+// the deck. Only the SCORE needs the review page itself, which is why the lane
+// enumerates from here and fetches pages one at a time under a budget.
+export interface ReviewIndexEntry {
+  // Canonical and absolute. NORMALIZING IT IS THE ADAPTER'S JOB, because it is
+  // half of the `review_observations` idempotency key and only the adapter knows
+  // whether a query string on that site is a tracking parameter or the address.
+  url: string;
+  // The cigar as the source names it, which is what the catalog resolver anchors
+  // on. Brand/line/vitola are not separated here: `parseListing` (matching v2)
+  // does that from the whole title exactly as it does for a vendor listing, and a
+  // second, source-specific split would be a second thing to keep in step.
+  name: string;
+  reviewer: string | null;
+  // Day precision, `YYYY-MM-DD`, as the SOURCE states it — see the note on
+  // `ReviewParse.reviewedAt` for why the index's day beats the page's timestamp.
+  reviewedAt: string | null;
+  // The source's own deck/summary, never body prose, already bounded to
+  // REVIEW_EXCERPT_MAX by the adapter (ADR-013 §2).
+  excerpt: string | null;
+}
+
+// One review page, parsed. `null` from `parseReview` means "this page is not a
+// scored review" — a news post, an announcement, a page whose score box moved —
+// and the lane counts it rather than guessing a number for it.
+export interface ReviewParse extends ReviewIndexEntry {
+  // The score EXACTLY as the source wrote it, on the scale the adapter declares.
+  // Not normalized here: `normalizeReviewScore` owns that convention, and storing
+  // the native pair beside the 0-100 value is what keeps it revisable (0028).
+  nativeScore: number | string;
+  // The source's own taxonomy for the thing reviewed, in the same shape a
+  // vendor's category path takes — so `cigarCategoryPattern`/`excludePattern`
+  // gate a reviewer's accessory writeups exactly as they gate a shop's ashtrays.
+  category: string[];
+}
+
+// A reviewer's crawl shape: where its index lives, how deep one run walks it, the
+// scale it scores on, and how its two page shapes are read.
+//
+// THE TWO PARSERS RIDE THE ADAPTER, and that is a deliberate widening of "an
+// adapter is configuration". A shop's product page is schema.org — one of two
+// declared markups covers every vendor in the fleet, so their adapters name a
+// format and the core does the reading. A reviewer's score box is bespoke HTML
+// with no standard behind it, so there is no format to name. Putting the reading
+// here keeps the promise ADR-006 actually makes — a new source is a new adapter
+// file and no core changes — where a per-source branch inside the lane would
+// break it on the second reviewer.
+export interface ReviewSourceShape {
+  // Page 1 of the index; `indexPageUrl(1)` must return this same URL.
+  indexUrl: string;
+  indexPageUrl: (page: number) => string;
+  // Index pages one run walks, and the ceiling on review pages it fetches. Both
+  // are per-RUN bounds, not a claim about the archive's size: the back catalogue
+  // of a decade-old reviewer is far larger than any one polite run.
+  maxIndexPages: number;
+  maxReviews: number;
+  // The scale the source scores on — one of @cj/domain's REVIEW_SCALES, which is
+  // also the CHECK on `review_observations.native_scale`.
+  nativeScale: ReviewScale;
+  // The index page → its entries. Entries whose URL the adapter cannot canonicalize
+  // are dropped here rather than reaching the key.
+  parseIndex: (html: string) => ReviewIndexEntry[];
+  // One review page → the observation, or null when the page carries no score.
+  // The index entry is passed back in so the ADAPTER decides which of its own two
+  // surfaces is authoritative per field; nothing generic could know that.
+  parseReview: (html: string, entry: ReviewIndexEntry) => ReviewParse | null;
+}
 
 // A tier is an ORDINAL an admin reads and types, not a score, and the database
 // CHECKs it to [1, 9] (migration 0034). Spelled as a union rather than `number`
@@ -102,6 +194,12 @@ export interface VendorAdapterShape {
   // The vendors.name this adapter resolves/creates its registry row by.
   name: string;
   url: string;
+  // The sitemap the seed/offers walk enumerates from. A REVIEWER still names its
+  // real one — that is a fact about the site — but its lane does not read it: a
+  // blog's post sitemap does not separate reviews from news, so the review index
+  // (`review.indexUrl`) is the only enumeration that answers "what has this source
+  // reviewed". Said here so an operator reading an adapter is not misled about
+  // which URL the nightly lane actually fetches.
   sitemapUrl: string;
   // --- registry posture ----------------------------------------------------
   // The vendors row this adapter seeds (ADR-006: the registry is admin-managed
@@ -162,6 +260,11 @@ export interface VendorAdapterShape {
   // omits it and its bare listings stay `packaging: null`.
   impliedPackaging?: ImpliedPackaging;
   // A breadcrumb path (joined) matching this is a cigar category…
+  //
+  // A REVIEWER's category is its own taxonomy for the thing it reviewed
+  // (`ReviewParse.category`), and these two gate it identically: a reviewer that
+  // scores ashtrays and lighters alongside cigars is the same problem as a shop
+  // that sells them, and the same pair of patterns is the answer.
   cigarCategoryPattern: RegExp;
   // …unless it also matches this (accessories, samplers, humidors, etc.).
   excludePattern: RegExp;
@@ -249,3 +352,12 @@ export interface ExclusionProductGate {
 export type PrefixVendorAdapter = VendorAdapterBase & PrefixProductGate;
 export type ExclusionVendorAdapter = VendorAdapterBase & ExclusionProductGate;
 export type VendorAdapter = PrefixVendorAdapter | ExclusionVendorAdapter;
+
+// A REVIEWER'S adapter, narrowed to its kind. The two above leave `kind` as the
+// full `SourceKind` union, so `adapter.review` is unreachable on them — a
+// property only reachable on one arm of a union is not reachable at all. An
+// adapter file that IS a reviewer annotates itself with this instead, and its
+// `review` shape is then readable without a discriminant check at every use site.
+// The gate stays a union: nothing about being a reviewer decides how its URLs are
+// shaped, and halfwheel's happen to be Mode B.
+export type ReviewerAdapter = VendorAdapterShape & ReviewerSourceKind & (PrefixProductGate | ExclusionProductGate);

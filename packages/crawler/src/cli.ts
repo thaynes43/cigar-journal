@@ -8,6 +8,7 @@ import { runIngest, type CrawlMode, type IngestResult } from "./core/ingest.js";
 import { runFleet, type FleetResult } from "./core/fleet.js";
 import { withVendorLaneLock } from "./core/run-record.js";
 import { runProbe, formatProbe, probeFetchBudget } from "./core/probe.js";
+import { formatReviewProbe, reviewProbeFetchBudget, reviewSourceOf, runReviewProbe } from "./core/reviews.js";
 import { runBrandImages, probeBrandTaxonomy, type BrandImagesResult } from "./core/brand-images.js";
 import { adapterPosture, vendorPostureDrift, formatVendorPostureDrift } from "./core/vendor-posture.js";
 import {
@@ -67,13 +68,18 @@ usage:
   --mode             seed (create catalog + offers + photos), offers (offers only,
                      no catalog creation), or enrich (drain the gap-fill queue).
                      --all-enabled takes offers or enrich; seeding the catalog is a
-                     deliberate per-vendor act.
+                     deliberate per-vendor act. A REVIEWER source (ADR-013 §4) walks
+                     its review index under enrich and does nothing under the other
+                     two — it sells nothing, so it has no offers and mints no cigars.
   --dry-run          fetch (bounded) and print the would-write report; no DB/storage writes
   --probe            live-verify an adapter: fetch robots.txt, the sitemap root
                      (N samples when the adapter configures sampling) plus up to
                      three index children, and three spread-apart product pages;
                      parse and print a verdict. WRITES NOTHING, no DB.
                      Run this before enabling a new vendor (ADR-006 live-read rule).
+                     A reviewer gets its own probe — robots, the review index, and
+                     three review pages read for a score — because a shop's
+                     questions (sitemap, products, prices) have no answer here.
   --import-approved  a LOCAL r/cubancigars online-stores wiki snapshot (markdown);
                      diff store entries against vendors.approval_status and print it.
                      No Reddit API calls. Read-only unless --yes.
@@ -224,7 +230,13 @@ async function resolveVendor(db: Database, adapter: VendorAdapter): Promise<stri
   return inserted[0]!.id;
 }
 
-function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestResult, photosEnabled: boolean): string {
+function formatSummary(
+  adapter: VendorAdapter,
+  mode: CrawlMode,
+  result: IngestResult,
+  photosEnabled: boolean,
+  dryRun: boolean,
+): string {
   const s = result.stats;
   const lines = [
     `crawl ${adapter.slug} (${mode})  status=${result.status}${photosEnabled ? "" : "  [photos disabled]"}`,
@@ -296,9 +308,32 @@ function formatSummary(adapter: VendorAdapter, mode: CrawlMode, result: IngestRe
       lines.push(`  enrich no candidate, no page fetched: ${enrich.noCandidate}`);
     }
   }
+  const reviews = s.reviews;
+  if (reviews) {
+    // A REVIEWER'S RUN, WHICH SHARES NO COUNTER WITH A SHOP'S. `listings`,
+    // `offers` and `photos` are all zero here and always will be, so the line
+    // above says nothing about whether the night went well; this one does.
+    lines.push(
+      `  reviews: index-pages=${reviews.indexPages} candidates=${reviews.candidates} ` +
+        `parsed=${reviews.parsed} unparsed=${reviews.unparsed} ` +
+        `linked-cigar=${reviews.linkedCigar} linked-blend=${reviews.linkedBlend} ` +
+        `recorded=${reviews.recorded} amended=${reviews.amended}`,
+    );
+    if (reviews.unresolved) {
+      // THE NUMBER TO WATCH, and it gets its own line for the reason
+      // `linksNoAnchor` does: these reviews named a cigar the catalog cannot
+      // resolve, and a reviewer NEVER mints — so nothing was written and nothing
+      // is queued. It is registry debt, and the fix is brand aliases in curation.
+      lines.push(`  reviews unresolved (no catalog target), skipped and never minted: ${reviews.unresolved}`);
+    }
+  }
   if (result.error) lines.push(`  error: ${result.error}`);
   if (result.report.length > 0) {
-    lines.push("would write:");
+    // "would write" is only true of a dry run. A LIVE reviewer run also reports —
+    // every review it skipped for want of a catalog target, and the one-line note
+    // a non-enrich mode leaves — and labelling those as pending writes would be
+    // exactly backwards: they are the things this run decided NOT to write.
+    lines.push(dryRun ? "would write:" : "notes:");
     for (const line of result.report) lines.push(`  ${line}`);
   }
   return lines.join("\n");
@@ -383,7 +418,7 @@ async function runFleetMode(args: CrawlArgs, mode: CrawlMode, databaseUrl: strin
               `  lane already running: another process holds the ${mode} lock for this vendor.`,
           );
         } else if (outcome.result) {
-          console.log(formatSummary(adapter, mode, outcome.result, storage !== null));
+          console.log(formatSummary(adapter, mode, outcome.result, storage !== null, args.dryRun));
         } else {
           console.error(`crawl ${outcome.slug} (${mode})  status=failed\n  error: ${outcome.error ?? "unknown"}`);
         }
@@ -401,8 +436,24 @@ async function runFleetMode(args: CrawlArgs, mode: CrawlMode, databaseUrl: strin
 // --probe: a read-only live check, no DB. Fetcher uses the adapter's rate and a
 // page cap DERIVED from the probe's own bounds — a hard-coded cap silently threw
 // MaxPagesExceededError once sampling and multi-child descent were added.
+//
+// A REVIEWER GETS A DIFFERENT PROBE, not a different threshold on the same one.
+// `runProbe` asks a shop's questions — does the sitemap enumerate products, does
+// the JSON-LD parse, is the price a placeholder — and a source with no sitemap
+// lane, no products and no prices answers "no" to all three, so it would report
+// `needs-attention` on a perfectly healthy reviewer. `runReviewProbe` asks the
+// three that actually gate this enablement (core/reviews.ts).
 async function runProbeMode(adapter: VendorAdapter): Promise<number> {
-  const fetcher = createFetcher({ minIntervalMs: adapter.minIntervalMs, maxPages: probeFetchBudget(adapter) });
+  const review = reviewSourceOf(adapter);
+  const fetcher = createFetcher({
+    minIntervalMs: adapter.minIntervalMs,
+    maxPages: review ? reviewProbeFetchBudget() : probeFetchBudget(adapter),
+  });
+  if (review) {
+    const result = await runReviewProbe(fetcher, adapter, review);
+    console.log(formatReviewProbe(result));
+    return result.verdict === "ok" ? 0 : 1;
+  }
   const result = await runProbe(fetcher, adapter);
   console.log(formatProbe(result));
   return result.verdict === "ok" ? 0 : 1;
@@ -605,7 +656,7 @@ async function main(): Promise<number> {
       return 0;
     }
 
-    console.log(formatSummary(adapter, mode, lane.value, storage !== null));
+    console.log(formatSummary(adapter, mode, lane.value, storage !== null, args.dryRun));
     return lane.value.status === "succeeded" ? 0 : 1;
   } finally {
     await pool.end();

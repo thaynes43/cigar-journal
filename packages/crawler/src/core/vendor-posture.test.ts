@@ -74,13 +74,18 @@ describe("vendorPostureDrift", () => {
 
   // A non-vendor adapter carries no focus at all; the column holds NULL for it,
   // and `undefined !== null` would otherwise report drift on every single run.
+  //
+  // Spelled with `kind: "reference"` — the OTHER non-vendor kind — because it is
+  // the one that carries no review walk either, so the case stays about the focus
+  // column alone. A reviewer's posture is asserted against the real halfwheel
+  // adapter in `reviews.test.ts`.
   it("treats an absent adapter focus as the row's NULL, not as a difference", () => {
     const reference: VendorAdapter = {
-      slug: "halfwheel",
-      name: "halfwheel",
-      url: "https://halfwheel.example",
-      sitemapUrl: "https://halfwheel.example/sitemap.xml",
-      kind: "reviewer",
+      slug: "reference-source",
+      name: "Reference Source",
+      url: "https://reference.example",
+      sitemapUrl: "https://reference.example/sitemap.xml",
+      kind: "reference",
       purchaseLinkout: false,
       crawlEnabled: false,
       approvalStatus: "owner-added",
@@ -89,7 +94,7 @@ describe("vendorPostureDrift", () => {
       excludePattern: /^$/,
       productPathPrefix: "/review/",
     };
-    const row = rowFor(reference, { kind: "reviewer", focus: null, purchaseLinkout: false });
+    const row = rowFor(reference, { kind: "reference", focus: null, purchaseLinkout: false });
     expect(row.focus).toBeNull();
     expect(vendorPostureDrift(row, reference)).toEqual([]);
   });

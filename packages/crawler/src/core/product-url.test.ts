@@ -467,16 +467,25 @@ describe("registry invariant", () => {
     }
   });
 
-  // THE SOURCE KIND (ADR-013 §4, migration 0028). Every adapter here is a shop,
-  // and every one says so — the seed path passes `kind` straight into the
-  // `vendors` row, so a missing one would be a silent default rather than a
-  // statement.
-  it("every registered adapter declares itself a vendor, with a market", () => {
+  // THE SOURCE KIND (ADR-013 §4, migration 0028). Every adapter states what it IS
+  // — the seed path passes `kind` straight into the `vendors` row, so a missing
+  // one would be a silent default rather than a statement — and the posture that
+  // follows from the kind is asserted here rather than left to the type union,
+  // because a `focus` of `undefined` and a `focus` the column will not hold are
+  // the same value to TypeScript and different rows to Postgres.
+  it("every registered adapter declares its kind, and the posture that kind implies", () => {
     for (const [slug, adapter] of Object.entries(adapters)) {
-      expect(adapter.kind, slug).toBe("vendor");
-      // A shop's `focus` is required, and it is the claim `evidencedMarketSql`
-      // reads to infer a cigar's market.
-      expect(["NC", "CC", "both"], slug).toContain(adapter.focus);
+      expect(["vendor", "reviewer", "reference"], slug).toContain(adapter.kind);
+      if (adapter.kind === "vendor") {
+        // A shop's `focus` is required, and it is the claim `evidencedMarketSql`
+        // reads to infer a cigar's market.
+        expect(["NC", "CC", "both"], slug).toContain(adapter.focus);
+        continue;
+      }
+      // …and a non-shop's is forbidden, on both sides of
+      // `vendors_non_vendor_source_chk`: no market, and never a place to buy.
+      expect(adapter.focus, slug).toBeUndefined();
+      expect(adapter.purchaseLinkout, slug).toBe(false);
     }
   });
 
@@ -504,27 +513,46 @@ describe("registry invariant", () => {
       excludePattern: /^$/,
       productPathPrefix: "/review/",
     } as const;
+    // The minimum a reviewer must declare to have a lane at all (#199 slice 2a).
+    const review = {
+      indexUrl: "https://halfwheel.example/reviews/",
+      indexPageUrl: () => "https://halfwheel.example/reviews/",
+      maxIndexPages: 1,
+      maxReviews: 1,
+      nativeScale: "0-100",
+      parseIndex: () => [],
+      parseReview: () => null,
+    } as const;
 
     // A reviewer stocks nothing, so a focus on it is a stocking claim from a site
     // with no inventory.
     // @ts-expect-error `focus` is forbidden on a non-vendor source kind.
-    const withFocus: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: false, focus: "NC" };
+    const withFocus: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: false, review, focus: "NC" };
 
     // And it is never a purchase destination — `false`, not merely defaulted,
     // because the COLUMN defaults to true.
     // @ts-expect-error `purchaseLinkout` narrows to `false` on a non-vendor kind.
-    const asDestination: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: true };
+    const asDestination: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: true, review };
 
     // A shop, conversely, must state its market.
     // @ts-expect-error `focus` is required on the vendor kind.
     const marketless: VendorAdapter = { ...reviewerBase, kind: "vendor", purchaseLinkout: true };
 
+    // A reviewer with no review shape is an enabled registry row whose nightly
+    // lane has nothing to walk — a silent no-op that reads as a healthy run.
+    // @ts-expect-error `review` is required on the reviewer kind.
+    const laneless: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: false };
+
+    // A reference source has no review walk, so declaring one is the mirror error.
+    // @ts-expect-error `review` is forbidden on the reference kind.
+    const referenceWithLane: VendorAdapter = { ...reviewerBase, kind: "reference", purchaseLinkout: false, review };
+
     // The legal shape, for contrast — no suppression needed.
-    const halfwheel: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: false };
+    const halfwheel: VendorAdapter = { ...reviewerBase, kind: "reviewer", purchaseLinkout: false, review };
     expect(halfwheel.kind).toBe("reviewer");
     expect(halfwheel.focus).toBeUndefined();
     // Referenced so the bindings above are not dead code the linter strips.
-    expect([withFocus, asDestination, marketless]).toHaveLength(3);
+    expect([withFocus, asDestination, marketless, laneless, referenceWithLane]).toHaveLength(5);
   });
 });
 
