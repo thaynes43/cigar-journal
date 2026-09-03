@@ -508,7 +508,8 @@ and `criticScoreMin` filters on that same whole number, so a tile showing
 reviewed fails any `criticScoreMin`: no opinion is not a low score.
 
 **Scope-bounding.** The tile `price` (price-at-a-glance) and `critics` (the
-cigar's own critic aggregate) are catalog/market data, present for every caller. The personal overlay (`smokeCount`, `myRating`,
+cigar's own critic aggregate) are catalog/market data, present for every
+caller. The personal overlay (`smokeCount`, `myRating`,
 `remaining`, `wanted`, `favorited`) is present only under `journal:read`; without
 it those fields are omitted **and** the personal filters (`inHumidor`/`wanted`/
 `smoked`) are dropped rather than applied, so the result set never leaks the
