@@ -1,7 +1,7 @@
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, and, isNull } from "drizzle-orm";
 import { cigars } from "@cj/db";
 import type { Tx } from "./deps.js";
-import type { CigarRef, Verification } from "./types.js";
+import type { CigarRef, DescribedCigarInput, SpecializedFrom, Verification } from "./types.js";
 import {
   CigarNotFoundError,
   CigarAmbiguousError,
@@ -10,6 +10,7 @@ import {
 } from "./errors.js";
 import { assertCigarAncestry } from "./cigar-ancestry.js";
 import { loadAncestryContext, resolveDescribedTaxonomy } from "./taxonomy-resolve.js";
+import { fold, foldTokens } from "./taxonomy-keys.js";
 import { isUuid } from "./uuid.js";
 
 // The string heuristics moved to name-heuristics.ts, which carries their
@@ -41,6 +42,10 @@ export interface ResolvedCigar {
   canonicalName: string;
   verification: Verification;
   created: boolean;
+  // Set when the described cigar stated a vitola against a family row (ADR-017):
+  // the resolved entry is that vitola's own sibling leaf, and this names the
+  // family it came from. Absent on every other path.
+  specializedFrom?: SpecializedFrom;
 }
 
 export interface ResolveCigarOptions {
@@ -60,6 +65,14 @@ interface CandidateRow {
   id: string;
   canonical_name: string;
   brand: string | null;
+  // The free-text line and the three registry ids ride along for ADR-017: a
+  // sibling minted off a family row copies its structure verbatim, so the row
+  // that decided the link is also the row the mint reads its parents from.
+  line: string | null;
+  brand_id: string | null;
+  line_id: string | null;
+  blend_id: string | null;
+  type: "NC" | "CC" | null;
   vitola_name: string | null;
   verification: Verification;
   sim: number;
@@ -139,16 +152,46 @@ export async function resolveCigar(
     throw new ValidationError([{ path: "cigar.described.canonicalName", message: "Required." }]);
   }
 
+  // THE NAME MINUS ITS VITOLA IS THE FAMILY CLAIM (ADR-017). When the caller
+  // states `vitola.name`, striking that vitola's own words leaves what the name
+  // claims about WHICH FAMILY this is. Without it a numbered vitola never reaches
+  // its family: `Padron 1926 Natural No. 2` carries the model token `2` that
+  // `Padron 1926 Natural` lacks, so `numbersCompatible` disqualifies the family
+  // outright and the resolver mints a row sharing nothing with it.
+  //
+  // A SECOND KEY, NOT A REPLACEMENT — it widens the candidate pool below and
+  // answers the strong-match filter only when the full name answered nothing (see
+  // there). What it LEAVES is judged by the ordinary rules, unchanged: a leftover
+  // identity word still asks (`Padrón 1926 Serie No. 2 Natural` minus `No. 2`
+  // leaves `Serie`, which the family never said, so `cigar_ambiguous`). And the
+  // sibling's own name is composed from the FULL described name, so nothing the
+  // user typed is lost by having been struck here.
+  //
+  // Not applied under `confirmedDistinct`: that path makes none of these
+  // comparisons and wants only its exact-duplicate guard, which is on the name
+  // the user actually gave.
+  const statedVitola = described.vitola?.name?.trim() || null;
+  const claim =
+    statedVitola != null && !options?.confirmedDistinct ? strikeVitola(name, statedVitola) : name;
+
   // THE SAME POOL `searchCigars` DRAWS, and for the same reason: every decision
   // below — the strong-link filter, the sibling scan, the ambiguity list the user
   // picks from — is made over the rows this query returned, so a family larger
   // than the pool decides on an arbitrary slice of itself. `LIMIT 10` against
   // fourteen live `Tatuaje Monster` siblings could not see four of them
   // (`CANDIDATE_POOL`, name-heuristics.ts).
+  //
+  // BOTH KEYS PROBE IT, scored on whichever fits better. The pool must not
+  // NARROW when a vitola is stated: drawn on the claim alone, `Cohiba Robusto`
+  // + `Robusto` probes for `Cohiba`, scores the catalogued `Cohiba Robusto` at
+  // 0.43 — under the strong-match floor — and mints a duplicate of a row the
+  // catalog already holds. The claim widens the search; it never shrinks it.
   const result = await tx.execute(sql`
-    SELECT id, canonical_name, brand, vitola_name, verification, similarity(canonical_name, ${name}) AS sim
+    SELECT id, canonical_name, brand, line, brand_id, line_id, blend_id, type,
+           vitola_name, verification,
+           GREATEST(similarity(canonical_name, ${name}), similarity(canonical_name, ${claim})) AS sim
     FROM cigars
-    WHERE canonical_name % ${name}
+    WHERE canonical_name % ${name} OR canonical_name % ${claim}
     ORDER BY sim DESC
     LIMIT ${CANDIDATE_POOL}
   `);
@@ -173,11 +216,37 @@ export async function resolveCigar(
     // no residue on either side, no stated wrapper disagreement
     // (`journalLinkCompatible`, which is the journal's own rule and stricter than
     // the `strongLinkCompatible` the curation queue and the crawler read).
+    //
+    // THE NAME IS ASKED FIRST AND THE CLAIM ONLY WHEN IT ANSWERS NOTHING
+    // (ADR-017). The strike exists to REACH a family the full name cannot; it
+    // must never take a decision the full name already makes, because most
+    // vitolas are not in the size vocabulary and the claim reads their word as an
+    // identity residue on the ROW: `Trinidad Trinidad Reyes` + `Reyes` claims
+    // `Trinidad Trinidad`, which no longer accounts for the `Reyes` its own
+    // catalog row says (importer ledger fixture, row 5). Falling back only from
+    // ZERO strong candidates also keeps a genuine ambiguity a question: the
+    // broader key must not resolve what the narrower one could not decide.
     const nearby = candidates.filter((c) => Number(c.sim) >= STRONG_MATCH);
-    const strong = nearby.filter((c) => journalLinkCompatible(name, c.canonical_name));
+    const named = nearby.filter((c) => journalLinkCompatible(name, c.canonical_name));
+    const strong =
+      named.length === 0 && claim !== name
+        ? nearby.filter((c) => journalLinkCompatible(claim, c.canonical_name))
+        : named;
 
     if (strong.length === 1) {
       const match = strong[0]!;
+      // SPECIALIZATION (ADR-017). A candidate whose `vitola_name` is NULL is a
+      // FAMILY ROW — the vitola was never recorded — and linking a stated vitola
+      // onto it would retroactively declare every smoke and lot already there
+      // that vitola. Nor is the row retyped: the stated vitola gets its own
+      // sibling leaf under the family's structure instead. Keyed on the FIELD and
+      // not on a word in the name, so a size word in `canonicalName` alone stays
+      // vocabulary and links here as it always did (flow 002). The sibling is
+      // named from the FULL described name, not the claim — the strike is a
+      // comparison key, never a rename.
+      if (statedVitola != null && match.vitola_name == null) {
+        return await specialize(tx, match, described, name, statedVitola);
+      }
       return {
         cigarId: match.id,
         canonicalName: match.canonical_name,
@@ -186,7 +255,7 @@ export async function resolveCigar(
       };
     }
     if (strong.length > 1) {
-      throw new CigarAmbiguousError(name, rankedCandidates(name, strong));
+      throw new CigarAmbiguousError(name, rankedCandidates(claim, strong));
     }
 
     // NEITHER LINK NOR CREATE — ASK. Every candidate this close (≥ STRONG_MATCH)
@@ -216,11 +285,11 @@ export async function resolveCigar(
     // weaker signal needs the question.
     const siblings = nearby.filter(
       (c) =>
-        numbersCompatible(name, c.canonical_name) &&
-        packagingCompatible(name, c.canonical_name),
+        numbersCompatible(claim, c.canonical_name) &&
+        packagingCompatible(claim, c.canonical_name),
     );
     if (siblings.length > 0) {
-      throw new CigarAmbiguousError(name, rankedCandidates(name, siblings));
+      throw new CigarAmbiguousError(name, rankedCandidates(claim, siblings));
     }
   }
 
@@ -271,5 +340,190 @@ export async function resolveCigar(
     canonicalName: created.canonicalName,
     verification: created.verification,
     created: true,
+  };
+}
+
+// ---- specialization (ADR-017) ----------------------------------------------
+
+// A name as its words, each kept verbatim beside its matching key. Split on
+// letters and numbers so an accented word stays ONE word — `/[a-z0-9]+/` would
+// cut `Padrón` into `Padr` and `n`, while `fold` reads it as `padron`.
+interface NameWord {
+  text: string;
+  key: string;
+}
+
+function nameWords(name: string): NameWord[] {
+  return [...name.matchAll(/[\p{L}\p{N}]+/gu)].map((match) => ({
+    text: match[0],
+    key: fold(match[0]),
+  }));
+}
+
+// Where the vitola's own words sit in a name, as an index into its words, or -1.
+// Compared on FOLDED KEYS, the rule the registries and the identity guards match
+// on, and never a substring test: `Padrón 1926 Serie No. 2 Natural` names
+// `No. 2`, a bare `Padron 1926 Natural` does not, and `Coronado` does not name
+// `Corona`.
+function vitolaAt(words: readonly NameWord[], needle: readonly string[]): number {
+  if (needle.length === 0) return -1;
+  for (let start = 0; start + needle.length <= words.length; start++) {
+    if (needle.every((token, offset) => words[start + offset]!.key === token)) return start;
+  }
+  return -1;
+}
+
+function namesVitola(name: string, vitola: string): boolean {
+  return vitolaAt(nameWords(name), foldTokens(vitola)) >= 0;
+}
+
+// THE FAMILY CLAIM: the name with the stated vitola's own words removed
+// (ADR-017). A comparison key and nothing else — no row is ever named or renamed
+// from it. A name that is ONLY its vitola makes no family claim at all, so it is
+// returned whole rather than as the empty string.
+function strikeVitola(name: string, vitola: string): string {
+  const needle = foldTokens(vitola);
+  const words = nameWords(name);
+  const at = vitolaAt(words, needle);
+  if (at < 0) return name;
+  const kept = [...words.slice(0, at), ...words.slice(at + needle.length)];
+  return kept.length === 0 ? name : kept.map((word) => word.text).join(" ");
+}
+
+// The sibling's name: what the user called it when that already carries the
+// vitola, else the family's name with the vitola after it. Composing
+// unconditionally would yield `Padrón 1926 Serie No. 2 Natural No. 2`; taking the
+// described name unconditionally would drop the family's own spelling from a bare
+// `Padron 1926 Natural` + `Belicoso`.
+function siblingName(describedName: string, familyName: string, vitola: string): string {
+  return namesVitola(describedName, vitola) ? describedName : `${familyName} ${vitola}`;
+}
+
+// MINT (OR FIND) THE VITOLA'S OWN LEAF UNDER A FAMILY ROW — ADR-017's whole
+// mechanism, and the one path in this module that writes a row it did not derive
+// from the description alone.
+//
+// GET-OR-CREATE ON PARTS **OR** FOLDED NAME, the idiom `splitCigar` mints leaves
+// with (taxonomy-curation.ts) and for the same reason: matching parts alone means
+// the same product however it is spelled, a matching folded name alone catches
+// the leaf minted freeform before anyone structured it, and the catalog is
+// mid-migration and carries both kinds. Scoped to the family's own marca, which
+// is exact rather than an approximation — every leaf this can mint carries the
+// family's `brand_id` verbatim, so a duplicate of one necessarily carries it too.
+async function specialize(
+  tx: Tx,
+  family: CandidateRow,
+  described: DescribedCigarInput,
+  describedName: string,
+  vitola: string,
+): Promise<ResolvedCigar> {
+  const canonicalName = siblingName(describedName, family.canonical_name, vitola);
+
+  // THE FAMILY ROW IS ALREADY THAT VITOLA'S ROW, in one case: its name carries
+  // the size its field never recorded (`… Anniversary Maduro Torpedo`, vitola
+  // NULL, user says "Torpedo"). The sibling would compose to the family's own
+  // name, and minting a second row under it is never right — link it, and report
+  // no specialization, because none happened.
+  if (fold(canonicalName) === fold(family.canonical_name)) {
+    return {
+      cigarId: family.id,
+      canonicalName: family.canonical_name,
+      verification: family.verification,
+      created: false,
+    };
+  }
+
+  const specializedFrom: SpecializedFrom = {
+    cigarId: family.id,
+    canonicalName: family.canonical_name,
+  };
+  const vitolaKey = fold(vitola);
+  const nameKey = fold(canonicalName);
+  const siblings = await tx
+    .select({
+      id: cigars.id,
+      canonicalName: cigars.canonicalName,
+      verification: cigars.verification,
+      lineId: cigars.lineId,
+      blendId: cigars.blendId,
+      vitolaName: cigars.vitolaName,
+    })
+    .from(cigars)
+    .where(
+      and(
+        eq(cigars.catalogStatus, "active"),
+        family.brand_id == null ? isNull(cigars.brandId) : eq(cigars.brandId, family.brand_id),
+      ),
+    );
+  // PARTS MATCH ONLY UNDER A BRAND — ADR-012's rule, which `split_cigar` states
+  // as "a null on either side is refused rather than treated as a wildcard: an
+  // unbranded row is not a sibling of everything". Without a `brand_id` the parts
+  // degenerate to `{null, null, <vitola>}`, which EVERY unbranded row carrying
+  // that size word satisfies, so an unbranded `Foo` + `Robusto` would re-point
+  // onto an unrelated `Bar Robusto`. An unbranded family therefore links only on
+  // the folded name, and mints otherwise.
+  //
+  // Under a brand, `null === null` on `lineId`/`blendId` is the INTENDED reading:
+  // a family with no line and a leaf with no line sit at the same place in that
+  // marca's structure, which is exactly what makes them siblings.
+  const branded = family.brand_id != null;
+  const existing = siblings.find(
+    (row) =>
+      (branded &&
+        row.lineId === family.line_id &&
+        row.blendId === family.blend_id &&
+        row.vitolaName != null &&
+        fold(row.vitolaName) === vitolaKey) ||
+      (nameKey !== "" && fold(row.canonicalName) === nameKey),
+  );
+  if (existing) {
+    return {
+      cigarId: existing.id,
+      canonicalName: existing.canonicalName,
+      verification: existing.verification,
+      created: false,
+      specializedFrom,
+    };
+  }
+
+  const inserted = await tx
+    .insert(cigars)
+    .values({
+      canonicalName,
+      // Structure copied from the family VERBATIM. The sibling is the same blend
+      // in a stated size, so its ancestry is the family's already-consistent
+      // triple — re-deriving it from the description would be strictly less
+      // information and could land the leaf under a different parent.
+      brand: family.brand,
+      line: family.line,
+      brandId: family.brand_id,
+      lineId: family.line_id,
+      blendId: family.blend_id,
+      // The family's type, and only when it has none does a stated NC/CC fill it
+      // rather than being dropped.
+      type: family.type ?? described.type ?? null,
+      // What the description actually added: the vitola and its dimensions.
+      vitolaName: vitola,
+      lengthInches:
+        described.vitola?.lengthInches != null ? String(described.vitola.lengthInches) : null,
+      ringGauge: described.vitola?.ringGauge ?? null,
+      edition: described.edition ?? null,
+      // Freeform and unverified, like every other row a conversation mints; the
+      // caller queues its enrichment on the same "only a create queues" rule.
+      nameSource: "freeform",
+      verification: "unverified",
+    })
+    .returning({
+      id: cigars.id,
+      canonicalName: cigars.canonicalName,
+      verification: cigars.verification,
+    });
+  const created = inserted[0]!;
+  return {
+    cigarId: created.id,
+    canonicalName: created.canonicalName,
+    verification: created.verification,
+    created: true,
+    specializedFrom,
   };
 }

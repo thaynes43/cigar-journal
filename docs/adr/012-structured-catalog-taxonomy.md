@@ -2,6 +2,9 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-31
+- **Amended by ADR-017 (2026-09-03):** a leaf with `vitola_name NULL` is a
+  family row — never retyped; a stated vitola specializes it into a sibling
+  leaf.
 
 ## Context
 

@@ -199,7 +199,13 @@ async function saveWithinTx(
     action: "smoke.created",
     smokeId: smoke.id,
     before: null,
-    after: consumption ? { ...smokeSnapshot(smoke), consumption } : smokeSnapshot(smoke),
+    after: {
+      ...(consumption ? { ...smokeSnapshot(smoke), consumption } : smokeSnapshot(smoke)),
+      // The family row a described cigar was specialized off, when a stated
+      // vitola met one (ADR-017) — the audit is where that pairing is recorded,
+      // since the family row itself is never written to.
+      ...(cigar.specializedFrom ? { specializedFrom: cigar.specializedFrom } : {}),
+    },
     correlationId: input.correlationId ?? input.clientRequestId,
   });
 
@@ -252,6 +258,10 @@ async function saveWithinTx(
     },
     cigarCreated: cigar.created,
     enrichmentQueued,
+    // ADR-017: present only when the described cigar stated a vitola against a
+    // family row, so the model can tell the user the smoke landed on that
+    // vitola's own entry rather than the family's.
+    ...(cigar.specializedFrom ? { specializedFrom: cigar.specializedFrom } : {}),
     ...(holdingAfter ? { holdingAfter } : {}),
     replayed: false,
   };

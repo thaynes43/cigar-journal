@@ -7,6 +7,7 @@ import {
   recordPurchase,
   recordPurchaseBatch,
   updateSmoke,
+  updatePurchase,
   getSmoke,
   queryMySmokes,
   searchCigars,
@@ -48,6 +49,7 @@ import {
   type Principal,
   type SaveSmokeInput,
   type UpdateSmokeInput,
+  type UpdatePurchaseInput,
   type AddCigarInput,
   type RecordPurchaseInput,
   type RecordPurchaseBatchInput,
@@ -77,6 +79,7 @@ import {
   getSmokeSchema,
   saveSmokeSchema,
   updateSmokeSchema,
+  updatePurchaseSchema,
   addCigarSchema,
   recordPurchaseSchema,
   recordPurchaseBatchSchema,
@@ -126,6 +129,7 @@ import {
   getMyInventoryOutput,
   saveSmokeOutput,
   updateSmokeOutput,
+  updatePurchaseOutput,
   addCigarOutput,
   recordPurchaseOutput,
   recordPurchaseBatchOutput,
@@ -133,6 +137,7 @@ import {
   openPhotoDropOutput,
   type SaveSmokeArgs,
   type UpdateSmokeArgs,
+  type UpdatePurchaseArgs,
   type AddCigarArgs,
   type RecordPurchaseArgs,
   type RecordPurchaseBatchArgs,
@@ -153,7 +158,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl, uploadUrl, dropUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The thirty-three-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The thirty-four-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -752,6 +757,21 @@ function toUpdateInput(
   };
 }
 
+function toUpdatePurchaseInput(
+  args: UpdatePurchaseArgs,
+  clientId: string,
+  correlationId: string,
+): UpdatePurchaseInput {
+  return {
+    clientRequestId: args.clientRequestId,
+    purchaseId: args.purchaseId,
+    // One op, mirrored straight through; the domain re-checks the destination id.
+    changes: args.changes,
+    provenance: { source: "llm-conversation", client: clientId },
+    correlationId,
+  };
+}
+
 export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpServer {
   const server = new McpServer(SERVER_INFO, { instructions: INSTRUCTIONS });
 
@@ -760,7 +780,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Search cigars",
       description:
-        "Resolve a conversational cigar mention to catalog entries by fuzzy (trigram) name match. Use when a cigar is named or asked about, not for the user's own history. Prefer the fullest name the user gave — a bare word or a single product token may not match. Read `guidance`: single_match (an exact catalog-name hit — proceed with it), brand_match (only a brand was named — ask for the line/vitola), multiple_matches (candidates but no exact hit — confirm the exact one with the user before saving), no_match (nothing matched — call add_cigar, then save against the cigarId it returns, in the same turn; a described save_smoke still creates the cigar, but that is the safety net, not the action to take here; if the mention was partial/abbreviated, ask for the fuller name first so you don't create a duplicate).",
+        "Resolve a conversational cigar mention to catalog entries by fuzzy (trigram) name match. Use when a cigar is named or asked about, not for the user's own history. Prefer the fullest name the user gave — a bare word or a single product token may not match. Read `guidance`: single_match (an exact catalog-name hit — proceed with it), brand_match (only a brand was named — ask for the line/vitola), multiple_matches (candidates but no exact hit — confirm the exact one with the user before saving), no_match (nothing matched — call add_cigar, then save against the cigarId it returns, in the same turn; a described save_smoke still creates the cigar, but that is the safety net, not the action to take here; if the mention was partial/abbreviated, ask for the fuller name first so you don't create a duplicate). A match with vitola.name null is a family entry (vitola not recorded); if the user names the vitola, carry it in vitola.name on add_cigar or the save so it lands on that vitola's own entry.",
       inputSchema: searchCigarsSchema,
       outputSchema: searchCigarsOutput,
       annotations: { readOnlyHint: true, title: "Search cigars" },
@@ -1068,6 +1088,11 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           // to an existing cigar reports false. Undefined (and so absent) on a
           // replay of an envelope stored before the field existed.
           enrichmentQueued: result.enrichmentQueued,
+          // The family entry this smoke's cigar was specialized off (ADR-017) —
+          // present only when the described cigar stated a vitola against an
+          // entry that recorded none, so the smoke landed on that vitola's own
+          // sibling entry and the family entry kept its own history.
+          specializedFrom: result.specializedFrom,
           // Present only when a consumption block was supplied (ADR-008): the
           // derived stock after the deduction, mirroring record_purchase's
           // holdingAfter. Additive — undefined serializes away when absent.
@@ -1088,7 +1113,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Add cigar",
       description:
-        "The user names a cigar missing from the catalog. Confirm the fullest name first (search_cigars guidance applies); the entry is created unverified from their words and a background enrichment request is queued to fill specs and a product photo. Use before save_smoke or record_purchase when nothing matches — and it is a prelude, never the answer: it writes NO journal entry and no purchase (journalEntryCreated is always false), so the save_smoke or record_purchase that motivated it still has to run in the same turn, against the cigarId returned. A catalog row with no journal entry is worse than no row at all, because it looks like success and drops what the user actually said. If it errors cigar_ambiguous or you fear a silent link to a near-match (a number/packaging variant), show the user search_cigars candidates; when they confirm none is theirs, retry with confirmedDistinct:true. `guidance` is 'created' for a new entry or 'already_existed' when the name linked to an existing one.",
+        "The user names a cigar missing from the catalog. Confirm the fullest name first (search_cigars guidance applies); the entry is created unverified from their words and a background enrichment request is queued to fill specs and a product photo. Use before save_smoke or record_purchase when nothing matches — and it is a prelude, never the answer: it writes NO journal entry and no purchase (journalEntryCreated is always false), so the save_smoke or record_purchase that motivated it still has to run in the same turn, against the cigarId returned. A catalog row with no journal entry is worse than no row at all, because it looks like success and drops what the user actually said. If it errors cigar_ambiguous or you fear a silent link to a near-match (a number/packaging variant), show the user search_cigars candidates; when they confirm none is theirs, retry with confirmedDistinct:true. `guidance` is 'created' for a new entry or 'already_existed' when the name linked to an existing one. A stated vitola.name against a family entry (vitola null) mints that vitola's own entry as a sibling under the family's structure and reports specializedFrom; it never retypes the family entry.",
       inputSchema: addCigarSchema,
       outputSchema: addCigarOutput,
       annotations: {
@@ -1105,6 +1130,10 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           cigar: result.cigar,
           created: result.created,
           enrichmentQueued: result.enrichmentQueued,
+          // The family entry a stated vitola was specialized off (ADR-017) —
+          // present only on that path. `guidance` keeps its two values: the
+          // sibling was either minted (created) or already there.
+          specializedFrom: result.specializedFrom,
           // The point-of-use restatement of the gap-fill invariant (#177): this tool
           // catalogs, it does not journal. A constant, and deliberately emitted HERE
           // rather than from the domain result — the domain result is what
@@ -1207,6 +1236,35 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           deps,
           principal,
           toUpdateInput(args, clientId, correlationId),
+        );
+        return jsonResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "update_purchase",
+    {
+      title: "Update purchase",
+      // THE LEDGER'S HALF OF ADR-017. A family entry is never migrated as a
+      // whole — only the owner knows which stick was which — so a lot moves the
+      // same way a smoke does: one record, named, on the user's word.
+      description:
+        'Re-point one of the user\'s purchase lots to the correct catalog entry ("that box was the No. 2") — field-scoped like update_smoke; only the cigar can change. Refused while a smoke consumed from the lot sits on a different cigar than the destination: move those smokes first with update_smoke. Idempotent via clientRequestId.',
+      inputSchema: updatePurchaseSchema,
+      outputSchema: updatePurchaseOutput,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        title: "Update purchase",
+      },
+    },
+    (args, extra) =>
+      run("update_purchase", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+        const result = await updatePurchase(
+          deps,
+          principal,
+          toUpdatePurchaseInput(args, clientId, correlationId),
         );
         return jsonResult(result);
       }),

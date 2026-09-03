@@ -21,6 +21,9 @@ const DOMAIN_TO_TRPC: Record<ErrorCode, TRPCErrorCode> = {
   cigar_not_found: "NOT_FOUND",
   cigar_ambiguous: "CONFLICT",
   smoke_not_found: "NOT_FOUND",
+  // Raised only by update_purchase, an MCP-side verb today; mapped to keep this
+  // record exhaustive over ErrorCode.
+  purchase_not_found: "NOT_FOUND",
   photo_not_found: "NOT_FOUND",
   photo_limit: "CONFLICT",
   photo_drop_not_found: "NOT_FOUND",

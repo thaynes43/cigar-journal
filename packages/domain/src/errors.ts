@@ -10,6 +10,7 @@ export type ErrorCode =
   | "cigar_not_found"
   | "cigar_ambiguous"
   | "smoke_not_found"
+  | "purchase_not_found"
   | "photo_not_found"
   | "photo_limit"
   | "photo_drop_not_found"
@@ -122,6 +123,18 @@ export class SmokeNotFoundError extends DomainError {
   readonly action: ErrorAction | null = null;
   constructor() {
     super("No smoke matches the given id.");
+  }
+}
+
+// A purchase lot that exists but isn't the caller's, or no lot at all — the same
+// shape and the same principle as SmokeNotFoundError: ownership never leaks, so
+// a cross-user id reads exactly like an unknown one (ADR-017's update_purchase).
+export class PurchaseNotFoundError extends DomainError {
+  readonly code = "purchase_not_found" as const;
+  readonly recoverable = false;
+  readonly action: ErrorAction | null = null;
+  constructor() {
+    super("No purchase matches the given id.");
   }
 }
 

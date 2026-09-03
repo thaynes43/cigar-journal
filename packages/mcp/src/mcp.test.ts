@@ -290,7 +290,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the thirty-three tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
+  it("lists exactly the thirty-four tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -316,6 +316,7 @@ describe("@cj/mcp adapter", () => {
           "set_favorite",
           "set_want",
           "update_cigar",
+          "update_purchase",
           "update_smoke",
           // curation surface (admin only)
           "get_curation_queue",
@@ -355,6 +356,7 @@ describe("@cj/mcp adapter", () => {
         "record_purchase",
         "record_purchase_batch",
         "update_smoke",
+        "update_purchase",
         "open_photo_drop",
         "add_smoke_photo",
         "set_want",
@@ -1786,6 +1788,224 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+
+
+  // ---- family rows, specialization and update_purchase (ADR-017, #290) ------
+
+  it("add_cigar specializes a family entry into the vitola's own sibling and reports specializedFrom", async () => {
+    const familyId = await h.seedCigar({
+      canonicalName: "Talamanca Reserva Natural",
+      brand: "Talamanca",
+      type: "NC",
+    });
+
+    await withClient(ownerFull, async (client) => {
+      const created = payloadOf(
+        await call(client, "add_cigar", {
+          clientRequestId: randomUUID(),
+          cigar: {
+            canonicalName: "Talamanca Reserva Natural",
+            vitola: { name: "No. 2", lengthInches: 5.5, ringGauge: 52 },
+          },
+        }),
+      ) as {
+        cigar: { cigarId: string; canonicalName: string };
+        created: boolean;
+        guidance: string;
+        specializedFrom?: { cigarId: string; canonicalName: string };
+      };
+
+      expect(created.created).toBe(true);
+      // guidance keeps its two values — the sibling was minted.
+      expect(created.guidance).toBe("created");
+      expect(created.cigar.cigarId).not.toBe(familyId);
+      expect(created.cigar.canonicalName).toBe("Talamanca Reserva Natural No. 2");
+      expect(created.specializedFrom).toEqual({
+        cigarId: familyId,
+        canonicalName: "Talamanca Reserva Natural",
+      });
+
+      // The save that follows lands on the sibling, and the family entry keeps
+      // whatever was already on it.
+      const saved = payloadOf(
+        await call(client, "save_smoke", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId: created.cigar.cigarId },
+          overallDescriptors: ["cocoa"],
+        }),
+      ) as { smoke: { cigar: { cigarId: string } } };
+      expect(saved.smoke.cigar.cigarId).toBe(created.cigar.cigarId);
+    });
+
+    // Filtered in JS — this package does not depend on drizzle-orm operators.
+    const rows = await h.deps.db.select().from(cigars);
+    expect(rows.find((row) => row.id === familyId)!.vitolaName).toBeNull();
+  });
+
+  it("save_smoke's described branch specializes too, and publishes specializedFrom", async () => {
+    const familyId = await h.seedCigar({ canonicalName: "Cordillera Alta Natural", brand: "Cordillera" });
+
+    await withClient(ownerFull, async (client) => {
+      const saved = payloadOf(
+        await call(client, "save_smoke", {
+          clientRequestId: randomUUID(),
+          cigar: {
+            described: {
+              canonicalName: "Cordillera Alta Natural Belicoso",
+              vitola: { name: "Belicoso" },
+            },
+          },
+          overallDescriptors: ["cocoa"],
+        }),
+      ) as {
+        smoke: { cigar: { cigarId: string; canonicalName: string } };
+        cigarCreated: boolean;
+        specializedFrom?: { cigarId: string; canonicalName: string };
+      };
+
+      expect(saved.cigarCreated).toBe(true);
+      expect(saved.smoke.cigar.cigarId).not.toBe(familyId);
+      expect(saved.smoke.cigar.canonicalName).toBe("Cordillera Alta Natural Belicoso");
+      expect(saved.specializedFrom).toEqual({
+        cigarId: familyId,
+        canonicalName: "Cordillera Alta Natural",
+      });
+    });
+  });
+
+  it("update_purchase re-points a lot, replays, and no-ops when it already points there", async () => {
+    const familyId = await h.seedCigar({ canonicalName: `Repoint Family ${randomUUID()}` });
+    const siblingId = await h.seedCigar({ canonicalName: `Repoint Sibling ${randomUUID()}` });
+
+    await withClient(ownerFull, async (client) => {
+      const bought = payloadOf(
+        await call(client, "record_purchase", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId: familyId },
+          quantity: 20,
+        }),
+      ) as { purchaseId: string };
+
+      const args = {
+        clientRequestId: randomUUID(),
+        purchaseId: bought.purchaseId,
+        changes: { cigar: { resolveTo: siblingId } },
+      };
+      const moved = payloadOf(await call(client, "update_purchase", args)) as {
+        purchase: { purchaseId: string; cigarId: string; canonicalName: string };
+        changedFields: string[];
+        replayed: boolean;
+      };
+      expect(moved.purchase.cigarId).toBe(siblingId);
+      expect(moved.changedFields).toEqual(["cigar"]);
+      expect(moved.replayed).toBe(false);
+
+      const replay = payloadOf(await call(client, "update_purchase", args)) as { replayed: boolean };
+      expect(replay.replayed).toBe(true);
+
+      // Asked again under a fresh envelope: already there, so nothing changes.
+      const again = payloadOf(
+        await call(client, "update_purchase", { ...args, clientRequestId: randomUUID() }),
+      ) as { changedFields: string[] };
+      expect(again.changedFields).toEqual([]);
+
+      // The holdings followed the lot.
+      const inventory = payloadOf(await call(client, "get_my_inventory", {})) as {
+        holdings: { cigar: { cigarId: string } }[];
+      };
+      expect(inventory.holdings.some((hold) => hold.cigar.cigarId === siblingId)).toBe(true);
+    });
+
+    const audits = await h.deps.db.select().from(auditLog);
+    expect(
+      audits.some(
+        (row) =>
+          row.action === "purchase.repoint" &&
+          (row.after as { cigarId?: string } | null)?.cigarId === siblingId,
+      ),
+    ).toBe(true);
+  });
+
+  it("update_purchase refuses while a consumed smoke sits elsewhere, and hides other users' lots", async () => {
+    const familyId = await h.seedCigar({ canonicalName: `Repoint Held ${randomUUID()}` });
+    const siblingId = await h.seedCigar({ canonicalName: `Repoint Held Sibling ${randomUUID()}` });
+
+    await withClient(ownerFull, async (client) => {
+      const bought = payloadOf(
+        await call(client, "record_purchase", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId: familyId },
+          quantity: 5,
+        }),
+      ) as { purchaseId: string };
+      const saved = payloadOf(
+        await call(client, "save_smoke", {
+          clientRequestId: randomUUID(),
+          cigar: { cigarId: familyId },
+          overallDescriptors: ["cedar"],
+          consumption: { fromHumidor: true, purchaseId: bought.purchaseId },
+        }),
+      ) as { smoke: { smokeId: string } };
+
+      const refused = errorOf(
+        await call(client, "update_purchase", {
+          clientRequestId: randomUUID(),
+          purchaseId: bought.purchaseId,
+          changes: { cigar: { resolveTo: siblingId } },
+        }),
+      );
+      expect(refused.code).toBe("validation_error");
+      const fields = refused.fields as { path: string; message: string }[];
+      expect(fields[0]!.path).toBe("changes.cigar.resolveTo");
+      expect(fields[0]!.message).toContain(saved.smoke.smokeId);
+
+      // An unknown destination is cigar_not_found, as everywhere else.
+      const badTarget = errorOf(
+        await call(client, "update_purchase", {
+          clientRequestId: randomUUID(),
+          purchaseId: bought.purchaseId,
+          changes: { cigar: { resolveTo: randomUUID() } },
+        }),
+      );
+      expect(badTarget.code).toBe("cigar_not_found");
+
+      // Another user's lot never exists, and neither does a malformed id.
+      await withClient(otherFull, async (stranger) => {
+        const foreign = errorOf(
+          await call(stranger, "update_purchase", {
+            clientRequestId: randomUUID(),
+            purchaseId: bought.purchaseId,
+            changes: { cigar: { resolveTo: siblingId } },
+          }),
+        );
+        const malformed = errorOf(
+          await call(stranger, "update_purchase", {
+            clientRequestId: randomUUID(),
+            purchaseId: "not-a-uuid",
+            changes: { cigar: { resolveTo: siblingId } },
+          }),
+        );
+        expect(foreign.code).toBe("purchase_not_found");
+        expect(malformed).toEqual(foreign);
+      });
+    });
+  });
+
+  it("update_purchase is journal:write — a catalog-only token cannot reach it", async () => {
+    expect(TOOL_SCOPES.update_purchase).toEqual(["journal:write"]);
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ownerCatalogOnly}` },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "update_purchase", arguments: { clientRequestId: randomUUID() } },
+      }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("insufficient_scope");
+  });
 
   // ---- record_purchase_batch (#231) -----------------------------------------
 
