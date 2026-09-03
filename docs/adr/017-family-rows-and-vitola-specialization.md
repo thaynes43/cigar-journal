@@ -41,11 +41,21 @@ leaf, and history moves one record at a time, explicitly.**
   `freeform`; `unverified`; enrichment queued as for any created row. An
   existing sibling with the same parts (or folded name) links, `created:
   false`. The result carries `specializedFrom: { cigarId, canonicalName }` and
-  the audit row records it. A stated vitola that *differs* from a candidate's
-  recorded one is a different product and creates as today. No stated vitola
-  → link to the family row as today: unknown stays unknown.
+  the audit row records it. Sibling matching by parts applies only under a
+  brand; an unbranded family links a sibling by folded name alone, or mints —
+  null parts are not "the same parts" (the reason `split_cigar` refuses
+  unbranded rows). A stated vitola that *differs* from a candidate's recorded
+  one is a different product and creates as today. No stated vitola → link to
+  the family row as today: unknown stays unknown.
 - **The vitola is a field, not a word.** The rule keys on `described.vitola.name`;
   a size word in `canonicalName` alone remains vocabulary and links (flow 002).
+  When a vitola is stated, its tokens are struck from the described name before
+  the candidate search and the strong-match comparison: the name minus its
+  vitola is the family claim, so `Padron 1926 Natural No. 2` resolves against
+  `Padron 1926 Natural` although `2` is a number, and specializes. What the
+  strike leaves is compared under the ordinary rules — a leftover word still
+  asks (`… Serie …` against a family that never said it), and the sibling's
+  name is still composed from the full described name.
   Server instructions and the `search_cigars`/`save_smoke`/`add_cigar`
   descriptions say it: a match whose `vitola.name` is null is a family entry;
   when the user names the vitola, put it in `vitola.name` so the smoke lands

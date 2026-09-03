@@ -1244,4 +1244,146 @@ describe("resolveCigar family rows and vitola specialization (ADR-017)", () => {
     expect(saved.specializedFrom).toBeUndefined();
     expect((await readCigar(familyId)).vitolaName).toBeNull();
   });
+
+  // AN UNBRANDED ROW IS NOT A SIBLING OF EVERYTHING (ADR-012, the rule
+  // `split_cigar` states outright). Without a `brand_id` the family's parts are
+  // `{null, null, <vitola>}`, which every unbranded row carrying that size word
+  // satisfies — so a parts match there would re-point `Foo` onto an unrelated
+  // `Bar Robusto`. The folded name is the only link an unbranded family accepts.
+  it("mints rather than linking an unrelated unbranded row that shares the vitola", async () => {
+    const strangerId = await h.seedCigar({ canonicalName: "Bar Robusto", vitolaName: "Robusto" });
+    const familyId = await h.seedCigar({ canonicalName: "Foo Anejo" });
+
+    const added = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Foo Anejo", vitola: { name: "Robusto" } },
+    });
+
+    expect(added.created).toBe(true);
+    expect(added.cigar.cigarId).not.toBe(strangerId);
+    expect(added.cigar.cigarId).not.toBe(familyId);
+    expect(added.cigar.canonicalName).toBe("Foo Anejo Robusto");
+    expect(added.specializedFrom).toEqual({ cigarId: familyId, canonicalName: "Foo Anejo" });
+    expect((await readCigar(added.cigar.cigarId)).vitolaName).toBe("Robusto");
+    // The unrelated row is untouched — nothing of `Bar` was claimed.
+    expect((await readCigar(strangerId)).canonicalName).toBe("Bar Robusto");
+  });
+
+  // UNDER A BRAND, both-null line and blend DO count as equal: a family with no
+  // line and a leaf with no line sit at the same place in that marca's structure,
+  // which is what makes them siblings. Same vitola, second ask, one row.
+  it("matches parts with null line and blend when the family has a brand", async () => {
+    const brandRows = await h.deps.db
+      .insert(brands)
+      .values({ name: "Talavera", slug: brandSlug("Talavera") })
+      .returning({ id: brands.id });
+    const brandId = brandRows[0]!.id;
+    const familyId = await h.seedCigar({
+      canonicalName: "Talavera Natural",
+      brand: "Talavera",
+      brandId,
+    });
+
+    const first = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Talavera Natural", vitola: { name: "No. 2" } },
+    });
+    expect(first.created).toBe(true);
+    // Renamed away from the composed name, so only the PARTS can find it next time.
+    await h.deps.db
+      .update(cigars)
+      .set({ canonicalName: "Talavera Natural Serie Dos" })
+      .where(eq(cigars.id, first.cigar.cigarId));
+
+    const second = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Talavera Natural", vitola: { name: "No. 2" } },
+    });
+    expect(second.created).toBe(false);
+    expect(second.cigar.cigarId).toBe(first.cigar.cigarId);
+    expect(second.specializedFrom).toEqual({
+      cigarId: familyId,
+      canonicalName: "Talavera Natural",
+    });
+  });
+
+  // THE STRIKE (ADR-017). `Padron 1926 Natural No. 2` carries a model token the
+  // family lacks, so `numbersCompatible` disqualified the family outright and the
+  // resolver minted a row sharing nothing with it. Striking the stated vitola's
+  // own words first leaves the family claim, which matches.
+  it("strikes a stated vitola from the name so a numbered vitola reaches its family", async () => {
+    const registry = await seedRegistry("Larimar", "Serie", "Natural");
+    const familyId = await h.seedCigar({
+      canonicalName: "Larimar 1926 Natural",
+      brand: "Larimar",
+      brandId: registry.brandId,
+    });
+
+    const added = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: {
+        canonicalName: "Larimar 1926 Natural No. 2",
+        vitola: { name: "No. 2", lengthInches: 5.5, ringGauge: 52 },
+      },
+    });
+
+    expect(added.created).toBe(true);
+    expect(added.cigar.cigarId).not.toBe(familyId);
+    // Named from the FULL described name — the strike is a comparison key, not a
+    // rename.
+    expect(added.cigar.canonicalName).toBe("Larimar 1926 Natural No. 2");
+    expect(added.specializedFrom).toEqual({
+      cigarId: familyId,
+      canonicalName: "Larimar 1926 Natural",
+    });
+    const sibling = await readCigar(added.cigar.cigarId);
+    expect(sibling.brandId).toBe(registry.brandId);
+    expect(sibling.vitolaName).toBe("No. 2");
+    expect((await readCigar(familyId)).vitolaName).toBeNull();
+  });
+
+  // WHAT THE STRIKE LEAVES IS JUDGED AS EVER. `Padrón 1926 Serie No. 2 Natural`
+  // minus `No. 2` still says `Serie`, which the family never said — a one-sided
+  // identity residue, which is a question, not a link and not a mint.
+  it("still asks when the struck name leaves a residue the family never claimed", async () => {
+    const familyId = await h.seedCigar({
+      canonicalName: "Marbella 1926 Natural",
+      brand: "Marbella",
+    });
+    const before = await h.deps.db.select({ id: cigars.id }).from(cigars);
+
+    const error = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: {
+        canonicalName: "Marbella 1926 Serie No. 2 Natural",
+        vitola: { name: "No. 2" },
+      },
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(CigarAmbiguousError);
+    expect((error as CigarAmbiguousError).candidates.map((c) => c.cigarId)).toContain(familyId);
+    // Nothing was written — the ambiguity is raised inside the transaction.
+    expect((await h.deps.db.select({ id: cigars.id }).from(cigars)).length).toBe(before.length);
+  });
+
+  // THE STRIKE WIDENS THE SEARCH AND NEVER SHRINKS IT. Probing on the claim
+  // alone, `Zafira Robusto` + `Robusto` would search for `Zafira`, score the
+  // catalogued `Zafira Robusto` below the strong-match floor, and mint a
+  // duplicate of a row the catalog already holds.
+  it("still links a full-name match when the claim alone would score too low", async () => {
+    const existingId = await h.seedCigar({
+      canonicalName: "Zafira Robusto",
+      vitolaName: "Robusto",
+    });
+
+    const saved = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "Zafira Robusto", vitola: { name: "Robusto" } } },
+      overallDescriptors: ["cedar"],
+    });
+
+    expect(saved.smoke.cigar.cigarId).toBe(existingId);
+    expect(saved.cigarCreated).toBe(false);
+    expect(saved.specializedFrom).toBeUndefined();
+  });
 });
