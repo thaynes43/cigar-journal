@@ -63,6 +63,14 @@ export interface ReviewWalkStats {
   // which is exactly what "re-crawl creates zero duplicates" looks like in a log.
   recorded: number;
   amended: number;
+  // THE ARCHIVE CURSOR, as this run found it and as it leaves it (#199). Two
+  // numbers rather than one because the pair is the progress report: `2 -> 4`
+  // means two archive pages drained tonight, `87 -> 2` means the walk reached the
+  // end and wrapped, and `5 -> 5` means the budget went entirely on page 1 (a
+  // `--limit`, or an index that refused us). They are page numbers, not counters,
+  // so they are carried in the run's stats JSONB and printed on the summary line.
+  cursorFrom: number;
+  cursorTo: number;
 }
 
 export function emptyReviewStats(): ReviewWalkStats {
@@ -76,7 +84,54 @@ export function emptyReviewStats(): ReviewWalkStats {
     unresolved: 0,
     recorded: 0,
     amended: 0,
+    cursorFrom: REVIEW_ARCHIVE_FIRST_PAGE,
+    cursorTo: REVIEW_ARCHIVE_FIRST_PAGE,
   };
+}
+
+// --- the archive cursor (issue #199) -----------------------------------------
+//
+// WHAT MAKES A BACK CATALOGUE REACHABLE. One run's page budget is a fraction of a
+// decade-old archive — halfwheel is ~2,400 reviews over ~220 index pages against
+// a 40-fetch run — so a walk that always starts at the top re-reads the newest
+// reviews every night and never once opens page 3. The cursor is the single piece
+// of state that outlives a run: where the ARCHIVE half of the next walk resumes.
+// It lives in `vendors.crawl_cursor` (migration 0038), and the database, the
+// registry and `run-record.ts` all treat it as opaque — this lane owns its shape.
+//
+// PAGE 1 IS NOT PART OF IT, deliberately. Every run walks page 1 first whatever
+// the cursor says: the newest reviews are the ones a site edits after publishing,
+// `last_seen_at` on them is what "still up" means, and the row is idempotent on
+// `(source, url)`, so re-confirming eleven of them costs eleven fetches and
+// changes nothing. The cursor therefore never points below page 2 — which is also
+// where a fresh row (`crawl_cursor NULL`) starts, and where a finished walk wraps
+// back to.
+export const REVIEW_ARCHIVE_FIRST_PAGE = 2;
+
+export interface ReviewCursor {
+  archivePage: number;
+}
+
+// The stored value, read back. PARSED RATHER THAN CAST, because the column is
+// hand-editable — resetting a source's walk by writing a page number is a
+// legitimate operator move, and ADR-006's posture is that nothing a human can
+// type should be able to crash a nightly run. Anything unreadable, out of range
+// or below page 2 means the same thing as NULL: start the archive over.
+export function reviewCursorPage(stored: unknown): number {
+  if (typeof stored !== "object" || stored === null) return REVIEW_ARCHIVE_FIRST_PAGE;
+  const page = (stored as Record<string, unknown>).archivePage;
+  if (typeof page !== "number" || !Number.isInteger(page) || page < REVIEW_ARCHIVE_FIRST_PAGE) {
+    return REVIEW_ARCHIVE_FIRST_PAGE;
+  }
+  return page;
+}
+
+// What a finished run hands back to be persisted, or `undefined` when it has
+// nothing to say about the cursor — a shop, or a reviewer under `seed`/`offers`.
+// `undefined` means LEAVE THE COLUMN ALONE and never "reset it": a lane that did
+// not walk the archive has no opinion about where the next walk starts.
+export function reviewCursorWrite(stats: ReviewWalkStats | undefined): ReviewCursor | undefined {
+  return stats ? { archivePage: stats.cursorTo } : undefined;
 }
 
 // The review shape of an adapter, or null. Written as a function rather than
@@ -148,6 +203,11 @@ export interface ReviewWalkOptions {
   crawlRunId: string | null;
   limit?: number | null;
   dryRun?: boolean;
+  // This source's stored `vendors.crawl_cursor`, exactly as the registry holds it
+  // (#199). Read by the caller with the rest of the vendor row and passed in
+  // unparsed — `reviewCursorPage` is the only thing that interprets it, and the
+  // value this run leaves behind is `stats.cursorTo`.
+  cursor?: unknown;
 }
 
 // Walk the source's review index, fetch each candidate under a per-run budget,
@@ -170,34 +230,63 @@ export async function walkReviews(
   if (!robots.isAllowed(gatePath)) throw new RobotsDisallowedReviewsError(gatePath);
 
   // --- enumerate ----------------------------------------------------------
-  // Newest-first, and every run starts at page 1. That is the whole archive
-  // policy of this slice, stated plainly: a run sees the newest
-  // `maxIndexPages * <entries per page>` reviews and re-confirms them, which is
-  // what makes `last_seen_at` mean "still up" and an edited score surface as an
-  // amendment. The BACK CATALOGUE is not walked — a decade of reviews is hours of
-  // polite fetching, and reaching it needs a persisted index cursor this slice
-  // deliberately does not invent (a resumable walk is its own decision, with its
-  // own ledger, and inventing one silently here would be worse than not having it).
+  // PAGE 1, THEN THE ARCHIVE FROM WHERE LAST NIGHT STOPPED (#199, migration 0038).
+  // One walk making two different claims, which is why the budget is split rather
+  // than spent top-down:
+  //
+  //   * PAGE 1 IS THE NEWS, and it is walked first every run. Those are the
+  //     reviews a site still edits, `last_seen_at` on them is what "still up"
+  //     means, and the write is idempotent on `(source, url)` — so re-confirming
+  //     them nightly costs one fetch each and produces `recorded = N, amended = 0`.
+  //   * THE REST OF THE INDEX BUDGET IS THE ARCHIVE, resumed at the cursor and
+  //     advanced by the pages actually walked. That is the whole difference from
+  //     slice 2a: ~2,400 reviews drain a couple of index pages a night instead of
+  //     never being reached at all. At the end of the archive the cursor WRAPS to
+  //     page 2 and the walk cycles — a second pass re-confirms rows and amends the
+  //     scores that moved, which is the same idempotent write page 1 relies on.
+  //
+  // The cursor is COMPUTED here and PERSISTED BY THE CALLER, in the transaction
+  // that closes the `crawl_runs` row (run-record.ts). A run that fails therefore
+  // re-walks tonight's pages tomorrow rather than skipping them in silence.
   const entries: ReviewIndexEntry[] = [];
   const seen = new Set<string>();
   const cap = Math.max(1, Math.min(review.maxReviews, options.limit ?? review.maxReviews));
-  for (let page = 1; page <= review.maxIndexPages && entries.length < cap; page++) {
+  const resumeAt = reviewCursorPage(options.cursor);
+  stats.cursorFrom = resumeAt;
+  stats.cursorTo = resumeAt;
+  let archivePage = resumeAt;
+  for (let slot = 0; slot < review.maxIndexPages && entries.length < cap; slot++) {
+    const page = slot === 0 ? 1 : archivePage++;
+    // THE CURSOR PASSES EVERY PAGE THIS RUN GOT AN ANSWER ABOUT — the two
+    // assignments below — and that includes a 404 and a page robots refuses. One
+    // left under the cursor would be re-asked every night and stall the drain on
+    // it forever, where passing it costs at most the reviews it held until the
+    // wrap comes round. A fetch that THROWS is not an answer: it ends the run, and
+    // a failed run's cursor is never persisted.
     const url = review.indexPageUrl(page);
     if (!robots.isAllowed(pathOf(url))) {
       report.push(`skip   ${pathOf(url)}  (robots.txt disallows the index page)`);
+      stats.cursorTo = archivePage;
       continue;
     }
     const res = await deps.fetcher.fetchText(url);
     stats.indexPages += 1;
+    stats.cursorTo = archivePage;
     if (res.status !== 200) {
       errors += 1;
       continue;
     }
     const parsed = review.parseIndex(res.body);
-    // An index page that yields nothing ENDS the walk rather than costing the
-    // remaining budget: past the last page a paginated archive serves a 200 with
-    // no cards, and walking on would fetch empty pages until the cap.
-    if (parsed.length === 0) break;
+    // An index page that yields nothing is THE END OF THE ARCHIVE: past its last
+    // page a paginated archive answers 200 with no cards. It ends the walk rather
+    // than costing the remaining budget, and it wraps the cursor back to the first
+    // archive page. An empty PAGE 1 is not that claim — it is the index shape
+    // moving or the site being down — so that case ends the walk and leaves the
+    // cursor exactly where it was, to be tried again tomorrow.
+    if (parsed.length === 0) {
+      if (page > 1) stats.cursorTo = REVIEW_ARCHIVE_FIRST_PAGE;
+      break;
+    }
     for (const entry of parsed) {
       if (seen.has(entry.url)) continue;
       seen.add(entry.url);

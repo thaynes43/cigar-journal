@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, boolean, smallint, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, boolean, jsonb, smallint, timestamp } from "drizzle-orm/pg-core";
 
 // Admin-managed source registry (Market context). Cuban vendors carry an approval
 // status synced from the r/cubancigars wiki; unapproved sources stay labeled.
@@ -50,6 +50,17 @@ export const vendors = pgTable("vendors", {
   // purchase destination — no listing link-out; the detail page keeps the row
   // plain, unapproved-labeled text (Cuban Lou's). Defaults true.
   purchaseLinkout: boolean("purchase_linkout").notNull().default(true),
+  // WHERE THIS SOURCE'S NEXT RUN RESUMES (migration 0038, issue #199). The only
+  // crawl state that outlives a run, and OPAQUE HERE BY DESIGN: the shape belongs
+  // to the adapter that wrote it — the reviewer lane stores `{ archivePage: N }`,
+  // a token-paginated source would store its token — and the crawler core only
+  // reads it into the run and writes back what the run returned.
+  //
+  // NULL means "never resumed", which is what every shop's row says forever: a
+  // sitemap walk sees the whole catalogue every night and has nothing to
+  // remember. A reviewer's archive does not fit in one polite run, so its cursor
+  // is what makes the back catalogue reachable at all.
+  crawlCursor: jsonb("crawl_cursor"),
   approvalStatus: text("approval_status")
     .$type<"owner-added" | "approved" | "unapproved">()
     .notNull()

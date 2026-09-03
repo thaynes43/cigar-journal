@@ -535,3 +535,22 @@ init container at startup (ADR-003).
   re-used for evenings on end — the drop the 2026-09-02 save claimed was created
   23 hours before the smoke it bounded — so the drop's creation is not the
   session start, its current run of opens is.
+- `0038_vendor_crawl_cursor.sql` — `vendors.crawl_cursor` (jsonb, nullable): where
+  this source's next run resumes (issue #199). A shop's sitemap walk sees the whole
+  catalogue every night and remembers nothing; a REVIEWER's enumeration is an
+  archive that only grows — halfwheel is ~2,400 reviews over ~220 index pages, and
+  one polite run reaches 33 — so without a resume point the newest 33 are re-read
+  nightly and the decade behind them is unreachable. The reviewer lane now walks
+  page 1 first every run (the newest reviews are the ones edited after publication,
+  and `review_observations` is idempotent on `(source, url)`, so re-confirming them
+  costs a fetch and changes nothing) and spends the rest of its index budget from
+  the cursor, advancing it by the pages actually walked and wrapping to page 2 when
+  the archive states its end. **jsonb, not an integer**: a resume point belongs to
+  the adapter — the reviewer lane stores `{"archivePage": N}`, a token-paginated
+  source would store its token — and the crawler core only reads it into the run
+  and writes back what the run returned, so a new source shape needs no migration.
+  No CHECK, no default and no backfill: there is nothing general to check about a
+  value one adapter interprets, and NULL already means "never resumed" (the state
+  every vendor row keeps forever). Written in the SAME TRANSACTION as the
+  `crawl_runs` completion row, so a failed run leaves it untouched and re-walks
+  those pages — a cursor advanced by a run that then died would skip them silently.

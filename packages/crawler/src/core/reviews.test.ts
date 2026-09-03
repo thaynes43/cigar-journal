@@ -3,7 +3,16 @@ import { normalizeReviewScore, REVIEW_EXCERPT_MAX, REVIEW_SCALES } from "@cj/dom
 import { adapters } from "../adapters/index.js";
 import { halfwheel, canonicalReviewUrl, parseHalfwheelIndex, parseHalfwheelReview } from "../adapters/halfwheel.js";
 import { createMockFetcher, loadFixture } from "../testing/fixtures.js";
-import { formatReviewProbe, isCigarReview, reviewSourceOf, runReviewProbe } from "./reviews.js";
+import {
+  emptyReviewStats,
+  formatReviewProbe,
+  isCigarReview,
+  reviewCursorPage,
+  reviewCursorWrite,
+  reviewSourceOf,
+  runReviewProbe,
+  REVIEW_ARCHIVE_FIRST_PAGE,
+} from "./reviews.js";
 import type { ReviewIndexEntry } from "../adapters/types.js";
 
 // The halfwheel reviewer adapter, parsed against the live captures under
@@ -58,6 +67,34 @@ describe("halfwheel — registry posture", () => {
     // re-enumerates the same cards.
     expect(review.indexPageUrl(1)).toBe(review.indexUrl);
     expect(review.indexPageUrl(2)).toBe("https://halfwheel.com/category/reviews/cigars/page/2/");
+  });
+});
+
+describe("the archive cursor", () => {
+  // `vendors.crawl_cursor` is jsonb the DATABASE never interprets and an operator
+  // can edit by hand (resetting a source's walk is a legitimate move), so what is
+  // pinned here is that no value it can hold costs a nightly run its life: an
+  // unreadable one means the same thing as an empty column.
+  it("reads a stored page and treats anything else as the start of the archive", () => {
+    expect(reviewCursorPage({ archivePage: 87 })).toBe(87);
+    expect(reviewCursorPage(null)).toBe(REVIEW_ARCHIVE_FIRST_PAGE);
+    expect(reviewCursorPage(undefined)).toBe(REVIEW_ARCHIVE_FIRST_PAGE);
+    expect(reviewCursorPage({})).toBe(REVIEW_ARCHIVE_FIRST_PAGE);
+    expect(reviewCursorPage({ archivePage: "87" })).toBe(REVIEW_ARCHIVE_FIRST_PAGE);
+    expect(reviewCursorPage({ archivePage: 4.5 })).toBe(REVIEW_ARCHIVE_FIRST_PAGE);
+    expect(reviewCursorPage("page 87")).toBe(REVIEW_ARCHIVE_FIRST_PAGE);
+    // Never page 1: it is walked every run regardless, so a cursor pointing at it
+    // would spend an archive page re-fetching the news.
+    expect(reviewCursorPage({ archivePage: 1 })).toBe(REVIEW_ARCHIVE_FIRST_PAGE);
+    expect(reviewCursorPage({ archivePage: 0 })).toBe(REVIEW_ARCHIVE_FIRST_PAGE);
+    expect(reviewCursorPage({ archivePage: -3 })).toBe(REVIEW_ARCHIVE_FIRST_PAGE);
+  });
+
+  it("hands back a cursor only when a review walk ran", () => {
+    expect(reviewCursorWrite({ ...emptyReviewStats(), cursorTo: 12 })).toEqual({ archivePage: 12 });
+    // A shop, or a reviewer under `seed`/`offers`: no walk, no opinion, and the
+    // caller leaves the column exactly as it found it.
+    expect(reviewCursorWrite(undefined)).toBeUndefined();
   });
 });
 

@@ -119,7 +119,10 @@ export interface ReviewSourceShape {
   indexPageUrl: (page: number) => string;
   // Index pages one run walks, and the ceiling on review pages it fetches. Both
   // are per-RUN bounds, not a claim about the archive's size: the back catalogue
-  // of a decade-old reviewer is far larger than any one polite run.
+  // of a decade-old reviewer is far larger than any one polite run, which is why
+  // the lane resumes from `vendors.crawl_cursor` (#199). The FIRST of the index
+  // pages is always page 1 — the newest reviews, re-confirmed nightly — so
+  // `maxIndexPages - 1` is what a run spends on the archive.
   maxIndexPages: number;
   maxReviews: number;
   // The scale the source scores on — one of @cj/domain's REVIEW_SCALES, which is

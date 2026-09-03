@@ -43,7 +43,13 @@ import {
   type EnrichAsk,
 } from "./match.js";
 import { parseRobots } from "./robots.js";
-import { emptyReviewStats, reviewSourceOf, walkReviews, type ReviewWalkStats } from "./reviews.js";
+import {
+  emptyReviewStats,
+  reviewCursorWrite,
+  reviewSourceOf,
+  walkReviews,
+  type ReviewWalkStats,
+} from "./reviews.js";
 import { openCrawlRun, reclaimStrandedRuns, type SignalHost } from "./run-record.js";
 import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
 
@@ -1574,6 +1580,7 @@ async function runReviewLane(
   deps: IngestDeps,
   options: IngestOptions,
   review: NonNullable<ReturnType<typeof reviewSourceOf>>,
+  cursor: unknown,
   crawlRunId: string | null,
   stats: IngestStats,
   report: string[],
@@ -1593,6 +1600,7 @@ async function runReviewLane(
       adapter: options.adapter,
       review,
       crawlRunId,
+      cursor,
       limit: options.limit,
       dryRun: options.dryRun,
     },
@@ -1627,8 +1635,14 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
   // must take effect on the next run without an adapter change. A row that
   // somehow has none falls back to the column's own default — the conservative
   // end, never the price authority.
+  //
+  // `crawl_cursor` rides the same read (migration 0038, #199) and is the one
+  // column here the run WRITES BACK: the reviewer lane resumes its archive walk
+  // from it and hands back where it stopped. Read as the opaque value the registry
+  // holds — only `reviewCursorPage` interprets it — and null for every shop, which
+  // is what a sitemap walk that remembers nothing between nights leaves it as.
   const vendorRows = await deps.db
-    .select({ focus: vendors.focus, tier: vendors.tier })
+    .select({ focus: vendors.focus, tier: vendors.tier, crawlCursor: vendors.crawlCursor })
     .from(vendors)
     .where(eq(vendors.id, options.vendorId))
     .limit(1);
@@ -1636,6 +1650,7 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
     focus: vendorRows[0]?.focus ?? null,
     tier: vendorRows[0]?.tier ?? DEFAULT_VENDOR_TIER,
   };
+  const crawlCursor = vendorRows[0]?.crawlCursor ?? null;
 
   // The crawl_runs row this pass belongs to, threaded to the write sites so an
   // audited write (a market downgrade unlinking a listing) names the run that made
@@ -1648,7 +1663,7 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
   // schedule of its own.
   const review = reviewSourceOf(options.adapter);
   const run = async (crawlRunId: string | null): Promise<void> => {
-    if (review) await runReviewLane(deps, options, review, crawlRunId, stats, report);
+    if (review) await runReviewLane(deps, options, review, crawlCursor, crawlRunId, stats, report);
     else if (options.mode === "enrich") await drainEnrichment(deps, options, posture, crawlRunId, stats, report);
     else await walkListings(deps, options, posture, crawlRunId, stats, report);
   };
@@ -1680,7 +1695,12 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
   try {
     await run(record.crawlRunId);
     stats.pagesFetched = deps.fetcher.pagesFetched;
-    await record.close("succeeded", { stats });
+    // THE CURSOR MOVES WITH THE COMPLETION ROW, in one transaction (#199). Only a
+    // reviewer's `enrich` run produces one; every other run passes `undefined`,
+    // which leaves the column alone rather than resetting it. The failure path
+    // below deliberately has no equivalent: a run that did not finish must re-walk
+    // the pages it was on, and an advanced cursor would skip them in silence.
+    await record.close("succeeded", { stats, cursor: reviewCursorWrite(stats.reviews) });
     return { crawlRunId: record.crawlRunId, status: "succeeded", stats, report };
   } catch (error) {
     stats.pagesFetched = deps.fetcher.pagesFetched;
