@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.41.0](https://github.com/thaynes43/cigar-journal/compare/v0.40.1...v0.41.0) (2026-09-03)
+
+
+### Features
+
+* **crawler:** halfwheel reviewer adapter — review observations, no minting (ADR-013 slice 2a) ([#199](https://github.com/thaynes43/cigar-journal/issues/199)) ([#296](https://github.com/thaynes43/cigar-journal/issues/296)) ([00082d3](https://github.com/thaynes43/cigar-journal/commit/00082d33871d1fab2a76072b8f1ca58d83f0904d))
+* **db,domain,mcp,web:** photos default to cigar, and the multi-photo review holds end to end ([#287](https://github.com/thaynes43/cigar-journal/issues/287), [#288](https://github.com/thaynes43/cigar-journal/issues/288)) ([#291](https://github.com/thaynes43/cigar-journal/issues/291)) ([e1498d8](https://github.com/thaynes43/cigar-journal/commit/e1498d8ef231dc8493bb185c09b28bfdb3bf128c))
+* **db,domain,mcp,web:** smoke timing — startedAt/endedAt with a derived duration (ADR-016) ([#289](https://github.com/thaynes43/cigar-journal/issues/289)) ([#295](https://github.com/thaynes43/cigar-journal/issues/295)) ([5dfcb2a](https://github.com/thaynes43/cigar-journal/commit/5dfcb2a8dcf18dbaece69facb1b5b01585b78c31))
+* **domain,mcp,web:** critic and journal score surfaces — labeled aggregates with counts (ADR-013 slice 2b, DESIGN-006) ([#199](https://github.com/thaynes43/cigar-journal/issues/199)) ([#297](https://github.com/thaynes43/cigar-journal/issues/297)) ([f36cb25](https://github.com/thaynes43/cigar-journal/commit/f36cb252dff660b1538761e438ee58cc4078c689))
+* **domain,mcp:** family rows and vitola specialization; update_purchase re-point (ADR-017) ([#294](https://github.com/thaynes43/cigar-journal/issues/294)) ([b1c1a51](https://github.com/thaynes43/cigar-journal/commit/b1c1a5159bed8a855918d5d18b5f1834b040c1d6))
+
+
+### Bug Fixes
+
+* **crawler:** cigarworld page errors, small batch variant prices + enrich errors, posture alignment ([#270](https://github.com/thaynes43/cigar-journal/issues/270)) ([#298](https://github.com/thaynes43/cigar-journal/issues/298)) ([162f8f2](https://github.com/thaynes43/cigar-journal/commit/162f8f2b91c760840b0e88e70958f893b82928c2))
+* **web:** ledger column rule and shelf-repeats-grid rule — go-live sweep residue ([#219](https://github.com/thaynes43/cigar-journal/issues/219)) ([#292](https://github.com/thaynes43/cigar-journal/issues/292)) ([08552ea](https://github.com/thaynes43/cigar-journal/commit/08552eaa557ac376da68d97068d189f268285bd5))
+
 ## [0.40.1](https://github.com/thaynes43/cigar-journal/compare/v0.40.0...v0.40.1) (2026-09-02)
 
 
