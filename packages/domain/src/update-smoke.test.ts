@@ -4,6 +4,7 @@ import { smokes, smokeProgression, smokeConsumptions, purchases, auditLog } from
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import { updateSmoke } from "./update-smoke.js";
+import { getSmoke } from "./reads.js";
 import type { Principal } from "./index.js";
 import {
   VersionConflictError,
@@ -339,5 +340,107 @@ describe("updateSmoke", () => {
     expect(await consumptionRow(smokeId)).toBeNull();
     const smoke = (await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId)))[0]!;
     expect(smoke.version).toBe(1);
+  });
+
+  // Session bounds (ADR-016) — field-scoped ops like every other change, and
+  // always `user` provenance: a correction is a statement, so it outranks
+  // whatever observation stood there.
+  describe("session bounds", () => {
+    async function row() {
+      return (await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId)))[0]!;
+    }
+
+    it("sets both bounds with user provenance, audited and named in changedFields", async () => {
+      const result = await updateSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        smokeId,
+        changes: {
+          startedAt: { value: "2026-09-02T01:04:00.000Z" },
+          endedAt: { value: "2026-09-02T02:20:00.000Z" },
+        },
+      });
+
+      expect(result.changedFields).toEqual(expect.arrayContaining(["startedAt", "endedAt"]));
+      const after = await row();
+      expect(after.startedAt?.toISOString()).toBe("2026-09-02T01:04:00.000Z");
+      expect(after.startedAtSource).toBe("user");
+      expect(after.endedAt?.toISOString()).toBe("2026-09-02T02:20:00.000Z");
+      expect(after.endedAtSource).toBe("user");
+
+      // The derivation follows the instants — nothing stores 76.
+      const view = await getSmoke(h.deps, user, { smokeId });
+      expect(view.durationMinutes).toBe(76);
+
+      const audits = await h.deps.db.select().from(auditLog).where(eq(auditLog.smokeId, smokeId));
+      const updated = audits.find((a) => a.action === "smoke.updated")!;
+      expect((updated.after as Record<string, unknown>).startedAtSource).toBe("user");
+      expect((updated.before as Record<string, unknown>).startedAt).toBeNull();
+    });
+
+    it("clears a bound and its source together on an explicit null", async () => {
+      await updateSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        smokeId,
+        changes: {
+          startedAt: { value: "2026-09-02T01:04:00.000Z" },
+          endedAt: { value: "2026-09-02T02:20:00.000Z" },
+        },
+      });
+
+      const result = await updateSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        smokeId,
+        changes: { startedAt: null },
+      });
+
+      expect(result.changedFields).toContain("startedAt");
+      const after = await row();
+      // The paired CHECK makes a half-cleared bound unrepresentable, so the
+      // source has to go with the instant.
+      expect(after.startedAt).toBeNull();
+      expect(after.startedAtSource).toBeNull();
+      expect(after.endedAt).not.toBeNull();
+
+      const view = await getSmoke(h.deps, user, { smokeId });
+      expect(view.startedAt).toBeNull();
+      expect(view.durationMinutes).toBeNull();
+    });
+
+    it("refuses an end before its start", async () => {
+      const error = await updateSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        smokeId,
+        changes: {
+          startedAt: { value: "2026-09-02T02:20:00.000Z" },
+          endedAt: { value: "2026-09-02T01:04:00.000Z" },
+        },
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields).toEqual([
+        { path: "changes.endedAt.value", message: "Must not be before startedAt." },
+      ]);
+      expect((await row()).version).toBe(1);
+    });
+
+    it("stores a pair it cannot vouch for and lets the derivation say null", async () => {
+      // A start alone, thirteen hours before an end set later: nothing is
+      // refused — only the DERIVATION declines to name a length.
+      await updateSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        smokeId,
+        changes: { startedAt: { value: "2026-09-01T13:00:00.000Z" } },
+      });
+      await updateSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        smokeId,
+        changes: { endedAt: { value: "2026-09-02T02:20:00.000Z" } },
+      });
+
+      const view = await getSmoke(h.deps, user, { smokeId });
+      expect(view.startedAt?.source).toBe("user");
+      expect(view.endedAt?.source).toBe("user");
+      expect(view.durationMinutes).toBeNull();
+    });
   });
 });

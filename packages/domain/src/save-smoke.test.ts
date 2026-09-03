@@ -14,6 +14,7 @@ import { createMemoryPhotoStorage } from "@cj/photos";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import { listSmokePhotos } from "./smoke-photos.js";
+import { getSmoke } from "./reads.js";
 import { getPhotoDropByToken, openPhotoDrop, stagePhotoByToken } from "./photo-drops.js";
 import type { Principal, ProcessedImage, SaveSmokeInput } from "./index.js";
 import { ValidationError, CigarAmbiguousError, IdempotencyConflictError } from "./errors.js";
@@ -772,6 +773,193 @@ describe("saveSmoke", () => {
       const view = await getPhotoDropByToken(h.deps, { token: drop.token });
       expect(view.status).toBe("open");
       expect(view.photos).toHaveLength(2);
+    });
+  });
+
+  // Session timing (ADR-016): what one save establishes about when the smoke
+  // happened. The pure rules are unit-tested in mapping.test.ts; these pin what
+  // reaches Postgres — including the smokedAt amendment, which changes the
+  // journal date of every live save that has a start.
+  describe("session timing", () => {
+    const image = (): ProcessedImage => ({
+      full: Buffer.from(`full-${newRequestId()}`),
+      thumb: Buffer.from(`thumb-${newRequestId()}`),
+      contentType: "image/jpeg",
+      width: 1600,
+      height: 1200,
+      bytes: 4096,
+    });
+
+    // One open drop per user, so each case opens its own — and the drop's
+    // SESSION start is what the save reads, which is `opened` on a fresh drop.
+    async function dropOpenedAt(opened: Date) {
+      const storage = createMemoryPhotoStorage();
+      const owner = await h.createUser(`timing-${newRequestId()}@example.com`);
+      h.setNow(opened);
+      const drop = await openPhotoDrop(h.deps, storage, owner);
+      await stagePhotoByToken(h.deps, storage, { token: drop.token, image: image() });
+      return { owner, drop };
+    }
+
+    async function rowOf(smokeId: string) {
+      const rows = await h.deps.db.select().from(smokes).where(eq(smokes.id, smokeId));
+      return rows[0]!;
+    }
+
+    it("takes the start from the drop it carries and ends at the save", async () => {
+      // The session ADR-016 was written from: the drop's opening at 01:04Z, the
+      // save at 02:20Z, and the 1h 16m nobody had to track.
+      const cigarId = await h.seedCigar({ canonicalName: `Timing Drop ${newRequestId()}` });
+      const { owner, drop } = await dropOpenedAt(new Date("2026-09-02T01:04:00.000Z"));
+      h.setNow(new Date("2026-09-02T02:20:00.000Z"));
+
+      const result = await saveSmoke(h.deps, owner, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        photoDropId: drop.photoDropId,
+      });
+
+      expect(result.smoke.startedAt).toEqual({
+        value: "2026-09-02T01:04:00.000Z",
+        source: "photo-drop",
+      });
+      expect(result.smoke.endedAt).toEqual({
+        value: "2026-09-02T02:20:00.000Z",
+        source: "system-finalized",
+      });
+      expect(result.smoke.durationMinutes).toBe(76);
+
+      const row = await rowOf(result.smoke.smokeId);
+      expect(row.startedAt?.toISOString()).toBe("2026-09-02T01:04:00.000Z");
+      expect(row.startedAtSource).toBe("photo-drop");
+      expect(row.endedAt?.toISOString()).toBe("2026-09-02T02:20:00.000Z");
+      expect(row.endedAtSource).toBe("system-finalized");
+      // The ADR-002 amendment: the journal date is when it was lit, so the stamp
+      // is the START rather than the finalize instant it used to be.
+      expect(row.smokedAt?.toISOString()).toBe("2026-09-02T01:04:00.000Z");
+      expect(row.smokedAtSource).toBe("system-finalized");
+
+      const view = await getSmoke(h.deps, owner, { smokeId: result.smoke.smokeId });
+      expect(view.durationMinutes).toBe(76);
+      expect(view.startedAt).toEqual({ value: "2026-09-02T01:04:00.000Z", source: "photo-drop" });
+    });
+
+    it("ignores a drop whose session is more than twelve hours stale", async () => {
+      // One open drop per user means a drop is re-used for evenings on end. A
+      // session that old is not this smoke's start, and nothing is synthesized
+      // to fill the gap.
+      const cigarId = await h.seedCigar({ canonicalName: `Timing Stale ${newRequestId()}` });
+      const { owner, drop } = await dropOpenedAt(new Date("2026-09-01T02:50:00.000Z"));
+      h.setNow(new Date("2026-09-02T02:20:00.000Z"));
+
+      const result = await saveSmoke(h.deps, owner, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        photoDropId: drop.photoDropId,
+      });
+
+      expect(result.smoke.startedAt).toBeNull();
+      expect(result.smoke.durationMinutes).toBeNull();
+      const row = await rowOf(result.smoke.smokeId);
+      expect(row.startedAt).toBeNull();
+      expect(row.startedAtSource).toBeNull();
+      // With no start the journal date is the finalize instant, exactly as before.
+      expect(row.smokedAt?.toISOString()).toBe("2026-09-02T02:20:00.000Z");
+    });
+
+    it("gives a save that states when the smoke happened no end at all", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Timing Stated ${newRequestId()}` });
+      h.setNow(new Date("2026-09-02T02:20:00.000Z"));
+
+      const result = await saveSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        smokedAt: { value: "2026-08-30T20:00:00.000Z" },
+      });
+
+      expect(result.smoke.endedAt).toBeNull();
+      expect(result.smoke.durationMinutes).toBeNull();
+      const row = await rowOf(result.smoke.smokeId);
+      expect(row.endedAt).toBeNull();
+      expect(row.endedAtSource).toBeNull();
+      expect(row.smokedAtSource).toBe("user");
+    });
+
+    it("files a user-stated start as the journal date and closes it at the save", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Timing Lit ${newRequestId()}` });
+      h.setNow(new Date("2026-09-02T02:20:00.000Z"));
+
+      const result = await saveSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        startedAt: { value: "2026-09-02T01:04:00.000Z" },
+      });
+
+      expect(result.smoke.startedAt).toEqual({ value: "2026-09-02T01:04:00.000Z", source: "user" });
+      expect(result.smoke.durationMinutes).toBe(76);
+      const row = await rowOf(result.smoke.smokeId);
+      expect(row.startedAtSource).toBe("user");
+      expect(row.smokedAt?.toISOString()).toBe("2026-09-02T01:04:00.000Z");
+      expect(row.smokedAtSource).toBe("user");
+      expect(row.smokedAtPrecision).toBe("minute");
+    });
+
+    it("never lets the drop overwrite a stated start", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Timing Both ${newRequestId()}` });
+      const { owner, drop } = await dropOpenedAt(new Date("2026-09-02T01:04:00.000Z"));
+      h.setNow(new Date("2026-09-02T02:20:00.000Z"));
+
+      const result = await saveSmoke(h.deps, owner, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        photoDropId: drop.photoDropId,
+        startedAt: { value: "2026-09-02T01:30:00.000Z" },
+      });
+
+      expect(result.smoke.startedAt).toEqual({ value: "2026-09-02T01:30:00.000Z", source: "user" });
+      expect(result.smoke.durationMinutes).toBe(50);
+    });
+
+    it("refuses an end before its start", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Timing Inverted ${newRequestId()}` });
+      const error = await saveSmoke(h.deps, user, {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        startedAt: { value: "2026-09-02T02:20:00.000Z" },
+        endedAt: { value: "2026-09-02T01:04:00.000Z" },
+      }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).fields.map((f) => f.path)).toContain("endedAt.value");
+    });
+
+    it("re-derives nothing on a replay — the stored result stands, clock and all", async () => {
+      const cigarId = await h.seedCigar({ canonicalName: `Timing Replay ${newRequestId()}` });
+      h.setNow(new Date("2026-09-02T02:20:00.000Z"));
+      const input: SaveSmokeInput = {
+        clientRequestId: newRequestId(),
+        cigar: { cigarId },
+        overallDescriptors: ["cedar"],
+        startedAt: { value: "2026-09-02T01:04:00.000Z" },
+      };
+
+      const first = await saveSmoke(h.deps, user, input);
+      // An hour later the retry lands. A replay returns what was stored: it does
+      // not restamp the end, and so does not stretch the duration.
+      h.setNow(new Date("2026-09-02T03:20:00.000Z"));
+      const replay = await saveSmoke(h.deps, user, input);
+
+      expect(replay.replayed).toBe(true);
+      expect(replay.smoke.endedAt).toEqual(first.smoke.endedAt);
+      expect(replay.smoke.durationMinutes).toBe(first.smoke.durationMinutes);
+      const row = await rowOf(first.smoke.smokeId);
+      expect(row.endedAt?.toISOString()).toBe("2026-09-02T02:20:00.000Z");
     });
   });
 });

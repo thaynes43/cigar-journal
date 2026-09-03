@@ -10,6 +10,11 @@ export type Verification = "verified" | "unverified";
 export type JournalVisibility = "public" | "private";
 export type SmokedAtSource = "user" | "system-finalized" | "legacy-document" | "unknown";
 export type SmokedAtPrecision = "minute" | "approximate" | "day";
+// The session bounds' provenance (ADR-016). A start is stated by the user or
+// observed from the photo drop's opening (ADR-014); an end is stated or stamped
+// by the save that finalized the smoke.
+export type StartedAtSource = "user" | "photo-drop";
+export type EndedAtSource = "user" | "system-finalized";
 export type ProvenanceSource = "llm-conversation" | "manual" | "legacy-import";
 export type DrawBurn = "excellent" | "good" | "fair" | "poor";
 export type SmokeOutput = "low" | "medium" | "high";
@@ -22,6 +27,26 @@ export interface SmokedAt {
   value: string | null; // ISO-8601 instant (stored as timestamptz), null when unknown
   source: SmokedAtSource;
   precision: SmokedAtPrecision | null;
+}
+
+// A session bound as it is read back (ADR-016) — the instant and where it came
+// from. The whole object is null when the bound is unknown: an instant never
+// appears without its provenance, and nothing is synthesized to fill the gap.
+export interface SmokeStartedAt {
+  value: string; // ISO-8601 instant
+  source: StartedAtSource;
+}
+
+export interface SmokeEndedAt {
+  value: string; // ISO-8601 instant
+  source: EndedAtSource;
+}
+
+// A session bound as a client states it (ADR-016). Value only — the source is
+// server-owned: a stated bound is `user` by definition, and `photo-drop` /
+// `system-finalized` are observations a client cannot assert.
+export interface SmokeTimingInput {
+  value: string;
 }
 
 export interface VitolaInput {
@@ -108,6 +133,12 @@ export interface SaveSmokeInput {
   clientRequestId: string;
   cigar: CigarRef;
   smokedAt?: SmokedAtInput;
+  // The session's bounds (ADR-016), stated only when the user stated them —
+  // never inferred. An omitted `startedAt` leaves the photo drop free to
+  // establish the start; an omitted `endedAt` is stamped only when the server
+  // also stamps `smokedAt` (a live save).
+  startedAt?: SmokeTimingInput;
+  endedAt?: SmokeTimingInput;
   context?: SmokeContext | null;
   overallDescriptors?: string[];
   progression?: ProgressionEntryInput[];
@@ -138,6 +169,12 @@ export interface SaveSmokeResult {
     smokeId: string;
     version: number;
     cigar: SavedCigar;
+    // What the save established about the session (ADR-016). Additive, and
+    // optional because an idempotent replay returns the ORIGINAL stored result —
+    // envelopes written before this field existed do not carry it.
+    startedAt?: SmokeStartedAt | null;
+    endedAt?: SmokeEndedAt | null;
+    durationMinutes?: number | null;
   };
   cigarCreated: boolean;
   // Whether this save also queued a background enrichment (specs + a product
@@ -453,6 +490,10 @@ export interface RecordPriceResult {
 export interface UpdateSmokeChanges {
   cigar?: { resolveTo: string };
   smokedAt?: SmokedAtInput;
+  // Session bounds (ADR-016), field-scoped like every other op: a value sets it
+  // with source `user`, an explicit null clears it and its source with it.
+  startedAt?: SmokeTimingInput | null;
+  endedAt?: SmokeTimingInput | null;
   context?: SmokeContext | null;
   assessment?: AssessmentInput;
   construction?: ConstructionInput;
@@ -631,6 +672,13 @@ export interface SmokeView {
   version: number;
   cigar: { cigarId: string; canonicalName: string; verification: Verification };
   smokedAt: SmokedAt;
+  // The session's bounds and its length (ADR-016). Each bound is null when
+  // unknown; `durationMinutes` is DERIVED from the pair on every read and never
+  // stored, so it is null unless both bounds exist and the span is positive and
+  // no longer than MAX_SMOKE_DURATION_HOURS.
+  startedAt: SmokeStartedAt | null;
+  endedAt: SmokeEndedAt | null;
+  durationMinutes: number | null;
   // Explicit humidor deduction (ADR-008): null = not from the humidor / unknown.
   consumption: SmokeConsumptionView | null;
   context: SmokeContext | null;
@@ -671,6 +719,13 @@ export interface SmokeSummary {
   smokeId: string;
   cigar: { cigarId: string; canonicalName: string };
   smokedAt: SmokedAt;
+  // The session's bounds and its length (ADR-016). Each bound is null when
+  // unknown; `durationMinutes` is DERIVED from the pair on every read and never
+  // stored, so it is null unless both bounds exist and the span is positive and
+  // no longer than MAX_SMOKE_DURATION_HOURS.
+  startedAt: SmokeStartedAt | null;
+  endedAt: SmokeEndedAt | null;
+  durationMinutes: number | null;
   rating: number | null;
   liked: boolean | null;
   descriptors: string[];
@@ -733,6 +788,13 @@ export interface PublicSmokeView {
   smokeId: string;
   cigar: { canonicalName: string };
   smokedAt: SmokedAt;
+  // The session's bounds and its length (ADR-016). Each bound is null when
+  // unknown; `durationMinutes` is DERIVED from the pair on every read and never
+  // stored, so it is null unless both bounds exist and the span is positive and
+  // no longer than MAX_SMOKE_DURATION_HOURS.
+  startedAt: SmokeStartedAt | null;
+  endedAt: SmokeEndedAt | null;
+  durationMinutes: number | null;
   journal: { title: string | null; narrative: string | null };
   overallDescriptors: string[];
   progression: ProgressionEntryView[];

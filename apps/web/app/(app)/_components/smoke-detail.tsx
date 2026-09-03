@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { SmokeView } from "@cj/domain";
 import { photosEnabled } from "@/lib/photos";
 import { ui } from "@/lib/ui";
+import { formatDuration } from "@/lib/format";
 import { Chips } from "./chips";
 import { RatingSeal } from "./rating-seal";
 import { BurnLine } from "./burn-line";
@@ -29,12 +30,18 @@ function provenanceLine(provenance: SmokeView["provenance"]): string {
 export function SmokeDetail({ smoke }: { smoke: SmokeView }) {
   const { assessment, construction, context } = smoke;
   const cigarHref = `/cigars/${smoke.cigar.cigarId}`;
+  // The smoke's length beside its date (ADR-016) — absent unless both bounds are
+  // known and the pair can be vouched for.
+  const duration = formatDuration(smoke.durationMinutes);
 
   return (
     <article className="mx-auto flex max-w-3xl flex-col gap-8">
       <header className="flex items-start gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-2">
-          <LocalDate format="smokedAt" value={smoke.smokedAt} className="label-caps" />
+          <div className="label-caps">
+            <LocalDate format="smokedAt" value={smoke.smokedAt} />
+            {duration ? <span>{` · ${duration}`}</span> : null}
+          </div>
           {smoke.journal.title ? (
             // A real title heads the entry; the cigar name links below it.
             <>

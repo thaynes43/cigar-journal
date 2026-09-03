@@ -12,6 +12,10 @@ export const SMOKE_OUTPUT_OPTIONS: SmokeOutput[] = ["low", "medium", "high"];
 
 export interface SmokeDetailsDraft {
   smokedAt: string; // datetime-local; "" = unset (server stamps on save)
+  // The session's bounds (ADR-016); datetime-local, "" = unset. A stated bound
+  // is `user` provenance, which the server assigns — the form never sends one.
+  startedAt: string;
+  endedAt: string;
   rating: string; // "" = unset
   liked: "" | "yes" | "no";
   strength: string;
@@ -29,6 +33,8 @@ export interface SmokeDetailsDraft {
 export function emptyDetails(): SmokeDetailsDraft {
   return {
     smokedAt: "",
+    startedAt: "",
+    endedAt: "",
     rating: "",
     liked: "",
     strength: "",
@@ -54,6 +60,8 @@ function isoToLocalInput(iso: string | null): string {
 export function detailsFromView(view: SmokeView): SmokeDetailsDraft {
   return {
     smokedAt: isoToLocalInput(view.smokedAt.value),
+    startedAt: isoToLocalInput(view.startedAt?.value ?? null),
+    endedAt: isoToLocalInput(view.endedAt?.value ?? null),
     rating: view.assessment.rating != null ? String(view.assessment.rating) : "",
     liked: view.assessment.liked === true ? "yes" : view.assessment.liked === false ? "no" : "",
     strength: view.assessment.strength ?? "",
@@ -93,6 +101,10 @@ export function buildSaveInput(
     clientRequestId,
     cigar,
     smokedAt: details.smokedAt ? { value: details.smokedAt } : undefined,
+    // Sent only when the user filled them in (ADR-016): an empty field is not a
+    // statement, and leaving it empty is what lets the server observe the bound.
+    startedAt: details.startedAt ? { value: details.startedAt } : undefined,
+    endedAt: details.endedAt ? { value: details.endedAt } : undefined,
     overallDescriptors: details.overallDescriptors,
     progression: toProgressionInput(progression),
     construction: {
@@ -133,6 +145,16 @@ export function buildUpdateChanges(
 
   if (details.smokedAt && details.smokedAt !== initial.smokedAt) {
     changes.smokedAt = { value: details.smokedAt };
+  }
+
+  // Session bounds (ADR-016). Unlike smokedAt, an EMPTIED field is an operation:
+  // explicit null clears the instant and its source, which is the only way to
+  // take a bound back off a smoke.
+  if (details.startedAt !== initial.startedAt) {
+    changes.startedAt = details.startedAt ? { value: details.startedAt } : null;
+  }
+  if (details.endedAt !== initial.endedAt) {
+    changes.endedAt = details.endedAt ? { value: details.endedAt } : null;
   }
 
   const assessment: NonNullable<UpdateChanges["assessment"]> = {};

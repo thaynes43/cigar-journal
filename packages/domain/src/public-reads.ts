@@ -19,7 +19,7 @@ import type {
 } from "./types.js";
 import { SmokeNotFoundError } from "./errors.js";
 import { isUuid } from "./uuid.js";
-import { toSmokePhotoView } from "./mapping.js";
+import { toSmokePhotoView, smokeTimingView } from "./mapping.js";
 import { decodeSmokeCursor, encodeSmokeCursor, afterSmokeCursor } from "./smoke-cursor.js";
 
 // Anonymous reads for public journals (PRD-001 R7, ADR-004; issue #96). A journal
@@ -67,6 +67,7 @@ function toPublicSmokeView(
       source: smoke.smokedAtSource,
       precision: smoke.smokedAtPrecision,
     },
+    ...smokeTimingView(smoke),
     journal: { title: smoke.journalTitle, narrative: smoke.journalNarrative },
     overallDescriptors: smoke.overallDescriptors,
     progression: progression.map((p) => ({

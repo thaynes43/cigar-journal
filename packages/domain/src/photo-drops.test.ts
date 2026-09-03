@@ -6,6 +6,7 @@ import { createHarness, newRequestId, type DomainHarness } from "./testing/harne
 import { saveSmoke } from "./save-smoke.js";
 import { deleteSmoke } from "./delete-smoke.js";
 import { addSmokePhoto, listSmokePhotos, MAX_PHOTOS_PER_SMOKE } from "./smoke-photos.js";
+import { getSmoke } from "./reads.js";
 import {
   openPhotoDrop,
   claimPhotoDrop,
@@ -18,6 +19,7 @@ import {
   getPhotoDropPhotoObject,
   MAX_PHOTOS_PER_DROP,
   PHOTO_DROP_TTL_SECONDS,
+  DROP_SESSION_GAP_HOURS,
 } from "./photo-drops.js";
 import { PhotoLimitError, PhotoNotFoundError, SmokeNotFoundError, UploadTokenInvalidError } from "./errors.js";
 import type { Principal, ProcessedImage } from "./index.js";
@@ -613,6 +615,96 @@ describe("photo drops", () => {
     const fresh = await openPhotoDrop(h.deps, broken, user);
     expect(fresh.reused).toBe(false);
     expect(fresh.photoDropId).not.toBe(stale.photoDropId);
+  });
+
+  // The drop's SESSION window (ADR-016). `created_at` cannot be the smoke's
+  // start: one open drop per user means the same drop carries evening after
+  // evening — the drop the 2026-09-02 save claimed had been created 23 hours
+  // earlier and was merely re-opened for that night's first photo.
+  describe("session window", () => {
+    async function dropRow(id: string) {
+      const rows = await h.deps.db.select().from(photoDrops).where(eq(photoDrops.id, id));
+      return rows[0]!;
+    }
+
+    it("opens a fresh drop with both stamps on this open", async () => {
+      const drop = await openPhotoDrop(h.deps, storage, user);
+      const row = await dropRow(drop.photoDropId);
+      expect(row.sessionStartedAt.toISOString()).toBe(BASE.toISOString());
+      expect(row.lastOpenedAt.toISOString()).toBe(BASE.toISOString());
+    });
+
+    it("continues the session when the re-open falls inside the gap", async () => {
+      const first = await openPhotoDrop(h.deps, storage, user);
+      const later = new Date(BASE.getTime() + 90 * 60_000); // 1h30m — the same evening
+      h.setNow(later);
+      const again = await openPhotoDrop(h.deps, storage, user);
+      expect(again.reused).toBe(true);
+
+      const row = await dropRow(first.photoDropId);
+      expect(row.sessionStartedAt.toISOString()).toBe(BASE.toISOString());
+      // The gap is always measured from the LAST open, never from the session.
+      expect(row.lastOpenedAt.toISOString()).toBe(later.toISOString());
+    });
+
+    it("starts a new session when the re-open falls past the gap", async () => {
+      const first = await openPhotoDrop(h.deps, storage, user);
+      const tomorrow = new Date(BASE.getTime() + (DROP_SESSION_GAP_HOURS + 1) * 3600_000);
+      h.setNow(tomorrow);
+      const again = await openPhotoDrop(h.deps, storage, user);
+      expect(again.reused).toBe(true);
+
+      const row = await dropRow(first.photoDropId);
+      expect(row.sessionStartedAt.toISOString()).toBe(tomorrow.toISOString());
+      expect(row.lastOpenedAt.toISOString()).toBe(tomorrow.toISOString());
+      // The drop itself is the same one — only its session moved. Which is the
+      // whole point: creation and session start have parted company, and it is
+      // the session the save reads.
+      expect(again.photoDropId).toBe(first.photoDropId);
+      expect(row.sessionStartedAt.getTime()).not.toBe(row.createdAt.getTime());
+    });
+
+    it("a late claim fills the start from the session, and never overwrites one", async () => {
+      // The drop is a day old and was re-opened at the start of tonight's smoke,
+      // so the session — not the creation — is what the claim writes.
+      const created = new Date("2026-09-01T02:50:00.000Z");
+      h.setNow(created);
+      const drop = await openPhotoDrop(h.deps, storage, user);
+      const lit = new Date("2026-09-02T01:04:00.000Z");
+      h.setNow(lit);
+      // Tonight's first photo re-opens the same drop, which resets its session.
+      const reopened = await openPhotoDrop(h.deps, storage, user);
+      expect(reopened.photoDropId).toBe(drop.photoDropId);
+      await stagePhotoByToken(h.deps, storage, { token: reopened.token, image: image() });
+
+      h.setNow(new Date("2026-09-02T02:20:00.000Z"));
+      const smokeId = await newSmoke();
+      const claim = await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+      expect(claim.status).toBe("claimed");
+
+      const after = await getSmoke(h.deps, user, { smokeId });
+      expect(after.startedAt).toEqual({ value: lit.toISOString(), source: "photo-drop" });
+      expect(after.durationMinutes).toBe(76);
+
+      // Re-claiming is idempotent and COALESCEs, so nothing is restamped.
+      h.setNow(new Date("2026-09-02T04:00:00.000Z"));
+      await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+      const again = await getSmoke(h.deps, user, { smokeId });
+      expect(again.startedAt).toEqual({ value: lit.toISOString(), source: "photo-drop" });
+    });
+
+    it("a late claim leaves a stale session unapplied", async () => {
+      h.setNow(new Date("2026-09-01T02:50:00.000Z"));
+      const drop = await openPhotoDrop(h.deps, storage, user);
+      h.setNow(new Date("2026-09-02T02:20:00.000Z"));
+      const smokeId = await newSmoke();
+
+      await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+
+      const after = await getSmoke(h.deps, user, { smokeId });
+      expect(after.startedAt).toBeNull();
+      expect(after.durationMinutes).toBeNull();
+    });
   });
 
   it("answers an unknown token with one error, whatever the caller asked for", async () => {

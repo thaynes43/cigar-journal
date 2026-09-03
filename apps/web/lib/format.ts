@@ -33,6 +33,20 @@ export function formatSmokedAt(smokedAt: SmokedAt, timeZone?: string): string | 
     : fmt(MINUTE, MINUTE_OPTS, timeZone).format(date);
 }
 
+// A smoke's length, e.g. "1h 16m", "45m", "2h" (ADR-016). Null in, null out —
+// and a zero is null too: the derivation already refuses a span it cannot vouch
+// for, and "0m" would state a length rather than admit there isn't one. Whole
+// hours drop the minutes; under an hour drops the hours.
+export function formatDuration(minutes: number | null | undefined): string | null {
+  if (minutes == null || !Number.isFinite(minutes) || minutes <= 0) return null;
+  const whole = Math.floor(minutes);
+  if (whole <= 0) return null;
+  const hours = Math.floor(whole / 60);
+  const rest = whole % 60;
+  if (hours === 0) return `${rest}m`;
+  return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
+}
+
 export function formatDay(iso: string | null, timeZone?: string): string | null {
   return iso ? fmt(DAY, DAY_OPTS, timeZone).format(new Date(iso)) : null;
 }

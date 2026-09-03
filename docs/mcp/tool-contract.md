@@ -172,7 +172,7 @@ Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
 - approximatePosition and any position is a 0-1 fraction through the smoke (0 = light, 1 = nub).
 - descriptors are normalized kebab-case tags; specificDescriptors are the user's exact, unusual words kept verbatim.
-- smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time.
+- smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time. Started and ended times are the same: state them only when the user gave them; a save that carries the photo drop takes its start from the drop, and the server derives the duration.
 - get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
 - a title alone is not a journal entry — include at least one observation, descriptor, impression, or narrative.
 - Combine related corrections into one update_smoke call rather than several.
@@ -284,6 +284,46 @@ smokedAt: { value: "2026-08-26T20:15:00-04:00", source: user, precision: minute 
   therefore always has a useful timestamp without hallucination.
 - Imports (server-side path, not this tool) → `source: legacy-document`
   (usually `precision: day`) or `source: unknown` with null value.
+
+### The session's bounds and its length (ADR-016)
+
+`startedAt` and `endedAt` are a second, separate pair — when the cigar was lit
+and when it was put down — and they carry provenance the same way:
+
+```yaml
+startedAt: { value: "2026-09-02T01:04:00Z", source: photo-drop }
+endedAt:   { value: "2026-09-02T02:20:00Z", source: system-finalized }
+durationMinutes: 76
+```
+
+- **State a bound only when the user stated it** (`{ value }`; source `user`).
+  Like `smokedAt`, `user` is the only provenance a client may assert —
+  `photo-drop` and `system-finalized` are the server's own observations. A
+  stated bound is never overwritten by one.
+- **The photo drop establishes the start.** A `save_smoke` carrying a
+  `photoDropId` with no stated `startedAt` takes that drop's *session* start,
+  source `photo-drop` — the moment this smoke's first photo appeared, not the
+  drop's creation (one open drop per user, so the same drop is re-used for
+  evenings on end). A late `add_smoke_photo { photoDropId }` fills it in the
+  same way, and neither overwrites a start that already exists.
+- **Finalizing establishes the end.** `endedAt = now`, source
+  `system-finalized`, exactly when the server stamps `smokedAt`. A save carrying
+  a stated `smokedAt` is a user logging after the fact and gets no end.
+- **When the server stamps `smokedAt` and a start exists, `smokedAt` takes the
+  start's value** — the journal date is when the cigar was lit, not when it was
+  written up, so a smoke lit before midnight files under the evening it belongs
+  to. `system-finalized` therefore reads as *the server's best observation of
+  when the smoke happened*, not literally the finalize instant (ADR-002 as
+  amended). A user-stated `startedAt` with `smokedAt` unstated makes `smokedAt`
+  that value, `source: user, precision: minute`.
+- **`durationMinutes` is derived on every read, never stored:**
+  `floor((ended − started) / 60s)` when both bounds exist, the difference is
+  positive, and it is at most twelve hours; otherwise null. Never send it — it
+  is an output only, and a stored number would go stale the moment either bound
+  is corrected.
+- An `endedAt` before its `startedAt` is a `validation_error`. Any other
+  combination is stored as given, and the derivation reports null when it cannot
+  vouch for the pair.
 
 ## Tool results (text + structured output)
 
@@ -546,6 +586,9 @@ result:
     - smokeId: sm_01jab4
       cigar: { cigarId: cg_01j9x2, canonicalName: Plasencia Alma del Fuego Concepcion }
       smokedAt: { value: "2026-07-30T21:05:00-04:00", source: system-finalized, precision: approximate }
+      startedAt: { value: "2026-07-30T21:05:00-04:00", source: photo-drop }   # null when unknown
+      endedAt: { value: "2026-07-30T22:21:00-04:00", source: system-finalized }
+      durationMinutes: 76        # derived from the pair on read (ADR-016); null when unknown
       rating: 88
       liked: true
       descriptors: [tangerine, cream, cedar]
@@ -585,6 +628,9 @@ result:
     cigar: { cigarId: cg_01j9x2, canonicalName: Plasencia Alma del Fuego Concepcion }
     consumption: { purchaseId: pu_01kd, source: user }   # null when not from the humidor (ADR-008)
     smokedAt: { value: "2026-07-30T21:05:00-04:00", source: system-finalized, precision: approximate }
+    startedAt: { value: "2026-07-30T21:05:00-04:00", source: photo-drop }   # user | photo-drop; null when unknown
+    endedAt: { value: "2026-07-30T22:21:00-04:00", source: system-finalized } # user | system-finalized
+    durationMinutes: 76          # derived from the pair on read (ADR-016), never stored
     context: { location: patio, pairing: [sparkling-water] }
     overallDescriptors: [citrus, cream, cedar]
     progression:
@@ -664,6 +710,10 @@ arguments:
   smokedAt: { value: "2026-08-26T20:15:00-04:00", source: user, precision: minute }
                                  # omit entirely if the user never said —
                                  # server stamps system-finalized time
+  startedAt: { value: "2026-08-26T20:15:00-04:00" }   # ONLY when the user stated when they lit it;
+                                 #   omit and the photoDropId's session start is used
+  endedAt: { value: "2026-08-26T21:31:00-04:00" }     # ONLY when the user stated when they put it down;
+                                 #   omit and a live save ends at the save
   context:
     location: patio
     pairing: [sparkling-water]
@@ -708,6 +758,9 @@ result:
     version: 1
     url: https://cigars.haynesnetwork.com/smokes/sm_01jc8x
     cigar: { cigarId: cg_01j9x2, verification: verified }
+    startedAt: { value: "2026-09-02T01:04:00Z", source: photo-drop }   # null when unknown
+    endedAt: { value: "2026-09-02T02:20:00Z", source: system-finalized }
+    durationMinutes: 76          # derived from the pair, never stored; null when it can't be vouched for
   cigarCreated: false            # true when `described` created an unverified entry
   enrichmentQueued: false        # true only alongside cigarCreated — the new entry's specs + photo lookup
                                  #   ABSENT on an idempotent replay of an envelope recorded before this field
@@ -1016,6 +1069,8 @@ arguments:
   changes:                       # each block optional; only these exist:
     cigar: { resolveTo: cg_01j9x7 }        # re-point to the correct catalog entry
     smokedAt: { value: "2026-08-25T21:00:00-04:00", source: user, precision: minute }
+    startedAt: { value: "2026-08-25T21:00:00-04:00" }   # explicit null clears it and its source
+    endedAt: { value: "2026-08-25T22:16:00-04:00" }     # an end before its start is a validation_error
     context: { location: garage }
     assessment: { rating: 90 }
     construction: { draw: good }
@@ -1030,12 +1085,16 @@ arguments:
 
 result:
   smoke: { smokeId: sm_01jc8x, version: 3 }
-  changedFields: [assessment.rating, cigar, progression, consumption]
+  changedFields: [assessment.rating, cigar, progression, consumption, startedAt, endedAt]
   replayed: false
 ```
 
 Deletion is web-only. Imported Smokes accept structured-field changes; their
-original markdown is immutable. The `consumption` op sets, clears
+original markdown is immutable. The `startedAt`/`endedAt` ops set the session's
+bounds with `source: user` — a correction is a statement, so it outranks whatever
+observation stood there — and an explicit null clears the instant and its source
+together. `durationMinutes` has no op: it is derived from the pair on read
+(ADR-016), so correcting either bound is how it changes. The `consumption` op sets, clears
 (`fromHumidor: false`), or re-attributes the humidor link (ADR-008); re-pointing
 the smoke's `cigar` clears a now-foreign lot automatically. The movement is
 audited in the same transaction as the smoke change.

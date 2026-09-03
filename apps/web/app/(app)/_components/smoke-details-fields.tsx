@@ -41,6 +41,24 @@ export function SmokeDetailsFields({
             className={ui.field}
           />
         </label>
+        <label className={`${ui.label} w-56`}>
+          Started
+          <input
+            type="datetime-local"
+            value={value.startedAt}
+            onChange={(e) => set("startedAt", e.target.value)}
+            className={ui.field}
+          />
+        </label>
+        <label className={`${ui.label} w-56`}>
+          Ended
+          <input
+            type="datetime-local"
+            value={value.endedAt}
+            onChange={(e) => set("endedAt", e.target.value)}
+            className={ui.field}
+          />
+        </label>
         <label className={`${ui.label} w-28`}>
           Rating
           <input

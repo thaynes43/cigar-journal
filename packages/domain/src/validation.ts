@@ -6,6 +6,7 @@ import type {
   RecordPurchaseInput,
   SaveSmokeInput,
   SmokedAtInput,
+  SmokeTimingInput,
   UpdateSmokeInput,
 } from "./types.js";
 import { ValidationError, type FieldError } from "./errors.js";
@@ -68,6 +69,31 @@ function checkSmokedAt(smokedAt: SmokedAtInput, errors: FieldError[]): void {
   }
 }
 
+// The session's bounds (ADR-016). Each is a lenient leaf like `smokedAt` — a
+// malformed instant returns a field-pathed validation_error rather than reaching
+// Postgres as an invalid timestamp — and the PAIR is checked only when both
+// arrive together: an end before its start is a contradiction the caller must
+// fix, while every other combination is stored as given and left to the
+// derivation, which says null when it cannot vouch for the two.
+function checkTimingPair(
+  started: SmokeTimingInput | null | undefined,
+  ended: SmokeTimingInput | null | undefined,
+  prefix: string,
+  errors: FieldError[],
+): void {
+  const startMs = started ? Date.parse(started.value) : NaN;
+  const endMs = ended ? Date.parse(ended.value) : NaN;
+  if (started && Number.isNaN(startMs)) {
+    errors.push({ path: `${prefix}startedAt.value`, message: "Must be an ISO-8601 date-time." });
+  }
+  if (ended && Number.isNaN(endMs)) {
+    errors.push({ path: `${prefix}endedAt.value`, message: "Must be an ISO-8601 date-time." });
+  }
+  if (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs < startMs) {
+    errors.push({ path: `${prefix}endedAt.value`, message: "Must not be before startedAt." });
+  }
+}
+
 // Minimum validity (ADR-002): a cigar reference plus at least one substantive
 // field. Descriptors are normalized, never rejected, so they are validated for
 // substance (non-empty) only, not shape.
@@ -102,6 +128,7 @@ export function validateSaveInput(input: SaveSmokeInput): void {
   if (input.construction) checkConstruction(input.construction, "construction", errors);
   if (input.progression) checkProgression(input.progression, errors);
   if (input.smokedAt) checkSmokedAt(input.smokedAt, errors);
+  checkTimingPair(input.startedAt, input.endedAt, "", errors);
 
   if (errors.length > 0) throw new ValidationError(errors);
 }
@@ -113,6 +140,8 @@ export function validateSaveInput(input: SaveSmokeInput): void {
 function hasAnyChange(changes: UpdateSmokeInput["changes"]): boolean {
   if (changes.cigar) return true;
   if (changes.smokedAt) return true;
+  if ("startedAt" in changes) return true;
+  if ("endedAt" in changes) return true;
   if ("context" in changes) return true;
   if (changes.assessment && Object.keys(changes.assessment).length > 0) return true;
   if (changes.construction && Object.keys(changes.construction).length > 0) return true;
@@ -154,6 +183,7 @@ export function validateUpdateInput(input: UpdateSmokeInput): void {
     });
   }
   if (changes.smokedAt) checkSmokedAt(changes.smokedAt, errors);
+  checkTimingPair(changes.startedAt, changes.endedAt, "changes.", errors);
   if (changes.cigar && !isNonEmpty(changes.cigar.resolveTo)) {
     errors.push({ path: "changes.cigar.resolveTo", message: "Required." });
   }

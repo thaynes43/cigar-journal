@@ -148,6 +148,23 @@ async function buildPatch(
     changedFields.push("smokedAt");
   }
 
+  // Session bounds (ADR-016). An edited bound is always `user` — a correction is
+  // a statement, and it outranks whatever observation stood there. An explicit
+  // null clears the instant and its source together, which is what the paired
+  // CHECK requires. The duration is not patched: it is derived on read, so it
+  // follows from these two without a field of its own.
+  if ("startedAt" in changes) {
+    patch.startedAt = changes.startedAt ? new Date(changes.startedAt.value) : null;
+    patch.startedAtSource = changes.startedAt ? "user" : null;
+    changedFields.push("startedAt");
+  }
+
+  if ("endedAt" in changes) {
+    patch.endedAt = changes.endedAt ? new Date(changes.endedAt.value) : null;
+    patch.endedAtSource = changes.endedAt ? "user" : null;
+    changedFields.push("endedAt");
+  }
+
   if ("context" in changes) {
     patch.context = changes.context ?? null;
     changedFields.push("context");

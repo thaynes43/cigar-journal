@@ -53,7 +53,10 @@ sequenceDiagram
 The claim runs after the save commits and never fails it; a drop the save did
 not carry is attached later with `add_smoke_photo { smokeId, photoDropId }`.
 The link keeps working for the saved smoke until it expires, so a photo of the
-nub taken after the save needs nothing new.
+nub taken after the save needs nothing new. The drop also dates the smoke: the
+opening that began this session is where `startedAt` comes from when the user
+never said when they lit it (ADR-016), on the save that carries the drop and on
+a later claim alike.
 
 ## Mid-conversation history retrieval
 
@@ -99,6 +102,10 @@ sequenceDiagram
     M-->>C: result
     C->>U: Saved. This one developed from pepper into tangerine cream...
 ```
+
+The save is also the end of the smoke: with no stated `smokedAt` the server
+stamps `endedAt` at the moment it commits, files the entry under the start when
+one was established, and derives `durationMinutes` from the pair (ADR-016).
 
 ## Failure modes
 

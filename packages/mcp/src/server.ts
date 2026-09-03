@@ -935,6 +935,11 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           smokeId: s.smokeId,
           cigar: s.cigar,
           smokedAt: s.smokedAt,
+          // The session's bounds and its derived length (ADR-016) — null when
+          // the smoke carries no such observation.
+          startedAt: s.startedAt,
+          endedAt: s.endedAt,
+          durationMinutes: s.durationMinutes,
           rating: s.rating,
           liked: s.liked,
           descriptors: s.descriptors,
@@ -1030,6 +1035,13 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
               canonicalName: result.smoke.cigar.canonicalName,
               verification: result.smoke.cigar.verification,
             },
+            // What the save established about the session (ADR-016) — the bounds
+            // and the length derived from them, so the model can tell the user
+            // how long the smoke took without a follow-up read. Undefined (and
+            // so absent) on a replay of an envelope stored before they existed.
+            startedAt: result.smoke.startedAt,
+            endedAt: result.smoke.endedAt,
+            durationMinutes: result.smoke.durationMinutes,
           },
           cigarCreated: result.cigarCreated,
           // True when this save CREATED the catalog entry and queued its background
