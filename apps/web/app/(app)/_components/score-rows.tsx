@@ -66,9 +66,10 @@ export function ScoreRows({
         />
       ) : null}
       {widened ? (
-        <p className="label-caps text-muted">
-          {CATALOG_SCORE_STRINGS.across(fallbackBlendName)}
-        </p>
+        // Sentence case, not `label-caps` like the labels above it: the caption
+        // carries the blend's NAME, and a marca's own capitalization is part of
+        // that name — `ACROSS NO. 9` renders a proper noun as a label.
+        <p className="text-xs text-muted">{CATALOG_SCORE_STRINGS.across(fallbackBlendName)}</p>
       ) : null}
     </div>
   );
