@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import type { CigarHolding, CigarHoldingLot } from "@cj/domain";
 import { ui } from "@/lib/ui";
+import { presentColumns, type TableColumnRule } from "@/lib/table-columns";
 import { LocalDate } from "./local-date";
 
 // The "Your humidor" panel (DESIGN-002 §detail §4): the caller's holding for this
@@ -11,32 +12,32 @@ import { LocalDate } from "./local-date";
 // only when holdings exist; every column and line is absent-when-empty. What-I-
 // paid (PPS) lives here, never in the market Price panel.
 
-interface Column {
+interface Column extends TableColumnRule<CigarHoldingLot> {
   header: string;
-  present: (lots: CigarHoldingLot[]) => boolean;
   cell: (lot: CigarHoldingLot) => ReactNode;
 }
 
-// Column order per the design; each is dropped when empty across all lots.
+// Column order per the design; each is dropped when empty across all lots — the
+// absent-when-empty predicate is shared with the Ledger (`@/lib/table-columns`).
 const COLUMNS: Column[] = [
   {
     header: "Qty",
-    present: (lots) => lots.some((l) => l.quantity != null),
+    value: (lot) => lot.quantity,
     cell: (lot) => <span className="tabular-nums">{lot.quantity ?? "—"}</span>,
   },
   {
     header: "Purchased",
-    present: (lots) => lots.some((l) => l.purchasedAt != null),
+    value: (lot) => lot.purchasedAt,
     cell: (lot) => <LocalDate className="tabular-nums" format="day" value={lot.purchasedAt} fallback="—" />,
   },
   {
     header: "Vendor",
-    present: (lots) => lots.some((l) => l.vendor != null),
+    value: (lot) => lot.vendor,
     cell: (lot) => <>{lot.vendor ?? "—"}</>,
   },
   {
     header: "Per stick",
-    present: (lots) => lots.some((l) => l.pricePerStick != null),
+    value: (lot) => lot.pricePerStick,
     cell: (lot) => (
       <span className="tabular-nums">
         {lot.pricePerStick != null ? `$${lot.pricePerStick.toFixed(2)}` : "—"}
@@ -45,13 +46,13 @@ const COLUMNS: Column[] = [
   },
   {
     header: "Box date",
-    present: (lots) => lots.some((l) => l.boxDate != null),
+    value: (lot) => lot.boxDate,
     cell: (lot) => <LocalDate className="tabular-nums" format="day" value={lot.boxDate} fallback="—" />,
   },
 ];
 
 export function HoldingPanel({ holding }: { holding: CigarHolding }) {
-  const columns = COLUMNS.filter((c) => c.present(holding.lots));
+  const columns = presentColumns(COLUMNS, holding.lots);
 
   return (
     <section className="flex flex-col gap-3">

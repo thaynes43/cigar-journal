@@ -55,6 +55,11 @@ Inventory is gone.
   existing poster library. **Ledger** is the purchases-lots table moved from
   `/inventory?view=table`, plus a per-holding consumed/remaining column —
   the desk-work surface for dates, PPS, box codes, and count reconciliation.
+  **Ledger columns:** the identity and count columns (Cigar, Brand, QTY,
+  Consumed, Left, Purchased, Vendor, PPS) always render because they are what
+  the desk scans by; the descriptive ones (Packaging, Vitola, Type, Size,
+  Humidor, Box date, Aging) render only when a row carries a value, the same
+  absent-when-empty rule the humidor panel applies.
 - **Ownership facet** (All view and Brands): `All · Have · Want · Don't
   have`. Definitions: Have = explicit `remaining > 0`; Want = flagged;
   Don't have = no active holding (previously-owned-and-emptied included —
