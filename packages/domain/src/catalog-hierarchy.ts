@@ -286,6 +286,10 @@ export function dimensionSpec(by: CatalogDimension): DimensionSpec {
 export interface ResolvedHierarchyLevel {
   slug: string;
   name: string;
+  // The registry row's id, for the callers that need to ask something ELSE about
+  // the entity a slug named — today the drill header's DESIGN-006 score read.
+  // Null for `unfiled`, which is the absence of a row rather than a row.
+  id: string | null;
 }
 
 // One registry row behind a pinned slug, with everything two callers need: the
@@ -304,7 +308,7 @@ export type ResolvedCatalogHierarchy = Partial<Record<CatalogDimension, Resolved
 
 // The Unfiled pseudo-entity (D-05 / §Strings). It is a real drill target with no
 // registry row behind it, so it resolves by construction rather than by lookup.
-const UNFILED_LEVEL: ResolvedHierarchyLevel = { slug: HIERARCHY_UNFILED, name: "Unfiled" };
+const UNFILED_LEVEL: ResolvedHierarchyLevel = { slug: HIERARCHY_UNFILED, name: "Unfiled", id: null };
 
 // An ancestor pinned to `unfiled` scopes nothing — there is no registry row to
 // scope by — so it is treated as absent for lookup purposes.
@@ -427,7 +431,7 @@ export async function resolveCatalogHierarchy(
     // The row's OWN slug, not the param: a pre-wave link carrying a brand name
     // resolves through the fold, and the canonical slug is the honest answer to
     // "what did I drill into".
-    if (entity) resolved[dimension] = { slug: entity.slug, name: entity.name };
+    if (entity) resolved[dimension] = { slug: entity.slug, name: entity.name, id: entity.id };
   }
   return resolved;
 }

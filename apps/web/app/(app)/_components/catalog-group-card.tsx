@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { CatalogGroupCard as GroupCardData } from "@cj/domain";
 import { ui, wantChip } from "@/lib/ui";
 import { BandTile } from "./band-tile";
-import { CATALOG_GROUP_STRINGS } from "./catalog-registry";
+import { CATALOG_GROUP_STRINGS, CATALOG_SCORE_STRINGS } from "./catalog-registry";
 
 // The aggregate group card (DESIGN-004 D-03) — what a grouped view fills the
 // whole grid with, and what retired the brand poster tile that used to carry the
@@ -81,7 +81,33 @@ function GroupBadges({ card }: { card: { inHumidorCount: number; wantedCount: nu
   return <div className="flex flex-wrap items-center gap-1.5">{badges}</div>;
 }
 
+// The subtitle line (DESIGN-006): `12 cigars · Critics 91 · Journal 86`, each
+// score dropped when its population is empty — so `12 cigars` alone stays a valid
+// subtitle and a card never renders a placeholder for a number nobody has earned.
+//
+// THE COUNTS RIDE THE `title`, NOT THE LINE. ADR-013 §1 requires every rendered
+// aggregate to carry its sample count, and the card obeys it — but a card is a
+// glance, and `12 cigars · Critics 91 · 12 reviews · Journal 86 · 3 journals`
+// stops being one. Hover (and the accessible name) carries the counts; the leaf
+// page and the drill header, where there is room, print them inline. This is the
+// only hover-revealed content on the card and it duplicates nothing essential
+// (DESIGN-006 §Accessibility).
+function groupSubtitle(card: GroupCardData): { text: string; title?: string } {
+  const parts = [CATALOG_GROUP_STRINGS.subtitle(card.cigarCount)];
+  const counts: string[] = [];
+  if (card.critics) {
+    parts.push(`${CATALOG_SCORE_STRINGS.critics} ${card.critics.score}`);
+    counts.push(CATALOG_SCORE_STRINGS.reviews(card.critics.count));
+  }
+  if (card.journal) {
+    parts.push(`${CATALOG_SCORE_STRINGS.journal} ${card.journal.score}`);
+    counts.push(CATALOG_SCORE_STRINGS.journals(card.journal.count));
+  }
+  return { text: parts.join(" · "), title: counts.length > 0 ? counts.join(" · ") : undefined };
+}
+
 export function CatalogGroupCard({ card, href }: { card: GroupCardData; href: string }) {
+  const subtitle = groupSubtitle(card);
   return (
     <Link href={href} className="group flex h-full flex-col gap-2">
       <div className="relative aspect-[3/4] overflow-hidden rounded-card border border-line transition-colors group-hover:border-accent/60">
@@ -96,8 +122,8 @@ export function CatalogGroupCard({ card, href }: { card: GroupCardData; href: st
         {card.parentName ? (
           <span className="truncate text-xs text-muted">{card.parentName}</span>
         ) : null}
-        <span className="label-caps tabular-nums">
-          {CATALOG_GROUP_STRINGS.subtitle(card.cigarCount)}
+        <span className="label-caps tabular-nums" title={subtitle.title}>
+          {subtitle.text}
         </span>
         <GroupBadges card={card} />
       </div>

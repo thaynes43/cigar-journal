@@ -141,6 +141,9 @@ const FIRST_DIR: Record<CatalogSortField, CatalogSortDir> = {
   "recently-added": "desc",
   price: "desc",
   count: "desc",
+  // DESIGN-006 names `critic-score:desc` the canonical token — best reviewed
+  // first — so this key's pill enters where its published contract already is.
+  "critic-score": "desc",
 };
 
 export function firstDir(field: CatalogSortField): CatalogSortDir {
@@ -169,6 +172,10 @@ export const LEAF_SORTS: readonly RegistrySort<CatalogSort>[] = [
   sortRow("my-rating", "My rating"),
   sortRow("recently-added", "Recently added"),
   sortRow("price", "Price"),
+  // DESIGN-006. `Critics`, not `Critic score`: the pill row's labels name the
+  // population, and the tile badge it turns on says `Critics 91` in the same
+  // words. It is the ONE sort whose key appears on the tiles it orders.
+  sortRow("critic-score", "Critics"),
 ];
 
 // A grouped view sorts its cards by name or by member count, and takes no chips
@@ -403,6 +410,20 @@ export const CATALOG_CHIPS = {
 // The group card's own strings (DESIGN-004 §Strings). `{n} cigars` is the group
 // subtitle and the Unfiled card's subtitle both; the badges use the leaf tile's
 // row/cap/tone grammar and are absent when zero.
+// The score strings (DESIGN-006 §Surfaces and strings), in ONE place for the same
+// reason the group subtitle is: the leaf page, the drill header and the group
+// card all render the same sentence, and three spellings of it would drift the
+// first time a count went singular.
+export const CATALOG_SCORE_STRINGS = {
+  critics: "Critics",
+  journal: "Journal",
+  reviews: (n: number): string => `${n} ${n === 1 ? "review" : "reviews"}`,
+  journals: (n: number): string => `${n} ${n === 1 ? "journal" : "journals"}`,
+  // The caption a leaf page shows when its figures are the blend's — the scope
+  // named because it is wider than the surface (DESIGN-006 rule 2).
+  across: (blend: string): string => `Across ${blend}`,
+} as const;
+
 export const CATALOG_GROUP_STRINGS = {
   unfiled: "Unfiled",
   // `{n} cigars`, with its singular. §Strings pinned only the plural, so a

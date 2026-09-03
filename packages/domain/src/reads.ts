@@ -50,6 +50,7 @@ import { toSmokePhotoView } from "./mapping.js";
 import { assessEnrichmentFields } from "./enrichment.js";
 import { validateQueryFilters } from "./validation.js";
 import { isUuid } from "./uuid.js";
+import { getLeafSurfaceScores } from "./score-aggregates.js";
 import { vendorDisplaysPricesSql, offerIsDisplayableSql } from "./offer-display.js";
 import { compareOffersByTier, packagingTier, TIER_SINGLE } from "./packaging-tier.js";
 import { decodeSmokeCursor, encodeSmokeCursor, afterSmokeCursor } from "./smoke-cursor.js";
@@ -690,7 +691,20 @@ async function loadCigarHierarchy(deps: Deps, cigar: CigarRow): Promise<CigarHie
 export async function getCigar(
   deps: Deps,
   principal: Principal,
-  args: { cigarId: string },
+  args: {
+    cigarId: string;
+    // Which journals the DESIGN-006 score slot averages. The rendered surfaces
+    // want the viewer's population — public journals plus the caller's own — and
+    // that is the default, so a call site that does not think about it gets what
+    // the design specifies.
+    //
+    // `public` exists for ONE caller: an MCP token holding `catalog:read` without
+    // `journal:read`. The journal aggregate is otherwise a number the caller's own
+    // private ratings move, which is journal data reaching a catalog-only scope.
+    // The two populations differ only by the caller's own journal, so the tool
+    // still answers — with the community number alone.
+    journalPopulation?: "viewer" | "public";
+  },
 ): Promise<GetCigarResult> {
   if (!isUuid(args.cigarId)) throw new CigarNotFoundError();
 
@@ -749,6 +763,15 @@ export async function getCigar(
   // The structural ancestry behind the D-08 breadcrumb and facts rows.
   // Catalog-scoped, like enrichment and pricing — the same for every viewer.
   const hierarchy = await loadCigarHierarchy(deps, cigar);
+  // The reserved score slot's pair (ADR-013 §3, DESIGN-006 rule 2): this leaf's
+  // own observations where it has any, else its blend's, each carrying the level
+  // it was computed at so the page can caption the fallback instead of passing a
+  // blend's number off as this vitola's.
+  const scores = await getLeafSurfaceScores(
+    deps.db,
+    args.cigarId,
+    args.journalPopulation === "public" ? null : { userId: principal.userId },
+  );
 
   return {
     cigar: toCigarView(cigar),
@@ -766,6 +789,7 @@ export async function getCigar(
     favorited: favoriteRows.length > 0,
     favoriteNote: favoriteRows[0]?.note ?? null,
     hierarchy,
+    scores,
   };
 }
 

@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { CatalogGroupCard as GroupCardData } from "@cj/domain";
 import { CatalogGroupCard, CatalogUnfiledCard } from "./catalog-group-card";
 
+// Rendered TEXT, not markup: the subtitle's parts are separate spans for styling,
+// and what the design pins is the sentence a reader sees.
+const text = (html: string): string => html.replace(/<[^>]*>/g, "");
+
 // The group card's anatomy is a contract (DESIGN-004 D-03), so the parts that
 // carry meaning — the fan ladder, the never-fake-art rule, the badge grammar and
 // the parent sub-label — are pinned here rather than left to a visual review.
@@ -18,6 +22,8 @@ const base: GroupCardData = {
   inHumidorCount: 0,
   wantedCount: 0,
   covers: [],
+  critics: null,
+  journal: null,
 };
 
 const cover = (n: number) => ({ cigarId: `cigar-${n}`, productPhotoId: `photo-${n}` });
@@ -68,6 +74,43 @@ describe("CatalogGroupCard", () => {
   it("subtitles the member count, and counts one in the singular", () => {
     expect(render({ cigarCount: 12 })).toContain("12 cigars");
     expect(render({ cigarCount: 1 })).toContain("1 cigar<");
+  });
+
+  // DESIGN-006 §Surfaces and strings: `12 cigars · Critics 91 · Journal 86`, the
+  // counts on the title attribute. The two populations are never mixed and each
+  // is dropped when its population is empty — so the member count alone stays a
+  // valid subtitle, which is what most of the catalogue still renders.
+  describe("the score subtitle (DESIGN-006)", () => {
+    it("appends both labelled aggregates, counts on the title", () => {
+      const html = render({
+        cigarCount: 12,
+        critics: { score: 91, count: 12 },
+        journal: { score: 86, count: 3 },
+      });
+      expect(text(html)).toContain("12 cigars · Critics 91 · Journal 86");
+      expect(html).toContain('title="12 reviews · 3 journals"');
+    });
+
+    it("omits a population that is empty, and the whole title when both are", () => {
+      expect(text(render({ critics: { score: 91, count: 12 }, journal: null }))).toContain(
+        "12 cigars · Critics 91",
+      );
+      expect(render({ critics: { score: 91, count: 12 }, journal: null })).not.toContain("Journal");
+
+      const bare = render({ critics: null, journal: null });
+      expect(text(bare)).toContain("12 cigars");
+      expect(bare).not.toContain("Critics");
+      expect(bare).not.toContain("title=");
+    });
+
+    // ADR-013 §1 the other way round: a score never travels without its sample
+    // count. On a card the count rides the hover, so a card with a score and no
+    // title would be a bare number.
+    it("never renders a score without its count somewhere", () => {
+      const html = render({ journal: { score: 86, count: 1 } });
+      expect(text(html)).toContain("Journal 86");
+      expect(html).toContain('title="1 journal"');
+    });
   });
 
   it("renders each badge only when non-zero, in the leaf tile's tone grammar", () => {

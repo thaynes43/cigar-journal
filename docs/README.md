@@ -12,7 +12,7 @@ is the sum of these.
 - [`adr/`](adr/) — architecture decision records (MADR-style). Immutable once
   accepted; supersede rather than edit.
 - [`design/`](design/) — cross-cutting UX/research design docs, through the
-  catalog hierarchy and slicing (DESIGN-004).
+  critic and journal score surfaces (DESIGN-006).
 - [`ddd/`](ddd/) — ubiquitous language, bounded contexts, aggregates, and the
   [cigar industry vocabulary](ddd/cigar-industry-vocabulary.md) that binds
   enrichment, curation, and UI copy.

@@ -138,6 +138,7 @@ export function CatalogAllGrid({
                 cigar={cigar}
                 level={level}
                 own={state.own}
+                showCriticScore={state.sort.field === "critic-score"}
                 imageUrl={
                   cigar.hasProductPhoto ? `/api/product-photos/${cigar.cigarId}/thumb` : undefined
                 }

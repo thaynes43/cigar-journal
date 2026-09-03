@@ -330,11 +330,20 @@ export const browseCatalogSchema = z
       .describe(
         "true: only cigars with a current in-stock offer; false: only those without one. Market data (not personal). Combinable with the others.",
       ),
-    sort: z
-      .enum(["name", "my-rating", "recently-added", "price"])
+    criticScoreMin: z
+      .number()
+      .int()
+      .min(0)
+      .max(100)
       .optional()
       .describe(
-        "Order: name (A-Z, default), my-rating (the user's average, best first), recently-added (newest catalog entries first), price (cheapest current per-stick first; unpriced cigars come last).",
+        "Only cigars whose critic score is at least this (0-100). Cigars no reviewer has scored are excluded by any value.",
+      ),
+    sort: z
+      .enum(["name", "my-rating", "recently-added", "price", "critic-score"])
+      .optional()
+      .describe(
+        "Order: name (A-Z, default), my-rating (the user's average, best first), recently-added (newest catalog entries first), price (cheapest current per-stick first; unpriced cigars come last), critic-score (best reviewed first; unscored cigars come last).",
       ),
     cursor: z
       .string()
@@ -931,6 +940,27 @@ export const searchCigarsOutput = z
   .object({ matches: z.array(searchMatchOutput), guidance: z.string() })
   .passthrough();
 
+// The two labelled aggregates (ADR-013 §3, DESIGN-006). `scope` says which level
+// the number was computed at — `cigar` for the leaf's own observations, `blend`
+// when it fell back to the blend's — so a reader can never quote one as the other.
+// Both nullable and BOTH ALWAYS PRESENT as keys: "no critic has scored this" and
+// "critics scored it zero" are different claims, and an absent key would be a
+// third thing again.
+const surfaceScoreOutput = z
+  .object({
+    score: z.number(),
+    count: z.number(),
+    scope: z.string(),
+  })
+  .passthrough();
+
+const surfaceScoresOutput = z
+  .object({
+    critics: surfaceScoreOutput.nullable(),
+    journal: surfaceScoreOutput.nullable(),
+  })
+  .passthrough();
+
 export const getCigarOutput = z
   .object({
     cigar: looseObject,
@@ -939,6 +969,9 @@ export const getCigarOutput = z
     // observations. Permissive, like the rest of the catalog payload.
     enrichment: looseObject.optional(),
     pricing: looseObject.nullish(),
+    // Additive ADR-013 block — always present, both members null when nothing
+    // has been observed at the leaf or its blend.
+    scores: surfaceScoresOutput.optional(),
   })
   .passthrough();
 
@@ -967,6 +1000,10 @@ const catalogTileOutput = z
     type: z.string().nullish(),
     verification: z.string(),
     price: tilePriceOutput.nullish(),
+    // The leaf's OWN critic aggregate (DESIGN-006) — catalog-scoped, so present
+    // for every caller. Null when nobody has reviewed this exact vitola; a tile
+    // never borrows its blend's number, which it has no room to label.
+    critics: z.object({ score: z.number(), count: z.number() }).passthrough().nullish(),
     smokeCount: z.number().optional(),
     myRating: z.number().nullish(),
     remaining: z.number().optional(),

@@ -1,5 +1,6 @@
 import type { Tobacco, SmokeContext, SmokePhotoKind, CigarNameSource, SuggestedParse } from "@cj/db";
 import type { ErrorPayload } from "./errors.js";
+import type { SurfaceScores } from "./score-aggregates.js";
 
 // Domain vocabulary — mirrors docs/ddd/ubiquitous-language.md. Value objects are
 // plain interfaces; the Smoke aggregate is assembled by the services below.
@@ -889,6 +890,12 @@ export interface GetCigarResult {
   // absent, never a placeholder — and the detail page's breadcrumb renders only
   // the levels that are actually there.
   hierarchy: CigarHierarchy;
+  // The two labelled aggregates for the leaf's reserved score slot (ADR-013 §3,
+  // DESIGN-006): the leaf's OWN observations where it has any, else its blend's —
+  // and each score says which, so the page can caption `Across <blend name>`
+  // rather than passing a blend's number off as this vitola's. Both null when
+  // nothing has been observed at either level; the pair itself is always present.
+  scores: SurfaceScores;
 }
 
 // The structural ancestry of one leaf cigar, in display form. Each level carries
@@ -1044,6 +1051,23 @@ export interface CatalogTilePrice {
   seenAt: string; // ISO — when this figure was observed
 }
 
+// The critic aggregate as a tile and a group card carry it (DESIGN-006): a whole
+// number on the 0-100 axis and the sample count behind it, never one without the
+// other. Catalog-scoped — the same for every viewer, unlike the journal figure.
+export interface CatalogTileCritics {
+  score: number;
+  count: number; // observations
+}
+
+// The journal aggregate as a group card carries it (DESIGN-006): ONE VOICE PER
+// JOURNAL, so `count` is journals and never smokes (ADR-013 §3 as amended). Its
+// population is public journals plus the viewer's own, so — unlike `critics` —
+// it is principal-scoped and two viewers can legitimately see different numbers.
+export interface CatalogGroupJournal {
+  score: number;
+  count: number; // journals
+}
+
 // A catalog cigar plus the caller's personal overlay (PRD R-CAT-5 / R-INV-4):
 // how many times they have smoked this exact cigar and their rounded average
 // rating for it. Both are principal-scoped, so they never leak across users.
@@ -1071,6 +1095,18 @@ export interface CatalogCigarTile extends CatalogCigar {
   // Price-at-a-glance: the best current offer for the cigar, or null when none
   // is recorded (PRD-003 R-PRICE-2, ADR-009). Catalog/market-scoped, not personal.
   price: CatalogTilePrice | null;
+  // The critic aggregate over this LEAF's own review observations (DESIGN-006),
+  // whole-numbered and always carrying its observation count. Null when nobody
+  // has reviewed this exact vitola.
+  //
+  // NO BLEND FALLBACK, unlike the leaf DETAIL page. A tile states no scope, so a
+  // blend's number rendered on it would be a blend score presented as a leaf's —
+  // the misrepresentation ADR-013 §1 forbids and DESIGN-006 rule 2 restates as
+  // "nothing is ever shown at a level it was not computed for". It is also what
+  // makes `critic-score` a coherent ordering: every tile in the grid is ranked by
+  // the same thing. There is deliberately NO journal figure on a tile — the tile's
+  // rating seal is the viewer's own per-cigar rating and must stay that.
+  critics: CatalogTileCritics | null;
   // Whether `canonicalName` is authoritative text (`freeform` — every row before
   // the taxonomy waves) or a projection recomposed from the structural parts
   // (`composed`). DESIGN-004 D-07 elides a COMPOSED caption inside a drill down
@@ -1117,7 +1153,10 @@ export interface GetBrandResult {
 // cigars group after priced ones (nulls last), never interleaved as zero. The
 // union and the runtime CATALOG_SORTS registry grow together as sorts land
 // (registry discipline).
-export type CatalogSort = "name" | "my-rating" | "recently-added" | "price";
+// `critic-score` (DESIGN-006) orders by the leaf's OWN critic mean — the same
+// number its tile badges — best first under the canonical `critic-score:desc`,
+// with unscored cigars grouped last in both directions.
+export type CatalogSort = "name" | "my-rating" | "recently-added" | "price" | "critic-score";
 
 // The ownership facet (PRD-003 R-UNI-2, DESIGN-002 §IA). Exclusive segments over
 // the caller's personal overlay: `have` = explicit remaining > 0, `want` =
@@ -1181,6 +1220,12 @@ export interface BrowseCatalogArgs {
   smoked?: boolean;
   favorited?: boolean;
   inStock?: boolean;
+  // Only cigars whose OWN critic mean is at least this (DESIGN-006, 0-100).
+  // Compared against the whole number the tile renders, not the unrounded mean,
+  // so a tile badged `Critics 90` can never be filtered out by `criticScoreMin:
+  // 90`. Unscored cigars are excluded by any value — a cigar nobody has reviewed
+  // does not clear a bar, and `0` is a real score rather than "no opinion".
+  criticScoreMin?: number;
   cursor?: string | null;
   limit?: number;
 }
@@ -1240,6 +1285,13 @@ export interface CatalogGroupCard {
   // dimension: an abstract dimension never gets fake art (the hnet
   // WallGroupingArt rule).
   covers: { cigarId: string; productPhotoId: string }[];
+  // The two labelled aggregates the subtitle carries (DESIGN-006): `12 cigars ·
+  // Critics 91 · Journal 86`, each omitted when its population is empty — so
+  // `12 cigars` alone is still a valid subtitle. Computed AT THIS GROUP'S LEVEL,
+  // never borrowed from a child or a parent. Always null on `vitola` cards and on
+  // the Unfiled bucket: neither is a level the aggregates are defined at.
+  critics: CatalogTileCritics | null;
+  journal: CatalogGroupJournal | null;
 }
 
 // The null-key population at the grouped level (DESIGN-004 D-05). Rendered as

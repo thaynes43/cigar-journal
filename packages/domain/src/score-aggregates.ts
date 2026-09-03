@@ -104,8 +104,19 @@ export interface ScorePair {
  * construction, and the caller is responsible for having authenticated that
  * userId; the visibility flag is deliberately ignored, since a private journal
  * is exactly what its owner is entitled to see aggregated.
+ *
+ * `viewer` — the population every RENDERED surface uses (DESIGN-006 rule 1):
+ * public journals PLUS the viewer's own, whether or not theirs is public. It is
+ * the union of the two above and not a third policy — a signed-in reader looking
+ * at a blend they have rated should see their own rating counted, and hiding it
+ * would make the number they are shown disagree with the entries on the same
+ * page. It discloses nothing new: the only journal it adds to `public` is the
+ * caller's own.
  */
-export type JournalPopulation = { kind: "public" } | { kind: "user"; userId: string };
+export type JournalPopulation =
+  | { kind: "public" }
+  | { kind: "user"; userId: string }
+  | { kind: "viewer"; userId: string };
 
 const PUBLIC_JOURNAL: JournalPopulation = { kind: "public" };
 
@@ -170,16 +181,33 @@ function idArray(ids: string[]): SQL {
   )}]::uuid[]`;
 }
 
+// How many decimals a read rounds its means to.
+//
+// TWO PRECISIONS, ONE ROUNDING. The analytical reads keep two decimals — the
+// precision the observations themselves carry, and what a hand-computed fixture
+// can assert exactly. The RENDERED surfaces (DESIGN-006 rule 1) want an integer
+// on the 0-100 axis, and they get it by rounding the exact numeric mean ONCE,
+// here, rather than by rounding a two-decimal value a second time in TypeScript:
+// a true mean of 82.499 rounds to 82.50 and then to 83, which is not 82. Postgres
+// rounds numeric half away from zero, so the value is identical on every platform.
+type ScoreDigits = 0 | 2;
+
 // One population's grouped aggregate over one scope view, restricted to the
-// requested ids. `round(avg(...), 2)` before the float8 cast, not after: rounding
+// requested ids. `round(avg(...), n)` before the float8 cast, not after: rounding
 // the exact numeric mean is deterministic, while rounding a float that has
 // already lost precision is not.
-function population(view: SQL, valueColumn: SQL, level: ScoreLevel, keys: SQL): SQL {
+function population(
+  view: SQL,
+  valueColumn: SQL,
+  level: ScoreLevel,
+  keys: SQL,
+  digits: ScoreDigits,
+): SQL {
   const blender = level === "blender";
   const key = blender ? sql`bb.blender_id` : sql.raw(`p.${LEVEL_COLUMN[level]}`);
   return sql`
     SELECT ${key} AS key,
-           round(avg(${valueColumn}), 2)::float8 AS score,
+           round(avg(${valueColumn}), ${sql.raw(String(digits))})::float8 AS score,
            count(*)::int AS n
     FROM ${view} p
     ${blender ? BLENDER_JOIN : sql``}
@@ -208,12 +236,17 @@ function population(view: SQL, valueColumn: SQL, level: ScoreLevel, keys: SQL): 
 // averaging that user's per-blend means. The inner grouping is on the requested
 // level's key, so this happens by construction — there is no per-level mean for
 // a higher level to re-average.
-function journalVoices(level: ScoreLevel, keys: SQL, restrict: SQL): SQL {
+function journalVoices(
+  level: ScoreLevel,
+  keys: SQL,
+  restrict: SQL,
+  digits: ScoreDigits,
+): SQL {
   const blender = level === "blender";
   const key = blender ? sql`bb.blender_id` : sql.raw(`p.${LEVEL_COLUMN[level]}`);
   return sql`
     SELECT key,
-           round(avg(voice), 2)::float8 AS score,
+           round(avg(voice), ${sql.raw(String(digits))})::float8 AS score,
            count(*)::int AS n,
            sum(ratings)::int AS ratings
     FROM (
@@ -242,6 +275,8 @@ function journalRestriction(population: JournalPopulation): SQL {
       return sql`AND p.visibility = 'public'`;
     case "user":
       return sql`AND p.user_id = ${population.userId}`;
+    case "viewer":
+      return sql`AND (p.visibility = 'public' OR p.user_id = ${population.userId})`;
   }
 }
 
@@ -298,6 +333,18 @@ export async function getScoreAggregates(
   ids: string[],
   journalPopulation: JournalPopulation = PUBLIC_JOURNAL,
 ): Promise<Map<string, ScorePair>> {
+  return fetchAggregates(db, level, ids, journalPopulation, 2);
+}
+
+// The batch read's body, with the rounding precision the caller needs. Two
+// precisions, one query shape — see `ScoreDigits`.
+async function fetchAggregates(
+  db: Queryer,
+  level: ScoreLevel,
+  ids: string[],
+  journalPopulation: JournalPopulation,
+  digits: ScoreDigits,
+): Promise<Map<string, ScorePair>> {
   const result = new Map<string, ScorePair>();
 
   // THE MAP IS KEYED BY THE CALLER'S STRINGS, NOT POSTGRES'S.
@@ -342,8 +389,8 @@ export async function getScoreAggregates(
   const keys = idArray([...originalsByCanonical.keys()]);
   const rows = await db.execute(sql`
     WITH keys AS (SELECT unnest(${keys}) AS key),
-    critic AS (${population(sql`review_observation_scope`, sql`p.normalized_score`, level, keys)}),
-    journal AS (${journalVoices(level, keys, journalRestriction(journalPopulation))})
+    critic AS (${population(sql`review_observation_scope`, sql`p.normalized_score`, level, keys, digits)}),
+    journal AS (${journalVoices(level, keys, journalRestriction(journalPopulation), digits)})
     SELECT k.key::text AS key,
            c.score AS critic_score, c.n AS critic_n,
            j.score AS journal_score, j.n AS journal_n, j.ratings AS journal_ratings
@@ -377,4 +424,225 @@ export async function getScoreAggregate(
 ): Promise<ScorePair> {
   const all = await getScoreAggregates(db, level, [id], journalPopulation);
   return all.get(id) ?? EMPTY;
+}
+
+// ---------------------------------------------------------------------------
+// THE RENDERED SURFACES (DESIGN-006)
+//
+// Everything above answers "what do the observations say" for a level, at the
+// precision they carry. Everything below answers the narrower question every
+// SURFACE asks — a leaf page, a drill header, a group card, `get_cigar` — and it
+// is narrower in three ways, each of which is a rule rather than a formatting
+// choice:
+//
+//   1. INTEGERS. Both aggregates round to a whole number on the 0-100 axis
+//      (DESIGN-006 rule 1). Rounded once, from the exact numeric mean, in the
+//      same statement that computes it — see `ScoreDigits`.
+//   2. THE VIEWER'S POPULATION. The journal aggregate is public journals plus
+//      the viewer's own (rule 1). An unauthenticated reader gets the public
+//      population alone.
+//   3. THE SCOPE TRAVELS WITH THE NUMBER. Rule 2 — "nothing is ever shown at a
+//      level it was not computed for" — is enforceable only if a caller cannot
+//      hold a score without holding the level it came from, so `SurfaceScore`
+//      has no shape that omits it. The leaf page is the one surface that can
+//      fall back to a wider level, and it is the reason this exists at all.
+// ---------------------------------------------------------------------------
+
+// The levels a surface renders at. `blender` is absent deliberately: DESIGN-006
+// puts blender roll-ups out of scope until blender browsing exists, and a level
+// with no surface has no business in a surface type.
+export type SurfaceLevel = "cigar" | "blend" | "line" | "brand";
+
+export interface SurfaceScore {
+  // The mean on the 0-100 axis, a whole number (DESIGN-006 rule 1).
+  score: number;
+  // Observations for `critics`; JOURNALS for `journal`. Never absent — the
+  // labelled count is half of what ADR-013 §1 requires every rendered number to
+  // carry, and a shape that could omit it would let a surface print a bare score.
+  count: number;
+  // The level these numbers were actually computed at. Equal to the surface's own
+  // level everywhere except a leaf page that fell back to its blend, which is the
+  // case the caption `Across <blend name>` exists to state.
+  scope: SurfaceLevel;
+}
+
+// The pair a surface renders. `critics` and `journal` are independent: either can
+// be absent while the other is present, and an absent one renders NOTHING — not a
+// zero, not a dash (DESIGN-006 rule 1, "each absent when its population is empty").
+export interface SurfaceScores {
+  critics: SurfaceScore | null;
+  journal: SurfaceScore | null;
+}
+
+export const NO_SURFACE_SCORES: SurfaceScores = { critics: null, journal: null };
+
+// Who is looking. `null` is an unauthenticated reader — the public population,
+// which is what DESIGN-006 rule 1 degenerates to when there is no "own journal".
+export type ScoreViewer = { userId: string } | null;
+
+function viewerPopulation(viewer: ScoreViewer): JournalPopulation {
+  return viewer == null ? PUBLIC_JOURNAL : { kind: "viewer", userId: viewer.userId };
+}
+
+function toSurfaceScore(
+  aggregate: ScoreAggregate | null,
+  scope: SurfaceLevel,
+): SurfaceScore | null {
+  return aggregate == null ? null : { score: aggregate.score, count: aggregate.count, scope };
+}
+
+/**
+ * Both populations for many entities at ONE level, as the surfaces render them
+ * (DESIGN-006): whole numbers, the viewer's journal population, and every score
+ * carrying the level it was computed at.
+ *
+ * One round trip. There is no fallback here — a blend, line or brand surface IS
+ * its scope (rule 2), so the only level any of these numbers can carry is the one
+ * that was asked for. The leaf's own-else-blend resolution lives in
+ * `getLeafSurfaceScores`, which is a different question and a different query.
+ *
+ * Returns an entry for every id asked about, so a list render never distinguishes
+ * "not in the map" from "nothing observed".
+ */
+export async function getSurfaceScores(
+  db: Queryer,
+  level: SurfaceLevel,
+  ids: string[],
+  viewer: ScoreViewer,
+): Promise<Map<string, SurfaceScores>> {
+  const pairs = await fetchAggregates(db, level, ids, viewerPopulation(viewer), 0);
+  const result = new Map<string, SurfaceScores>();
+  for (const [id, pair] of pairs) {
+    result.set(id, {
+      critics: toSurfaceScore(pair.critic, level),
+      journal: toSurfaceScore(pair.journal, level),
+    });
+  }
+  return result;
+}
+
+/** One entity at one level, surface-shaped. */
+export async function getSurfaceScore(
+  db: Queryer,
+  level: SurfaceLevel,
+  id: string,
+  viewer: ScoreViewer,
+): Promise<SurfaceScores> {
+  const all = await getSurfaceScores(db, level, [id], viewer);
+  return all.get(id) ?? NO_SURFACE_SCORES;
+}
+
+interface LeafScoreRow {
+  critic_cigar_score: number | null;
+  critic_cigar_n: number | null;
+  critic_blend_score: number | null;
+  critic_blend_n: number | null;
+  journal_cigar_score: number | null;
+  journal_cigar_n: number | null;
+  journal_blend_score: number | null;
+  journal_blend_n: number | null;
+}
+
+// One arm of the leaf read: a whole-number mean and a count over one scope view,
+// with no GROUP BY. An ungrouped aggregate always returns exactly one row, so an
+// arm that matches nothing yields `{ score: null, n: 0 }` rather than no row at
+// all — which is what lets the four arms be cross-joined into a single row below
+// without any of them being able to erase the others.
+function leafCritics(on: SQL): SQL {
+  return sql`
+    SELECT round(avg(p.normalized_score), 0)::float8 AS score, count(*)::int AS n
+    FROM leaf JOIN review_observation_scope p ON ${on}
+  `;
+}
+
+// The journal arm, one voice per journal (ADR-013 §3 as amended): the inner
+// GROUP BY collapses each author to their own mean before the outer one averages
+// the voices, exactly as `journalVoices` does for the analytical read.
+function leafJournal(on: SQL, restrict: SQL): SQL {
+  return sql`
+    SELECT round(avg(v.voice), 0)::float8 AS score, count(*)::int AS n
+    FROM (
+      SELECT p.user_id, avg(p.rating) AS voice
+      FROM leaf JOIN smoke_rating_scope p ON ${on}
+      WHERE true ${restrict}
+      GROUP BY p.user_id
+    ) v
+  `;
+}
+
+function pickLeaf(
+  own: { score: number | null; n: number | null },
+  blend: { score: number | null; n: number | null },
+): SurfaceScore | null {
+  // MOST SPECIFIC LEVEL WITH DATA (DESIGN-006 rule 2), resolved per population
+  // rather than once for the pair. A leaf that has been smoked but never reviewed
+  // must still show what critics said about its blend; resolving both populations
+  // together would suppress that, because the leaf "has data" for the other one.
+  // The consequence is that the two can legitimately land at different scopes,
+  // which is exactly why `scope` rides on each score rather than on the pair.
+  if (own.score != null && own.n != null && own.n > 0) {
+    return { score: own.score, count: own.n, scope: "cigar" };
+  }
+  if (blend.score != null && blend.n != null && blend.n > 0) {
+    return { score: blend.score, count: blend.n, scope: "blend" };
+  }
+  return null;
+}
+
+/**
+ * The leaf detail page's pair (DESIGN-006 rule 2): **the leaf's own observations
+ * if any, else its blend's**, per population, in ONE query.
+ *
+ * This resolution lives here rather than at the call site on purpose. It is the
+ * only place in the app where a number rendered on one entity's page was computed
+ * over a wider set, so it is the only place that can get ADR-013 §1 wrong by
+ * accident — and it can only be got right if the answer carries its scope. A
+ * caller cannot render one of these without being handed the level it belongs to.
+ *
+ * A blend-scoped critic score deliberately includes the leaf's OWN observations
+ * as well: the fallback widens the population to the whole blend, it does not
+ * substitute a disjoint one. (It fires only when the leaf's own count is zero, so
+ * the two never disagree about the same rows.)
+ *
+ * An unknown, excluded or merged cigar answers `{ critics: null, journal: null }`
+ * — `cigar_ancestry` carries the `catalog_status = 'active'` gate, so a tombstone
+ * resolves to no leaf and therefore to no blend either.
+ */
+export async function getLeafSurfaceScores(
+  db: Queryer,
+  cigarId: string,
+  viewer: ScoreViewer,
+): Promise<SurfaceScores> {
+  // A malformed id is not-found, not a 500 (#206, ./uuid.ts) — the uuid cast
+  // would otherwise fail the whole statement.
+  if (!isUuid(cigarId)) return NO_SURFACE_SCORES;
+  const restrict = journalRestriction(viewerPopulation(viewer));
+
+  const rows = await db.execute(sql`
+    WITH leaf AS (
+      SELECT ca.cigar_id, ca.blend_id FROM cigar_ancestry ca WHERE ca.cigar_id = ${cigarId}::uuid
+    ),
+    cc AS (${leafCritics(sql`p.cigar_id = leaf.cigar_id`)}),
+    cb AS (${leafCritics(sql`p.blend_id = leaf.blend_id`)}),
+    jc AS (${leafJournal(sql`p.cigar_id = leaf.cigar_id`, restrict)}),
+    jb AS (${leafJournal(sql`p.blend_id = leaf.blend_id`, restrict)})
+    SELECT cc.score AS critic_cigar_score, cc.n AS critic_cigar_n,
+           cb.score AS critic_blend_score, cb.n AS critic_blend_n,
+           jc.score AS journal_cigar_score, jc.n AS journal_cigar_n,
+           jb.score AS journal_blend_score, jb.n AS journal_blend_n
+    FROM cc, cb, jc, jb
+  `);
+
+  const row = (rows.rows as unknown as LeafScoreRow[])[0];
+  if (row == null) return NO_SURFACE_SCORES;
+  return {
+    critics: pickLeaf(
+      { score: row.critic_cigar_score, n: row.critic_cigar_n },
+      { score: row.critic_blend_score, n: row.critic_blend_n },
+    ),
+    journal: pickLeaf(
+      { score: row.journal_cigar_score, n: row.journal_cigar_n },
+      { score: row.journal_blend_score, n: row.journal_blend_n },
+    ),
+  };
 }

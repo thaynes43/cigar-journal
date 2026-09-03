@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { CatalogCigarTile, OwnershipFacet } from "@cj/domain";
 import { ui } from "@/lib/ui";
-import { tileCaption, type CatalogLevel } from "./catalog-registry";
+import { tileCaption, CATALOG_SCORE_STRINGS, type CatalogLevel } from "./catalog-registry";
 import { BandTile } from "./band-tile";
 import { RatingSeal } from "./rating-seal";
 import { WantBadge } from "./want-badge";
@@ -22,6 +22,7 @@ export function CigarStillTile({
   imageUrl,
   level = "root",
   own = "all",
+  showCriticScore = false,
 }: {
   cigar: CatalogCigarTile;
   imageUrl?: string | null;
@@ -35,6 +36,13 @@ export function CigarStillTile({
   // under Want every tile is wanted, so the want mark is noise there and its
   // slot is better spent on a real difference between the tiles.
   own?: OwnershipFacet;
+  // Whether the grid is ordered by critic score (DESIGN-006). The badge appears
+  // ONLY then, because it is the sort key made visible — the one fact that
+  // explains why these tiles are in this order. Off any other ordering a leaf
+  // tile carries no score at all, and it never carries a journal figure in any
+  // ordering: the rating seal below is the viewer's own per-cigar rating and
+  // must stay exactly that (ADR-013 §1).
+  showCriticScore?: boolean;
 }) {
   const caption = tileCaption(cigar, level);
   const subtitle = [cigar.vitola.name, cigar.type].filter(Boolean).join(" · ");
@@ -77,11 +85,27 @@ export function CigarStillTile({
         {dims}
       </span>
     ) : null;
+  // The critic score, ONLY under the critic sort (DESIGN-006). It leads the row
+  // because it is the reason these tiles are in this order — the sort key made
+  // visible — and it displaces the dims filler outright rather than competing
+  // with it, so the row gains at most one item over its usual three. Labelled
+  // `Critics 91`, never a bare number, and it is the leaf's OWN score: a tile
+  // states no scope, so a blend's figure could not honestly appear here.
+  const critics =
+    showCriticScore && cigar.critics ? (
+      <span key="critics" className={`${ui.chip} tabular-nums`}>
+        {`${CATALOG_SCORE_STRINGS.critics} ${cigar.critics.score}`}
+      </span>
+    ) : null;
   // The three marks are never evicted; the dims chip only appears when a slot is
   // free (dims yields first), and it sits at the left of the row.
   const marks = [remaining, want, seal].filter((node) => node !== null);
   const badges = (
-    marks.length < 3 && dimsBadge ? [remaining, dimsBadge, want, seal] : [remaining, want, seal]
+    critics
+      ? [critics, remaining, want, seal]
+      : marks.length < 3 && dimsBadge
+        ? [remaining, dimsBadge, want, seal]
+        : [remaining, want, seal]
   ).filter((node) => node !== null);
 
   return (

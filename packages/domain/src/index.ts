@@ -95,11 +95,19 @@ export {
 export {
   getScoreAggregate,
   getScoreAggregates,
+  getSurfaceScore,
+  getSurfaceScores,
+  getLeafSurfaceScores,
+  NO_SURFACE_SCORES,
   type ScoreLevel,
   type ScoreAggregate,
   type JournalAggregate,
   type ScorePair,
   type JournalPopulation,
+  type SurfaceLevel,
+  type SurfaceScore,
+  type SurfaceScores,
+  type ScoreViewer,
 } from "./score-aggregates.js";
 
 // Catalog curation (ADR-006, DESIGN-003 §Curation): merge duplicates (tombstone,

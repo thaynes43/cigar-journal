@@ -785,15 +785,23 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Get cigar",
       description:
-        "Fetch full catalog detail (blend, vitola, origin) for one resolved cigar id. Use after search_cigars when factual specifics help the conversation.",
+        "Fetch full catalog detail (blend, vitola, origin) for one resolved cigar id, plus `scores` — the critic and journal aggregates, each with its sample count and the level (cigar or blend) it was computed at. Use after search_cigars when factual specifics help the conversation.",
       inputSchema: getCigarSchema,
       outputSchema: getCigarOutput,
       annotations: { readOnlyHint: true, title: "Get cigar" },
     },
     (args, extra) =>
       run("get_cigar", extra.authInfo, async ({ principal, scopes }) => {
-        const result = await getCigar(deps, principal, { cigarId: args.cigarId });
         const personal = scopes.includes(PERSONAL_SCOPE);
+        // The journal aggregate's population is scope-bounded like everything
+        // else personal here. With journal:read it is the viewer's (public
+        // journals plus the caller's own, DESIGN-006 rule 1); without it, the
+        // community population alone — a catalog-only token must not read a
+        // number the caller's own private ratings moved.
+        const result = await getCigar(deps, principal, {
+          cigarId: args.cigarId,
+          journalPopulation: personal ? "viewer" : "public",
+        });
         // The enrichment hint and pricing summary are catalog-scoped (ADR-009) —
         // same for every viewer, so they ride the base payload under catalog:read.
         // personalProfile and the want/favorite overlays are present only with
@@ -804,6 +812,12 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           cigar: result.cigar,
           enrichment: result.enrichment,
           pricing: result.pricing,
+          // ADR-013 §3 / DESIGN-006: two labelled aggregates, never mixed, each
+          // with its sample count and the level it was computed at. Always
+          // present — both members null when nothing has been observed — because
+          // "nobody has scored this" is an answer the model needs to be able to
+          // give, and an absent key reads as "the tool did not say".
+          scores: result.scores,
         };
         return jsonResult(
           personal
@@ -823,7 +837,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Browse catalog",
       description:
-        "Page the cigar catalog with composable filters and sorts — the tool for browsing, filtering, and shopping questions (use search_cigars instead to resolve one named cigar). Filters combine in one call: q (name/brand/line text), brand (one brand exactly), type (NC|CC), and independent booleans inHumidor / wanted / smoked / inStock (each true or false, all AND together). Sort by name, my-rating, recently-added, or price (cheapest current per-stick first; unpriced cigars last). Returns tiles with a catalog-scoped price-at-a-glance (per-stick with its packaging, or the package price) plus, under journal:read, the personal overlay (smokeCount, myRating, remaining, wanted, favorited); without journal:read the personal filters and overlay are omitted. Page with the returned nextCursor.",
+        "Page the cigar catalog with composable filters and sorts — the tool for browsing, filtering, and shopping questions (use search_cigars instead to resolve one named cigar). Filters combine in one call: q (name/brand/line text), brand (one brand exactly), type (NC|CC), criticScoreMin (0-100), and independent booleans inHumidor / wanted / smoked / inStock (each true or false, all AND together). Sort by name, my-rating, recently-added, price (cheapest current per-stick first; unpriced cigars last), or critic-score (best reviewed first; unscored cigars last). Returns tiles with a catalog-scoped price-at-a-glance (per-stick with its packaging, or the package price) and critics (the cigar’s own critic score with its observation count, null when unreviewed), plus — under journal:read — the personal overlay (smokeCount, myRating, remaining, wanted, favorited); without journal:read the personal filters and overlay are omitted. Page with the returned nextCursor.",
       inputSchema: browseCatalogSchema,
       outputSchema: browseCatalogOutput,
       annotations: { readOnlyHint: true, title: "Browse catalog" },
@@ -843,6 +857,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           type: args.type,
           sort: args.sort,
           inStock: args.inStock,
+          criticScoreMin: args.criticScoreMin,
           ...(personal
             ? { inHumidor: args.inHumidor, wanted: args.wanted, smoked: args.smoked }
             : {}),
@@ -860,6 +875,10 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           // Price-at-a-glance is catalog/market data — always included (ADR-009);
           // a per-stick figure always carries its packaging (shape-enforced).
           price: t.price,
+          // The leaf's own critic aggregate (ADR-013 §3, DESIGN-006) — catalog
+          // data like the price, so every caller sees it. Null when unreviewed,
+          // and never the blend's number: a tile states no scope.
+          critics: t.critics,
           // Personal overlay: present only with journal:read. hasProductPhoto is
           // a web-only tile field and stays excluded to keep the payload stable.
           ...(personal
