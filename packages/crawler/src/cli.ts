@@ -328,6 +328,12 @@ function formatSummary(
         `linked-cigar=${reviews.linkedCigar} linked-blend=${reviews.linkedBlend} ` +
         `recorded=${reviews.recorded} amended=${reviews.amended}`,
     );
+    // THE DRAIN'S PROGRESS, in the one line that shows it (#199). `2 -> 4` is two
+    // archive pages walked tonight, `87 -> 2` is the walk reaching the end of the
+    // archive and wrapping, and `5 -> 5` is a run that never got past page 1 — a
+    // `--limit`, or an index page that answered something other than 200. Without
+    // it a nightly log of a resumable walk looks identical every night.
+    lines.push(`  reviews archive cursor: page ${reviews.cursorFrom} → ${reviews.cursorTo}`);
     if (reviews.unresolved) {
       // THE NUMBER TO WATCH, and it gets its own line for the reason
       // `linksNoAnchor` does: these reviews named a cigar the catalog cannot

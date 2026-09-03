@@ -195,6 +195,34 @@ describe("migrations", () => {
     expect(JSON.stringify(checks.rows)).toContain("'other'");
   });
 
+  // 0038: the source's resume point (#199). Nullable, uninterpreted jsonb — what
+  // is pinned is that the column holds whatever an adapter puts in it and that a
+  // row starts with nothing, because "never resumed" is what every shop's row
+  // says forever.
+  it("0038 adds a nullable, uninterpreted crawl_cursor", async () => {
+    const column = await pg.db.execute(
+      sql`SELECT data_type, is_nullable, column_default
+            FROM information_schema.columns
+           WHERE table_schema = 'public' AND table_name = 'vendors' AND column_name = 'crawl_cursor'`,
+    );
+    expect(column.rows).toEqual([{ data_type: "jsonb", is_nullable: "YES", column_default: null }]);
+
+    const [fresh] = await pg.db
+      .insert(vendors)
+      .values({ name: "Cursorless Shop" })
+      .returning({ id: vendors.id, cursor: vendors.crawlCursor });
+    expect(fresh!.cursor).toBeNull();
+
+    // No CHECK: only the adapter that wrote it can say what a resume point means,
+    // so the column takes the reviewer lane's page and would take a token as well.
+    await pg.db.update(vendors).set({ crawlCursor: { archivePage: 87 } }).where(eq(vendors.id, fresh!.id));
+    const [resumed] = await pg.db
+      .select({ cursor: vendors.crawlCursor })
+      .from(vendors)
+      .where(eq(vendors.id, fresh!.id));
+    expect(resumed!.cursor).toEqual({ archivePage: 87 });
+  });
+
   it("0034 defaults the tier to 2 and refuses one outside [1, 9]", async () => {
     const [defaulted] = await pg.db
       .insert(vendors)

@@ -292,6 +292,13 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(runs).toHaveLength(3);
     expect(runs.every((r) => r.status === "succeeded")).toBe(true);
     expect(runs.every((r) => r.finishedAt !== null && r.stats !== null)).toBe(true);
+
+    // A SHOP HAS NO RESUME POINT (migration 0038, #199). Its sitemap walk sees the
+    // whole catalogue every night, so there is nothing to remember between runs —
+    // and three completed runs must leave `crawl_cursor` NULL rather than writing
+    // a value the vendor lane would then have to interpret.
+    const [shop] = await pg.db.select({ cursor: vendors.crawlCursor }).from(vendors).where(eq(vendors.id, vendorId));
+    expect(shop!.cursor).toBeNull();
   });
 
   // PACKAGING IS NEVER IDENTITY (ADR-012), and this is the case that says so end

@@ -1,0 +1,38 @@
+-- 0038_vendor_crawl_cursor — WHERE THE NEXT RUN PICKS UP (issue #199, the
+-- reviewer archive cursor). One nullable jsonb column on the source registry, and
+-- the only piece of crawl state that outlives a run.
+--
+-- WHY A SOURCE NEEDS ONE. A shop's walk is its sitemap: bounded, and every run
+-- sees the whole catalogue, so nothing has to be remembered between nights. A
+-- REVIEWER's enumeration is an archive that only grows — halfwheel is ~2,400
+-- reviews across ~220 index pages, and one polite run (40 fetches at its
+-- interval) reaches 33 of them. Without a resume point every night re-reads the
+-- same newest 33 and the decade behind them is unreachable; that is the limit
+-- slice 2a shipped with (#296) and this column removes. Page 1 is still walked
+-- first every night — the newest reviews are the ones edited after publication,
+-- and the write is idempotent on `(source, url)` so re-confirming them costs a
+-- fetch and changes nothing — and the REST of the page budget resumes where last
+-- night stopped, wrapping back to page 2 when the archive states its end.
+--
+-- JSONB, NOT AN INTEGER, and that is the decision this column is worth. A resume
+-- point belongs to the ADAPTER, and only the adapter knows what one is: the
+-- reviewer lane stores `{"archivePage": 87}`, a source paginated by continuation
+-- token would store the token, one walked by date would store a date. The crawler
+-- core does exactly two things with the value — read it into the run, write back
+-- what the run returned — so a new source shape needs no migration and no
+-- widening here.
+--
+-- NO CHECK, NO DEFAULT, NO BACKFILL. There is nothing general to CHECK about a
+-- value only one adapter can interpret, and a default would be this table
+-- asserting a shape it does not know. Every existing row starts NULL, which
+-- already means exactly "this source has never been resumed"; the lane decides
+-- what that means for it (page 2, for a reviewer archive whose page 1 is walked
+-- separately every run). A vendor lane neither reads nor writes it, so the column
+-- stays NULL for every shop.
+--
+-- WRITTEN IN THE RUN'S COMPLETION TRANSACTION (crawler `run-record.ts`): the
+-- cursor moves in the same transaction that marks `crawl_runs` succeeded, so a
+-- failed run leaves it exactly where it was and re-walks those pages tomorrow. A
+-- cursor advanced by a run that then died would skip them in silence — the one
+-- failure mode a resumable walk has, and the reason this is not a second UPDATE.
+ALTER TABLE vendors ADD COLUMN crawl_cursor jsonb;

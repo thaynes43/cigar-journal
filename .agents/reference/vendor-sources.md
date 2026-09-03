@@ -188,11 +188,28 @@ Two details that came out of the live read and are worth keeping:
 
 **Per-run budget.** 3 index pages -> 33 candidates, <= 33 review pages, 1 robots
 read = 37 fetches under `maxPages: 40` at `minIntervalMs: 4000` ~ 2.5 minutes.
-**The back catalogue is not walked** — ~2,400 reviews at that rate is hours, and
-reaching them needs a persisted index cursor slice 2a deliberately does not
-invent. Steady state is the newest ~33 reviews, re-confirmed nightly, which is
-what makes `last_seen_at` mean "still up" and an edited score arrive as an
-amendment rather than a duplicate.
+
+**The back catalogue drains across nights** (#199, migration 0038). ~2,400 reviews
+over ~220 index pages is hours of polite fetching, so no one run can hold them and
+the walk is resumable instead: `vendors.crawl_cursor` (jsonb, adapter-owned — this
+lane stores `{"archivePage": N}`) is where the next run picks up.
+
+- **Page 1 first, every run.** The newest eleven are re-confirmed nightly, which is
+  what makes `last_seen_at` mean "still up" and an edited score arrive as an
+  amendment rather than a duplicate. The write is idempotent on `(source, url)`, so
+  re-reading them costs eleven fetches and changes nothing.
+- **The other two index pages are the archive**, resumed at the cursor and
+  advancing it by the pages actually walked — including a page that 404s or that
+  robots refuses, which would otherwise stall the drain on it forever. A fresh row
+  (`crawl_cursor NULL`) starts at page 2.
+- **At the end of the archive the cursor wraps to page 2** and the walk cycles. Two
+  archive pages a night over ~220 pages is **~110 nights** to the bottom (~22 new
+  reviews a night); the second pass re-confirms and amends rather than duplicating.
+- **The cursor moves only in the transaction that closes the `crawl_runs` row.** A
+  failed run leaves it exactly where it was and re-walks those pages — a cursor
+  advanced by a run that then died would skip reviews with nothing downstream able
+  to notice. The run summary prints `reviews archive cursor: page N → M`, so the
+  fleet log shows the drain progressing.
 
 **Egress.** The dev pod cannot reach halfwheel.com (default-deny
 CiliumNetworkPolicy on `dev`), but namespace **`frontend` has no network policy** —
@@ -226,6 +243,11 @@ haynes-ops change is required.
 5. First-run expectation: 33 candidates, ~33 parsed, and an `unresolved` count that
    is the registry-alias gap rather than a matcher fault. Watch it fall as Wave 3
    curation adds aliases.
+6. Nightly, watch `reviews archive cursor: page N → M` climb — that is the back
+   catalogue draining. To restart the archive walk (a parser fix that changes what
+   old pages yield, say):
+   `UPDATE vendors SET crawl_cursor = NULL WHERE name = 'halfwheel';` — the column
+   is read defensively, so a bad hand-written value costs a re-walk, never a run.
 
 ## Vendor enablement — the bar `--probe` now holds
 

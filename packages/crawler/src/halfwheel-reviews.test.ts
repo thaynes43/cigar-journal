@@ -6,6 +6,7 @@ import { brandSlug, fold } from "@cj/domain";
 import { runIngest, type IngestDeps } from "./core/ingest.js";
 import { adapterPosture } from "./core/vendor-posture.js";
 import { halfwheel } from "./adapters/halfwheel.js";
+import { MaxPagesExceededError } from "./core/fetcher.js";
 import { createMockFetcher, loadFixture, type MockFetcher } from "./testing/fixtures.js";
 
 // THE REVIEWER LANE END TO END, over a real embedded Postgres (ADR-013 §2, issue
@@ -20,9 +21,10 @@ import { createMockFetcher, loadFixture, type MockFetcher } from "./testing/fixt
 // carries the provenance a human could check the claim with.
 
 const ROBOTS = "https://halfwheel.com/robots.txt";
+const indexPage = (page: number): string => `https://halfwheel.com/category/reviews/cigars/page/${page}/`;
 const INDEX_1 = "https://halfwheel.com/category/reviews/cigars/";
-const INDEX_2 = "https://halfwheel.com/category/reviews/cigars/page/2/";
-const INDEX_3 = "https://halfwheel.com/category/reviews/cigars/page/3/";
+const INDEX_2 = indexPage(2);
+const INDEX_3 = indexPage(3);
 const ALADINO = "https://halfwheel.com/aladino-250th/478243/";
 const ASHLAR = "https://halfwheel.com/hiram-solomon-ashlar/477873/";
 const JAMIE_FOXX = "https://halfwheel.com/ag-cigars-legendary-moment-jamie-foxx/476898/";
@@ -86,6 +88,15 @@ describe("halfwheel reviewer lane (embedded Postgres)", () => {
 
   const cigarCount = async (): Promise<number> =>
     (await pg.db.select({ id: cigars.id }).from(cigars)).length;
+
+  // `vendors.crawl_cursor` as the registry holds it (migration 0038) — the row the
+  // next run resumes from.
+  const cursorOf = async (): Promise<unknown> =>
+    (await pg.db.select({ cursor: vendors.crawlCursor }).from(vendors).where(eq(vendors.id, sourceId)))[0]!.cursor;
+
+  const setCursor = async (cursor: unknown): Promise<void> => {
+    await pg.db.update(vendors).set({ crawlCursor: cursor }).where(eq(vendors.id, sourceId));
+  };
 
   beforeAll(async () => {
     pg = await startTestPostgres();
@@ -157,6 +168,9 @@ describe("halfwheel reviewer lane (embedded Postgres)", () => {
 
   it("walks the archive, links what resolves, and mints nothing for what does not", async () => {
     const before = await cigarCount();
+    // A FRESH SOURCE ROW HAS NO RESUME POINT, which the lane reads as "start the
+    // archive at page 2" — page 1 is the newest reviews and is walked every run.
+    expect(await cursorOf()).toBeNull();
     const fetcher = createMockFetcher(routes());
     const result = await runIngest(deps(fetcher), { adapter: halfwheel, vendorId: sourceId, mode: "enrich" });
 
@@ -174,6 +188,11 @@ describe("halfwheel reviewer lane (embedded Postgres)", () => {
       unresolved: 1,
       recorded: 2,
       amended: 0,
+      // Started at page 2 (no stored cursor), walked pages 2 and 3, and page 3
+      // stated the end of this three-page archive — so the cursor wraps rather
+      // than pointing past the last page.
+      cursorFrom: 2,
+      cursorTo: 2,
     });
     // A REVIEWER STOCKS NOTHING, SO IT MINTS NOTHING. The unresolved review is
     // the exact population seed mode would have minted from a vendor listing;
@@ -184,8 +203,10 @@ describe("halfwheel reviewer lane (embedded Postgres)", () => {
     expect(result.report.join("\n")).toContain("no catalog target — not minted");
 
     // The lane fetched robots, three index pages and four reviews — no sitemap,
-    // no images, nothing else.
+    // no images, nothing else. PAGE 1 FIRST, then the archive from the cursor.
     expect(fetcher.requested).toEqual([ROBOTS, INDEX_1, INDEX_2, INDEX_3, ALADINO, ASHLAR, JAMIE_FOXX, ZINO]);
+    // …and the resume point is persisted, so tomorrow's run does not start over.
+    expect(await cursorOf()).toEqual({ archivePage: 2 });
   });
 
   it("writes the score, the provenance and exactly one target per row", async () => {
@@ -324,6 +345,77 @@ describe("halfwheel reviewer lane (embedded Postgres)", () => {
     expect(result.error).toContain("robots.txt disallows the review index");
   });
 
+  // ------------------------------------------------------------------------
+  // THE ARCHIVE CURSOR (#199, migration 0038). The back catalogue is ~220 index
+  // pages against a run that can afford three, so the walk has to be resumable:
+  // page 1 every night, the rest of the budget from where last night stopped.
+  // ------------------------------------------------------------------------
+  it("resumes the archive at the stored cursor and advances it by the pages it walked", async () => {
+    // A source mid-drain: several nights in, its cursor names page 5.
+    await setCursor({ archivePage: 5 });
+    const fetcher = createMockFetcher(
+      routes({
+        [indexPage(5)]: { body: fixture("reviews-index-page2.html") },
+        [indexPage(6)]: { body: fixture("reviews-index-page2.html") },
+      }),
+    );
+    const result = await runIngest(deps(fetcher), { adapter: halfwheel, vendorId: sourceId, mode: "enrich" });
+
+    expect(result.status).toBe("succeeded");
+    // PAGE 1 FIRST, then pages 5 and 6 — never pages 2-4, which earlier runs walked.
+    expect(fetcher.requested.slice(0, 4)).toEqual([ROBOTS, INDEX_1, indexPage(5), indexPage(6)]);
+    // Both archive pages carried the same card, and the walk enumerated it once:
+    // page 1's three plus Zino, not five.
+    expect(result.stats.reviews).toMatchObject({ indexPages: 3, candidates: 4, cursorFrom: 5, cursorTo: 7 });
+    expect(await cursorOf()).toEqual({ archivePage: 7 });
+  });
+
+  it("wraps to the first archive page when the index states its end", async () => {
+    // Picks up where the test above left it, which is the point: these run in the
+    // order a fleet would.
+    expect(await cursorOf()).toEqual({ archivePage: 7 });
+    const fetcher = createMockFetcher(routes({ [indexPage(7)]: { body: fixture("reviews-index-empty.html") } }));
+    const result = await runIngest(deps(fetcher), { adapter: halfwheel, vendorId: sourceId, mode: "enrich" });
+
+    expect(result.status).toBe("succeeded");
+    // The empty page ENDS the walk — page 8 is never asked for — and the reviews
+    // page 1 enumerated are still fetched.
+    expect(fetcher.requested).toEqual([ROBOTS, INDEX_1, indexPage(7), ALADINO, ASHLAR, JAMIE_FOXX]);
+    expect(result.stats.reviews).toMatchObject({ indexPages: 2, candidates: 3, cursorFrom: 7, cursorTo: 2 });
+    // Round again: a second pass re-confirms rather than duplicates, because every
+    // write is idempotent on `(source, url)`.
+    expect(await cursorOf()).toEqual({ archivePage: 2 });
+    expect(await observations()).toHaveLength(2);
+  });
+
+  it("leaves the cursor untouched when the run fails", async () => {
+    await setCursor({ archivePage: 5 });
+    // The real fetcher THROWS at its max-pages guard, which is the shape of a
+    // failure that lands mid-walk — after the run has already walked, and
+    // counted, an archive page.
+    const base = createMockFetcher(routes({ [indexPage(5)]: { body: fixture("reviews-index-page2.html") } }));
+    const fetcher: MockFetcher = {
+      requested: base.requested,
+      get pagesFetched() {
+        return base.pagesFetched;
+      },
+      fetchText: async (url: string) => {
+        if (url === indexPage(6)) throw new MaxPagesExceededError(halfwheel.maxPages!);
+        return base.fetchText(url);
+      },
+      fetchBinary: base.fetchBinary,
+    };
+    const result = await runIngest(deps(fetcher), { adapter: halfwheel, vendorId: sourceId, mode: "enrich" });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("max-pages guard");
+    // Page 5 was walked and the run's own stats had already moved past it — but
+    // the cursor is written in the completion transaction, and this run never
+    // completed. Tomorrow re-walks page 5 rather than skipping it in silence.
+    expect(result.stats.reviews).toMatchObject({ cursorFrom: 5, cursorTo: 6 });
+    expect(await cursorOf()).toEqual({ archivePage: 5 });
+  });
+
   it("honors --limit and reports would-writes without touching the database on a dry run", async () => {
     const before = await observations();
     const fetcher = createMockFetcher(routes());
@@ -342,5 +434,24 @@ describe("halfwheel reviewer lane (embedded Postgres)", () => {
     expect(result.report.join("\n")).toContain("score=89/0-100");
     // The dry run wrote nothing: same rows, same timestamps.
     expect(await observations()).toEqual(before);
+  });
+
+  it("computes the cursor on a dry run and never writes it", async () => {
+    await setCursor({ archivePage: 9 });
+    const fetcher = createMockFetcher(routes({ [indexPage(9)]: { body: fixture("reviews-index-page2.html") } }));
+    const result = await runIngest(deps(fetcher), {
+      adapter: halfwheel,
+      vendorId: sourceId,
+      mode: "enrich",
+      dryRun: true,
+    });
+
+    // It resumed from the stored cursor and reports where it would leave it…
+    expect(fetcher.requested.slice(0, 3)).toEqual([ROBOTS, INDEX_1, indexPage(9)]);
+    expect(result.stats.reviews).toMatchObject({ cursorFrom: 9, cursorTo: 11 });
+    // …and wrote nothing: a dry run opens no `crawl_runs` row, and the cursor
+    // moves only in that row's completion transaction.
+    expect(result.crawlRunId).toBeNull();
+    expect(await cursorOf()).toEqual({ archivePage: 9 });
   });
 });

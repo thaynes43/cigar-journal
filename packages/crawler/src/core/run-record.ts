@@ -1,5 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
-import { crawlRuns, type Database, type Pool } from "@cj/db";
+import { crawlRuns, vendors, type Database, type Pool } from "@cj/db";
 import type { Queryer } from "@cj/domain";
 import type { CrawlMode } from "./ingest.js";
 
@@ -47,7 +47,16 @@ export interface OpenCrawlRun {
   crawlRunId: string;
   // Close the row with a terminal status. Also disposes the handler: once the row
   // is closed there is nothing for a signal to reclaim.
-  close(outcome: CrawlRunOutcome, patch: { stats: unknown; error?: string | null }): Promise<void>;
+  //
+  // `cursor` is this source's new `vendors.crawl_cursor` (migration 0038, #199),
+  // written IN THE SAME TRANSACTION as the completion row. Omitted — which is
+  // every shop's run and every failed run — the column is not touched at all,
+  // which is not the same as writing null: a lane that did not walk a resumable
+  // archive has no opinion about where the next walk starts.
+  close(
+    outcome: CrawlRunOutcome,
+    patch: { stats: unknown; error?: string | null; cursor?: unknown },
+  ): Promise<void>;
   // Remove the signal handler without touching the row — the `finally` path, so a
   // long-lived process (or a test) does not accumulate listeners.
   dispose(): void;
@@ -116,10 +125,26 @@ export async function openCrawlRun(
     crawlRunId,
     close: async (outcome, patch) => {
       disarm();
-      await db
-        .update(crawlRuns)
-        .set({ status: outcome, stats: patch.stats, error: patch.error ?? null, finishedAt: input.now() })
-        .where(eq(crawlRuns.id, crawlRunId));
+      const completion = {
+        status: outcome,
+        stats: patch.stats,
+        error: patch.error ?? null,
+        finishedAt: input.now(),
+      };
+      if (patch.cursor === undefined) {
+        await db.update(crawlRuns).set(completion).where(eq(crawlRuns.id, crawlRunId));
+        return;
+      }
+      // ONE TRANSACTION, AND THIS IS THE WHOLE POINT OF THE PARAMETER (#199). A
+      // resume point advanced by a run that then failed to record itself skips the
+      // pages it claimed to have walked, and nothing downstream could ever notice:
+      // the reviews are simply never fetched. Committing "this run succeeded" and
+      // "the next run starts here" together makes the two facts inseparable — the
+      // cursor moves exactly when the run that moved it is on the record.
+      await db.transaction(async (tx) => {
+        await tx.update(crawlRuns).set(completion).where(eq(crawlRuns.id, crawlRunId));
+        await tx.update(vendors).set({ crawlCursor: patch.cursor }).where(eq(vendors.id, input.vendorId));
+      });
     },
     dispose: disarm,
   };

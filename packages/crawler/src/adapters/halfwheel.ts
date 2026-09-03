@@ -81,13 +81,18 @@ import type { ReviewerAdapter, ReviewIndexEntry, ReviewParse } from "./types.js"
 //               `crawl-offers-fleet` must not fail a whole fleet run because one
 //               enabled source sells nothing.
 //   budget      3 index pages → 33 candidates, ≤ 33 review pages, 1 robots = 37
-//               fetches under a `maxPages` of 40, at 4s each ≈ 2.5 minutes. THE
-//               BACK CATALOGUE IS NOT WALKED: ~2,400 reviews at this rate is hours,
-//               and reaching them needs a persisted index cursor that slice 2a
-//               deliberately does not invent. Steady state is the newest ~33
-//               reviews, re-confirmed every night — which is what makes
-//               `last_seen_at` mean "still up" and an edited score arrive as an
-//               amendment rather than a duplicate.
+//               fetches under a `maxPages` of 40, at 4s each ≈ 2.5 minutes.
+//   archive     THE BACK CATALOGUE DRAINS ACROSS NIGHTS (#199, migration 0038),
+//               and the budget above is why it has to: ~2,400 reviews over ~220
+//               index pages is hours of polite fetching, so no single run can hold
+//               them. Each run walks page 1 — the newest eleven, re-confirmed, so
+//               `last_seen_at` means "still up" and an edited score arrives as an
+//               amendment rather than a duplicate — and spends the other two index
+//               pages on the archive, resuming from `vendors.crawl_cursor` and
+//               leaving it two pages further on. Two pages a night over 220 is
+//               ~110 nights to the bottom, at which point the cursor wraps to page
+//               2 and the walk cycles; the second pass costs nothing but fetches,
+//               because every write is idempotent on `(source, url)`.
 //
 // --- what the in-cluster probe must confirm before `crawlEnabled` flips -------
 //   1. robots still allows `/` for our UA and still puts us in the `*` group.
@@ -147,7 +152,11 @@ export const halfwheel: ReviewerAdapter = {
       page <= 1
         ? "https://halfwheel.com/category/reviews/cigars/"
         : `https://halfwheel.com/category/reviews/cigars/page/${page}/`,
-    maxIndexPages: 3,
+    // Three index pages per run: PAGE 1 PLUS TWO ARCHIVE PAGES (#199). The split is
+  // the lane's, not the adapter's — what this number says is how many index
+  // fetches one run may spend, and 3 is what leaves room for the 33 review pages
+  // they enumerate under `maxPages: 40`.
+  maxIndexPages: 3,
     maxReviews: 33,
     nativeScale: "0-100",
     parseIndex: parseHalfwheelIndex,
