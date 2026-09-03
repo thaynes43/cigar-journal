@@ -2258,11 +2258,11 @@ export interface WorklistMatch {
   //                    the fix is a brand alias, and minting from this state is
   //                    how a flat namespace grew a parallel catalogue per vendor
   //                    (ADR-012).
-  //   ambiguous      — a brand anchored but no single leaf came out. Either
-  //                    several of its leaves fit, or the listing is an assortment
-  //                    (sampler) naming none — the parse says which. NOT always
-  //                    "several candidates"; both shapes are the same instruction
-  //                    to the queue: a human chooses, nothing is minted.
+  //   ambiguous      — a brand anchored and several of its leaves fit, so no
+  //                    single one settled. A human chooses; nothing is minted.
+  //                    An ASSORTMENT no longer arrives here (#164): a sampler or
+  //                    a mixed bundle is skipped as a non-cigar, because the only
+  //                    resolution a curator could ever give it was "not a cigar".
   // Absent means the row is an `auto` proposal, which needs no reason.
   reason?: ListingUnmatchedReason;
   // THE RESOLVER'S OWN PARSE of this listing (migration 0027), surfaced so a

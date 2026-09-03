@@ -99,7 +99,12 @@ export async function writePurchase(
           type: purchase.type,
           vitola: { name: purchase.vitola, lengthInches: purchase.lengthInches, ringGauge: purchase.ringGauge },
         },
-      });
+      },
+      // The ledger is a record of what was BOUGHT, and samplers were bought
+      // (`Oliva Free Sampler`, and more like it). The assortment refusal is the
+      // smoke path's (#164 Q1); replaying history through it would drop rows the
+      // owner still holds.
+      { allowAssortment: true });
 
       const inserted = await tx
         .insert(purchases)

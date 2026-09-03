@@ -1,4 +1,4 @@
-import { parsePackagingFacts, type PackagingFacts } from "@cj/domain";
+import { assortmentPhrase, parsePackagingFacts, type PackagingFacts } from "@cj/domain";
 import { productImageUrl, type JsonLdOffer, type JsonLdPriceSpecification, type JsonLdProduct } from "./jsonld.js";
 import type { VariantPrice } from "./variant-prices.js";
 import type { CategorySource, ImpliedPackaging, ProductMarkup, VendorAdapter } from "../adapters/types.js";
@@ -298,8 +298,18 @@ export function isCigarCategory(categoryPath: string[], adapter: VendorAdapter):
 
 // The full listing gate: cigar category AND not a set/kit/mixed case by name
 // (those live under cigar categories but are not one catalog cigar).
+//
+// THE ASSORTMENT RULE IS SHARED, NOT PER-ADAPTER (#164). Two adapters had hand-
+// written `excludeNamePattern`s for samplers and sets and the rest had none, so
+// whether `Mix & Match Cuban Cigar Bundle` reached the matcher depended on which
+// shop published it — and where it did reach, it became a triage row a curator
+// had to close by hand. `assortmentPhrase` is the one vocabulary
+// (`@cj/domain`), so every vendor answers the same way, before a connection is
+// opened. The adapter patterns stay: they also exclude accessories and vintage
+// listings, which are a different question.
 export function isCigarListing(listing: NormalizedListing, adapter: VendorAdapter): boolean {
   if (!isCigarCategory(listing.categoryPath, adapter)) return false;
   if (adapter.excludeNamePattern?.test(listing.name)) return false;
+  if (assortmentPhrase(listing.name) != null) return false;
   return true;
 }

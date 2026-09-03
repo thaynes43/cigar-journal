@@ -162,8 +162,32 @@ describe("isCigarListing", () => {
     expect(isCigarListing(listing("Taste of Oliva Sampler"), foxCigar)).toBe(false);
   });
 
+  // THE SHARED ASSORTMENT RULE (#164), which is not per-adapter. Fox declares no
+  // `excludeNamePattern` at all, so before this every one of these reached the
+  // matcher and became a triage row nobody could resolve except by saying "not a
+  // cigar". The vocabulary lives in `@cj/domain`, so every vendor answers alike.
+  it("rejects an assortment whatever the adapter declares", () => {
+    expect(isCigarListing(listing("Mix & Match Cuban Cigar Bundle (Outlet)"), foxCigar)).toBe(false);
+    expect(isCigarListing(listing("Club & Mini Outlet Bundle Deal"), foxCigar)).toBe(false);
+    expect(isCigarListing(listing("Cohiba 3-Pack Trio Deal"), foxCigar)).toBe(false);
+    expect(isCigarListing(listing("Drew Estate Free 8-Cigar Sampler"), foxCigar)).toBe(false);
+  });
+
   it("keeps a plain cigar listing", () => {
     expect(isCigarListing(listing("Arturo Fuente Don Carlos Double Robusto"), foxCigar)).toBe(true);
+  });
+
+  // `Bundles` is a brand-line name for bundle cigars, and `Amazon` carries `mazo`
+  // — the two traps #164 names. Both are single cigars and both must pass.
+  it("keeps a bundle LINE and an identity word that contains a container word", () => {
+    expect(isCigarListing(listing("Dominican Bundles Toro"), foxCigar)).toBe(true);
+    expect(isCigarListing(listing("Nicaraguan Bundles Robusto"), foxCigar)).toBe(true);
+    expect(isCigarListing(listing("CAO Brazilia Amazon"), foxCigar)).toBe(true);
+    // AND THE MULTI-MARCA CASE IS DELIBERATELY NOT A NAME-GATE CASE: the words
+    // alone cannot tell this from a product title, so it passes here and the
+    // BRAND REGISTRY refuses it downstream (matching-v2.test.ts). Pinned so the
+    // downstream test cannot silently start passing for this reason instead.
+    expect(isCigarListing(listing("Padrón & Montecristo Dominican Bundle"), foxCigar)).toBe(true);
   });
 });
 

@@ -678,16 +678,17 @@ async function ingestListing(
       status = "unmatched";
       silentVerdict = "no_anchor";
       stats.linksNoAnchor = (stats.linksNoAnchor ?? 0) + 1;
-    } else if (result.kind === "sampler") {
-      // A mixed box is not one catalog cigar (docs/ddd/cigar-industry-vocabulary.md).
-      // It shares `ambiguous` as its stored reason because 0027 widened the CHECK
-      // by exactly two values and a sampler is, from the queue's point of view,
-      // the same instruction — a human decides, nothing is minted. It does NOT
-      // share the counter: `linksAmbiguous` is read as "collapse buckets still
-      // needing a split", and a shop's sampler shelf would drown that signal.
-      // The parse says which it is, in words, on the row.
-      status = "unmatched";
-      silentVerdict = "ambiguous";
+    } else if (result.kind === "assortment") {
+      // A mixed box is not one catalog cigar (docs/ddd/cigar-industry-vocabulary.md),
+      // AND IT IS NOT A QUESTION EITHER (#164). It used to be filed as a triage
+      // row sharing `ambiguous`'s stored reason, which handed a curator a queue of
+      // rows whose only possible resolution was "not a cigar" — 30-odd of them on
+      // prod, and every shop's sampler shelf feeding more. It is now counted where
+      // the gate counts an accessory: skipped, no listing_matches row, no offer,
+      // no cigar. An existing link is untouched, because writing nothing cannot
+      // break one (the positive-evidence rule).
+      stats.skippedNonCigar += 1;
+      return null;
     } else if (result.kind === "ambiguous") {
       // The brand anchored and more than one of its leaves fits. Minting would be
       // the collapse-bucket failure in reverse: a new row for a product the

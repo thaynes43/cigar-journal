@@ -3,10 +3,14 @@ import { blends, brands, lines } from "@cj/db";
 import type { Queryer } from "./deps.js";
 import { windowKeys, fold, anchorByAlias, registrySlugCandidates, MIN_ANCHOR_KEY_LENGTH, type AliasCandidate } from "./taxonomy-keys.js";
 import {
+  assortmentPhrase,
+  assortmentBrands,
+  joinsTwoClaims,
   parseListingTitle,
   stripPackaging,
   extractDims,
   tokenizeTitle,
+  type AssortmentReason,
   type ListingParse,
   type ParseRegistry,
 } from "./catalog-parse.js";
@@ -90,6 +94,29 @@ export async function parseListing(db: Queryer, title: string): Promise<ListingP
     blendsOfLine: (lineId) => blendRows.filter((row) => row.lineId === lineId),
   };
   return parseListingTitle(title, registry);
+}
+
+// IS THIS NAME AN ASSORTMENT? — the registry-backed half of the pure rule in
+// catalog-parse.ts, for callers that hold a name rather than a parse. The journal
+// resolver is the one that needs it: a described cigar never goes through
+// `parseListingTitle`, and "the name is several cigars" is a refusal it has to
+// make before it compares anything (#164 Q1).
+//
+// THE PROBE IS SKIPPED UNLESS THE NAME JOINS TWO CLAIMS. The words decide almost
+// every case for free, and the multi-marca rule cannot fire on a name with no
+// `&`/`and` in it, so the ordinary described cigar costs not one extra query.
+export async function assortmentOf(db: Queryer, name: string): Promise<AssortmentReason | null> {
+  const phrase = assortmentPhrase(name);
+  if (phrase != null) return phrase;
+
+  // Asked over the name with packaging removed, exactly as `parseListingTitle`
+  // asks it, so the two surfaces classify one name the same way.
+  const { cleaned } = stripPackaging(name);
+  if (!joinsTwoClaims(cleaned)) return null;
+
+  const { keys } = tokenizeTitle(cleaned);
+  const brandRows = await probeBrands(db, windowKeys(keys));
+  return assortmentBrands(cleaned, brandRows) ? "multi-brand" : null;
 }
 
 // --------------------------------------------------------------------------
@@ -345,12 +372,12 @@ export type LeafChoice =
   | { kind: "none"; note: string }
   // A retailer assortment. Its own arm rather than a `many` with an empty list,
   // because the two are different facts and the type should not blur them: an
-  // `ambiguous` listing is about SEVERAL leaves and a sampler is about NONE of
-  // them — "a mixed box is not one catalog cigar". Returning `many` with no
+  // `ambiguous` listing is about SEVERAL leaves and an assortment is about NONE
+  // of them — "a mixed box is not one catalog cigar". Returning `many` with no
   // candidates promised a curator a choice and handed them nothing, and it
   // inflated the ambiguity counter whose whole job is to point at collapse
   // buckets that need splitting.
-  | { kind: "sampler"; note: string };
+  | { kind: "assortment"; reason: AssortmentReason; note: string };
 
 function structuralMatches(parse: ListingParse, candidates: LeafCandidate[]): LeafCandidate[] | null {
   // Structure beats strings whenever both sides have it. A shared `blend_id` is
@@ -370,16 +397,20 @@ function structuralMatches(parse: ListingParse, candidates: LeafCandidate[]): Le
 // Pick the leaf, or refuse. Pure: the scope query already did the only reading
 // this needs, so every rule below is testable against literal candidate rows.
 export function chooseLeaf(parse: ListingParse, candidates: LeafCandidate[]): LeafChoice {
-  // THE SAMPLER TEST COMES FIRST, and the order is load-bearing: `none` is the
+  // THE ASSORTMENT TEST COMES FIRST, and the order is load-bearing: `none` is the
   // arm that licenses seed mode to MINT, so checking an empty candidate set
-  // before checking the sampler would mint a catalog row called "Sampler" for
+  // before checking the assortment would mint a catalog row called "Sampler" for
   // every assortment of a marca whose leaves are not in the catalog yet — which
   // is the newest brand in every crawl. A retailer assortment names no single
   // product (the industry vocabulary is explicit: "a mixed box is not one catalog
-  // cigar"). The outcome a human sees is the same as an ambiguity — triage,
-  // nothing minted — but the fact is different, so it gets its own arm.
-  if (parse.sampler) {
-    return { kind: "sampler", note: "Sampler listing — spans blends, so it names no single leaf." };
+  // cigar"), whether it says so with the word `Sampler`, with `Mix & Match`, with
+  // a bundle-deal phrase, or by joining two marcas (#164 Q1).
+  if (parse.assortment) {
+    return {
+      kind: "assortment",
+      reason: parse.assortment,
+      note: `Assortment listing (${parse.assortment}) — it spans products, so it names no single leaf.`,
+    };
   }
 
   if (candidates.length === 0) return { kind: "none", note: "No leaf exists under this brand yet." };

@@ -5,6 +5,7 @@ import { createHarness, newRequestId, type DomainHarness } from "./testing/harne
 import { brandSlug } from "./catalog-browse.js";
 import { fold } from "./taxonomy-keys.js";
 import {
+  assortmentOf,
   parseListing,
   scopedLeafCandidates,
   chooseLeaf,
@@ -97,6 +98,31 @@ describe("taxonomy resolution", () => {
     it("yields no anchor for a marca the registry does not know", async () => {
       const parse = await parseListing(h.deps.db, "Xikar HP3 Lighter");
       expect(parse.brandId).toBeNull();
+    });
+  });
+
+  // The named-name half of the assortment rule (#164 Q1), which the JOURNAL asks
+  // — a described cigar never goes through `parseListingTitle`, so it needs the
+  // same verdict over a bare string.
+  describe("assortmentOf", () => {
+    it("reads the shelf words with no query at all", async () => {
+      expect(await assortmentOf(h.deps.db, "Drew Estate Free 8-Cigar Sampler")).toBe("sampler");
+      expect(await assortmentOf(h.deps.db, "Mix & Match Cuban Cigar Bundle")).toBe("mix-and-match");
+      expect(await assortmentOf(h.deps.db, "Club & Mini Outlet Bundle Deal")).toBe("bundle-deal");
+    });
+
+    it("asks the registry when a name joins two claims", async () => {
+      expect(await assortmentOf(h.deps.db, "Padrón & Drew Estate DOMINICAN Bundle")).toBe("multi-brand");
+      // One marca joined to a word that is not one is still one cigar.
+      expect(await assortmentOf(h.deps.db, "Padrón 1964 Anniversary Maduro & Natural Toro")).toBe(null);
+    });
+
+    it("leaves an ordinary described cigar alone", async () => {
+      expect(await assortmentOf(h.deps.db, "Padrón 1964 Anniversary Maduro Torpedo")).toBe(null);
+      // The `mazo` inside `Amazon`, again: the assortment rule reads the same
+      // names the packaging strip does, so the trap has to be closed in both.
+      expect(await assortmentOf(h.deps.db, "CAO Brazilia Amazon")).toBe(null);
+      expect(await assortmentOf(h.deps.db, "Dominican Bundles Toro")).toBe(null);
     });
 
     // Structural scoping, enforced by the query rather than by a filter that could
@@ -297,21 +323,31 @@ describe("taxonomy resolution", () => {
       const parse = await parseListing(h.deps.db, "Padrón 1964 Anniversary Sampler");
       const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
       // Its OWN arm, not an ambiguity with an empty candidate list: an ambiguous
-      // listing is about several leaves and a sampler is about none of them, and
-      // the counter that watches for unsplit collapse buckets must not be fed by
-      // a shop's sampler shelf.
-      expect(choice.kind).toBe("sampler");
+      // listing is about several leaves and an assortment is about none of them,
+      // and the counter that watches for unsplit collapse buckets must not be fed
+      // by a shop's sampler shelf.
+      expect(choice.kind).toBe("assortment");
     });
 
     // ORDER MATTERS HERE. `none` is the arm that licenses seed mode to mint, so
-    // a sampler tested after the empty-candidate check would mint a catalog row
-    // called "Sampler" for every assortment of a marca whose leaves are not in
-    // the catalog yet — which is the newest brand in every single crawl.
+    // an assortment tested after the empty-candidate check would mint a catalog
+    // row called "Sampler" for every assortment of a marca whose leaves are not
+    // in the catalog yet — which is the newest brand in every single crawl.
     it("refuses a sampler even when the brand has no leaves at all", async () => {
       await seedBrand("Sampler Only Marca");
       const parse = await parseListing(h.deps.db, "Sampler Only Marca Assortment Sampler");
       const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
-      expect(choice.kind).toBe("sampler");
+      expect(choice.kind).toBe("assortment");
+    });
+
+    // TWO MARCAS JOINED IS A SHELF (#164 Q1), and the registry is what says so —
+    // the rule hand-writes no brand list, it asks the alias probe whether each
+    // half of the conjunction names a marca.
+    it("refuses a listing that joins two marcas", async () => {
+      const parse = await parseListing(h.deps.db, "Padrón & Drew Estate DOMINICAN Bundle (Outlet)");
+      const choice = chooseLeaf(parse, await scopedLeafCandidates(h.deps.db, parse));
+      expect(choice.kind).toBe("assortment");
+      expect(choice.kind === "assortment" && choice.reason).toBe("multi-brand");
     });
 
     it("reports no leaf when the brand is known but the product is new", async () => {

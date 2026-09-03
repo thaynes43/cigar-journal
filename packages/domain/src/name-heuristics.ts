@@ -219,6 +219,15 @@ export function numbersCompatible(query: string, candidate: string): boolean {
 
 // Incompatible when EITHER side carries a packaging token the other lacks — a
 // Tubos Pack / tin / sampler is a packaging variant, not the product.
+//
+// NO LONGER READ BY THE JOURNAL (ADR-012 amendment, #164). `resolveCigar` strips
+// packaging off a described name instead of comparing it, because "packaging is
+// never identity" makes a container word an offer fact rather than a reason to
+// mint a second row. What still reads it compares two RAW names — the crawler's
+// `leafBindingCompatible` and the curation duplicate queue, via
+// `strongLinkCompatible` — where a `… 5 Pack` catalog row is a real row whose
+// packaging is the only thing separating it from its base, and Wave 3 merges
+// rather than links it.
 export function packagingCompatible(query: string, candidate: string): boolean {
   return mutuallyContained(packagingTokens(query), packagingTokens(candidate));
 }
@@ -519,7 +528,16 @@ export function strongLinkCompatible(query: string, candidate: string): boolean 
 // past the name, on a word that names WHICH CIGAR IT IS.
 export function journalLinkCompatible(query: string, candidate: string): boolean {
   if (!numbersCompatible(query, candidate)) return false;
-  if (!packagingCompatible(query, candidate)) return false;
+  // `packagingCompatible` IS DELIBERATELY NOT HERE (ADR-012 amendment, #164).
+  // PACKAGING IS NEVER IDENTITY, so a container word is not a reason to refuse a
+  // link — it is a fact about an offer. `resolveCigar` strips packaging off BOTH
+  // names before it calls this, and the vocabulary strike below removes any
+  // container word a strip left behind, so the guard had nothing left to judge
+  // except the case it got wrong: `Undercrown Shade 5 Pack` refusing the base
+  // `Undercrown Shade` and minting a packaging SKU into the journal's catalog.
+  // The predicate survives for the CRAWLER and the curation duplicate queue,
+  // which compare two raw catalog names (`strongLinkCompatible`).
+  //
   // A STATED disagreement only: `unstated` is the collapse-bucket signature, not
   // a contradiction, and refusing it would mint a second row for every user who
   // says the wrapper out loud (`variantRelation`).

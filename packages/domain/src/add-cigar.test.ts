@@ -163,7 +163,13 @@ describe("addCigar", () => {
 
   // ---- packaging / one-sided-number guard + confirmedDistinct escape hatch ---
 
-  it("the reported repro: 'Davidoff Signature 2000' creates distinct of both Signature and its Tubos Pack, and a smoke saves against it", async () => {
+  // THE REPORTED REPRO, AND HALF OF IT WAS RE-DECIDED BY #164. The naked
+  // `Signature` is still a different product — a one-sided digit is a structured
+  // claim of difference — but the Tubos Pack is NOT: packaging is never identity,
+  // so `Davidoff Signature 2000` is that row's cigar and links to it instead of
+  // minting a third row beside the pack. What the repro was really about (a
+  // number-distinct name must not fold onto its naked sibling) is unchanged.
+  it("the reported repro: 'Davidoff Signature 2000' is distinct of Signature, links its Tubos Pack, and a smoke saves against it", async () => {
     const sigId = await h.seedCigar({
       canonicalName: "Davidoff Signature",
       brand: "Davidoff",
@@ -176,17 +182,13 @@ describe("addCigar", () => {
       line: "Signature",
     });
 
-    // WITHOUT the flag: the naked "Signature" is disqualified by the one-sided
-    // digit rule, the Tubos Pack by the packaging rule — so neither strong-links
-    // and neither triggers ambiguity; a fresh distinct row is created.
     const result = await addCigar(h.deps, user, {
       clientRequestId: newRequestId(),
       cigar: { canonicalName: "Davidoff Signature 2000", brand: "Davidoff", line: "Signature" },
     });
-    expect(result.created).toBe(true);
-    expect(result.cigar.canonicalName).toBe("Davidoff Signature 2000");
+    expect(result.created).toBe(false);
+    expect(result.cigar.cigarId).toBe(tubosId);
     expect(result.cigar.cigarId).not.toBe(sigId);
-    expect(result.cigar.cigarId).not.toBe(tubosId);
 
     // The returned catalog id is real and usable — a smoke links straight to it.
     const smoke = await saveSmoke(h.deps, user, {

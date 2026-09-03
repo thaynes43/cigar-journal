@@ -506,7 +506,7 @@ describe("matching v2 (embedded Postgres)", () => {
   it("never mints from a sampler listing", async () => {
     const vendorId = await makeVendor(`Sampler Fox ${randomUUID()}`);
     const before = (await pg.db.select({ id: cigars.id }).from(cigars)).length;
-    await runIngest(
+    const run = await runIngest(
       deps(
         createMockFetcher(
           routes(["https://foxcigar.com/shop/fox-5-cigar-sampler/"], {
@@ -518,6 +518,32 @@ describe("matching v2 (embedded Postgres)", () => {
       { adapter: foxCigar, vendorId, mode: "seed" },
     );
     expect((await pg.db.select({ id: cigars.id }).from(cigars)).length).toBe(before);
+    // AND NO TRIAGE ROW EITHER, since #164. It used to be filed as `ambiguous`
+    // for a curator whose only possible answer was "not a cigar"; it is now
+    // counted where the gate counts an accessory.
+    expect(await matchesFor(vendorId)).toHaveLength(0);
+    expect(run.stats.skippedNonCigar).toBe(1);
+  });
+
+  // ------------------------------------------------------------------------
+  // TWO MARCAS JOINED IS A SHELF (#164 Q1). The words alone cannot say so —
+  // `Padrón & Montecristo Dominican Bundle` reads like a product title — so the
+  // BRAND REGISTRY decides it: each side of the conjunction is put to the same
+  // alias probe the anchor uses, and two different marcas is an assortment.
+  // ------------------------------------------------------------------------
+  it("never mints from a listing that joins two marcas", async () => {
+    await seedBrand("Montecristo");
+    const url = "https://foxcigar.com/shop/padron-montecristo-dominican-bundle/";
+    const vendorId = await makeVendor(`Mix Fox ${randomUUID()}`);
+    const before = (await pg.db.select({ id: cigars.id }).from(cigars)).length;
+    const run = await runIngest(
+      deps(createMockFetcher(routes([url], { [url]: loadFixture("product-mix-bundle.html") })), null),
+      { adapter: foxCigar, vendorId, mode: "seed" },
+    );
+    expect((await pg.db.select({ id: cigars.id }).from(cigars)).length).toBe(before);
+    expect(await matchesFor(vendorId)).toHaveLength(0);
+    expect(await pg.db.select().from(offers).where(eq(offers.vendorId, vendorId))).toHaveLength(0);
+    expect(run.stats.skippedNonCigar).toBe(1);
   });
 
   // ------------------------------------------------------------------------

@@ -65,8 +65,8 @@ returned `created: false` against The Bride).
 
 **A described name links only to a row making the same identity claims**
 (2026-09-01). Any residue at all — on the name, on the row, or both — and any
-*stated* wrapper disagreement raises `cigar_ambiguous`; number and packaging
-disagreements still create. A one-sided residue used to link, on the reasoning
+*stated* wrapper disagreement raises `cigar_ambiguous`; a number disagreement
+still creates. A one-sided residue used to link, on the reasoning
 that the shorter name said strictly less, until production showed the cost: the
 catalog held "Atabey Ritos", `add_cigar` for "Atabey Black Ritos" — a different
 blend — left the residue `{black}` on the query side alone and silently linked,
@@ -87,8 +87,39 @@ tokens, edit distance 1 pairs `Face` with `Farce`.
 A near-match rejected by the identity or wrapper rule ALONE is neither linked nor
 created: it raises `cigar_ambiguous` with the siblings as candidates, because the
 residue is too weak a signal to decide silently in either direction and the user
-is the one who knows. A number or packaging rejection still creates — those names
-state a structured difference, so there is nothing to adjudicate.
+is the one who knows. A number rejection still creates — that name states a
+structured difference, so there is nothing to adjudicate.
+
+**Packaging comes off the name before any of it is read as a name** (#164,
+amending ADR-012). Packaging is never identity: a container or count word
+describes an offer, so `Undercrown Shade 5 Pack` is the base cigar bought five at
+a time, `Punch Bolos Tin` is `Punch Bolos`, and both sides of every comparison
+are stripped before the candidate search and the strong-match filter. The strip
+is UNCONDITIONAL, unlike the vitola strike below — a size word can be identity, a
+packaging word never is — so there is no packaging rejection left to create on,
+and a created row's `canonical_name` is the stripped name: a journal never mints
+`… 5 Pack`. It compares folded WORDS, so an identity word that merely contains a
+container word survives (`CAO Brazilia Amazon` keeps its `Amazon`). A name that
+is only packaging (`5 Pack`, `Tin`) is a `validation_error` on `canonicalName` —
+there is nothing left to name.
+
+**Assortments are refused, not stripped.** A sampler, a `Mix & Match`, a bundle
+or trio deal, or two marcas joined by `&`/`and` is a retailer's selection: it
+names several cigars and therefore none, and the registry's own alias probe is
+what decides the two-marca case rather than any hand-written brand list. Where a
+pack can be stripped down to the cigar inside it, an assortment cannot — `Mix &
+Match Cuban Cigar Bundle` reduces to `Mix & Match Cuban`, which is the shape of
+row the flat matcher used to mint — so `save_smoke` and `add_cigar` answer
+`validation_error` on `canonicalName` and ask which cigar was actually smoked.
+The word is not enough on its own: `Dominican Bundles` is a brand line of bundle
+cigars, so `bundle` qualifies only inside a promotion phrase.
+
+**An acquisition may be an assortment.** `record_purchase`,
+`record_purchase_batch` and the ledger importer resolve one, because you do buy a
+sampler as a unit and the owner keeps such rows as inventory records with lots
+against them. An assortment name is not stripped either — there is no cigar
+underneath it to strip down to — and an assortment row is reachable only by an
+assortment name, so a cigar can never link onto the shelf it came in.
 
 Candidate lists put the identity VERDICT first: a name that contradicts the query
 — a residue on both sides — sorts below every name that merely says more or less,

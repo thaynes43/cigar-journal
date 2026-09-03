@@ -9,7 +9,8 @@ import {
   type CigarCandidate,
 } from "./errors.js";
 import { assertCigarAncestry } from "./cigar-ancestry.js";
-import { loadAncestryContext, resolveDescribedTaxonomy } from "./taxonomy-resolve.js";
+import { assortmentOf, loadAncestryContext, resolveDescribedTaxonomy } from "./taxonomy-resolve.js";
+import { assortmentPhrase, stripPackaging } from "./catalog-parse.js";
 import { fold, foldTokens } from "./taxonomy-keys.js";
 import { isUuid } from "./uuid.js";
 
@@ -26,7 +27,6 @@ export {
 } from "./name-heuristics.js";
 import {
   numbersCompatible,
-  packagingCompatible,
   journalLinkCompatible,
   rankByIdentity,
   CANDIDATE_POOL,
@@ -59,6 +59,21 @@ export interface ResolveCigarOptions {
   // save_smoke, whose described branch is the safety net for a client that
   // skipped the gap-fill prelude, not a path the user was asked about.
   confirmedDistinct?: boolean;
+  // AN ACQUISITION MAY BE AN ASSORTMENT; A SMOKE MAY NOT (#164 Q1).
+  //
+  // "Which cigar is this?" has no answer for a sampler, so `save_smoke` and
+  // `add_cigar` refuse one — a smoke lands on a leaf, and a mixed box is not a
+  // leaf. But you genuinely BUY a sampler as one unit, and the owner keeps
+  // exactly such rows (`Oliva Free Sampler`, `LFD Los Tubos Sampler`, `Drew
+  // Estate Free 8-Cigar Sampler`) as inventory records with lots against them;
+  // his imported purchase ledger carries more. So the acquisition writers —
+  // `record_purchase`, `record_purchase_batch` and the importer's purchase
+  // writer — set this and keep recording what was actually bought.
+  //
+  // It never relaxes anything else: an assortment resolved this way is an
+  // ordinary freeform row, and the smoke it eventually feeds is logged against
+  // the stick, which the user names then.
+  allowAssortment?: boolean;
 }
 
 interface CandidateRow {
@@ -78,6 +93,36 @@ interface CandidateRow {
   sim: number;
 }
 
+// A candidate row plus its IDENTITY NAME — its `canonical_name` with packaging
+// removed. Both sides of every comparison below are stripped, which is the rule
+// the listing matcher already runs (taxonomy-resolve.ts) and for the same
+// measured reason: the catalog holds packaging rows, so comparing a stripped
+// query against a raw row made the exact row disqualify itself.
+type Candidate = CandidateRow & { identity: string; assortment: boolean };
+
+// The name minus its packaging — WHAT THIS NAME CLAIMS TO BE. ADR-012: packaging
+// is never identity, so a container or count word is an offer fact and takes no
+// part in deciding which cigar this is.
+//
+// AN ASSORTMENT NAME IS NOT STRIPPED, and that exception is the whole difference
+// between the two halves of #164. A pack is a pack OF something, so removing the
+// container leaves the cigar; a sampler is not a sampler of one thing, so
+// removing the word leaves a name for a cigar that does not exist (`Oliva Free
+// Sampler` → `Oliva Free`). The owner holds three such rows as inventory records,
+// and they must keep the names he bought them under.
+function identityOf(raw: string): { identity: string; assortment: boolean; onlyPackaging: boolean } {
+  const trimmed = raw.trim();
+  if (assortmentPhrase(trimmed) != null) {
+    return { identity: trimmed, assortment: true, onlyPackaging: false };
+  }
+  const cleaned = stripPackaging(trimmed).cleaned;
+  // A name that is ALL packaging keeps its own text as the comparison key rather
+  // than becoming the empty string, which would match the whole catalog. The
+  // described path refuses it outright; a catalog row named that way is simply
+  // compared as written.
+  return { identity: cleaned === "" ? trimmed : cleaned, assortment: false, onlyPackaging: cleaned === "" };
+}
+
 // How many candidates a `cigar_ambiguous` error offers. The POOL is wide so the
 // decision is made over the whole family (`CANDIDATE_POOL`); the LIST is a page
 // the model reads out loud to a user, and fifty of those is not a question
@@ -90,9 +135,11 @@ const MAX_CANDIDATES = 10;
 // Ordering is the whole value of the list — with fourteen `Tatuaje Monster`
 // siblings in the pool the raw score sorts them almost arbitrarily, so the
 // sibling the user actually named could be offered last.
-function rankedCandidates(name: string, rows: CandidateRow[]): CigarCandidate[] {
+function rankedCandidates(name: string, rows: Candidate[]): CigarCandidate[] {
+  // Ranked on the IDENTITY name and displayed under the row's own — packaging is
+  // not identity, so it must not decide the order the user reads.
   return rankByIdentity(name, rows, (row) => ({
-    name: row.canonical_name,
+    name: row.identity,
     sim: Number(row.sim),
   }))
     .slice(0, MAX_CANDIDATES)
@@ -152,6 +199,48 @@ export async function resolveCigar(
     throw new ValidationError([{ path: "cigar.described.canonicalName", message: "Required." }]);
   }
 
+  // AN ASSORTMENT IS NOT A CIGAR (ADR-012 amendment, #164). A sampler, a
+  // mix-and-match, a bundle deal or two marcas joined is a retailer's selection —
+  // it names several cigars and therefore none, so there is no leaf to link and
+  // nothing to mint. Refused rather than stripped: unlike packaging, what is left
+  // after removing the assortment words is not a cigar either (`Mix & Match Cuban
+  // Cigar Bundle` leaves `Mix & Match Cuban`, and the flat matcher minted rows
+  // exactly like it). Only the user knows which stick from the box was smoked.
+  if (!options?.allowAssortment) {
+    const assortment = await assortmentOf(tx, name);
+    if (assortment != null) {
+      throw new ValidationError([
+        {
+          path: "cigar.described.canonicalName",
+          message: `This name is an assortment (${assortment}), which is several cigars and so names none. Ask which cigar was smoked and name that one.`,
+        },
+      ]);
+    }
+  }
+
+  // PACKAGING IS NEVER IDENTITY (ADR-012), so it comes off the described name
+  // before ANY of it is read as a name — the candidate search, the strong-match
+  // comparison, and the row a create would mint. `Undercrown Shade 5 Pack` is the
+  // base cigar bought five at a time; the `5` and the `Pack` belong to an offer,
+  // and a journal that minted `… 5 Pack` would put a packaging SKU in the catalog
+  // for every user who read a band off a box.
+  //
+  // UNCONDITIONAL, unlike ADR-017's vitola strike, which is a second key tried
+  // only when the full name matched nothing. That strike is conditional because
+  // most vitolas are not vocabulary and a struck word can be identity; a
+  // packaging word never is, so there is no case in which the unstripped name is
+  // the better claim — including under `confirmedDistinct`, whose exact-duplicate
+  // guard therefore also compares the stripped name it would actually create.
+  const { identity, assortment: nameIsAssortment, onlyPackaging } = identityOf(name);
+  if (onlyPackaging) {
+    throw new ValidationError([
+      {
+        path: "cigar.described.canonicalName",
+        message: "This name is only packaging. Name the cigar inside the pack.",
+      },
+    ]);
+  }
+
   // THE NAME MINUS ITS VITOLA IS THE FAMILY CLAIM (ADR-017). When the caller
   // states `vitola.name`, striking that vitola's own words leaves what the name
   // claims about WHICH FAMILY this is. Without it a numbered vitola never reaches
@@ -168,11 +257,13 @@ export async function resolveCigar(
   // user typed is lost by having been struck here.
   //
   // Not applied under `confirmedDistinct`: that path makes none of these
-  // comparisons and wants only its exact-duplicate guard, which is on the name
-  // the user actually gave.
+  // comparisons and wants only its exact-duplicate guard, which is on the
+  // identity name — the one a create would actually write.
   const statedVitola = described.vitola?.name?.trim() || null;
   const claim =
-    statedVitola != null && !options?.confirmedDistinct ? strikeVitola(name, statedVitola) : name;
+    statedVitola != null && !options?.confirmedDistinct
+      ? strikeVitola(identity, statedVitola)
+      : identity;
 
   // THE SAME POOL `searchCigars` DRAWS, and for the same reason: every decision
   // below — the strong-link filter, the sibling scan, the ambiguity list the user
@@ -181,28 +272,46 @@ export async function resolveCigar(
   // fourteen live `Tatuaje Monster` siblings could not see four of them
   // (`CANDIDATE_POOL`, name-heuristics.ts).
   //
-  // BOTH KEYS PROBE IT, scored on whichever fits better. The pool must not
+  // EVERY KEY PROBES IT, scored on whichever fits best. The pool must not
   // NARROW when a vitola is stated: drawn on the claim alone, `Cohiba Robusto`
   // + `Robusto` probes for `Cohiba`, scores the catalogued `Cohiba Robusto` at
   // 0.43 — under the strong-match floor — and mints a duplicate of a row the
   // catalog already holds. The claim widens the search; it never shrinks it.
+  //
+  // THE NAME AS TYPED STAYS A PROBE KEY, alongside the stripped one. Stripping
+  // may only ever WIDEN what the pool can reach: a catalog row that carries the
+  // same packaging word the user typed (`Punch Bolos Tin`, a real prod row) scores
+  // highest against the raw name, and dropping that key would push it under the
+  // strong-match floor and mint a duplicate of the row we are trying to reach.
   const result = await tx.execute(sql`
     SELECT id, canonical_name, brand, line, brand_id, line_id, blend_id, type,
            vitola_name, verification,
-           GREATEST(similarity(canonical_name, ${name}), similarity(canonical_name, ${claim})) AS sim
+           GREATEST(similarity(canonical_name, ${name}),
+                    similarity(canonical_name, ${identity}),
+                    similarity(canonical_name, ${claim})) AS sim
     FROM cigars
-    WHERE canonical_name % ${name} OR canonical_name % ${claim}
+    WHERE canonical_name % ${name} OR canonical_name % ${identity} OR canonical_name % ${claim}
     ORDER BY sim DESC
     LIMIT ${CANDIDATE_POOL}
   `);
-  const candidates = result.rows as unknown as CandidateRow[];
+  // AN ASSORTMENT ROW IS REACHED ONLY BY AN ASSORTMENT NAME, and the reverse.
+  // Stripping packaging without this would let `Oliva Free Robusto` — a cigar —
+  // link straight onto `Oliva Free Sampler`, a shelf the owner holds as an
+  // inventory record, because `Sampler` and `Robusto` are both vocabulary and
+  // nothing else separated them. The two kinds of name live in separate buckets.
+  const candidates: Candidate[] = (result.rows as unknown as CandidateRow[])
+    .map((row) => ({ ...row, ...identityOf(row.canonical_name) }))
+    .filter((row) => row.assortment === nameIsAssortment);
 
   if (options?.confirmedDistinct) {
     // The user, shown search_cigars candidates, confirmed none is their cigar.
     // Skip strong-link and ambiguity and create — EXCEPT a literal (case-
     // insensitive) canonical_name match still links, since minting an exact
     // duplicate is never the intent even under an override.
-    const exact = candidates.find((c) => c.canonical_name.toLowerCase() === name.toLowerCase());
+    // Compared on the IDENTITY names — what a create would actually write against
+    // what the row actually is — so `Undercrown Shade 5 Pack` still finds the
+    // `Undercrown Shade` row it would otherwise duplicate.
+    const exact = candidates.find((c) => c.identity.toLowerCase() === identity.toLowerCase());
     if (exact) {
       return {
         cigarId: exact.id,
@@ -227,10 +336,10 @@ export async function resolveCigar(
     // ZERO strong candidates also keeps a genuine ambiguity a question: the
     // broader key must not resolve what the narrower one could not decide.
     const nearby = candidates.filter((c) => Number(c.sim) >= STRONG_MATCH);
-    const named = nearby.filter((c) => journalLinkCompatible(name, c.canonical_name));
+    const named = nearby.filter((c) => journalLinkCompatible(identity, c.identity));
     const strong =
-      named.length === 0 && claim !== name
-        ? nearby.filter((c) => journalLinkCompatible(claim, c.canonical_name))
+      named.length === 0 && claim !== identity
+        ? nearby.filter((c) => journalLinkCompatible(claim, c.identity))
         : named;
 
     if (strong.length === 1) {
@@ -245,7 +354,7 @@ export async function resolveCigar(
       // named from the FULL described name, not the claim — the strike is a
       // comparison key, never a rename.
       if (statedVitola != null && match.vitola_name == null) {
-        return await specialize(tx, match, described, name, statedVitola);
+        return await specialize(tx, match, described, identity, statedVitola);
       }
       return {
         cigarId: match.id,
@@ -278,16 +387,16 @@ export async function resolveCigar(
     // The ask branch did not exist when the allowance was written; now that it
     // does, a question costs a round trip and a silent link costs data.
     //
-    // A number or packaging rejection deliberately does NOT come here and still
-    // creates. Those names make an explicit, structured claim of difference —
-    // `No. 9` is not `T52`, a Tubos Pack is not the stick — so there is nothing
-    // for a user to adjudicate. A word residue is the weaker signal, and only the
-    // weaker signal needs the question.
-    const siblings = nearby.filter(
-      (c) =>
-        numbersCompatible(claim, c.canonical_name) &&
-        packagingCompatible(claim, c.canonical_name),
-    );
+    // A NUMBER rejection deliberately does NOT come here and still creates. That
+    // name makes an explicit, structured claim of difference — `No. 9` is not
+    // `T52` — so there is nothing for a user to adjudicate. A word residue is the
+    // weaker signal, and only the weaker signal needs the question.
+    //
+    // THE PACKAGING REJECTION IS GONE FROM THIS SENTENCE (#164), because there is
+    // no longer such a rejection: both names reached here stripped, so a Tubos
+    // Pack and the naked stick are the same claim and link above rather than
+    // creating a second row.
+    const siblings = nearby.filter((c) => numbersCompatible(claim, c.identity));
     if (siblings.length > 0) {
       throw new CigarAmbiguousError(name, rankedCandidates(claim, siblings));
     }
@@ -309,7 +418,9 @@ export async function resolveCigar(
   const inserted = await tx
     .insert(cigars)
     .values({
-      canonicalName: name,
+      // THE STRIPPED NAME, never the typed one: a journal does not mint `…
+      // 5 Pack`. The row is the cigar; the pack was an offer.
+      canonicalName: identity,
       brand: described.brand ?? null,
       line: described.line ?? null,
       brandId: taxonomy.brandId,
@@ -412,19 +523,22 @@ function siblingName(describedName: string, familyName: string, vitola: string):
 // family's `brand_id` verbatim, so a duplicate of one necessarily carries it too.
 async function specialize(
   tx: Tx,
-  family: CandidateRow,
+  family: Candidate,
   described: DescribedCigarInput,
   describedName: string,
   vitola: string,
 ): Promise<ResolvedCigar> {
-  const canonicalName = siblingName(describedName, family.canonical_name, vitola);
+  // Composed from the two IDENTITY names, so a family row that carries a
+  // container word in its own name (`Punch Bolos Tin`, mid-migration) does not
+  // pass it on to the sibling it mints.
+  const canonicalName = siblingName(describedName, family.identity, vitola);
 
   // THE FAMILY ROW IS ALREADY THAT VITOLA'S ROW, in one case: its name carries
   // the size its field never recorded (`… Anniversary Maduro Torpedo`, vitola
   // NULL, user says "Torpedo"). The sibling would compose to the family's own
   // name, and minting a second row under it is never right — link it, and report
   // no specialization, because none happened.
-  if (fold(canonicalName) === fold(family.canonical_name)) {
+  if (fold(canonicalName) === fold(family.identity)) {
     return {
       cigarId: family.id,
       canonicalName: family.canonical_name,

@@ -5,6 +5,7 @@ import { brandSlug } from "./catalog-browse.js";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import { addCigar } from "./add-cigar.js";
+import { recordPurchase } from "./record-purchase.js";
 import { searchCigars } from "./reads.js";
 import {
   numbersCompatible,
@@ -336,11 +337,19 @@ describe("strong-link guard predicates", () => {
     expect(journalLinkCompatible("Padrón 1964 Aniversario", "Padron 1964 Anniversary")).toBe(true);
     expect(journalLinkCompatible("Camacho Ecuador Robusto", "Camacho Ecuadorian Robusto")).toBe(true);
     expect(journalLinkCompatible("Padron 1926 Serie No. 1", "Padron 1926 Serie No. 1")).toBe(true);
-    // The structured claims of difference it inherits unchanged — these create
-    // rather than ask, and the resolver keeps them out of the ask branch.
+    // The structured claim of difference it inherits unchanged — a number
+    // disagreement creates rather than asks, and the resolver keeps it out of the
+    // ask branch.
     expect(journalLinkCompatible("Davidoff Signature 2000", "Davidoff Signature")).toBe(false);
+    // AND THE PACKAGING CLAIM IT NO LONGER MAKES (#164). A Tubos Pack is an OFFER
+    // of that cigar, not a different one, so the journal links where it used to
+    // mint a packaging SKU. `packagingCompatible` still refuses this pair for the
+    // crawler and the curation duplicate queue, which compare two catalog rows.
     expect(
       journalLinkCompatible("Davidoff Signature 2000", "Davidoff Signature 2000 Tubos Pack"),
+    ).toBe(true);
+    expect(
+      packagingCompatible("Davidoff Signature 2000", "Davidoff Signature 2000 Tubos Pack"),
     ).toBe(false);
   });
 
@@ -420,12 +429,20 @@ describe("resolveCigar number-token guard", () => {
     await expectNoStrongLink("Davidoff Signature", "Davidoff Signature 2000");
   });
 
-  it("does not link a naked stick onto its Tubos Pack (packaging variant)", async () => {
-    // Tubos-only case: the packaging variant is the sole seeded row, yet the
-    // naked-stick save must still create rather than silently link to a pack.
-    // A distinct product name (the one-sided test above already created a
-    // "…Signature 2000" row in this shared DB — reusing it would exact-link).
-    await expectNoStrongLink("Montecristo Epic 2010 Tubos Pack", "Montecristo Epic 2010");
+  // INVERTED BY #164, deliberately. This used to assert that a naked stick
+  // CREATED rather than linking to a `… Tubos Pack` row, on the reasoning that a
+  // pack is not the stick. ADR-012 rules the other way — packaging is never
+  // identity, the pack is an OFFER of that stick — so the naked name now links to
+  // the row the catalog already holds instead of minting its twin.
+  it("links a naked stick onto its Tubos Pack row (packaging is not identity)", async () => {
+    const existingId = await h.seedCigar({ canonicalName: "Montecristo Epic 2010 Tubos Pack" });
+    const result = await saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "Montecristo Epic 2010" } },
+      overallDescriptors: ["cocoa"],
+    });
+    expect(result.smoke.cigar.cigarId).toBe(existingId);
+    expect(result.cigarCreated).toBe(false);
   });
 
   // THE SCOPE PIN FOR THE WRAPPER GUARD. Wave 2 briefly folded `variantCompatible`
@@ -1405,5 +1422,160 @@ describe("resolveCigar family rows and vitola specialization (ADR-017)", () => {
     expect(added.cigar.cigarId).toBe(familyId);
     expect(added.specializedFrom).toBeUndefined();
     expect((await readCigar(familyId)).vitolaName).toBeNull();
+  });
+});
+
+// ==========================================================================
+// PACKAGING IS NEVER IDENTITY, AND AN ASSORTMENT IS NOT A CIGAR (#164).
+//
+// The two residues ADR-012 left behind. A container or count word on a described
+// name is an OFFER fact, so it comes off before the name is read as a name; a
+// shelf name is about several cigars and so about none, so it is refused rather
+// than stripped. The difference is what is LEFT: strip `5 Pack` off `Undercrown
+// Shade 5 Pack` and you have a cigar; strip `Bundle` off `Mix & Match Cuban
+// Cigar Bundle` and you have a row the flat matcher used to mint.
+// ==========================================================================
+
+describe("resolveCigar packaging fold and assortment refusal (#164)", () => {
+  let h: DomainHarness;
+  let user: Principal;
+
+  beforeAll(async () => {
+    h = await createHarness();
+    user = await h.createUser("packaging@example.com");
+    for (const name of ["Cohiba", "Montecristo"]) {
+      await h.deps.db
+        .insert(brands)
+        .values({ name, slug: brandSlug(name), aliases: [brandSlug(name)] });
+    }
+  }, 60_000);
+
+  afterAll(async () => {
+    await h?.stop();
+  });
+
+  async function save(canonicalName: string) {
+    return saveSmoke(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName } },
+      overallDescriptors: ["cocoa"],
+    });
+  }
+
+  // THE ISSUE'S OWN EXAMPLE. `5 Pack` carries a digit, so the number guard used
+  // to disqualify the base row outright and the journal minted the packaging SKU.
+  it("links a 5 Pack onto the base cigar", async () => {
+    const baseId = await h.seedCigar({ canonicalName: "Undercrown Shade" });
+    const saved = await save("Undercrown Shade 5 Pack");
+    expect(saved.smoke.cigar.cigarId).toBe(baseId);
+    expect(saved.smoke.cigar.canonicalName).toBe("Undercrown Shade");
+    expect(saved.cigarCreated).toBe(false);
+  });
+
+  it("links a Tin onto the base cigar", async () => {
+    const baseId = await h.seedCigar({ canonicalName: "Punch Bolos" });
+    const saved = await save("Punch Bolos Tin");
+    expect(saved.smoke.cigar.cigarId).toBe(baseId);
+    expect(saved.cigarCreated).toBe(false);
+  });
+
+  it("links a Tubos onto the base cigar", async () => {
+    const baseId = await h.seedCigar({ canonicalName: "Romeo y Julieta Wide Churchills" });
+    const saved = await save("Romeo y Julieta Wide Churchills Tubos");
+    expect(saved.smoke.cigar.cigarId).toBe(baseId);
+    expect(saved.cigarCreated).toBe(false);
+  });
+
+  // A JOURNAL NEVER MINTS `… 5 Pack`. When nothing matches, the row it creates is
+  // the cigar, not the pack it came in.
+  it("mints the stripped name when nothing matches", async () => {
+    const saved = await save("Cavalier Genève Black Series 10 ct");
+    expect(saved.cigarCreated).toBe(true);
+    expect(saved.smoke.cigar.canonicalName).toBe("Cavalier Genève Black Series");
+  });
+
+  // THE `mazo` SUBSTRING TRAP FROM #164. `mazo` is a container word and `Amazon`
+  // contains it; the strip compares folded WORDS, so the marca's own identity
+  // survives and the row is named as the user named it.
+  it("never strips Amazon out of CAO Brazilia Amazon", async () => {
+    const saved = await save("CAO Brazilia Amazon");
+    expect(saved.cigarCreated).toBe(true);
+    expect(saved.smoke.cigar.canonicalName).toBe("CAO Brazilia Amazon");
+  });
+
+  // Nothing is left to name, so there is nothing to resolve and nothing to mint.
+  it("refuses a name that is only packaging", async () => {
+    await expect(save("5 Pack")).rejects.toMatchObject({
+      code: "validation_error",
+      fields: [{ path: "cigar.described.canonicalName" }],
+    });
+    await expect(save("Tin")).rejects.toMatchObject({ code: "validation_error" });
+  });
+
+  // AN ASSORTMENT NAMES SEVERAL CIGARS AND THEREFORE NONE. Refused with the
+  // question the model should ask instead, because only the user knows which
+  // stick out of the box was actually smoked.
+  it("refuses an assortment by the words on the shelf", async () => {
+    for (const name of [
+      "Mix & Match Cuban Cigar Bundle",
+      "Club & Mini Outlet Bundle Deal",
+      "Cohiba 3-Pack Trio Deal",
+      "Drew Estate Free 8-Cigar Sampler",
+    ]) {
+      await expect(save(name), name).rejects.toMatchObject({
+        code: "validation_error",
+        fields: [{ path: "cigar.described.canonicalName" }],
+      });
+    }
+  });
+
+  // The registry says which words are marcas — the rule writes no brand list.
+  it("refuses two marcas joined", async () => {
+    await expect(save("Cohiba & Montecristo DOMINICAN Bundle")).rejects.toMatchObject({
+      code: "validation_error",
+    });
+  });
+
+  // YOU BUY A SAMPLER; YOU DO NOT SMOKE ONE. The refusal is the smoke path's, and
+  // the acquisition path records what was actually bought — the owner holds three
+  // such rows with lots against them, and his imported ledger carries more.
+  it("records a sampler purchase under the name it was bought", async () => {
+    const bought = await recordPurchase(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "Oliva Free Sampler", brand: "Oliva" } },
+      quantity: 10,
+    });
+    expect(bought.cigar.canonicalName).toBe("Oliva Free Sampler");
+
+    // And the second purchase of it links rather than minting a twin.
+    const again = await recordPurchase(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { described: { canonicalName: "Oliva Free Sampler", brand: "Oliva" } },
+      quantity: 5,
+    });
+    expect(again.cigar.cigarId).toBe(bought.cigar.cigarId);
+  });
+
+  // THE GUARD THE PACKAGING STRIP WOULD OTHERWISE REMOVE. `Sampler` and `Robusto`
+  // are both vocabulary, so with packaging struck from both sides nothing else
+  // separated a cigar from the shelf it came in — and a smoke would have landed on
+  // the owner's inventory record.
+  it("never links a cigar onto an assortment row", async () => {
+    const shelfId = await h.seedCigar({ canonicalName: "Corto Free Sampler", brand: "Corto" });
+    const saved = await save("Corto Free Robusto");
+    expect(saved.cigarCreated).toBe(true);
+    expect(saved.smoke.cigar.cigarId).not.toBe(shelfId);
+    expect(saved.smoke.cigar.canonicalName).toBe("Corto Free Robusto");
+  });
+
+  // THE TRAP THE MULTI-MARCA RULE MUST NOT SPRING. `Bundles` is a brand-line name
+  // for bundle cigars — two live prod rows carry it — and one marca joined to a
+  // word that is not another marca is still one cigar.
+  it("leaves a bundle LINE and a single-marca conjunction alone", async () => {
+    const bundleLine = await save("Dominican Bundles Toro");
+    expect(bundleLine.smoke.cigar.canonicalName).toBe("Dominican Bundles Toro");
+
+    const oneMarca = await save("Cohiba Black & Red Robusto");
+    expect(oneMarca.smoke.cigar.canonicalName).toBe("Cohiba Black & Red Robusto");
   });
 });

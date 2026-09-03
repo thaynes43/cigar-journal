@@ -888,6 +888,30 @@ sibling was minted here or already existed, and the enrichment gates above are
 unchanged. Smokes and lots already on the family entry stay there; each moves
 only by `update_smoke` / `update_purchase`.
 
+**Packaging comes off the name; an assortment is refused (#164, amending
+ADR-012).** Packaging is never identity — it describes the offer — so a container
+or count word is stripped before the name is resolved, and the entry a save
+creates is named without it. An assortment is different: it names several cigars
+and so none of them, and what is left after removing its words is not a cigar
+either, so it is refused and the model asks which cigar was actually smoked. Both
+rules apply identically to `add_cigar`.
+
+| described `canonicalName` | outcome |
+|---|---|
+| `Undercrown Shade 5 Pack` | resolves as `Undercrown Shade`; a created entry is named that |
+| `Punch Bolos Tin`, `… Tubos` | resolves as `Punch Bolos`, `…` |
+| `5 Pack`, `Tin` | `validation_error` on `cigar.described.canonicalName` — the name is only packaging |
+| `… Sampler`, `Mix & Match …`, `… Outlet Bundle Deal`, `Cohiba 3-Pack Trio Deal` | `validation_error` — an assortment names no single cigar; ask which one was smoked |
+| `Cohiba & Montecristo DOMINICAN Bundle` | `validation_error` — two marcas joined, decided by the brand registry |
+| `Dominican Bundles Toro`, `CAO Brazilia Amazon` | ordinary cigars — `Bundles` is a brand line, and a container word inside a longer word is not one |
+
+`record_purchase`, `record_purchase_batch` and the ledger importer do **not**
+refuse an assortment: a sampler is genuinely bought as a unit and is kept as an
+inventory record under the name it was bought (its packaging words are not
+stripped either — there is no single cigar underneath to strip down to). An
+assortment entry is reachable only by an assortment name, so a smoke can never
+land on one by resolution.
+
 ## add_cigar — write, idempotent
 
 Create an unverified catalog entry from the user's own naming when search_cigars
@@ -896,8 +920,9 @@ and a product photo. Use before `save_smoke`/`record_purchase` when the cigar is
 missing. Resolve-or-create is the exact path `save_smoke` uses for a described
 cigar — it links only to a close row making the *same* identity claims, raises
 `cigar_ambiguous` when a close row differs by a word or a stated wrapper, and
-creates an unverified entry otherwise (nothing close, or a number/packaging
-difference the names state outright); this tool adds the enrichment queue and the
+creates an unverified entry otherwise (nothing close, or a number difference the
+names state outright) — including its packaging strip and its assortment refusal
+(#164, table above); this tool adds the enrichment queue and the
 `confirmedDistinct` escape hatch — which `record_purchase` carries too, so an acquisition never needs
 this tool as a detour just to reach the flag.
 
@@ -1013,7 +1038,7 @@ their want list — acquisition never clears it silently (R-WANT-2), so when it 
 
 **`cigar_ambiguous` recovers in ONE call** (2026-08-31). A described name that
 strong-matches two catalog rows — or a related-but-distinct sibling the
-number/packaging guard refuses to link — returns `cigar_ambiguous`, exactly as
+number guard refuses to link — returns `cigar_ambiguous`, exactly as
 `add_cigar` does. Show the user the `search_cigars` candidates; when they confirm
 none is theirs, re-issue **this same `record_purchase`** with
 `confirmedDistinct: true`. The semantics are `add_cigar`'s, field for field:

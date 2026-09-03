@@ -239,12 +239,12 @@ describe("coversAsk", () => {
   // ruling `chooseLeaf` makes on the seed path. The packaging strip makes this
   // non-obvious and therefore worth pinning: `Sampler` comes OFF the name before
   // the keys are read, so a sampler's remaining keys cover the ask perfectly and
-  // only the `sampler` flag stops it.
+  // only the `assortment` flag stops it.
   it("never covers a sampler, however well its remaining keys fit", () => {
     const blend = ask({ canonicalName: "Drew Estate Liga Privada No. 9", brand: "Drew Estate", brandId: "de" });
     const sampler = parse("Liga Privada No. 9 Sampler");
 
-    expect(sampler.sampler).toBe(true);
+    expect(sampler.assortment).toBe("sampler");
     expect(sampler.cleanedName).toBe("Liga Privada No. 9");
     expect(coversAsk(blend, sampler)).toBe(false);
     // The control: the same cleaned name, sold as a cigar, is covered.
