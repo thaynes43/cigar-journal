@@ -5,7 +5,7 @@
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The tool surface. The first nineteen are the conversational journal contract
+// The tool surface. The first twenty are the conversational journal contract
 // (reads annotated readOnlyHint). The final fourteen are the admin catalog-curation
 // surface (DESIGN-003 wave 4a/4b, issue #126; the taxonomy five from ADR-012 Wave 3,
 // issue #196): the ops-agent tools, gated on `curation:*` scope AND an admin-role
@@ -23,6 +23,9 @@ export const TOOL_NAMES = [
   "record_purchase",
   "record_purchase_batch",
   "update_smoke",
+  // The ledger's counterpart to update_smoke's cigar op (ADR-017): re-point one
+  // purchase lot at the right catalog entry, per record and never bulk.
+  "update_purchase",
   // The two photo verbs. open_photo_drop comes first because it comes first in
   // time: it takes a photo of the smoke IN PROGRESS, before there is a smokeId
   // for add_smoke_photo to bind to (ADR-014, issue #263).
@@ -87,6 +90,10 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   // call instead of fourteen.
   record_purchase_batch: ["journal:write"],
   update_smoke: ["journal:write"],
+  // A correction to the caller's own ledger row, so it rides journal:write like
+  // every other personal write — no new scope, and an already-minted connector
+  // token reaches it with no re-consent (ADR-017).
+  update_purchase: ["journal:write"],
   // The drop writes the caller's own photo_drops row and nothing else, so it
   // rides journal:write like every other personal write — no new scope, and an
   // already-minted connector token reaches it with no re-consent (ADR-014).
@@ -173,7 +180,13 @@ composable filters (q, brand, type, inHumidor, wanted, smoked, inStock) and sort
 (name, my-rating, recently-added, price), returning tiles with the personal
 overlay and price-at-a-glance. get_cigar is full detail on one cigar; get_offers
 is its current vendor offers and price history (kept out of get_cigar to protect
-its budget) — reach for it when the user asks about price or where to buy.
+its budget) — reach for it when the user asks about price or where to buy. A
+search match whose vitola.name is null is a family entry — the vitola was never
+recorded. When the user names the vitola, put it in vitola.name on add_cigar or
+on the save's described cigar so the smoke lands on that vitola's own entry;
+when they do not, the family entry is right. A smoke or lot logged against a
+family entry moves to a vitola entry only by update_smoke or update_purchase,
+one record at a time.
 
 Gap-fill. When you are about to log a smoke or a purchase and search_cigars
 matched nothing, fill the gap first: add_cigar creates an unverified entry from

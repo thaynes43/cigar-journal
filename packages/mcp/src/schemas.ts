@@ -73,7 +73,13 @@ const describedCigar = z
       .nullish()
       .describe("Product line within the brand, e.g. '1964 Anniversary'. Omit if unknown."),
     edition: z.string().nullish().describe("Limited/special edition designation, if any."),
-    vitola: vitola.nullish().describe("Size/shape of this stick."),
+    // ADR-017: the field is what specializes a family entry, so the rule is
+    // stated where the model fills it, not only on the tools' own descriptions.
+    vitola: vitola
+      .nullish()
+      .describe(
+        "Size/shape of this stick. A match with vitola.name null is a family entry (vitola not recorded); if the user names the vitola, carry it in vitola.name on add_cigar or the save so it lands on that vitola's own entry.",
+      ),
     type: cigarType.nullish().describe("NC (non-Cuban) or CC (Cuban); omit if unstated."),
     manufacturer: z.string().nullish().describe("Manufacturer name, if distinct from brand."),
     factory: z.string().nullish().describe("Factory name, if known."),
@@ -488,6 +494,37 @@ export const updateSmokeSchema = z
         "Optional guard: if set and stale, returns version_conflict. Omit for immediate conversational fixes.",
       ),
     changes: updateChanges,
+  })
+  .strict();
+
+// update_purchase (ADR-017): one op, and only one — the lot's cigar. Shaped like
+// update_smoke's `changes` block so the two corrections read alike, and required
+// rather than optional because a call that changes nothing has nothing to ask.
+export const updatePurchaseSchema = z
+  .object({
+    clientRequestId: z
+      .string()
+      .describe(
+        "A UUID minted once per correction; reuse EXACTLY on retries so replays are recognized.",
+      ),
+    purchaseId: z
+      .string()
+      .describe("Id of the purchase lot to re-point, from get_my_inventory or a prior record_purchase."),
+    changes: z
+      .object({
+        cigar: z
+          .object({
+            resolveTo: z
+              .string()
+              .describe(
+                "Catalog cigarId (from a prior search_cigars/add_cigar result, never invented) to re-point this lot to.",
+              ),
+          })
+          .strict()
+          .describe("Correct the linked cigar."),
+      })
+      .strict()
+      .describe("Only the cigar can change; the ledger's own facts are corrected with another row."),
   })
   .strict();
 
@@ -1068,6 +1105,13 @@ export const getMyInventoryOutput = z
   .object({ holdings: z.array(looseObject), totalSticksRemaining: z.number() })
   .passthrough();
 
+// The family entry a stated vitola was specialized off (ADR-017), published on
+// the two tools that can mint the sibling. Shaped, not loose: it is two ids a
+// model reads out loud ("logged on the No. 2, under Padrón 1926 Natural").
+const specializedFromOutput = z
+  .object({ cigarId: z.string(), canonicalName: z.string() })
+  .passthrough();
+
 export const saveSmokeOutput = z
   .object({
     smoke: z
@@ -1094,6 +1138,10 @@ export const saveSmokeOutput = z
     // replay of an envelope stored before this field existed returns the original
     // result verbatim.
     enrichmentQueued: z.boolean().optional(),
+    // The family entry the smoke's cigar was specialized off (ADR-017) — present
+    // only when the described cigar stated a vitola against a row that recorded
+    // none, so the smoke landed on that vitola's own sibling entry instead.
+    specializedFrom: specializedFromOutput.optional(),
     // What the claim of `photoDropId` did (ADR-014) — present only when the save
     // carried one. Reported, never raised: the smoke is committed before the
     // claim runs, so `not_found` / `bound_elsewhere` / `failed` all arrive here
@@ -1108,6 +1156,10 @@ export const addCigarOutput = z
     cigar: looseObject,
     created: z.boolean(),
     enrichmentQueued: z.boolean(),
+    // The family entry a stated vitola was specialized off (ADR-017) — present
+    // only on that path, where `cigar` is that vitola's own sibling entry and
+    // `created` says whether it was minted here or already existed.
+    specializedFrom: specializedFromOutput.optional(),
     // Always false — declared, not inferred (#177). passthrough() would carry the
     // adapter's constant regardless, but the client-visible schema is the point:
     // this is the field a model reads at the point of use to learn that cataloging
@@ -1167,6 +1219,18 @@ export const recordPurchaseBatchOutput = z
 export const updateSmokeOutput = z
   .object({
     smoke: z.object({ smokeId: z.string(), version: z.number() }).passthrough(),
+    changedFields: z.array(z.string()),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export const updatePurchaseOutput = z
+  .object({
+    purchase: z
+      .object({ purchaseId: z.string(), cigarId: z.string(), canonicalName: z.string() })
+      .passthrough(),
+    // ["cigar"] when the lot moved; empty when it already pointed at the
+    // destination — a re-point asked for twice is a no-op, not an error.
     changedFields: z.array(z.string()),
     replayed: z.boolean(),
   })
@@ -1281,6 +1345,7 @@ export type GetMySmokesArgs = z.infer<typeof getMySmokesSchema>;
 export type GetSmokeArgs = z.infer<typeof getSmokeSchema>;
 export type SaveSmokeArgs = z.infer<typeof saveSmokeSchema>;
 export type UpdateSmokeArgs = z.infer<typeof updateSmokeSchema>;
+export type UpdatePurchaseArgs = z.infer<typeof updatePurchaseSchema>;
 export type AddCigarArgs = z.infer<typeof addCigarSchema>;
 export type RecordPurchaseArgs = z.infer<typeof recordPurchaseSchema>;
 export type RecordPurchaseBatchArgs = z.infer<typeof recordPurchaseBatchSchema>;

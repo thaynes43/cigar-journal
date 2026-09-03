@@ -164,6 +164,16 @@ export interface SavedCigar {
   verification: Verification;
 }
 
+// The family row a stated vitola was specialized off (ADR-017). A catalog row
+// with `vitola_name` NULL is a family entry — the vitola was never recorded —
+// and a stated vitola mints (or finds) that vitola's own sibling leaf under the
+// family's structure rather than retyping the family. Declared here, with the
+// vocabulary, because the resolver produces it and two tool results publish it.
+export interface SpecializedFrom {
+  cigarId: string;
+  canonicalName: string;
+}
+
 export interface SaveSmokeResult {
   smoke: {
     smokeId: string;
@@ -185,6 +195,12 @@ export interface SaveSmokeResult {
   // because an idempotent replay returns the ORIGINAL stored result, and
   // envelopes written before this field existed do not carry it.
   enrichmentQueued?: boolean;
+  // The family entry this smoke's cigar was specialized off (ADR-017), present
+  // only when the described cigar stated a vitola against a row whose
+  // `vitola_name` was NULL: the smoke landed on that vitola's own sibling leaf,
+  // not on the family row, and `cigarCreated` says whether the sibling was
+  // minted here or already existed.
+  specializedFrom?: SpecializedFrom;
   // The derived stock picture AFTER this smoke, present ONLY when the save
   // carried a `consumption` block (ADR-008 / DESIGN-002 ask-once flow). Additive
   // and mirrors record_purchase's `holdingAfter`, so an agent that just recorded
@@ -222,6 +238,10 @@ export interface AddCigarResult {
   cigar: SavedCigar;
   created: boolean; // false when the described name linked to an existing entry
   enrichmentQueued: boolean;
+  // The family entry a stated vitola was specialized off (ADR-017), present only
+  // on that path: `cigar` is then that vitola's own sibling leaf under the
+  // family's structure, and `created` says whether it was minted or found.
+  specializedFrom?: SpecializedFrom;
   replayed: boolean;
 }
 
@@ -515,6 +535,33 @@ export interface UpdateSmokeInput {
 
 export interface UpdateSmokeResult {
   smoke: { smokeId: string; version: number };
+  changedFields: string[];
+  replayed: boolean;
+}
+
+// ---- update_purchase (ADR-017) ---------------------------------------------
+
+// The ONE op a lot accepts: re-point it at the right catalog entry ("that box
+// was the No. 2"). Field-scoped like update_smoke rather than a generic patch,
+// and deliberately nothing else — the ledger is append-only, so a miscount is
+// still a negative-quantity row and never an edit.
+export interface UpdatePurchaseChanges {
+  cigar: { resolveTo: string };
+}
+
+export interface UpdatePurchaseInput {
+  clientRequestId: string;
+  purchaseId: string;
+  changes: UpdatePurchaseChanges;
+  provenance?: ProvenanceInput;
+  correlationId?: string;
+}
+
+export interface UpdatePurchaseResult {
+  // The lot after the move, named so the caller can read back where it landed.
+  purchase: { purchaseId: string; cigarId: string; canonicalName: string };
+  // `["cigar"]` when the lot moved, empty when it already pointed at the
+  // destination — a re-point asked for twice is a no-op, not an error.
   changedFields: string[];
   replayed: boolean;
 }

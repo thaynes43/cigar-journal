@@ -71,6 +71,10 @@ async function addWithinTx(
       verification: cigar.verification,
       created: cigar.created,
       enrichmentQueued,
+      // The family row this entry was specialized off, when a stated vitola met
+      // one (ADR-017). Absent on every other path, and the only record of the
+      // pair — the family row itself is never written to.
+      ...(cigar.specializedFrom ? { specializedFrom: cigar.specializedFrom } : {}),
     },
     correlationId: input.correlationId ?? input.clientRequestId,
   });
@@ -79,6 +83,10 @@ async function addWithinTx(
     cigar: { cigarId: cigar.cigarId, canonicalName: cigar.canonicalName, verification: cigar.verification },
     created: cigar.created,
     enrichmentQueued,
+    // ADR-017: present only when a stated vitola specialized a family row, so the
+    // model can say which family entry the new one came from. `created` still
+    // reports whether the sibling was minted or already existed.
+    ...(cigar.specializedFrom ? { specializedFrom: cigar.specializedFrom } : {}),
     replayed: false,
   };
 

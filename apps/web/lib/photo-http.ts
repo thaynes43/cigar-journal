@@ -44,6 +44,7 @@ const DOMAIN_TO_STATUS: Record<ErrorCode, number> = {
   cigar_not_found: 404,
   cigar_ambiguous: 409,
   smoke_not_found: 404,
+  purchase_not_found: 404,
   photo_not_found: 404,
   photo_limit: 409,
   photo_drop_not_found: 404,

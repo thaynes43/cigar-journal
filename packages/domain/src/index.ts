@@ -31,6 +31,9 @@ export { recordPurchase } from "./record-purchase.js";
 // isolates to its line instead of failing the batch.
 export { recordPurchaseBatch, MAX_BATCH_ITEMS } from "./record-purchase-batch.js";
 export { updateSmoke } from "./update-smoke.js";
+// Re-point one purchase lot at the right catalog entry (ADR-017) — the ledger's
+// counterpart to update_smoke's cigar op, per record and never bulk.
+export { updatePurchase } from "./update-purchase.js";
 export { deleteSmoke } from "./delete-smoke.js";
 export { getSmoke, queryMySmokes, searchCigars, getCigar, getCigarOffers, getCigarOfferHistory, getCigarPricing, getCigarPriceHistory, browseCigars } from "./reads.js";
 

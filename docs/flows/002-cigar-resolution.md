@@ -99,6 +99,22 @@ whose identity claims are comparable. `search_cigars` and `resolveCigar` draw th
 same fifty-row candidate pool: ranking cannot recover a row the pool never held,
 and a family is bigger than a page.
 
+**Specialization** (ADR-017). A row with `vitola_name NULL` is a FAMILY ROW — the
+vitola was never recorded, not a claim that there is none. When the described
+cigar states `vitola.name` and the single strong candidate is such a row, the
+resolver does not link: it gets-or-creates the SIBLING leaf under the family's
+own `brand_id`/`line_id`/`blend_id` and free-text brand/line, carrying the stated
+vitola and its dimensions, named as the user named it when that name already
+carries the vitola and `<family name> <vitola>` otherwise. The result adds
+`specializedFrom: { cigarId, canonicalName }` — the family row it was minted
+under — and `created` says whether the sibling was new. The rule keys on the
+FIELD, not on a word in the name: a size word in `canonicalName` alone stays
+vocabulary and still links, a candidate whose RECORDED vitola differs from the
+stated one is a different product and creates as before, and a described cigar
+that states no vitola links to the family row as it always did. The family row is
+never retyped, so the smokes and lots already on it keep the attribution they
+were given; each moves with `update_smoke` or `update_purchase`, one at a time.
+
 ## Failure modes
 
 - `cigar_ambiguous` at save time → model asks the user, retries with the

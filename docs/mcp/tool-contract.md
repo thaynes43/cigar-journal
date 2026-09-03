@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Thirty-one tools over the application services, client-neutral: any MCP client
+Thirty-four tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -33,8 +33,8 @@ ADR-005 (integration). Client capability differences live in
 Scopes: `catalog:read` (search_cigars, get_cigar, browse_catalog, get_offers),
 `journal:read` (get_my_smokes, get_smoke, get_my_inventory), `journal:write`
 (save_smoke, add_cigar, record_purchase, record_purchase_batch, update_smoke,
-add_smoke_photo, set_want, set_favorite, request_cigar_enrichment, update_cigar,
-record_price — including
+update_purchase, add_smoke_photo, set_want, set_favorite,
+request_cigar_enrichment, update_cigar, record_price — including
 lazy catalog create inside save/add, the enrichment queue write, conversational
 catalog repair, and chat-submitted price observations). There is no
 `catalog:write` scope: catalog mutation rides `journal:write` by house precedent
@@ -87,7 +87,13 @@ composable filters (q, brand, type, inHumidor, wanted, smoked, inStock) and sort
 (name, my-rating, recently-added, price), returning tiles with the personal
 overlay and price-at-a-glance. get_cigar is full detail on one cigar; get_offers
 is its current vendor offers and price history (kept out of get_cigar to protect
-its budget) — reach for it when the user asks about price or where to buy.
+its budget) — reach for it when the user asks about price or where to buy. A
+search match whose vitola.name is null is a family entry — the vitola was never
+recorded. When the user names the vitola, put it in vitola.name on add_cigar or
+on the save's described cigar so the smoke lands on that vitola's own entry;
+when they do not, the family entry is right. A smoke or lot logged against a
+family entry moves to a vitola entry only by update_smoke or update_purchase,
+one record at a time.
 
 Gap-fill. When you are about to log a smoke or a purchase and search_cigars
 matched nothing, fill the gap first: add_cigar creates an unverified entry from
@@ -764,6 +770,9 @@ result:
   cigarCreated: false            # true when `described` created an unverified entry
   enrichmentQueued: false        # true only alongside cigarCreated — the new entry's specs + photo lookup
                                  #   ABSENT on an idempotent replay of an envelope recorded before this field
+  specializedFrom:               # PRESENT ONLY when a stated vitola specialized a family entry (ADR-017)
+    cigarId: cg_01j9x2           #   the family entry — untouched; this smoke is on the sibling above
+    canonicalName: Padron 1926 Natural
   holdingAfter:                  # PRESENT ONLY when a `consumption` block was supplied
     totalAcquired: 7             #   (additive; mirrors record_purchase's holdingAfter)
     remaining: 6                 #   max(0, totalAcquired − count(consumptions)) (ADR-008)
@@ -834,6 +843,16 @@ savepoint, and any failure returns `enrichmentQueued: false` with the smoke save
 recorded before the field existed** — a replay returns the stored result verbatim,
 so read it as optional and treat its absence as "not reported", never as `false`.
 
+**A stated vitola against a family entry lands on the sibling (ADR-017).** A
+catalog entry whose `vitola.name` is null is a *family entry* — the vitola was
+never recorded — and a `described` cigar that states one does not link to it: the
+save resolves to that vitola's own entry under the family's brand/line/blend,
+minting it if it does not exist yet, and reports `specializedFrom { cigarId,
+canonicalName }` (the family entry, untouched). `cigarCreated` says whether the
+sibling was minted here or already existed, and the enrichment gates above are
+unchanged. Smokes and lots already on the family entry stay there; each moves
+only by `update_smoke` / `update_purchase`.
+
 ## add_cigar — write, idempotent
 
 Create an unverified catalog entry from the user's own naming when search_cigars
@@ -871,6 +890,9 @@ result:
   enrichmentQueued: true         # a request was FILED — false when one is already open, or nothing is missing
   journalEntryCreated: false     # ALWAYS false — cataloguing is not journaling
   guidance: created              # created | already_existed
+  specializedFrom:               # PRESENT ONLY when a stated vitola specialized a family entry (ADR-017)
+    cigarId: cg_01j8               #   the family entry, left exactly as it was
+    canonicalName: Padron 1926 Natural
   replayed: false
 ```
 
@@ -880,6 +902,20 @@ full vitola dimensions (nothing left to fill). A described name that matches two
 catalog rows — or lands a word away from one, "Atabey Black Ritos" against a
 catalogued "Atabey Ritos" (production, 2026-09-01) — returns `cigar_ambiguous`
 with candidates, exactly as `save_smoke`.
+
+**A family entry is specialized, never retyped (ADR-017).** When the described
+cigar states `vitola.name` and the single close entry records none (`vitola.name`
+null — a *family entry*, the vitola was simply never recorded), this tool mints
+that vitola's own sibling under the family's `brand`/`line`/`blend` — with the
+stated vitola and dimensions on it, named as the user named it when that already
+carries the vitola and `<family name> <vitola>` otherwise — and reports
+`specializedFrom { cigarId, canonicalName }` for the family entry. The family
+entry is not edited: setting its vitola would declare every smoke and lot already
+on it that vitola. A sibling that already exists links instead
+(`created: false`), still with `specializedFrom`. The rule keys on the *field*: a
+size word in `canonicalName` alone is still vocabulary and links, an entry whose
+recorded vitola merely *differs* is a different product and creates as before,
+and a description that states no vitola links to the family entry as ever.
 
 ## record_purchase — write, idempotent
 
@@ -1098,6 +1134,43 @@ together. `durationMinutes` has no op: it is derived from the pair on read
 (`fromHumidor: false`), or re-attributes the humidor link (ADR-008); re-pointing
 the smoke's `cigar` clears a now-foreign lot automatically. The movement is
 audited in the same transaction as the smoke change.
+
+## update_purchase — write, idempotent
+
+Re-point one purchase lot at the correct catalog entry ("that box was the No.
+2") — the ledger's counterpart to `update_smoke`'s `cigar` op (ADR-017), and
+field-scoped the same way. **The cigar is the only thing a lot can change**: the
+ledger is append-only and holdings stay derived, so a miscount is still a
+negative-quantity `record_purchase` row and never an edit.
+
+```yaml
+arguments:
+  clientRequestId: 41c0aa93-...
+  purchaseId: pu_01kd
+  changes:
+    cigar: { resolveTo: cg_01j9x7 }        # the only op there is
+
+result:
+  purchase:
+    purchaseId: pu_01kd
+    cigarId: cg_01j9x7
+    canonicalName: Padron 1926 Serie No. 2 Natural
+  changedFields: [cigar]        # empty when the lot already pointed there — a no-op, not an error
+  replayed: false
+```
+
+Owner-only: a lot that is not the caller's reads exactly like one that does not
+exist (`purchase_not_found`), so ownership never leaks. An unknown or malformed
+`resolveTo` is `cigar_not_found`. The move is audited as `purchase.repoint` with
+the cigar on both sides, in the same transaction as the update.
+
+**It is refused while a smoke consumed from the lot sits on another cigar.** Any
+`smoke_consumptions` row on the lot whose smoke links to a cigar other than the
+destination returns `validation_error` on `changes.cigar.resolveTo`, naming those
+smoke ids: moving the lot under them would leave a consumption claiming a lot of
+one product for a smoke of another. Move the smokes first with `update_smoke`,
+then re-point the lot. Nothing here is bulk — a family entry is never migrated as
+a whole, because only the owner knows which stick was which (ADR-017).
 
 ## open_photo_drop — write
 
@@ -2310,6 +2383,7 @@ error:
 | `cigar_not_found` | yes | `search_first` or use `described` |
 | `cigar_ambiguous` | yes | `ask_user` (candidates included) |
 | `smoke_not_found` | no | none — id came from nowhere; re-query history |
+| `purchase_not_found` | no | none — the lot is not the caller's or never existed; re-query `get_my_inventory` |
 | `photo_drop_not_found` | no | none — the drop is not the caller's or never existed; `open_photo_drop` returns the user's open drop |
 | `version_conflict` | yes | `retrieve_latest_and_retry` via `get_smoke` |
 | `idempotency_conflict` | no | new `clientRequestId` for a genuinely new intent |
