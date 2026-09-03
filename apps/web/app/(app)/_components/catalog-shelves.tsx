@@ -1,13 +1,15 @@
 import { getServerCaller } from "@/lib/trpc/server";
+import { shelfEarnsItsPlace } from "@/lib/shelves";
 import { ShelfStrip } from "./shelf-strip";
 
 // Root shelves above the cigar grid (R-UNI-4 / DESIGN-003 §Shelves): three
 // deterministic, truthfully-labeled strips, each linking the equivalent grid
-// filter state (the default view, so no `view` param). A shelf with no rows is
-// absent entirely (Whiskybase rule) — no empty strip, no placeholder. The reads
-// reuse the same faceted browse the grid runs, so shelf membership and the
-// destination can never disagree. The interactive strip (scroll affordances) is
-// the client ShelfStrip; this component is the server data fetcher.
+// filter state (the default view, so no `view` param). A shelf that earns no
+// place is absent entirely — no empty strip, no placeholder; `shelfEarnsItsPlace`
+// holds that rule. The reads reuse the same faceted browse the grid runs, so
+// shelf membership and the destination can never disagree. The interactive strip
+// (scroll affordances) is the client ShelfStrip; this component is the server
+// data fetcher.
 //
 // The `See all` hrefs carry the CANONICAL `field:dir` sort token (DESIGN-004
 // D-04) so a shelf link and the toolbar emit the same URL for the same state. A
@@ -42,13 +44,18 @@ const SHELVES: readonly ShelfDef[] = [
 
 export async function CatalogShelves() {
   const caller = await getServerCaller();
-  const results = await Promise.all(
-    SHELVES.map(async (shelf) => ({
-      shelf,
-      cigars: (await caller.catalog.browse(shelf.args)).cigars,
-    })),
-  );
-  const shown = results.filter((r) => r.cigars.length > 0);
+  // The root total comes from the same procedure the grid below runs, unfiltered
+  // — one extra read, alongside the shelves rather than after them.
+  const [root, results] = await Promise.all([
+    caller.catalog.browse({ limit: 1 }),
+    Promise.all(
+      SHELVES.map(async (shelf) => ({
+        shelf,
+        cigars: (await caller.catalog.browse(shelf.args)).cigars,
+      })),
+    ),
+  ]);
+  const shown = results.filter((r) => shelfEarnsItsPlace(r.cigars.length, root.totalCount));
   if (shown.length === 0) return null;
 
   return (

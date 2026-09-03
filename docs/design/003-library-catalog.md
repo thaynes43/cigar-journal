@@ -113,7 +113,9 @@ personal state as badges. No view pill guards it.
   release wave as the facet promotion; the UI does not pretend.
 
 **Shelves, kept but earned** (R-UNI-4 stands): *In your humidor* ·
-*Wanted* · *Recently added*, cap 12, absent-when-empty, root only.
+*Wanted* · *Recently added*, cap 12, absent-when-empty, root only. A shelf
+is a lens on the grid, so a shelf whose row count equals the grid's total at
+the catalog root is absent as well — the strip would be the grid twice.
 Required affordances, per the UX research consensus:
 
 - hidden native scrollbar (`scrollbar-width: none` + webkit) — licensed
