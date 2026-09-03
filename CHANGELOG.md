@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.42.0](https://github.com/thaynes43/cigar-journal/compare/v0.41.0...v0.42.0) (2026-09-03)
+
+
+### Features
+
+* **crawler,db:** reviewer archive cursor — the halfwheel back catalogue drains across nightly runs ([#199](https://github.com/thaynes43/cigar-journal/issues/199)) ([#299](https://github.com/thaynes43/cigar-journal/issues/299)) ([8f4e598](https://github.com/thaynes43/cigar-journal/commit/8f4e598f279bb80145aec17b01627c8732e4d94c))
+
+
+### Bug Fixes
+
+* **domain,crawler:** packaging never identity in the journal resolver; assortments refused ([#164](https://github.com/thaynes43/cigar-journal/issues/164)) ([#301](https://github.com/thaynes43/cigar-journal/issues/301)) ([f245da8](https://github.com/thaynes43/cigar-journal/commit/f245da828f4447ecdc79bbd7b0038730f253148d))
+
 ## [0.41.0](https://github.com/thaynes43/cigar-journal/compare/v0.40.1...v0.41.0) (2026-09-03)
 
 
