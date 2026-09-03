@@ -95,6 +95,34 @@ smoke exists, that takes every photo of that smoke until it expires.**
 - Follow-ups: the record form could offer the open drop ("2 photos waiting")
   as an opt-in — explicit, so it still does not infer.
 
+## Amendments
+
+- **2026-09-03 — the multi-photo path, proven and completed (issue #288).** The
+  drop was designed for "every photo of that smoke" but only ever exercised with
+  one photo per review, so three defects lived in the gap. **Ordering is now
+  `created_at, id`** on both `smoke_photos` and `staged_smoke_photos`, at every
+  read: a burst of uploads can share a millisecond, and a same-timestamp tie
+  under `created_at` alone is unordered, so two reads of one smoke could return
+  its photos in different orders. The claim already preserved each photo's
+  `created_at` (it is a move, not a copy); that is now asserted rather than
+  assumed. **A photo carries its own caption from the drop page** — one line
+  under the kind chips, committed on blur or Enter, cleared by emptying it —
+  because the page is where the user is when a photo is worth a line, and the
+  caption was otherwise reachable only through `add_smoke_photo`.
+  `setPhotoDropPhotoKind` generalizes into one audited update taking either
+  field or both (`staged_photo.caption` / `smoke_photo.caption` join the `.kind`
+  actions, one row per changed field). And the whole path — three photos, the
+  claim, the read back, a fourth photo through the same link afterwards, and the
+  detail page rendering all four — is walked by
+  `apps/web/e2e/nonadmin.photo-drop-multi.e2e.ts` against the real server.
+- **2026-09-03 — the default kind is `cigar` (issue #287).** The overwhelmingly
+  common photo of a smoke is the cigar itself, so `other` was the wrong default
+  and the 2026-09-02 Padrón live test paid for it: the upload landed as `other`
+  and the owner had to tap `Cigar` before saving. Both column defaults (migration
+  0036), both domain defaults and the MCP description now say `cigar`. Existing
+  rows are not backfilled — an `other` already stored was never a claim the user
+  made, and rewriting it would invent one.
+
 ## Alternatives considered
 
 - A draft/started smoke (`start_smoke` → `finalize_smoke`) — a second Smoke

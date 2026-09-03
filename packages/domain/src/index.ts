@@ -370,6 +370,7 @@ export { getUserSettings, updateUserSettings } from "./user-settings.js";
 // mutating services rather than widened into Deps.
 export {
   MAX_PHOTOS_PER_SMOKE,
+  DEFAULT_PHOTO_KIND,
   addSmokePhoto,
   listSmokePhotos,
   getSmokePhoto,
@@ -406,19 +407,20 @@ export {
   PHOTO_DROP_TTL_SECONDS,
   PHOTO_DROP_RETENTION_SECONDS,
   MAX_PHOTOS_PER_DROP,
+  MAX_PHOTO_CAPTION_LENGTH,
   openPhotoDrop,
   claimPhotoDrop,
   sweepPhotoDrops,
   getPhotoDropByToken,
   assertPhotoDropUsable,
   stagePhotoByToken,
-  setPhotoDropPhotoKind,
+  updatePhotoDropPhoto,
   removePhotoDropPhoto,
   getPhotoDropPhotoObject,
   type OpenPhotoDropInput,
   type ClaimPhotoDropInput,
   type StagePhotoByTokenInput,
-  type SetPhotoDropPhotoKindInput,
+  type UpdatePhotoDropPhotoInput,
   type RemovePhotoDropPhotoInput,
 } from "./photo-drops.js";
 

@@ -97,3 +97,36 @@ describe("no_match guidance", () => {
     expect(text).not.toMatch(/creates? (the cigar|it)/);
   });
 });
+
+// Forwarding is not a failure (#288, #202). No current client hands a chat
+// attachment to this server, so `no_image_received` is the OUTCOME, not a fault —
+// and the model reads three strings on the way to learning that: the delivery
+// detail it may repeat to the user, and one sentence in each photo tool's
+// description. All three shipped together and must stay together, so the pin is
+// on the load-bearing clause rather than on whole paragraphs (the register
+// differs on purpose). The contract carries the same detail verbatim because the
+// document is where the wording is reviewed.
+describe("no_image_received is the expected outcome", () => {
+  const read = (relative: string): string => readFileSync(new URL(relative, import.meta.url), "utf8");
+
+  const DETAIL =
+    "No image arrived with this call. Chat attachments are not forwarded to this server by any current client, so the upload link is the path — relay it. This is the expected outcome, not a failure.";
+
+  it("is the delivery detail the adapter ships", () => {
+    expect(read("./server.ts")).toContain(DETAIL);
+  });
+
+  it("is the same detail the tool contract publishes", () => {
+    expect(read("../../../docs/mcp/tool-contract.md")).toContain(DETAIL);
+  });
+
+  it.each([
+    ["open_photo_drop", "relay the link and do not report it as a problem."],
+    ["add_smoke_photo", "relay the upload link and do not report it as a problem."],
+  ])("%s tells the model it is the normal outcome", (_tool, tail) => {
+    const server = read("./server.ts");
+    expect(server).toContain(
+      `delivery.status no_image_received is the normal outcome on every current client — ${tail}`,
+    );
+  });
+});

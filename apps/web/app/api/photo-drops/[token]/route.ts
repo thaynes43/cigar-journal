@@ -80,7 +80,8 @@ export async function POST(
   if (!(file instanceof File)) return uploadErrorResponse("validation_error", 400);
 
   // The kind arrives on an anonymous request and lands in a `text` column, so it
-  // is checked here rather than trusted; omitting it is fine and means "other".
+  // is checked here rather than trusted; omitting it is fine and means "cigar"
+  // (#287) — the drop page's chips then open on `Cigar` already selected.
   const rawKind = form.get("kind");
   if (rawKind !== null && !isSmokePhotoKind(rawKind)) {
     return uploadErrorResponse("validation_error", 400);

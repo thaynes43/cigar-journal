@@ -13,7 +13,7 @@ import {
   getPhotoDropByToken,
   assertPhotoDropUsable,
   stagePhotoByToken,
-  setPhotoDropPhotoKind,
+  updatePhotoDropPhoto,
   removePhotoDropPhoto,
   getPhotoDropPhotoObject,
   MAX_PHOTOS_PER_DROP,
@@ -158,9 +158,10 @@ describe("photo drops", () => {
   it("reclassifies a staged photo through the link", async () => {
     const drop = await openPhotoDrop(h.deps, storage, user);
     const staged = await stagePhotoByToken(h.deps, storage, { token: drop.token, image: image() });
-    expect(staged.kind).toBe("other");
+    // The default is `cigar` (#287) — the common photo is the stick itself.
+    expect(staged.kind).toBe("cigar");
 
-    const updated = await setPhotoDropPhotoKind(h.deps, {
+    const updated = await updatePhotoDropPhoto(h.deps, {
       token: drop.token,
       photoId: staged.photoId,
       kind: "construction",
@@ -172,7 +173,7 @@ describe("photo drops", () => {
 
     // A photo of another drop (or none at all) is not addressable through this link.
     await expect(
-      setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: newRequestId(), kind: "burn" }),
+      updatePhotoDropPhoto(h.deps, { token: drop.token, photoId: newRequestId(), kind: "burn" }),
     ).rejects.toBeInstanceOf(PhotoNotFoundError);
   });
 
@@ -182,8 +183,8 @@ describe("photo drops", () => {
     const drop = await openPhotoDrop(h.deps, storage, user);
     const staged = await stagePhotoByToken(h.deps, storage, { token: drop.token, image: image() });
 
-    await setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: staged.photoId, kind: "band" });
-    await setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: staged.photoId, kind: "band" });
+    await updatePhotoDropPhoto(h.deps, { token: drop.token, photoId: staged.photoId, kind: "band" });
+    await updatePhotoDropPhoto(h.deps, { token: drop.token, photoId: staged.photoId, kind: "band" });
 
     const stagedRows = await auditRows("staged_photo.kind");
     expect(stagedRows).toHaveLength(1);
@@ -191,15 +192,15 @@ describe("photo drops", () => {
     expect(stagedRows[0]!.actor).toBe("web");
     expect(stagedRows[0]!.clientId).toBeNull();
     expect(stagedRows[0]!.smokeId).toBeNull();
-    expect(stagedRows[0]!.before).toEqual({ photoId: staged.photoId, kind: "other" });
+    expect(stagedRows[0]!.before).toEqual({ photoId: staged.photoId, kind: "cigar" });
     expect(stagedRows[0]!.after).toEqual({ photoId: staged.photoId, kind: "band" });
 
     // The same photo after the claim: the row lives on smoke_photos now, so the
     // action changes and the audit row can finally name the smoke.
     const smokeId = await newSmoke();
     await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
-    await setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: staged.photoId, kind: "burn" });
-    await setPhotoDropPhotoKind(h.deps, { token: drop.token, photoId: staged.photoId, kind: "burn" });
+    await updatePhotoDropPhoto(h.deps, { token: drop.token, photoId: staged.photoId, kind: "burn" });
+    await updatePhotoDropPhoto(h.deps, { token: drop.token, photoId: staged.photoId, kind: "burn" });
 
     const attachedRows = await auditRows("smoke_photo.kind");
     expect(attachedRows).toHaveLength(1);
@@ -264,6 +265,136 @@ describe("photo drops", () => {
     const claims = audits.filter((a) => a.action === "photo_drop.claim");
     expect(claims).toHaveLength(1);
     expect(claims[0]!.after).toMatchObject({ photoDropId: drop.photoDropId, attached: 3, pending: 0 });
+  });
+
+  it("preserves each photo's created_at across the claim, and keeps the order stable on a tie", async () => {
+    // #288. Two invariants that only bite with SEVERAL photos, which is the case
+    // the drop was built for and the one never exercised live.
+    //
+    // The claim is a MOVE: the row keeps its id, its keys AND its created_at, so
+    // the smoke's photos stay in the order they were taken rather than in the
+    // order the transaction happened to insert them.
+    //
+    // And `created_at, id`, not `created_at` alone: three photos dropped in one
+    // burst can land in the same millisecond, and a same-timestamp tie under
+    // `ORDER BY created_at` is unordered — the planner may hand back a different
+    // order on the next read of the same rows. The tie is forced here rather than
+    // hoped for, because a real burst produces it only sometimes.
+    const drop = await openPhotoDrop(h.deps, storage, user);
+    const staged = [
+      await stagePhotoByToken(h.deps, storage, { token: drop.token, kind: "cigar", image: image() }),
+      await stagePhotoByToken(h.deps, storage, { token: drop.token, kind: "band", image: image() }),
+      await stagePhotoByToken(h.deps, storage, { token: drop.token, kind: "burn", image: image() }),
+    ];
+    const tie = new Date("2026-08-27T12:34:56.000Z");
+    for (const photo of staged) {
+      await h.deps.db
+        .update(stagedSmokePhotos)
+        .set({ createdAt: tie })
+        .where(eq(stagedSmokePhotos.id, photo.photoId));
+    }
+    // Postgres compares a uuid by its bytes and the dashes sit at fixed
+    // positions, so plain code-unit order on the text form is the same order.
+    const byId = [...staged].sort((a, b) => (a.photoId < b.photoId ? -1 : 1));
+
+    // The drop's own page already agrees with the tie-break before the claim.
+    const beforeClaim = await getPhotoDropByToken(h.deps, { token: drop.token });
+    expect(beforeClaim.photos.map((p) => p.photoId)).toEqual(byId.map((p) => p.photoId));
+
+    const smokeId = await newSmoke();
+    await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+
+    const photos = await listSmokePhotos(h.deps, user, { smokeId });
+    expect(photos.map((p) => p.createdAt)).toEqual([tie.toISOString(), tie.toISOString(), tie.toISOString()]);
+    expect(photos.map((p) => p.photoId)).toEqual(byId.map((p) => p.photoId));
+    // Every kind survives the move, each on its own photo.
+    expect(photos.map((p) => p.kind)).toEqual(byId.map((p) => p.kind));
+
+    // Stable across reads and across surfaces: the same order twice, and the same
+    // order the link reports.
+    expect((await listSmokePhotos(h.deps, user, { smokeId })).map((p) => p.photoId)).toEqual(
+      byId.map((p) => p.photoId),
+    );
+    const view = await getPhotoDropByToken(h.deps, { token: drop.token });
+    expect(view.photos.map((p) => p.photoId)).toEqual(byId.map((p) => p.photoId));
+  });
+
+  it("captions a photo through the link, staged and attached, and clears it with null", async () => {
+    // #288: the drop page is where the user is when a photo is worth a line, so
+    // the caption rides the same PATCH the kind chips use — either field alone.
+    const drop = await openPhotoDrop(h.deps, storage, user);
+    const staged = await stagePhotoByToken(h.deps, storage, { token: drop.token, image: image() });
+
+    const captioned = await updatePhotoDropPhoto(h.deps, {
+      token: drop.token,
+      photoId: staged.photoId,
+      caption: "  First third  ",
+    });
+    // Trimmed on the way in; the kind it arrived with is untouched.
+    expect(captioned).toMatchObject({ caption: "First third", kind: "cigar" });
+
+    // Both fields at once, then the erase.
+    const both = await updatePhotoDropPhoto(h.deps, {
+      token: drop.token,
+      photoId: staged.photoId,
+      kind: "band",
+      caption: "The second band",
+    });
+    expect(both).toMatchObject({ caption: "The second band", kind: "band" });
+
+    // Blank IS the erase — the column carries a caption or it carries nothing.
+    expect(
+      (await updatePhotoDropPhoto(h.deps, { token: drop.token, photoId: staged.photoId, caption: "   " }))
+        .caption,
+    ).toBeNull();
+
+    const smokeId = await newSmoke();
+    await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+    const attached = await updatePhotoDropPhoto(h.deps, {
+      token: drop.token,
+      photoId: staged.photoId,
+      caption: "Halfway",
+    });
+    expect(attached).toMatchObject({ caption: "Halfway", attached: true });
+    expect((await listSmokePhotos(h.deps, user, { smokeId }))[0]!.caption).toBe("Halfway");
+  });
+
+  it("audits a caption change staged and attached, and writes nothing for a no-op", async () => {
+    // The kind's audit contract (#267), held for the caption on the same pattern:
+    // one row per changed field, attributed to the drop's owner with no client,
+    // and nothing at all when the value did not move.
+    const drop = await openPhotoDrop(h.deps, storage, user);
+    const staged = await stagePhotoByToken(h.deps, storage, { token: drop.token, image: image() });
+
+    await updatePhotoDropPhoto(h.deps, { token: drop.token, photoId: staged.photoId, caption: "Foot" });
+    await updatePhotoDropPhoto(h.deps, { token: drop.token, photoId: staged.photoId, caption: "Foot" });
+
+    const stagedRows = await auditRows("staged_photo.caption");
+    expect(stagedRows).toHaveLength(1);
+    expect(stagedRows[0]!.actor).toBe("web");
+    expect(stagedRows[0]!.clientId).toBeNull();
+    expect(stagedRows[0]!.smokeId).toBeNull();
+    expect(stagedRows[0]!.before).toEqual({ photoId: staged.photoId, caption: null });
+    expect(stagedRows[0]!.after).toEqual({ photoId: staged.photoId, caption: "Foot" });
+
+    // One call changing BOTH fields leaves one row per field, not a merged one.
+    await updatePhotoDropPhoto(h.deps, {
+      token: drop.token,
+      photoId: staged.photoId,
+      kind: "burn",
+      caption: "Ash",
+    });
+    expect(await auditRows("staged_photo.caption")).toHaveLength(2);
+    expect(await auditRows("staged_photo.kind")).toHaveLength(1);
+
+    const smokeId = await newSmoke();
+    await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+    await updatePhotoDropPhoto(h.deps, { token: drop.token, photoId: staged.photoId, caption: null });
+
+    const attachedRows = await auditRows("smoke_photo.caption");
+    expect(attachedRows).toHaveLength(1);
+    expect(attachedRows[0]!.smokeId).toBe(smokeId);
+    expect(attachedRows[0]!.after).toEqual({ photoId: staged.photoId, caption: null });
   });
 
   it("claims only what the smoke has room for and leaves the remainder staged", async () => {

@@ -30,6 +30,58 @@ type Phase = "loading" | "ready" | "closed" | "unavailable";
 type DropState = Pick<PhotoDropView, "status" | "smokeId" | "photos">;
 const OPTIMISTIC: DropState = { status: "open", smokeId: null, photos: [] };
 
+// The photo's own caption, on the drop page because that is where the user is
+// when the photo is worth a line (#288). One box, no label and no Save: it
+// commits on blur and on Enter, and an empty box clears it. The stored value is
+// the source of truth — a PATCH response or a refresh replaces what is in the
+// box — and `sent` is what stops an untouched field from posting on every blur.
+function Caption({
+  photo,
+  disabled,
+  onCommit,
+}: {
+  photo: PhotoDropPhotoView;
+  disabled: boolean;
+  onCommit: (caption: string) => void;
+}) {
+  const stored = photo.caption ?? "";
+  const [value, setValue] = useState(stored);
+  const sent = useRef(stored);
+
+  useEffect(() => {
+    setValue(stored);
+    sent.current = stored;
+  }, [stored]);
+
+  function commit() {
+    const next = value.trim();
+    if (next === sent.current) return;
+    sent.current = next;
+    onCommit(next);
+  }
+
+  return (
+    <input
+      type="text"
+      value={value}
+      disabled={disabled}
+      placeholder="Caption"
+      aria-label="Caption"
+      // The route's own bound, restated so the box cannot take a caption the
+      // PATCH would reject and the refresh would silently discard.
+      maxLength={200}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        commit();
+      }}
+      className={`${ui.field} w-full`}
+    />
+  );
+}
+
 export function PhotoDrop({ token }: { token: string }) {
   const [phase, setPhase] = useState<Phase>("loading");
   const [drop, setDrop] = useState<DropState>(OPTIMISTIC);
@@ -92,14 +144,16 @@ export function PhotoDrop({ token }: { token: string }) {
     }
   }
 
-  async function setKind(photoId: string, kind: SmokePhotoKind) {
+  // One PATCH, whichever field the user touched: a chip tap sends `kind`, a
+  // caption sends `caption`, and the field left out is left alone.
+  async function patch(photoId: string, body: { kind?: SmokePhotoKind; caption?: string }) {
     setBusyId(photoId);
     setMessage(null);
     try {
       const res = await fetch(`/api/photo-drops/${token}/photos/${photoId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind }),
+        body: JSON.stringify(body),
       });
       if (res.status === 410) {
         setPhase("closed");
@@ -216,13 +270,18 @@ export function PhotoDrop({ token }: { token: string }) {
                       type="button"
                       aria-pressed={photo.kind === kind}
                       disabled={busyId === photo.photoId}
-                      onClick={() => void setKind(photo.photoId, kind)}
+                      onClick={() => void patch(photo.photoId, { kind })}
                       className={`${filterChip.base} ${photo.kind === kind ? filterChip.active : filterChip.inactive}`}
                     >
                       {PHOTO_KIND_LABEL[kind]}
                     </button>
                   ))}
                 </div>
+                <Caption
+                  photo={photo}
+                  disabled={busyId === photo.photoId}
+                  onCommit={(caption) => void patch(photo.photoId, { caption })}
+                />
                 <button
                   type="button"
                   aria-label="Remove photo"

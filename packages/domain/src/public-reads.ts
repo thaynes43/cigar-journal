@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import {
   cigars,
   smokes,
@@ -126,11 +126,13 @@ export async function getPublicSmoke(
     .where(eq(smokeProgression.smokeId, args.smokeId))
     .orderBy(smokeProgression.ordinal);
 
+  // Same ordering as the owner's read (#288) — the public page must not present
+  // the same strip in a different order.
   const photos = await deps.db
     .select()
     .from(smokePhotos)
     .where(eq(smokePhotos.smokeId, args.smokeId))
-    .orderBy(smokePhotos.createdAt);
+    .orderBy(asc(smokePhotos.createdAt), asc(smokePhotos.id));
 
   return toPublicSmokeView(row.smoke, row.cigar, progression, photos);
 }

@@ -7,7 +7,9 @@ import { users } from "./users.js";
 // unguessable, unique keys into the private `photos` bucket — only pipeline
 // output (normalized JPEG, EXIF stripped) is ever stored. Cascades with the
 // smoke; the storage objects are cleaned up by @cj/domain, not the DB. The
-// authoritative DDL (kind CHECK, UNIQUE keys) lives in migration 0005.
+// authoritative DDL (kind CHECK, UNIQUE keys) lives in migration 0005; the
+// `cigar` default is migration 0036 (#287) — the common photo is the stick
+// itself, and `other` is the fallback.
 export type SmokePhotoKind = "cigar" | "band" | "construction" | "burn" | "other";
 
 export const smokePhotos = pgTable(
@@ -20,7 +22,7 @@ export const smokePhotos = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id),
-    kind: text("kind").$type<SmokePhotoKind>().notNull().default("other"),
+    kind: text("kind").$type<SmokePhotoKind>().notNull().default("cigar"),
     caption: text("caption"),
     objectKey: text("object_key").notNull().unique(),
     thumbKey: text("thumb_key").notNull().unique(),

@@ -166,6 +166,35 @@ describe("migrations", () => {
   // 0034: the vendor tier (ADR-015). The CHECK is the point — a tier is an
   // ORDINAL an admin types, and a typo outside the band would silently sort a shop
   // to the front of the fleet, into the display gate and onto the photo slot.
+  // 0036: both photo tables default `kind` to `cigar` (#287). Asserted on the
+  // catalog rather than by inserting rows — the column is what the migration
+  // changed, and a row would need a user, a smoke or a drop to hang off.
+  it("0036 defaults both photo tables' kind to cigar and backfills nothing", async () => {
+    const defaults = await pg.db.execute(
+      sql`SELECT table_name, column_default
+            FROM information_schema.columns
+           WHERE table_schema = 'public'
+             AND table_name IN ('smoke_photos', 'staged_smoke_photos', 'photo_upload_tokens')
+             AND column_name = 'kind'
+           ORDER BY table_name`,
+    );
+    expect(defaults.rows).toEqual([
+      // The single-use link keeps `other`: @cj/domain always writes this column
+      // explicitly, so its default is unreachable from any shipped path.
+      { table_name: "photo_upload_tokens", column_default: "'other'::text" },
+      { table_name: "smoke_photos", column_default: "'cigar'::text" },
+      { table_name: "staged_smoke_photos", column_default: "'cigar'::text" },
+    ]);
+
+    // The CHECK still admits every kind — a default is not a narrowing.
+    const checks = await pg.db.execute(
+      sql`SELECT pg_get_constraintdef(oid) AS def
+            FROM pg_constraint
+           WHERE conrelid = 'smoke_photos'::regclass AND contype = 'c'`,
+    );
+    expect(JSON.stringify(checks.rows)).toContain("'other'");
+  });
+
   it("0034 defaults the tier to 2 and refuses one outside [1, 9]", async () => {
     const [defaulted] = await pg.db
       .insert(vendors)
