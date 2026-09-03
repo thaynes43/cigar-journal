@@ -102,20 +102,25 @@ and a family is bigger than a page.
 **Specialization** (ADR-017). A row with `vitola_name NULL` is a FAMILY ROW — the
 vitola was never recorded, not a claim that there is none.
 
-**The stated vitola is struck from the name before anything compares it.** The
-name minus its vitola is the FAMILY CLAIM, and that is what the candidate search
-and every comparison above run on, because the rest of the name is what says
-which family this is. Without the strike a numbered vitola can never reach its
-family: `Padron 1926 Natural No. 2` carries a model token `Padron 1926 Natural`
-lacks, so the number rule disqualifies the family and the resolver mints a row
-sharing nothing with it. What the strike LEAVES is judged by the ordinary rules —
-`Padrón 1926 Serie No. 2 Natural` minus `No. 2` still says `Serie`, which the
-family never said, so that one-sided residue raises `cigar_ambiguous` exactly as
-any other would. The claim only ever widens the candidate search: both the full
-name and the claim probe the pool, scored on whichever fits better, so a name
-that already matched a row outright (`Cohiba Robusto` with `Robusto` stated)
-still links to it instead of minting a duplicate. Nothing is renamed by the
-strike; it is a comparison key.
+**A stated vitola is struck from the name to form the FAMILY CLAIM.** The rest of
+the name is what says which family this is, and without the claim a numbered
+vitola can never reach its family: `Padron 1926 Natural No. 2` carries a model
+token `Padron 1926 Natural` lacks, so the number rule disqualifies the family and
+the resolver mints a row sharing nothing with it.
+
+**The full name is asked first; the claim answers only when it found nothing.**
+The strike exists to REACH a family the name cannot, never to re-decide what the
+name already decided — most vitolas are not in the size vocabulary, so the claim
+reads their word as an identity residue on the ROW (`Trinidad Trinidad Reyes`
+minus `Reyes` no longer accounts for the `Reyes` its own catalog row says). It
+falls back only from ZERO strong candidates, so a genuine ambiguity stays a
+question rather than being resolved by the broader key. The claim likewise only
+widens the candidate pool — both keys probe it, scored on whichever fits better —
+so a name that already matched a row outright still links instead of minting a
+duplicate. What the claim LEAVES is judged by the ordinary rules: `Padrón 1926
+Serie No. 2 Natural` minus `No. 2` still says `Serie`, which the family never
+said, so that one-sided residue raises `cigar_ambiguous` exactly as any other
+would. Nothing is renamed by the strike; it is a comparison key.
 
 When the described cigar states `vitola.name` and the single strong candidate is
 such a row, the resolver does not link: it gets-or-creates the SIBLING leaf under

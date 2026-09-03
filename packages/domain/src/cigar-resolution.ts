@@ -153,18 +153,19 @@ export async function resolveCigar(
   }
 
   // THE NAME MINUS ITS VITOLA IS THE FAMILY CLAIM (ADR-017). When the caller
-  // states `vitola.name`, that vitola's own words are struck from the name before
-  // anything compares it, because the rest of the name is what claims WHICH
-  // FAMILY this is. Without the strike a numbered vitola never reaches its
-  // family: `Padron 1926 Natural No. 2` carries the model token `2` that
+  // states `vitola.name`, striking that vitola's own words leaves what the name
+  // claims about WHICH FAMILY this is. Without it a numbered vitola never reaches
+  // its family: `Padron 1926 Natural No. 2` carries the model token `2` that
   // `Padron 1926 Natural` lacks, so `numbersCompatible` disqualifies the family
   // outright and the resolver mints a row sharing nothing with it.
   //
-  // What the strike LEAVES is judged by the ordinary rules, unchanged — a
-  // leftover identity word still asks (`Padrón 1926 Serie No. 2 Natural` minus
-  // `No. 2` leaves `Serie`, which the family never said, so `cigar_ambiguous`).
-  // And the sibling's own name is composed from the FULL described name, so
-  // nothing the user typed is lost by having been struck here.
+  // A SECOND KEY, NOT A REPLACEMENT — it widens the candidate pool below and
+  // answers the strong-match filter only when the full name answered nothing (see
+  // there). What it LEAVES is judged by the ordinary rules, unchanged: a leftover
+  // identity word still asks (`Padrón 1926 Serie No. 2 Natural` minus `No. 2`
+  // leaves `Serie`, which the family never said, so `cigar_ambiguous`). And the
+  // sibling's own name is composed from the FULL described name, so nothing the
+  // user typed is lost by having been struck here.
   //
   // Not applied under `confirmedDistinct`: that path makes none of these
   // comparisons and wants only its exact-duplicate guard, which is on the name
@@ -211,13 +212,26 @@ export async function resolveCigar(
       };
     }
   } else {
-    // A candidate links only if it makes the SAME identity claims as the CLAIM —
-    // the name, minus a stated vitola's own words (above) — with no residue on
-    // either side and no stated wrapper disagreement (`journalLinkCompatible`,
-    // which is the journal's own rule and stricter than the
-    // `strongLinkCompatible` the curation queue and the crawler read).
+    // A candidate links only if it makes the SAME identity claims as the name —
+    // no residue on either side, no stated wrapper disagreement
+    // (`journalLinkCompatible`, which is the journal's own rule and stricter than
+    // the `strongLinkCompatible` the curation queue and the crawler read).
+    //
+    // THE NAME IS ASKED FIRST AND THE CLAIM ONLY WHEN IT ANSWERS NOTHING
+    // (ADR-017). The strike exists to REACH a family the full name cannot; it
+    // must never take a decision the full name already makes, because most
+    // vitolas are not in the size vocabulary and the claim reads their word as an
+    // identity residue on the ROW: `Trinidad Trinidad Reyes` + `Reyes` claims
+    // `Trinidad Trinidad`, which no longer accounts for the `Reyes` its own
+    // catalog row says (importer ledger fixture, row 5). Falling back only from
+    // ZERO strong candidates also keeps a genuine ambiguity a question: the
+    // broader key must not resolve what the narrower one could not decide.
     const nearby = candidates.filter((c) => Number(c.sim) >= STRONG_MATCH);
-    const strong = nearby.filter((c) => journalLinkCompatible(claim, c.canonical_name));
+    const named = nearby.filter((c) => journalLinkCompatible(name, c.canonical_name));
+    const strong =
+      named.length === 0 && claim !== name
+        ? nearby.filter((c) => journalLinkCompatible(claim, c.canonical_name))
+        : named;
 
     if (strong.length === 1) {
       const match = strong[0]!;

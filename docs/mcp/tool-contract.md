@@ -916,12 +916,12 @@ on it that vitola. A sibling that already exists links instead
 within its own marca, or on the folded name; a family with no brand matches on
 the name alone, since a null brand is not a wildcard (ADR-012).
 
-A stated vitola's own words are **struck from the name** before the entry is
-looked up, so the family is found whether or not the name repeats the vitola:
-`Padron 1926 Natural No. 2` with `vitola.name: "No. 2"` resolves against
+A stated vitola's own words are **struck from the name** when the name itself
+matches nothing, so the family is found whether or not the name repeats the
+vitola: `Padron 1926 Natural No. 2` with `vitola.name: "No. 2"` resolves against
 `Padron 1926 Natural` and specializes, and the sibling still takes the full name
-you sent. What the strike leaves is judged as ever — `Padrón 1926 Serie No. 2
-Natural` still says `Serie`, which that family never said, so it returns
+you sent. What is left is judged as ever — `Padrón 1926 Serie No. 2 Natural`
+still says `Serie`, which that family never said, so it returns
 `cigar_ambiguous` for you to settle with the user.
 
 The rule keys on the *field*: a

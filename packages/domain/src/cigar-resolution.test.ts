@@ -1386,4 +1386,24 @@ describe("resolveCigar family rows and vitola specialization (ADR-017)", () => {
     expect(saved.cigarCreated).toBe(false);
     expect(saved.specializedFrom).toBeUndefined();
   });
+
+  // THE NAME IS ASKED BEFORE THE CLAIM. Most vitolas are not in the size
+  // vocabulary — `Reyes`, `Divinos`, `Petit Edmundo` — so the claim reads their
+  // word as an identity residue on the ROW: `Ventanas Reyes` minus `Reyes` is
+  // `Ventanas`, which no longer accounts for the `Reyes` the catalog row itself
+  // says, and a claim-first resolver would ask about a row the name matched
+  // outright (caught by the importer's ledger fixture, row 5).
+  it("links a row the full name matches even when the vitola word is not vocabulary", async () => {
+    const familyId = await h.seedCigar({ canonicalName: "Ventanas Reyes", brand: "Ventanas" });
+
+    const added = await addCigar(h.deps, user, {
+      clientRequestId: newRequestId(),
+      cigar: { canonicalName: "Ventanas Reyes", vitola: { name: "Reyes" } },
+    });
+
+    expect(added.created).toBe(false);
+    expect(added.cigar.cigarId).toBe(familyId);
+    expect(added.specializedFrom).toBeUndefined();
+    expect((await readCigar(familyId)).vitolaName).toBeNull();
+  });
 });
