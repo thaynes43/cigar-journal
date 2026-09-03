@@ -22,6 +22,7 @@ import {
   VITOLA_TOKENS,
   type AliasAnchor,
   type AliasCandidate,
+  type AssortmentReason,
   type CigarType,
   type LeafCandidate,
   type ListingParse,
@@ -83,12 +84,13 @@ export type ListingResolution =
   // be the collapse-bucket failure running in reverse — a second row for a
   // product the catalog already holds twice.
   | { kind: "ambiguous"; parse: ListingParse; candidates: LeafCandidate[] }
-  // A retailer assortment: it spans blends, so it names no single leaf and never
-  // mints one. Distinct from `ambiguous` because it is about NO leaf rather than
-  // several, and the two must not share a counter — `linksAmbiguous` exists to
-  // point at collapse buckets that need splitting, and a shop's sampler shelf is
-  // not one.
-  | { kind: "sampler"; parse: ListingParse }
+  // A retailer assortment: it spans products, so it names no single leaf and
+  // never mints one. Distinct from `ambiguous` because it is about NO leaf rather
+  // than several, and the two must not share a counter — `linksAmbiguous` exists
+  // to point at collapse buckets that need splitting, and a shop's sampler shelf
+  // is not one. Since #164 it is not a triage row either: the walk counts it as
+  // skipped-non-cigar, which is what it is.
+  | { kind: "assortment"; reason: AssortmentReason; parse: ListingParse }
   // The brand anchored and none of its leaves fits. The ONLY arm that licenses
   // creating a catalog row, and the row it creates is structured.
   | { kind: "none"; parse: ListingParse };
@@ -105,7 +107,7 @@ export async function resolveListing(
   const choice = chooseLeaf(parse, candidates);
 
   if (choice.kind === "none") return { kind: "none", parse };
-  if (choice.kind === "sampler") return { kind: "sampler", parse };
+  if (choice.kind === "assortment") return { kind: "assortment", reason: choice.reason, parse };
   if (choice.kind === "many") return { kind: "ambiguous", parse, candidates: choice.candidates };
 
   const hit: CatalogHit = { cigarId: choice.candidate.cigarId, canonicalName: choice.candidate.canonicalName };
@@ -671,7 +673,7 @@ function isIdentityBearing(key: string): boolean {
 export function coversAsk(ask: EnrichAsk, parse: ListingParse): boolean {
   // A mixed box is not one cigar, so it depicts no single row (the same ruling
   // `chooseLeaf` makes first, and for the same reason).
-  if (parse.sampler) return false;
+  if (parse.assortment) return false;
 
   // Positive contradiction only — see the header. Silence on either side is not
   // evidence of a different brand.

@@ -226,6 +226,10 @@ export {
 export {
   parseListingTitle,
   stripPackaging,
+  assortmentPhrase,
+  assortmentBrands,
+  classifyAssortment,
+  joinsTwoClaims,
   parsePackagingFacts,
   parseDims,
   extractDims,
@@ -234,6 +238,7 @@ export {
   PACKAGING_TOKENS,
   PACKAGING_TOKEN_LABELS,
   VITOLA_TOKENS,
+  type AssortmentReason,
   type ListingParse,
   type ParseRegistry,
   type PackagingFacts,
@@ -242,6 +247,7 @@ export {
 } from "./catalog-parse.js";
 export {
   parseListing,
+  assortmentOf,
   loadAncestryContext,
   scopedLeafCandidates,
   chooseLeaf,

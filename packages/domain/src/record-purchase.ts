@@ -87,8 +87,14 @@ async function recordWithinTx(
   // links (created:false), so an override can never mint a literal duplicate —
   // and it is inert on a cigarId ref, which resolves before options are read.
   const describedRef = "described" in input.cigar;
+  //
+  // AN ACQUISITION MAY BE AN ASSORTMENT (#164 Q1). `save_smoke` and `add_cigar`
+  // refuse a sampler because a smoke lands on a leaf and a mixed box is not one;
+  // a PURCHASE of a sampler is a real event with a real price, and the owner keeps
+  // exactly those rows as inventory records. So this path records what was bought.
   const cigar: ResolvedCigar = await resolveCigar(tx, input.cigar as CigarRef, {
     confirmedDistinct: input.confirmedDistinct ?? false,
+    allowAssortment: true,
   });
 
   const { vendorId, unknownVendor } = await resolveVendor(tx, input.vendorName);

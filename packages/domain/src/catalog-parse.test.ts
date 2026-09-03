@@ -8,6 +8,8 @@ import {
   matchVitola,
   tokenizeTitle,
   parseListingTitle,
+  assortmentPhrase,
+  classifyAssortment,
   type ParseRegistry,
 } from "./catalog-parse.js";
 
@@ -74,8 +76,8 @@ describe("stripPackaging", () => {
   });
 
   it("flags a sampler, which names no single leaf", () => {
-    expect(stripPackaging("Fox 5 Cigar Sampler").sampler).toBe(true);
-    expect(stripPackaging("Oliva Serie V Robusto").sampler).toBe(false);
+    expect(stripPackaging("Fox 5 Cigar Sampler").assortment).toBe("sampler");
+    expect(stripPackaging("Oliva Serie V Robusto").assortment).toBe(null);
   });
 
   it("tidies separators the removal left dangling", () => {
@@ -368,5 +370,71 @@ describe("stripPackaging separator tidying", () => {
     expect(stripPackaging("Padrón 1964 Anniversary - Box of 20 - Torpedo").cleaned).toBe(
       "Padrón 1964 Anniversary - Torpedo",
     );
+  });
+});
+
+// ==========================================================================
+// ASSORTMENTS ARE NOT CIGARS (#164 Q1). A retailer's selection spans products,
+// so it names none of them — and unlike packaging it cannot be stripped, because
+// what is left is not a cigar either: `Mix & Match Cuban Cigar Bundle` leaves
+// `Mix & Match Cuban`, which is exactly the shape of row the flat matcher minted.
+// ==========================================================================
+
+describe("assortment classification", () => {
+  const brands = [
+    { id: "brand-cohiba", name: "Cohiba", aliases: ["cohiba"] },
+    { id: "brand-montecristo", name: "Montecristo", aliases: ["montecristo"] },
+    { id: "brand-cao", name: "CAO", aliases: ["cao"] },
+  ];
+
+  it("reads the words a retailer writes on a shelf", () => {
+    expect(assortmentPhrase("Drew Estate Free 8-Cigar Sampler")).toBe("sampler");
+    expect(assortmentPhrase("Oliva Free Sampler")).toBe("sampler");
+    expect(assortmentPhrase("Cuban Assortment")).toBe("sampler");
+    expect(assortmentPhrase("Mix & Match Cuban Cigar Bundle (Outlet)")).toBe("mix-and-match");
+    expect(assortmentPhrase("Mix and Match Nicaraguan Bundle")).toBe("mix-and-match");
+    expect(assortmentPhrase("Club & Mini Outlet Bundle Deal")).toBe("bundle-deal");
+    expect(assortmentPhrase("Cohiba 3-Pack Trio Deal")).toBe("count-deal");
+  });
+
+  // THE #164 TRAP, both halves. `Bundles` is a BRAND-LINE name for bundle cigars
+  // — two live prod rows carry it — so the bare word can never classify, and a
+  // container word inside an identity word can never match. Word boundaries are
+  // what make both true, and a substring rule breaks both.
+  it("never fires on a bundle line, or on a container word inside an identity word", () => {
+    expect(assortmentPhrase("Dominican Bundles Toro")).toBe(null);
+    expect(assortmentPhrase("Nicaraguan Bundles Robusto")).toBe(null);
+    expect(assortmentPhrase("CAO Brazilia Amazon")).toBe(null);
+    expect(assortmentPhrase("Oliva Serie V Bundle of 20")).toBe(null);
+  });
+
+  // `Amazon` carries `mazo` as a substring, and `mazo` is a container word. The
+  // strip compares folded WORDS, so the identity survives — pinned here as well
+  // as in the packaging suite because the assortment rule reads the same names.
+  it("keeps Amazon out of the mazo vocabulary", () => {
+    expect(stripPackaging("CAO Brazilia Amazon").cleaned).toBe("CAO Brazilia Amazon");
+    expect(stripPackaging("CAO Brazilia Amazon").packaging).toBe(null);
+    expect(stripPackaging("Oliva Serie V Mazo").cleaned).toBe("Oliva Serie V");
+  });
+
+  // The registry answers "is this a marca", so no brand list is written here.
+  it("reads two marcas joined as an assortment", () => {
+    expect(classifyAssortment("Cohiba & Montecristo DOMINICAN (Outlet)", brands)).toBe("multi-brand");
+    expect(classifyAssortment("Cohiba and Montecristo Selection", brands)).toBe("multi-brand");
+  });
+
+  it("leaves one marca, joined to anything else, alone", () => {
+    expect(classifyAssortment("Cohiba Robusto", brands)).toBe(null);
+    expect(classifyAssortment("Cohiba Black & Red Robusto", brands)).toBe(null);
+    expect(classifyAssortment("CAO Brazilia Amazon", brands)).toBe(null);
+  });
+
+  it("carries the verdict onto the parse, with a note for the curator", () => {
+    const registry: ParseRegistry = { brands, linesOfBrand: () => [], blendsOfLine: () => [] };
+    const parse = parseListingTitle("Cohiba & Montecristo DOMINICAN Bundle (Outlet)", registry);
+    expect(parse.assortment).toBe("multi-brand");
+    expect(parse.notes.some((note) => note.includes("Assortment"))).toBe(true);
+
+    expect(parseListingTitle("Cohiba Robusto", registry).assortment).toBe(null);
   });
 });

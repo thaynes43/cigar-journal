@@ -70,6 +70,94 @@ export const PACKAGING_TOKEN_LABELS = new Map<string, string>([
 // imports it back from this one vocabulary.
 export const PACKAGING_TOKENS = new Set(PACKAGING_TOKEN_LABELS.keys());
 
+// --------------------------------------------------------------------------
+// Assortments — a name that is about SEVERAL cigars, and therefore about none.
+// --------------------------------------------------------------------------
+
+// WHY THIS IS NOT PACKAGING. Stripping a container word off `Undercrown Shade 5
+// Pack` leaves `Undercrown Shade`, which is a cigar. Stripping one off `Mix &
+// Match Cuban Cigar Bundle` leaves `Mix & Match Cuban`, which is a shelf — and
+// the flat matcher minted exactly those rows. An assortment is not a packaging
+// variant of one product; it is a retailer's selection spanning products, so it
+// resolves to no leaf, mints no leaf, and is refused rather than stripped
+// (ADR-012, issue #164 Q1).
+export type AssortmentReason =
+  // `… Sampler`, `Free 8-Cigar Sampler`, `… Assortment`.
+  | "sampler"
+  // `Mix & Match Cuban Cigar Bundle`.
+  | "mix-and-match"
+  // `Club & Mini Outlet Bundle Deal`. The word `bundle` ALONE is not one of
+  // these — see the guard below.
+  | "bundle-deal"
+  // `Cohiba 3-Pack Trio Deal`.
+  | "count-deal"
+  // `Cohiba & Montecristo DOMINICAN Bundle` — two marcas joined, decided by the
+  // registry rather than by a hand-written brand list.
+  | "multi-brand";
+
+// THE WORD `BUNDLE` IS NOT ENOUGH, and this is the trap the rule is written
+// around: `Dominican Bundles Toro` and `Nicaraguan Bundles Robusto` are BRAND
+// LINES of bundle cigars, each one product. So `bundle` qualifies only in a
+// phrase that names a retailer promotion (`Bundle Deal`, `Outlet Bundle`), never
+// on its own — where it is packaging, and `PACKAGING_TOKEN_LABELS` already
+// records it on the offer.
+//
+// EVERY PATTERN IS WORD-BOUNDARY ANCHORED. A substring rule reads the `mazo` in
+// `CAO Brazilia Amazon` as a container and the `duo` in a marca as a promotion;
+// the tests pin both.
+const ASSORTMENT_PHRASES: readonly { pattern: RegExp; reason: AssortmentReason }[] = [
+  { pattern: /\bsamplers?\b/i, reason: "sampler" },
+  { pattern: /\bassortments?\b/i, reason: "sampler" },
+  { pattern: /\bmix\s*(?:&|and)\s*match\b/i, reason: "mix-and-match" },
+  { pattern: /\boutlet\s+bundles?\b/i, reason: "bundle-deal" },
+  { pattern: /\bbundle\s+deals?\b/i, reason: "bundle-deal" },
+  { pattern: /\b(?:trio|duo)\s+deals?\b/i, reason: "count-deal" },
+];
+
+// The assortment a NAME states on its own words. Pure and registry-free, so the
+// crawler's listing gate can run it before it has opened a connection.
+export function assortmentPhrase(name: string): AssortmentReason | null {
+  for (const { pattern, reason } of ASSORTMENT_PHRASES) if (pattern.test(name)) return reason;
+  return null;
+}
+
+// Where a name JOINS two names. Split on it and each side is a claim of its own,
+// which is what makes the two-marca test possible without a brand list: the
+// registry answers whether each side names a marca.
+//
+// A brand whose own name carries the joiner (an alias spelled `Alec & Bradley`)
+// is safe by construction — splitting it yields halves that anchor at most one
+// marca between them, and the rule needs TWO DIFFERENT ones.
+const CONJUNCTION = /\s*&\s*|\s+and\s+/i;
+
+// Does this name join two claims at all? The cheap gate in front of the registry
+// probe: no joiner, no second marca to find, so no query is worth making.
+export function joinsTwoClaims(name: string): boolean {
+  return CONJUNCTION.test(name);
+}
+
+// Two different marcas, joined. `Cohiba & Montecristo DOMINICAN Bundle` is a
+// shelf; `Cohiba Robusto` is a cigar, and no amount of trigram score should let
+// the first become the second.
+export function assortmentBrands(name: string, brands: readonly AliasCandidate[]): boolean {
+  const segments = name.split(CONJUNCTION);
+  if (segments.length < 2) return false;
+  const anchored = new Set<string>();
+  for (const segment of segments) {
+    const { keys, segmentStarts } = tokenizeTitle(segment);
+    const anchor = anchorByAlias(keys, brands, { segmentStarts, minKeyLength: MIN_ANCHOR_KEY_LENGTH });
+    if (anchor) anchored.add(anchor.entity.id);
+    if (anchored.size > 1) return true;
+  }
+  return false;
+}
+
+// The whole classification: the words first, the registry only if the words said
+// nothing and the name joins two claims.
+export function classifyAssortment(name: string, brands: readonly AliasCandidate[]): AssortmentReason | null {
+  return assortmentPhrase(name) ?? (assortmentBrands(name, brands) ? "multi-brand" : null);
+}
+
 // `box-pressed` and `trunk-pressed` are SHAPE, not packaging — the vocabulary
 // reference is explicit that they describe the leaf's vitola and that a title
 // carrying one is not a new leaf (docs/ddd/cigar-industry-vocabulary.md). The
@@ -155,7 +243,11 @@ export interface StrippedTitle extends PackagingFacts {
   // A retailer assortment spanning brands or blends. It matches NO SINGLE LEAF
   // (docs/ddd/cigar-industry-vocabulary.md) — carried here so the resolver can
   // refuse to mint from it rather than creating a catalog row called "Sampler".
-  sampler: boolean;
+  // Null is the ordinary case: this title names one product.
+  //
+  // NAME-ONLY REASONS. `multi-brand` needs the brand registry and is decided by
+  // `parseListingTitle`, which has one; everything here is decided by the words.
+  assortment: AssortmentReason | null;
 }
 
 // Remove everything that describes the container, leaving the name of the thing
@@ -165,7 +257,10 @@ export interface StrippedTitle extends PackagingFacts {
 // while an under-eager one merely leaves residue for a curator to read.
 export function stripPackaging(name: string): StrippedTitle {
   const facts = parsePackagingFacts(name);
-  const sampler = /\bsamplers?\b/i.test(name);
+  // READ BEFORE THE STRIP, because the strip removes the very words that say it:
+  // `sampler` and `bundle` are packaging tokens, so `Mix & Match Cuban Cigar
+  // Bundle` cleans to `Mix & Match Cuban` and nothing downstream could tell.
+  const assortment = assortmentPhrase(name);
 
   let working = normalizePressed(name);
 
@@ -201,7 +296,7 @@ export function stripPackaging(name: string): StrippedTitle {
     .replace(/\s+/g, " ")
     .trim();
 
-  return { cleaned, packaging: facts.packaging, sticksPerPackage: facts.sticksPerPackage, sampler };
+  return { cleaned, packaging: facts.packaging, sticksPerPackage: facts.sticksPerPackage, assortment };
 }
 
 // --------------------------------------------------------------------------
@@ -488,7 +583,10 @@ export interface ListingParse {
   cleanedName: string;
   packaging: string | null;
   sticksPerPackage: number | null;
-  sampler: boolean;
+  // Set when this title is about SEVERAL cigars — a sampler, a mix-and-match, a
+  // bundle deal, or two marcas joined. It names no leaf, so nothing links it and
+  // nothing mints from it.
+  assortment: AssortmentReason | null;
   // The tokens no level claimed, in title order. Empty means the parse explained
   // the whole title.
   residue: string;
@@ -516,6 +614,10 @@ function markConsumed<T extends AliasCandidate>(anchor: AliasAnchor<T>, consumed
 // treats breadcrumbs as a signal to keep, not a signal to trust.
 export function parseListingTitle(title: string, registry: ParseRegistry): ListingParse {
   const stripped = stripPackaging(title);
+  // The registry half of the assortment rule. Asked over the CLEANED name so a
+  // trailing `(Outlet)` or `Bundle` cannot change which marcas the halves name,
+  // and only when the words themselves said nothing.
+  const assortment = stripped.assortment ?? classifyAssortment(stripped.cleaned, registry.brands);
   // Dimensions come out BEFORE tokenizing. `6 x 50` folds into three tokens that
   // no alias will ever claim, and leaving them in would put a measurement in the
   // residue a curator reads as unexplained identity.
@@ -537,7 +639,7 @@ export function parseListingTitle(title: string, registry: ParseRegistry): Listi
     cleanedName: stripped.cleaned,
     packaging: stripped.packaging,
     sticksPerPackage: stripped.sticksPerPackage,
-    sampler: stripped.sampler,
+    assortment,
     residue: "",
     notes,
   };
@@ -545,8 +647,8 @@ export function parseListingTitle(title: string, registry: ParseRegistry): Listi
   if (stripped.packaging) {
     notes.push(`Packaging '${stripped.packaging}' stripped from the name and recorded on the offer.`);
   }
-  if (stripped.sampler) {
-    notes.push("Sampler listing — a retailer assortment matches no single leaf.");
+  if (assortment) {
+    notes.push(`Assortment listing (${assortment}) — it matches no single leaf.`);
   }
 
   const brand = anchorByAlias(keys, registry.brands, { segmentStarts, minKeyLength: MIN_ANCHOR_KEY_LENGTH });

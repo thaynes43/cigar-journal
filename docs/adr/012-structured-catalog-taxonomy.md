@@ -5,6 +5,8 @@
 - **Amended by ADR-017 (2026-09-03):** a leaf with `vitola_name NULL` is a
   family row — never retyped; a stated vitola specializes it into a sibling
   leaf.
+- **Amended by #164 fix (2026-09-03):** packaging words are stripped from a
+  described name before resolution; assortments are refused.
 
 ## Context
 
