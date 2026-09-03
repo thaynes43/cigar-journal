@@ -1,0 +1,57 @@
+# Live capture 2026-09-02 (in-cluster Job, namespace `frontend`), trimmed to the
+# groups that decide our access. The Cloudflare managed block is verbatim; the
+# Yoast block below it is the site's own. Omitted from the middle: the remaining
+# named-agent Disallow groups (Applebot-Extended, Bytespider,
+# CloudflareBrowserRenderingCrawler, Google-Extended, meta-externalagent) — all
+# the same shape as the four kept here, and none of them is us.
+#
+# `Content-Signal: search=yes,ai-train=no,use=reference` is an express Art. 4 DSM
+# reservation, and this lane is built to it: `search=yes` is defined in the file's
+# own header as "returning hyperlinks and short excerpts", which is exactly what
+# ADR-013 §2 permits us to store; `use=reference` covers a score shown with
+# attribution and a link back; `ai-train=no` forbids training, which nothing does.
+#
+# What matters for the gate: `cigar-journal-crawler` is not named, so it matches
+# the `*` group and `/category/reviews/cigars/` is allowed.
+
+# BEGIN Cloudflare Managed content
+
+User-agent: *
+Content-Signal: search=yes,ai-train=no,use=reference
+Allow: /
+
+User-agent: Amazonbot
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: GPTBot
+Disallow: /
+
+# END Cloudflare Managed Content
+
+# START YOAST BLOCK
+# ---------------------------
+User-agent: *
+Disallow: /wp-admin/
+Allow: /wp-admin/admin-ajax.php
+
+User-agent: AhrefsBot
+Crawl-delay: 600
+User-agent: PetalBot
+Disallow: /
+User-agent: AddSearchBot
+Disallow: /
+User-agent: Googlebot
+Crawl-delay: 10
+User-agent: bingbot
+Crawl-delay: 60
+
+
+Sitemap: https://halfwheel.com/sitemap_index.xml
+# ---------------------------
+# END YOAST BLOCK

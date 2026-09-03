@@ -6,7 +6,10 @@ the **fifteen-candidate Habanos sweep of 2026-09-02** (#270, ADR-015) that added
 the four picture sources below and rejected the rest. The six-adapter `--probe`
 run of **2026-09-02 on the v0.39.0 image** (#270) re-read 2 Guys, EGM,
 Cigarworld, Montefortuna and J.J. Fox; its results and the corrections it forced
-are in the verdict tails below.
+are in the verdict tails below. **halfwheel** joined on 2026-09-02 (#199 slice
+2a) as the first source here that is not a shop — see "Reviewer sources" below;
+a reviewer's posture, budget and enablement recipe differ from a vendor's and
+its section is separate for that reason.
 Caveat: the research pod's egress allowlist blocks direct fetches of
 every vendor site, so anything not marked "live-probed" is inferred from indexed
 sources and platform defaults — **verify live from the crawler's own environment
@@ -114,6 +117,116 @@ photo bytes and terms.
 - **cigare.com** — a parked domain ("Premium Domain Name For Sale"); robots and
   sitemap both 404.
 
+## Reviewer sources (ADR-013 §4) — halfwheel
+
+The first source in the registry that is **not a shop**. `vendors.kind` has three
+values (`vendor` | `reviewer` | `reference`, migration 0028) and a reviewer's row
+is constrained differently from every row above it: `vendors_non_vendor_source_chk`
+refuses a non-shop that carries a `focus` or a `purchase_linkout`, because a
+reviewer **stocks nothing** — any focus it named would be a stocking claim from a
+site with no inventory (the #170 mechanism), and any linkout would be a "buy here"
+pointing at a blog. The adapter type refuses the same combination a compile
+earlier.
+
+| Source | Tier | Kind | Platform | Structured path | Verdict |
+|---|---|---|---|---|---|
+| halfwheel | 9 | reviewer | WordPress (Yoast + a bespoke theme) | the **reviews archive**, `/category/reviews/cigars/` paginated `/page/N/`, + the theme's `post-review score-N` box | live-read 2026-09-02, adapter shipped `crawl_enabled=false` — probe pending. Tier 9 because it competes for none of the three things a tier orders: no offers, no enrich asks, no photo slot |
+
+**What it ingests, and only that.** Scores, links and short excerpts (ADR-013 §2).
+One `review_observations` row per review, idempotent on `(source, url)` where
+`source` is the adapter slug `halfwheel`: the 0-100 score exactly as halfwheel
+states it, the publication day, the byline, the canonical URL and the site's own
+one-sentence **deck** (`og:description`, ~150-260 characters, hard-bounded at 400
+and dropped rather than cut if it ever exceeds that). Never the review body, and
+never the conclusion paragraph inside the score box — that is the reviewer's own
+prose and is the one thing on the page most tempting to store.
+
+**It fetches no images, ever.** halfwheel's `/about/policies/` is explicit: "Any
+image used without the expressed consent of either Charlie Minato or Brooks
+Whittington will be considered stolen." There is no photo path in the reviewer
+lane to disable; the absence is the compliance.
+
+**It mints nothing.** A review whose headline resolves to no catalog target is
+COUNTED AND SKIPPED, and the count gets its own line in the run summary
+(`reviews unresolved (no catalog target), skipped and never minted: N`). A vendor
+listing in that position licenses `createCigarFromListing` — the shop demonstrably
+has the thing — but a reviewer's headline is an editorial title with no inventory
+behind it, and minting from one would grow the parallel catalog ADR-012 spent Wave
+2 removing, seeded this time by a source that could never be checked against
+stock. A high count is REGISTRY DEBT: the fix is brand aliases in curation, never
+a looser matcher.
+
+**Linkage is the most specific level the SOURCE states.** A headline naming a
+vitola that resolves to one leaf links the leaf (`cigar_id`); a headline naming a
+brand, a line and a blend and **no vitola** — `AG Cigars Legendary Moment Jamie
+Foxx` — links the blend (`blend_id`), because that is what the reviewer actually
+claimed. An ambiguous vitola stays unresolved rather than being widened to its
+blend: inventing a broader claim than the reviewer made is the mirror of the
+specificity error ADR-013 §1 forbids in the other direction.
+
+**Why the archive and not the sitemap.** halfwheel's Yoast index is 23
+`post-sitemap*.xml` children carrying every post the site has published, and a
+review and a news item share one URL shape (`/<slug>/<post-id>/`) with nothing in
+the sitemap to separate them — the news posts outnumber the reviews several times
+over. The archive is review-only, newest-first, 11 cards a page, verified to page
+220 (2015), and each card already carries the URL, the cigar name, the byline, the
+publication DAY and the deck. So the review page is fetched for exactly one thing:
+the score.
+
+Two details that came out of the live read and are worth keeping:
+
+- **The day comes from the archive card, not the page.** `datePublished` is a UTC
+  instant (`2026-09-02T19:30:36+00:00`) and `review_observations.reviewed_at` is a
+  `date`, so its first ten characters silently convert a US-Central publication
+  day to a UTC one — off by a day for anything published after 18:00 Central. The
+  card's `/date/2026/09/02` link is the day halfwheel itself files the post under.
+- **The URL is the archive's, normalized.** Some pages' JSON-LD `@id` is the
+  UNRESOLVED permalink (`https://halfwheel.com/?p=476898`, live on the AG Cigars
+  review). It is half of the idempotency key, so taking the `@id` would file that
+  review under a second address and the next crawl through the archive would
+  insert it again.
+
+**Per-run budget.** 3 index pages -> 33 candidates, <= 33 review pages, 1 robots
+read = 37 fetches under `maxPages: 40` at `minIntervalMs: 4000` ~ 2.5 minutes.
+**The back catalogue is not walked** — ~2,400 reviews at that rate is hours, and
+reaching them needs a persisted index cursor slice 2a deliberately does not
+invent. Steady state is the newest ~33 reviews, re-confirmed nightly, which is
+what makes `last_seen_at` mean "still up" and an edited score arrive as an
+amendment rather than a duplicate.
+
+**Egress.** The dev pod cannot reach halfwheel.com (default-deny
+CiliumNetworkPolicy on `dev`), but namespace **`frontend` has no network policy** —
+every capture behind this adapter was taken by a one-off Job there, and those
+fetches reached halfwheel.com and iubenda.com without a policy change. #199's line
+about needing a haynes-ops allowlist entry for reviewer domains is **stale**; no
+haynes-ops change is required.
+
+### Enabling halfwheel
+
+1. Build/ship an image carrying the adapter, then run the probe in-cluster:
+   `crawl --vendor halfwheel --probe` (writes nothing, no DB — a reviewer gets its
+   own probe, because a shop's questions about sitemaps, products and prices have
+   no answer here).
+2. Expect `verdict=ok kind=reviewer scale=0-100`, `index: ... reviews=11`,
+   `reviews: sampled=3 parsed=3 cigars=3`, and on every sample a `score=` equal to
+   its `normalized=` (0-100 is an identity map, so a difference is a misread) plus
+   a non-empty `by=`, `on=` and `excerpt=`. A score that reads right beside an
+   empty byline or a crawl-day date is the quiet failure here.
+3. Flip the registry row — the adapter cannot do it (registration is
+   insert-if-absent, and a run reports drift rather than writing over an admin's
+   decision):
+   `UPDATE vendors SET crawl_enabled = true WHERE name = 'halfwheel';`
+   Its row seeds `kind='reviewer'`, `focus=NULL`, `purchase_linkout=false`,
+   `display_enabled=false`, `tier=9`.
+4. It then rides the existing `cigar-journal-crawl-enrich-fleet` CronJob (02:00
+   UTC) with no new schedule: `fleet.ts` gates only on `crawl_enabled` and leaves
+   what the modes mean to the adapter, and a reviewer's nightly work is its review
+   walk. Under the weekly `crawl-offers-fleet` it does NOTHING and succeeds with a
+   report line saying so — a source that sells nothing must not fail a fleet run.
+5. First-run expectation: 33 candidates, ~33 parsed, and an `unresolved` count that
+   is the registry-alias gap rather than a matcher fault. Watch it fall as Wave 3
+   curation adds aliases.
+
 ## Vendor enablement — the bar `--probe` now holds
 
 `crawl_enabled` is flipped by an operator in the registry after an in-cluster
@@ -165,6 +278,26 @@ probe's `ok` verdict requires two things beyond robots + enumeration + parses:
   agents to transact only through its UCP/MCP endpoint and forbids automated
   checkout and payment; we never transact.
 
+- **halfwheel** (Terms & Conditions at `iubenda.com/terms-and-conditions/989103`,
+  `/about/policies/`, robots.txt — all read 2026-09-02): **no scraping, crawling,
+  robot, spider, automated-access or data-mining clause of any kind.** Two clauses
+  do bear on us, and both are answered by what the lane stores rather than by an
+  interpretation. (1) An all-rights-reserved content clause — users may not "copy,
+  download, share … publish, transmit … or create derivative works from the
+  content". A SCORE is a fact and not expression, the URL is a link, and the
+  excerpt is the site's own one-sentence deck under a hard 400-character bound;
+  the review body never enters a row. (2) An image policy: "Any image used without
+  the expressed consent of either Charlie Minato or Brooks Whittington will be
+  considered stolen" — so this lane fetches no image at all. Its robots.txt
+  carries `Content-Signal: search=yes,ai-train=no,use=reference`, declared in the
+  file itself an express Art. 4 DSM reservation; read as written, `search=yes` is
+  defined there as "returning hyperlinks and short excerpts", which is exactly
+  what we store, `use=reference` covers a score shown with attribution and a link
+  back, and `ai-train=no` forbids training, which nothing here does. A block of
+  named AI agents is disallowed outright (ClaudeBot, GPTBot, CCBot, Amazonbot,
+  Bytespider, Google-Extended, meta-externalagent, PetalBot, …); we are none of
+  them and match the `*` group's `Allow: /`. Recorded, not adjudicated.
+
 ## r/cubancigars online-stores wiki
 
 Use the **official Reddit Data API** (OAuth, registered app — approval
@@ -188,8 +321,12 @@ with attribution and a link back to r/cubancigars.
    wherever shown. No catalog *facts* are taken from Wikidata — imagery only.
 3. **Elite Cigar Library** — 56k+ cigars, no API yet ("under
    consideration") — watch, or email them.
-4. Not viable for bulk: Cigar Aficionado, halfwheel (copyright — link out
-   instead), Cigar Sense (proprietary), CigarGeeks (no API), Kaggle (none).
+4. Not viable for bulk: Cigar Aficionado, Cigar Sense (proprietary), CigarGeeks
+   (no API), Kaggle (none). **halfwheel** is off this list for the reason it
+   always was — its prose is copyrighted and we link out rather than republish —
+   but it is no longer unused: since #199 slice 2a it is a REVIEWER source whose
+   adapter takes scores, links and short excerpts only (see "Reviewer sources"
+   above). None of that is a bulk content import.
 
 ## Bottom line
 

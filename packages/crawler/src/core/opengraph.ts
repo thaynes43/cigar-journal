@@ -46,7 +46,12 @@ function attributes(tag: string): Record<string, string> {
 
 // First `<meta>` whose `property` or `name` is `key` (OG uses `property`, the
 // keywords/description tags use `name`), decoded. Empty content reads as absent.
-function metaContent(html: string, key: string): string | null {
+//
+// Exported since 2026-09-03 (#199 slice 2a): the halfwheel reviewer adapter reads
+// `og:title`/`og:description`/`author` off a WordPress post, which is the same
+// question this already answers for a product page. One meta reader, so one
+// attribute parser and one entity-decoding rule serve both.
+export function metaContent(html: string, key: string): string | null {
   for (const tag of html.match(META_RE) ?? []) {
     const attrs = attributes(tag);
     const id = attrs.property ?? attrs.name;

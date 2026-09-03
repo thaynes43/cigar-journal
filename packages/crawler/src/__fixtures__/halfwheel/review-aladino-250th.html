@@ -1,0 +1,79 @@
+<!doctype html>
+<!-- https://halfwheel.com/aladino-250th/478243/, live-read in-cluster 2026-09-02.
+     The live page is 151,827 bytes; this is the four things the parser reads.
+
+     The `@graph` is trimmed to the Article node — the live page also carries
+     WebPage, ImageObject, BreadcrumbList, WebSite, Organization and Person nodes,
+     none of which this adapter reads (the byline comes off `author.name` on the
+     Article itself, which Yoast repeats there as well as in the Person node).
+
+     TWO THINGS WORTH LOOKING AT.
+
+     `datePublished` is `2026-09-02T19:30:36+00:00` — a UTC instant. Its first ten
+     characters happen to agree with the archive card's `/date/2026/09/02` here,
+     and would NOT for a post published after 18:00 US Central. The index's day is
+     what the parser uses; this is the fallback.
+
+     The score box is the theme's own markup, and the number appears twice: as the
+     `score-87` modifier class and as the `.overall` span's text. The parser reads
+     both and refuses the page if they disagree. Its `<p>` is the reviewer's
+     conclusion — real prose, and NOT what the excerpt is taken from; the excerpt
+     is `og:description`, the site's own one-sentence deck. Kept here in full so
+     that distinction is visible in the fixture rather than only in a comment.
+
+     In the ingest suite this is the UNRESOLVED review: no `Aladino` brand alias
+     is seeded, so it anchors nothing, is counted and skipped, and mints no
+     catalog row. A vendor listing in that position would have minted one. -->
+<html lang="en-US">
+<head>
+<meta charset="UTF-8" />
+<title>Aladino 250th | halfwheel</title>
+<meta property="og:locale" content="en_US" />
+<meta property="og:type" content="article" />
+<meta property="og:title" content="Aladino 250th" />
+<meta property="og:description" content="Numerous companies jumped on the celebration bandwagon for the United States&#039; 250th anniversary in 2026. JRE Tobacco Co. created a cigar with an undisclosed blend, with a name that changed between the time it was announced and the time it was released." />
+<meta property="og:url" content="https://halfwheel.com/aladino-250th/478243/" />
+<meta property="og:site_name" content="halfwheel" />
+<meta property="article:published_time" content="2026-09-02T19:30:36+00:00" />
+<meta name="author" content="Patrick Lagreid" />
+<meta name="twitter:card" content="summary_large_image" />
+<script type="application/ld+json" class="yoast-schema-graph">
+{"@context":"https://schema.org","@graph":[{"@type":"Article","@id":"https://halfwheel.com/aladino-250th/478243/#article","author":{"name":"Patrick Lagreid","@id":"https://halfwheel.com/#/schema/person/6f5f53e4d23d72b1e0bcd6431e5ea0ef"},"headline":"Aladino 250th","datePublished":"2026-09-02T19:30:36+00:00","wordCount":1324,"keywords":["Aladino","Aladino 250th","America250","Fábrica de Puros Aladino at Las Lomas Jamastran","JRE Tobacco Co.","Toro"],"articleSection":["Cigars","Honduras","JRE Tobacco Co.","Limited Edition","Reviews"],"inLanguage":"en-US","copyrightYear":"2026"}]}
+</script>
+</head>
+<body>
+<main>
+<article>
+<h1>Aladino 250th</h1>
+<p>The final third of the Aladino 250th starts by making a quick U-turn and going back to the terroir and peanut flavors, with a little bit of pepper for tingle and some creaminess for body and texture.</p>
+<p>Final Notes</p>
+<ul>
+<li>I didn&#8217;t get any nicotine strength from the Aladino 250th.</li>
+<li>The cigars for this review were purchased by <em>halfwheel</em>.</li>
+</ul>
+
+        <div class="post-review score-87">
+            <div class="review-top">
+                <div class="overall-score">
+                    <span class="overall">87</span>
+                    <span class="overall-text">Overall Score</span>
+                </div>
+                <div class="review-text">
+                    <!--<span class="review-header"></span>-->
+                        <p>For whatever reason, it feels like I have been smoking a lot of very good, very solid cigars, though ones without a defining moment, and that includes the Aladino 250th. From start to finish, the cigar is very enjoyable, yet I couldn't point to any specific moment where I thought it really stood out.</p>
+                </div>
+            </div>
+            <div class="review-criteria">
+
+            </div>
+        </div>
+
+<div class="tags">
+	<a href="/tag/aladino">Aladino</a>
+	<a href="/tag/aladino-250th">Aladino 250th</a>
+	<a href="/tag/toro">Toro</a>
+</div>
+</article>
+</main>
+</body>
+</html>
