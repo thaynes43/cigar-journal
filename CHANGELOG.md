@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.43.1](https://github.com/thaynes43/cigar-journal/compare/v0.43.0...v0.43.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **crawler:** the fleet offers walk reported a spent page budget as thousands of fetch errors, hiding Small Batch's real zero ([#270](https://github.com/thaynes43/cigar-journal/issues/270)) ([#307](https://github.com/thaynes43/cigar-journal/issues/307)) ([a7ccc0c](https://github.com/thaynes43/cigar-journal/commit/a7ccc0c22a99e680f38367e8672669043e72f8f7))
+
 ## [0.43.0](https://github.com/thaynes43/cigar-journal/compare/v0.42.0...v0.43.0) (2026-09-06)
 
 
