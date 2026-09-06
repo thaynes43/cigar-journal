@@ -32,9 +32,15 @@ import type { PrefixVendorAdapter } from "./types.js";
 //   markup      JSON-LD `@graph` with WebPage/ImageObject/BreadcrumbList/WebSite/
 //               Organization/Product. The Product carries `name`, `sku`
 //               ("CO-S6", "HM-EN2R12-BOX"), `brand` (the marca) and one `image`.
-//               Its `offers` carries `availability` and a `url` and NO PRICE —
-//               fine for a tier-2 source, whose offers are recorded and never
-//               displayed (ADR-015). `og:type` is `article`, so the OpenGraph
+//               Its `offers` carries `availability`, a `url` and — contrary to
+//               what this note said until 2026-09-06 — A PRICE, wrapped under the
+//               numeric key `"0"` of `priceSpecification` (a Woo/Yoast shape)
+//               with a CONFLICTING `priceCurrency` on the wrapper. `firstOf` read
+//               the wrapper, so all 194 offers from the first offers walk landed
+//               `price = NULL, currency = 'EUR'` on pages showing `$446`. See
+//               `resolvePriceSpecification` (normalize.ts, #270). Its offers are
+//               still recorded and never displayed, tier-2 being a display rule
+//               (ADR-015) rather than a reason not to read the number. `og:type` is `article`, so the OpenGraph
 //               extractor is not an option here even as a fallback.
 //   category    the BreadcrumbList: `Home / Shop / <marca> / <product>`. Nothing
 //               in it says "cigar" — see `cigarCategoryPattern` below.

@@ -109,6 +109,108 @@ describe("normalizeListing", () => {
   });
 });
 
+// THE PRICE UNDER A NUMERIC KEY (#270, diagnosed live 2026-09-06). Montefortuna
+// wraps the real `UnitPriceSpecification` under the key `"0"` — a Woo/Yoast shape
+// — and carries a DIFFERENT currency on the wrapper. `firstOf` returns a
+// non-array unchanged, so the wrapper itself became the spec: no own `price`, so
+// the price was null, while `priceCurrency` was read off a node whose number was
+// one level down. Every one of the vendor's 194 offers on 2026-09-06 read
+// `price = NULL, currency = 'EUR'` on pages showing $446.
+//
+// Written as JSON put through the real extractor rather than as typed literals:
+// the wrapper is a shape `JsonLdPriceSpecification` cannot describe, and sending
+// all five cases through the same door is what makes them comparable.
+describe("normalizeListing — the offer's price specification", () => {
+  const priced = (offers: unknown) => {
+    const html = `<script type="application/ld+json">${JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "Product",
+      name: "Cohiba Siglo VI",
+      offers,
+    })}</script>`;
+    return normalizeListing(extractJsonLd(html).product!, [])!;
+  };
+
+  it("descends to the nested spec and takes the currency from the same node as the number", () => {
+    const listing = priced([
+      {
+        "@type": "Offer",
+        priceSpecification: {
+          "0": {
+            "@type": "UnitPriceSpecification",
+            price: "446",
+            priceCurrency: "USD",
+            validThrough: "2027-12-31",
+          },
+          priceCurrency: "EUR",
+        },
+        availability: "http://schema.org/InStock",
+      },
+    ]);
+
+    expect(listing.priceCents).toBe(44600);
+    // NOT the wrapper's EUR. A price labelled with someone else's currency is
+    // worse than no price at all — it is a number the display layer would believe.
+    expect(listing.currency).toBe("USD");
+    expect(listing.priceIsPlaceholder).toBe(false);
+    expect(listing.inStock).toBe(true);
+  });
+
+  it("leaves the shape every other vendor publishes exactly as it was", () => {
+    const listing = priced([
+      {
+        "@type": "Offer",
+        priceSpecification: { price: "24.50", priceCurrency: "USD" },
+        availability: "https://schema.org/InStock",
+      },
+    ]);
+
+    expect(listing.priceCents).toBe(2450);
+    expect(listing.currency).toBe("USD");
+  });
+
+  it("still takes the first element of an array of specifications", () => {
+    const listing = priced([
+      {
+        "@type": "Offer",
+        priceSpecification: [
+          { price: "13.75", priceCurrency: "USD" },
+          { price: "99.00", priceCurrency: "USD" },
+        ],
+      },
+    ]);
+
+    expect(listing.priceCents).toBe(1375);
+    expect(listing.currency).toBe("USD");
+  });
+
+  it("falls back to the offer's own price and currency when it publishes no specification", () => {
+    const listing = priced([{ "@type": "Offer", price: "9.20", priceCurrency: "USD" }]);
+
+    expect(listing.priceCents).toBe(920);
+    expect(listing.currency).toBe("USD");
+  });
+
+  // A genuinely unpriced page — which Montefortuna's adapter note says this vendor
+  // was believed to be until the wrapper was read. The currency is still the best
+  // thing known about the missing price, and stating it is what this always did.
+  it("reports the currency with a null price when no node anywhere carries a number", () => {
+    const listing = priced([
+      {
+        "@type": "Offer",
+        priceSpecification: { priceCurrency: "EUR" },
+        availability: "http://schema.org/OutOfStock",
+      },
+    ]);
+
+    expect(listing.priceCents).toBeNull();
+    expect(listing.currency).toBe("EUR");
+    // No number was published, so this is "no price stated", not a placeholder.
+    expect(listing.priceIsPlaceholder).toBe(false);
+    expect(listing.inStock).toBe(false);
+  });
+});
+
 describe("isCigarCategory", () => {
   it("accepts a cigar breadcrumb path", () => {
     expect(isCigarCategory(["Home", "Shop", "Cigars", "Padron"], foxCigar)).toBe(true);

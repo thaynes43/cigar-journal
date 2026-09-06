@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { extractKeywords, extractOpenGraphProduct } from "./opengraph.js";
+import { normalizeListing } from "./normalize.js";
 import { loadFixture } from "../testing/fixtures.js";
 
 // Every fixture here is a VERBATIM live capture (2026-09-01, in-cluster Job,
@@ -66,6 +67,65 @@ describe("extractOpenGraphProduct", () => {
 
   it("refuses a page that declares a product but names none", () => {
     expect(extractOpenGraphProduct('<html><head><meta property="og:type" content="product"/></head></html>')).toBeNull();
+  });
+});
+
+// THE MICRODATA STOCK SIGNAL (#270, re-read live in-cluster 2026-09-06). J.J. Fox
+// publishes availability ONLY as schema.org microdata —
+// `<meta itemprop="availability" content="https://schema.org/InStock">` — and the
+// meta reader identifies a tag by `property ?? name`, which is the whole of
+// OpenGraph and none of microdata. The tag was invisible, so all 223 of that
+// vendor's offers were written `in_stock = NULL` while every page said InStock:
+// unknown, on a shop that had answered the question everywhere.
+describe("extractOpenGraphProduct — availability as schema.org microdata", () => {
+  // The minimum a page must state to BE a product here — the declaration and a
+  // name. Everything else in these cases is the availability tag itself.
+  const page = (...metas: string[]) =>
+    '<html><head><meta property="og:type" content="product"/>' +
+    '<meta property="og:title" content="Partagas Shorts"/>' +
+    metas.join("") +
+    "</head></html>";
+
+  it("reads an itemprop-only availability, and it reaches the listing as in stock", () => {
+    const og = extractOpenGraphProduct(page('<meta itemprop="availability" content="https://schema.org/InStock"/>'))!;
+
+    expect(og.offers).toEqual([{ availability: "https://schema.org/InStock" }]);
+    expect(normalizeListing(og, [])!.inStock).toBe(true);
+  });
+
+  it("reads the out-of-stock spelling as false", () => {
+    const og = extractOpenGraphProduct(
+      page('<meta itemprop="availability" content="https://schema.org/OutOfStock"/>'),
+    )!;
+
+    expect(og.offers).toEqual([{ availability: "https://schema.org/OutOfStock" }]);
+    expect(normalizeListing(og, [])!.inStock).toBe(false);
+  });
+
+  // The whole point of the tristate: a page that states nothing states NOTHING.
+  // A J.J. Fox line that is out of stock omits the meta altogether, and reading
+  // that absence as "out of stock" would invent a fact the vendor never published.
+  it("leaves stock unknown when the page carries neither signal — never false", () => {
+    const og = extractOpenGraphProduct(page())!;
+
+    expect(og.offers).toEqual([{}]);
+    expect(normalizeListing(og, [])!.inStock).toBeNull();
+  });
+
+  // The fallback is a fallback: where a vendor publishes both, the OpenGraph value
+  // stays authoritative and nothing about the vendors that already work changes.
+  // Written with the two DISAGREEING, because agreeing tags could not tell a
+  // fallback from a merge.
+  it("lets og:availability win over a conflicting itemprop", () => {
+    const og = extractOpenGraphProduct(
+      page(
+        '<meta property="og:availability" content="outofstock"/>',
+        '<meta itemprop="availability" content="https://schema.org/InStock"/>',
+      ),
+    )!;
+
+    expect(og.offers).toEqual([{ availability: "https://schema.org/OutOfStock" }]);
+    expect(normalizeListing(og, [])!.inStock).toBe(false);
   });
 });
 
