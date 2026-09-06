@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import {
   auditLog,
   photoDrops,
@@ -16,12 +16,19 @@ import { auditActor } from "./audit-attribution.js";
 import type {
   ClaimPhotoDropResult,
   OpenPhotoDropResult,
+  PhotoDropOwnerView,
   PhotoDropPhotoView,
   PhotoDropStatus,
   PhotoDropView,
   SmokePhotoKind,
 } from "./types.js";
-import { PhotoLimitError, PhotoNotFoundError, SmokeNotFoundError, UploadTokenInvalidError } from "./errors.js";
+import {
+  PhotoDropNotFoundError,
+  PhotoLimitError,
+  PhotoNotFoundError,
+  SmokeNotFoundError,
+  UploadTokenInvalidError,
+} from "./errors.js";
 import { hashToken } from "./photo-upload-tokens.js";
 import {
   addSmokePhoto,
@@ -41,7 +48,7 @@ import { isUuid } from "./uuid.js";
 // when it was taken, once when there was finally something to attach it to.
 //
 // Two authorization regimes live in this file and must not be confused:
-//   * the OWNER services (open, claim, sweep) take a Principal, exactly like the
+//   * the OWNER services (open, read, claim, sweep) take a Principal, exactly like the
 //     rest of @cj/domain;
 //   * the TOKEN services take a raw token and no principal at all. The token IS
 //     the authorization (as on `/u/<token>`), so they are never owner-scoped and
@@ -73,19 +80,29 @@ export const MAX_PHOTOS_PER_DROP = MAX_PHOTOS_PER_SMOKE;
 // enforces it (#288).
 export const MAX_PHOTO_CAPTION_LENGTH = 200;
 
-// How long a gap between opens ends the drop's session (ADR-016). One open drop
-// per user means the SAME drop carries evening after evening — the drop the
-// 2026-09-02 save claimed had been created 23 hours earlier and was re-opened at
-// 01:04Z for that night's first photo — so a re-open after this long starts a new
-// session rather than continuing a stale one. Four hours: longer than any smoke
-// and the conversation around it, shorter than the gap to the next evening.
+// How long a gap between opens ends the drop's session (ADR-016, amended by
+// issue #302). A re-open this long after the last one is a NEW SMOKE, so it gets
+// a new drop rather than tonight's photos landing beside last night's — on
+// 2026-09-05 a Tatuaje's first photo joined the previous evening's Davidoff in a
+// drop that had simply been re-opened. Four hours: longer than any smoke and the
+// conversation around it, shorter than the gap to the next evening.
 export const DROP_SESSION_GAP_HOURS = 4;
 const DROP_SESSION_GAP_MS = DROP_SESSION_GAP_HOURS * 3600 * 1000;
 
 export interface OpenPhotoDropInput {
+  // Resume a NAMED drop (issue #302). Present means "this drop, whatever the
+  // gap": it comes back with a fresh link, continuing its session rather than
+  // starting one, and it is the only way to carry a drop past the session gap.
+  // Absent means "the drop for the smoke in progress" — the one inside the gap,
+  // or a new one.
+  photoDropId?: string;
   correlationId?: string;
   // Which adapter drove the open, for the audit row. Defaults to "web".
   actor?: "web" | "mcp";
+}
+
+export interface GetPhotoDropInput {
+  photoDropId: string;
 }
 
 export interface ClaimPhotoDropInput {
@@ -126,13 +143,20 @@ export interface RemovePhotoDropPhotoInput {
 // Owner-authorized
 // ---------------------------------------------------------------------------
 
-// Hand the caller a drop link. ONE OPEN DROP PER USER: an unclaimed, unexpired
-// drop is returned again with a FRESH token rather than a second drop being
-// opened, which is what lets a model that lost the id in a two-hour chat get its
-// photos back. Rotation is forced, not chosen — only the hash is stored, so the
-// earlier raw token is not re-derivable and re-issuing necessarily kills the old
-// link. The expiry is NOT extended: 48 hours run from the opening, not from the
-// last mention.
+// Hand the caller a drop link. ONE OPEN DROP PER SESSION (ADR-014 as amended by
+// issue #302): an unclaimed, unexpired drop last opened inside
+// DROP_SESSION_GAP_HOURS is returned again with a FRESH token, which is what lets
+// a model that lost the id in a two-hour chat get its photos back. Past that gap
+// the previous run is over and this open is a new smoke, so it gets a NEW drop —
+// and the old one is left entirely alone: its token is not rotated, its stamps do
+// not move, its staged photos stay with it, and its own link keeps working until
+// it expires, so a late photo through that link still lands where it was meant
+// to. `photoDropId` overrides all of that and resumes the named drop.
+//
+// Rotation is forced, not chosen — only the hash is stored, so the earlier raw
+// token is not re-derivable and re-issuing necessarily kills the old link. The
+// expiry is NOT extended: 48 hours run from the opening, not from the last
+// mention, and the caller states the remainder rather than the constant.
 export async function openPhotoDrop(
   deps: Deps,
   storage: PhotoStorage,
@@ -149,30 +173,20 @@ export async function openPhotoDrop(
   const token = randomBytes(32).toString("base64url");
   const tokenHash = hashToken(token);
 
-  const open = await deps.db
-    .select()
-    .from(photoDrops)
-    .where(
-      and(eq(photoDrops.userId, principal.userId), isNull(photoDrops.claimedAt), gt(photoDrops.expiresAt, now)),
-    )
-    .orderBy(desc(photoDrops.createdAt))
-    .limit(1);
-  const existing = open[0];
+  const existing =
+    input.photoDropId === undefined
+      ? await sessionDrop(deps, principal, now)
+      : await resumableDrop(deps, principal, input.photoDropId, now);
 
   if (existing) {
-    // The re-open either continues this drop's session or begins a new one
-    // (ADR-016): a gap longer than DROP_SESSION_GAP_HOURS means the previous run
-    // is over and tonight's first photo starts the clock. `last_opened_at`
-    // always advances — it is what the next gap is measured from.
-    const continues = now.getTime() - existing.lastOpenedAt.getTime() <= DROP_SESSION_GAP_MS;
+    // Both paths CONTINUE a session, so `session_started_at` never moves again
+    // once written: inside the gap it is still this evening's, and a resume is a
+    // caller saying "that drop" — neither is a new smoke. `last_opened_at`
+    // always advances; it is what the next gap is measured from.
     await deps.db.transaction(async (tx) => {
       await tx
         .update(photoDrops)
-        .set({
-          tokenHash,
-          lastOpenedAt: now,
-          ...(continues ? {} : { sessionStartedAt: now }),
-        })
+        .set({ tokenHash, lastOpenedAt: now })
         .where(eq(photoDrops.id, existing.id));
       await tx.insert(auditLog).values({
         userId: principal.userId,
@@ -227,6 +241,41 @@ export async function openPhotoDrop(
   });
 
   return { photoDropId, token, expiresAt: expiresAt.toISOString(), reused: false, photoCount: 0 };
+}
+
+// READ ONE DROP, TOUCHING NOTHING (issue #302). What it holds, until when, and
+// which smoke has it — the question the model used to ask by re-opening the drop,
+// which rotated the token and killed the link the user had already been sent.
+// This writes nothing at all: no token, no stamp, no audit row, and no sweep. A
+// read is never an event.
+//
+// It returns NO LINK. Minting one is what open_photo_drop is for, and a read that
+// handed one out would rotate the token by doing so.
+//
+// Owner-scoped, and one answer for every miss: another user's drop, a drop that
+// never existed and a malformed id are all PhotoDropNotFoundError, so the read is
+// never an oracle for other people's drops.
+export async function getPhotoDrop(
+  deps: Deps,
+  principal: Principal,
+  input: GetPhotoDropInput,
+): Promise<PhotoDropOwnerView> {
+  const drop = await ownedDrop(deps, principal, input.photoDropId);
+  const status = dropStatus(drop, deps.now());
+  // The token page's own mapping, unchanged: an open drop shows what is staged,
+  // an attached one the smoke's photos then any staged remainder, and a closed
+  // one shows nothing — the link is over and its remainder is the sweep's.
+  const photos = status === "closed" ? [] : await dropPhotos(deps, drop, status);
+  return {
+    photoDropId: drop.id,
+    status,
+    expiresAt: drop.expiresAt.toISOString(),
+    sessionStartedAt: drop.sessionStartedAt.toISOString(),
+    lastOpenedAt: drop.lastOpenedAt.toISOString(),
+    smokeId: drop.smokeId,
+    photoCount: photos.length,
+    photos,
+  };
 }
 
 // Bind a drop to the smoke that has just been saved and move its staged photos
@@ -670,6 +719,55 @@ export async function getPhotoDropPhotoObject(
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
+
+// The drop THIS SESSION'S open continues, or nothing: unclaimed, unexpired, and
+// last opened inside the gap. A drop older than that is not a candidate and is
+// not touched — the caller opens a new one and the old link stays alive for its
+// own smoke (issue #302). Ordered by the last open, because more than one drop of
+// this user's can be alive at once now and the session is the most recent run.
+async function sessionDrop(deps: Deps, principal: Principal, now: Date): Promise<PhotoDropRow | undefined> {
+  const cutoff = new Date(now.getTime() - DROP_SESSION_GAP_MS);
+  const rows = await deps.db
+    .select()
+    .from(photoDrops)
+    .where(
+      and(
+        eq(photoDrops.userId, principal.userId),
+        isNull(photoDrops.claimedAt),
+        gt(photoDrops.expiresAt, now),
+        gte(photoDrops.lastOpenedAt, cutoff),
+      ),
+    )
+    .orderBy(desc(photoDrops.lastOpenedAt), desc(photoDrops.createdAt))
+    .limit(1);
+  return rows[0];
+}
+
+// The drop a caller NAMED, for a resume. The gap does not apply — naming a drop
+// is the statement that this is the same smoke — but everything else does: it
+// must be the caller's, unclaimed and unexpired, or there is nothing to hand a
+// link to. One error for every miss, as the claim gives one `not_found`.
+async function resumableDrop(
+  deps: Deps,
+  principal: Principal,
+  photoDropId: string,
+  now: Date,
+): Promise<PhotoDropRow> {
+  const drop = await ownedDrop(deps, principal, photoDropId);
+  if (drop.claimedAt !== null || dropStatus(drop, now) === "closed") throw new PhotoDropNotFoundError();
+  return drop;
+}
+
+// One of the caller's drops by id. A malformed id names nothing, which is what
+// another user's drop also "names" here — one answer for both, and ahead of the
+// query it would 22P02 (./uuid.ts).
+async function ownedDrop(deps: Deps, principal: Principal, photoDropId: string): Promise<PhotoDropRow> {
+  if (!isUuid(photoDropId)) throw new PhotoDropNotFoundError();
+  const rows = await deps.db.select().from(photoDrops).where(eq(photoDrops.id, photoDropId)).limit(1);
+  const drop = rows[0];
+  if (!drop || drop.userId !== principal.userId) throw new PhotoDropNotFoundError();
+  return drop;
+}
 
 // A dead drop still RESOLVES — `closed` is a state its page reports, not an
 // error — so only an unknown token is invalid here.

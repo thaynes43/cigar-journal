@@ -21,6 +21,7 @@ import {
   addSmokePhoto,
   mintPhotoUploadToken,
   openPhotoDrop,
+  getPhotoDrop,
   claimPhotoDrop,
   stagePhotoByToken,
   requestCigarEnrichment,
@@ -85,6 +86,7 @@ import {
   recordPurchaseBatchSchema,
   addSmokePhotoSchema,
   openPhotoDropSchema,
+  getPhotoDropSchema,
   setWantSchema,
   setWantOutput,
   setFavoriteSchema,
@@ -135,6 +137,7 @@ import {
   recordPurchaseBatchOutput,
   addSmokePhotoOutput,
   openPhotoDropOutput,
+  getPhotoDropOutput,
   type SaveSmokeArgs,
   type UpdateSmokeArgs,
   type UpdatePurchaseArgs,
@@ -158,7 +161,7 @@ import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./resu
 import { smokeUrl, uploadUrl, dropUrl } from "./config.js";
 import { mcpEvent } from "./logger.js";
 
-// The thirty-four-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
+// The thirty-five-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
 // @cj/domain service — the single writer of Smokes, which owns all business rules
 // and re-validates every input — and shapes the contract response. Authorization,
@@ -772,6 +775,39 @@ function toUpdatePurchaseInput(
   };
 }
 
+// How much of a drop's life is left, in the units a person would say it in:
+// whole hours down to one, then whole minutes, never less than a minute (issue
+// #302). Derived from the drop's own `expires_at`, which is the whole point — the
+// tool used to state the 48-hour constant on a drop with thirteen hours left, in
+// a sentence written to be relayed to the user verbatim.
+function remainingLifetime(expiresAt: string, now: Date): string {
+  const ms = Math.max(60_000, new Date(expiresAt).getTime() - now.getTime());
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+}
+
+// The sentence the model relays. A fresh drop states its full lifetime; a re-used
+// or resumed one states what is actually left and names what is already waiting,
+// so a model that lost the id can tell the user their photos are still there
+// rather than reopening the subject.
+function shareDropSentence(args: {
+  url: string;
+  expiresAt: string;
+  now: Date;
+  photoCount: number;
+  reused: boolean;
+}): string {
+  const remaining = remainingLifetime(args.expiresAt, args.now);
+  const holds =
+    args.reused && args.photoCount > 0
+      ? `it already holds ${args.photoCount} ${args.photoCount === 1 ? "photo" : "photos"}; `
+      : "";
+  const lifetime = args.reused ? `It works for about ${remaining} more.` : `It works for ${remaining}.`;
+  return `Send the user this link to add photos during the smoke: ${args.url} — ${holds}every photo of this smoke goes there, and they attach to the review when it is saved. ${lifetime}`;
+}
+
 export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpServer {
   const server = new McpServer(SERVER_INFO, { instructions: INSTRUCTIONS });
 
@@ -1283,10 +1319,12 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // smoke ends.
       //
       // It says "relay it once" for a reason the model cannot infer: the link is
-      // multi-use for its 48 hours, so re-minting per photo would train the user to
-      // wait for a new link they do not need.
+      // multi-use for its lifetime, so re-minting per photo would train the user to
+      // wait for a new link they do not need. And it now says where to send the
+      // "how many photos?" question (issue #302): the model asked it by re-opening
+      // the drop, which rotated the token and killed the link the user already had.
       description:
-        "Open a photo drop for the smoke in progress: a link the user adds photos to at any point during the smoke, before it is saved. Call it the moment a photo appears in the conversation or the user says they took one, and relay the link (shareWithUser is the sentence to say); the same link takes every later photo of this smoke, so relay it once. Keep the photoDropId and pass it to save_smoke, which attaches the dropped photos to the saved smoke; the link then keeps working for that smoke until it expires (48 hours). Opening again while a drop is open returns that drop with a fresh link. If the client forwarded an attached image with the call it is stored into the drop directly (delivery reports which happened). Never fill the image argument yourself — no URLs, ids, or invented fields. delivery.status no_image_received is the normal outcome on every current client — relay the link and do not report it as a problem.",
+        "Open a photo drop for the smoke in progress: a link the user adds photos to at any point during the smoke, before it is saved. Call it the moment a photo appears in the conversation or the user says they took one, and relay the link (shareWithUser is the sentence to say); the same link takes every later photo of this smoke, so relay it once. Keep the photoDropId and pass it to save_smoke, which attaches the dropped photos to the saved smoke; the link then keeps working for that smoke until it expires. To see what a drop holds, use get_photo_drop — it never changes the link. Opening again within the same session returns the same drop with a fresh link, and the earlier link stops working; a re-open hours after the last one starts a new drop, and passing photoDropId resumes a specific drop instead. If the client forwarded an attached image with the call it is stored into the drop directly (delivery reports which happened). Leave the image argument empty — never fill in a URL, an id, or a file path. delivery.status no_image_received is the normal outcome on every current client — relay the link and do not report it as a problem.",
       inputSchema: openPhotoDropSchema,
       outputSchema: openPhotoDropOutput,
       // The same file-input declaration add_smoke_photo publishes: a host that
@@ -1316,6 +1354,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
         });
 
         const drop = await openPhotoDrop(deps, intake.storage, principal, {
+          photoDropId: args.photoDropId,
           correlationId,
           actor: "mcp",
         });
@@ -1349,15 +1388,37 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           // The sentence to say, as on add_smoke_photo — a link nobody relays
           // collects nothing. The reused wording names what is already waiting, so
           // a model that lost the id in a long chat can tell the user their photos
-          // are still there rather than reopening the subject.
-          shareWithUser:
-            drop.reused && photoCount > 0
-              ? `Send the user this link to add photos during the smoke: ${url} — it already holds ${photoCount} ${photoCount === 1 ? "photo" : "photos"}, every photo of this smoke goes there, and they attach to the review when it is saved. It lasts 48 hours.`
-              : `Send the user this link to add photos during the smoke: ${url} — every photo of this smoke goes there, and they attach to the review when it is saved. It lasts 48 hours.`,
+          // are still there rather than reopening the subject. THE LIFETIME IS THE
+          // DROP'S, not the constant (issue #302): a re-used drop said "48 hours"
+          // with thirteen left, and the user was told the wrong thing by a
+          // sentence written to be relayed verbatim.
+          shareWithUser: shareDropSentence({ url, expiresAt: drop.expiresAt, now: deps.now(), photoCount, reused: drop.reused }),
           // Exactly one of the two, always: `staged` when a forwarded image landed
           // in the drop, `delivery` (add_smoke_photo's vocabulary) when none did.
           ...(staged ? { staged } : { delivery: intake.delivery }),
         });
+      }),
+  );
+
+  server.registerTool(
+    "get_photo_drop",
+    {
+      title: "Get photo drop",
+      // THE READ THAT COSTS NOTHING (issue #302). The model had exactly one way to
+      // ask "how many photos are in the drop?" — open it again — and that call
+      // rotates the token, so on 2026-09-05 the count-check killed the link the
+      // user had already been sent. A read is not an event, and this one says so
+      // in its own text: it never rotates, never restamps, and returns no link.
+      description:
+        "Read a photo drop without touching it: its status, expiry, the photos it holds with their ids, kinds and captions, and the smoke it is attached to once one has claimed it. Use it to check or confirm what the user has dropped. It never rotates the link, moves the session clock, or mints anything; use open_photo_drop only when the user needs a link.",
+      inputSchema: getPhotoDropSchema,
+      outputSchema: getPhotoDropOutput,
+      annotations: { readOnlyHint: true, title: "Get photo drop" },
+    },
+    (args, extra) =>
+      run("get_photo_drop", extra.authInfo, async ({ principal }) => {
+        const drop = await getPhotoDrop(deps, principal, { photoDropId: args.photoDropId });
+        return jsonResult(drop);
       }),
   );
 
@@ -1391,7 +1452,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // vocabulary (below): it earns its place by telling the model the truth about
       // what arrived, which is exactly what the probe was built to learn.
       description:
-        "Add a photo to a smoke that is already saved. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. With photoDropId it instead attaches the photos of that drop to the smoke (for a drop save_smoke did not carry) and mints no link. If the client forwarded an attached image with the call, the photo is stored directly and no link is needed (delivery reports which happened). For a photo taken during a smoke that is not saved yet, use open_photo_drop. Never fill the image argument yourself — no URLs, ids, or invented fields. delivery.status no_image_received is the normal outcome on every current client — relay the upload link and do not report it as a problem.",
+        "Add a photo to a smoke that is already saved. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. With photoDropId it instead attaches the photos of that drop to the smoke (for a drop save_smoke did not carry) and mints no link. If the client forwarded an attached image with the call, the photo is stored directly and no link is needed (delivery reports which happened). For a photo taken during a smoke that is not saved yet, use open_photo_drop. Leave the image argument empty — never fill in a URL, an id, or a file path. delivery.status no_image_received is the normal outcome on every current client — relay the upload link and do not report it as a problem.",
       inputSchema: addSmokePhotoSchema,
       outputSchema: addSmokePhotoOutput,
       // Declare `image` as a file input so ChatGPT forwards the attached photo.
