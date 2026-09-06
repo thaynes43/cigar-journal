@@ -154,6 +154,56 @@ CronJob pair in haynes-ops because the CLI takes one `--vendor` (#156).
     failure — 500 pages fetched, **zero listings parsed** — and a summary that
     cannot tell a budget from an outage is exactly the summary that buries it.
 
+- **2026-09-06 — a page budget applied to an ordered enumeration is a permanent
+  truncation, and for Small Batch it truncates to zero (issue #270).** The same
+  fleet offers walk that produced the phantom errors above also produced Small
+  Batch `pages=500 listings=0 offers=0`, and that half was real. Diagnosed live
+  in-cluster: the site is healthy — robots 200, sitemap 200 with 11,290 locs,
+  every product page 200 with `cf-mitigated: null`, no challenge, no changed
+  markup, no broken selector.
+  - **The sitemap is in nopCommerce entity order — categories and brand/line
+    landing pages first, products second** — and `filterProductUrls` preserves
+    document order. Bisected live: the **first 2,123 gate-accepted URLs are all
+    landing pages**, which answer 200 with a `BreadcrumbList` and no `Product`,
+    so `extractProductMarkup` returns null and the walk drops them **silently**
+    — no listing, and correctly no error. `maxPages: 500` buys robots + sitemap +
+    498 landing pages, and the walk stops **1,625 URLs short of the first
+    product**. It is deterministic: it would have done this every Sunday forever.
+  - **No gate can fix it.** Brand pages (`/caldwell`), line pages
+    (`/all-pro-series`) and products (`/powstanie-sbc26`) are all one-segment
+    slugs with identical `changefreq`, as the adapter already documents. The cap
+    also cannot simply be raised: a full pass is 10,951 × 3s ≈ **9.1h** against
+    the fleet CronJob's 8h `activeDeadlineSeconds`, shared serially by nine
+    vendors. **The fix is the resume cursor** — `vendors.crawl_cursor` already
+    exists and halfwheel already uses it — which turns `maxPages` into a chunk
+    size instead of a wall. That is the #270 resume/chunking item, and it is now
+    load-bearing rather than a nicety.
+  - **`--probe` cannot catch this, structurally.** The probe samples *spread*
+    indices and the walk takes *document order*, so the probe passes on a vendor
+    whose offers walk yields nothing. A probe verdict is evidence about a
+    vendor's markup, never about what a budgeted walk will reach.
+
+- **2026-09-06 — two vendors were publishing facts the extractors could not
+  see (issue #270).** Both found while diagnosing the walk above, both confirmed
+  against the live pages and against what the run actually wrote.
+  - **J.J. Fox stock.** Its pages carry
+    `<meta itemprop="availability" content="https://schema.org/InStock">` — and
+    only that. `metaContent` identifies a tag by `property ?? name`, which is all
+    of OpenGraph and none of schema.org microdata, so all 223 offers were written
+    `in_stock = NULL`. Not "out of stock": **unknown**, on a vendor that said so
+    on every page. Availability now falls back to an `itemprop` read; OpenGraph
+    still wins where both exist, so no working vendor changes.
+  - **Montefortuna price.** Its `priceSpecification` is neither a spec nor an
+    array of them but an object wrapping one under the numeric key `"0"`, with a
+    *different* `priceCurrency` on the wrapper. `firstOf` returned the wrapper,
+    whose only own scalar is that currency — so all 194 offers were written
+    `price = NULL` with `currency = 'EUR'` on pages showing `$446`. The
+    specification is now resolved one level down to the node that carries a
+    price, **and the currency is taken from that same node**: a number labelled
+    with a neighbour's currency is worse than no number, because the display
+    layer would believe it. Nothing was dropping the price on tier grounds —
+    tier 2 is a *display* rule, applied at read time, not a write-time refusal.
+
 - **2026-09-03 — the nopCommerce variant-price extractor, and one listing may
   now write several offers (issue #270, first unattended fleet run).** This ADR
   named the extractor and left it unbuilt, so Small Batch Cigar — a tier-1
