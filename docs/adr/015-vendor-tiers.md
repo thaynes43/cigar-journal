@@ -121,6 +121,39 @@ CronJob pair in haynes-ops because the CLI takes one `--vendor` (#156).
 
 ## Amendments
 
+- **2026-09-06 — a page budget is not an outage, and the error line now says
+  what the errors were (issue #270).** The first unattended fleet **offers** walk
+  reported five-figure error counts on vendors where nothing had failed: Small
+  Batch `errors=10453`, 2 Guys `errors=3357`, Cigarworld `errors=6101`. Every one
+  of them was the enumeration the run never got to, and 2 Guys is the case that
+  proves it with no residual: its own `sitemapSampling.productLocs` is **3852**,
+  its four sitemap samples plus robots spent 5 of the 500-page budget leaving
+  **495** product fetches, and `3852 - 495 = 3357` — the reported error count,
+  exactly. `adapter.maxPages` is a safety cap the
+  fetcher enforces by **throwing**, and the seed/offers walk wrapped the fetch and
+  everything downstream of it in a single `catch` that counted any throw as one
+  `fetch` error — so a capped vendor spent its budget and then charged itself one
+  error for each of the thousands of URLs it never reached.
+  - The walk now **breaks** on `MaxPagesExceededError` and records the remainder
+    as **`locsBeyondBudget`**, reported on its own line. A non-zero value is a
+    capacity statement — this vendor publishes more than one run can walk — whose
+    fix is a raised cap plus a matching deadline, or the resumable chunking still
+    tracked under #270. It is never a failure.
+  - The single catch is split: `fetch` keeps its meaning (a throw out of the
+    fetcher), and a throw **after** the page is in hand — parse, normalize, or the
+    write — is the new kind **`ingest`**. Counting the second as the first said
+    "we could not reach the vendor" about a vendor we had just read.
+  - `errorKinds` gains **`errorSamples`**: up to five exemplars *per kind*, each a
+    URL and a reason (`ECONNRESET`, `timeout`, `status 429`), printed one per line
+    under `errors by kind:`. The 2026-09-03 amendment below made the error line
+    say *how many of what shape*; it still could not say what any of them
+    actually said, which is the question an operator asks first. Per-kind rather
+    than per-run, so a flood of one kind cannot crowd out the only instance of
+    another.
+  - Why this mattered on the night: the same run was Small Batch's **real**
+    failure — 500 pages fetched, **zero listings parsed** — and a summary that
+    cannot tell a budget from an outage is exactly the summary that buries it.
+
 - **2026-09-03 — the nopCommerce variant-price extractor, and one listing may
   now write several offers (issue #270, first unattended fleet run).** This ADR
   named the extractor and left it unbuilt, so Small Batch Cigar — a tier-1

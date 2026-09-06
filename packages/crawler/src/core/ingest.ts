@@ -51,7 +51,7 @@ import {
   type ReviewWalkStats,
 } from "./reviews.js";
 import { openCrawlRun, reclaimStrandedRuns, type SignalHost } from "./run-record.js";
-import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, type Fetcher } from "./fetcher.js";
+import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, MaxPagesExceededError, type Fetcher } from "./fetcher.js";
 
 // The run driver (ADR-006). Three modes share one polite walk: `seed` (catalog
 // creation + offers + photos), `offers` (offers-only, never creates a cigar), and
@@ -88,6 +88,20 @@ export type CrawlMode = "seed" | "offers" | "enrich";
 // How a look left the request. `blocked` is kept apart from `exhausted` because
 // "nobody could finish looking" is not a fact about a catalogue (#158).
 type Retirement = "open" | "exhausted" | "blocked";
+
+// One exemplar of a counted error: which URL, and what it said. Kept small on
+// purpose — a stack trace in a nightly summary is noise, a URL and a reason are
+// what an operator acts on.
+export interface ErrorSample {
+  kind: string;
+  url: string;
+  reason: string;
+}
+
+// Exemplars retained PER KIND. Five is enough to tell "one dead host" from "the
+// whole vendor is 429ing" and small enough that a run erroring on every one of
+// 11,000 URLs still writes a summary an operator reads rather than scrolls.
+const ERROR_SAMPLE_LIMIT = 5;
 
 export interface IngestStats {
   pagesFetched: number;
@@ -143,10 +157,42 @@ export interface IngestStats {
   // already seen and thrown away.
   //
   // Keys are coarse and stable, so they can be counted across runs: `http-<code>`
-  // for a status, `fetch` for a throw out of the fetcher, `photo` for a capture
-  // that threw. Absent when empty, like its siblings, so a clean run's JSONB is
-  // unchanged.
+  // for a status, `fetch` for a throw out of the fetcher, `ingest` for a throw
+  // after the page was in hand (parse, normalize or the write), `photo` for a
+  // capture that threw. Absent when empty, like its siblings, so a clean run's
+  // JSONB is unchanged.
+  //
+  // `fetch` and `ingest` used to be one key, because the seed/offers walk wrapped
+  // the fetch AND everything downstream of it in a single catch that labelled the
+  // lot `fetch`. That is the difference between "the vendor is unreachable" and
+  // "the vendor changed its markup", which is the first question an operator asks.
   errorKinds?: Record<string, number>;
+  // WHAT THE ERRORS ACTUALLY SAID (#270). `errorKinds` gives the shape of a
+  // failure, never its content: `fetch=3357` is still a number you can only act on
+  // by reproducing the run. These are up to ERROR_SAMPLE_LIMIT exemplars per kind
+  // — the URL and the reason (`ECONNRESET`, `timeout`, `status 429`) — carried
+  // into the run summary so the Job log answers "what kind of fetch error" without
+  // a redeploy. Bounded per kind, not in total, so a run drowning in one kind
+  // cannot crowd out the single instance of another. Absent when empty.
+  errorSamples?: ErrorSample[];
+  // PRODUCT LOCS THE PAGE BUDGET NEVER REACHED — not an error, and this field
+  // exists because they were counted as one (#270).
+  //
+  // `adapter.maxPages` is a safety cap the fetcher enforces by THROWING, and the
+  // walk's catch turned every throw into `errors += 1`. So a capped vendor spent
+  // its budget, then charged one "fetch error" for each of the thousands of URLs
+  // it had not got to: the first fleet offers walk (2026-09-06) reported
+  // `errors=10453` for Small Batch and `errors=3357` for 2 Guys on runs where
+  // nothing had failed at all — `productLocs - pagesFetched` in both cases. A
+  // summary that cannot tell a budget from an outage is the summary that hides the
+  // next outage, which is exactly what it did for Small Batch's real 0-listing
+  // failure the same night.
+  //
+  // A non-zero value is a CAPACITY statement — this vendor publishes more than one
+  // run can walk — and the fix for it is a raised cap plus a deadline, or the
+  // resumable chunking tracked under #270. Absent when the walk reached the end of
+  // the enumeration, like its siblings.
+  locsBeyondBudget?: number;
   // Present only for a vendor with sitemapSampling configured — absent keeps the
   // JSONB byte-identical for every other vendor.
   sitemapSampling?: {
@@ -438,7 +484,7 @@ async function capturePhoto(
   // stats.errors rather than losing the offer (ADR-007).
   const image = await deps.fetcher.fetchBinary(photoUrl, MAX_IMAGE_BYTES);
   if (image.status !== 200) {
-    countError(stats, `photo-http-${image.status}`);
+    countError(stats, `photo-http-${image.status}`, { url: photoUrl, reason: `status ${image.status}` });
     return "skipped";
   }
 
@@ -800,8 +846,7 @@ async function ingestListing(
       await capturePhoto(deps, options.vendorId, posture, cigarId, photoUrl, stats);
     } catch (error) {
       // Photo ingestion is isolated from the offer write (ADR-007).
-      countError(stats, "photo");
-      void error;
+      countError(stats, "photo", { url: photoUrl ?? url, reason: errorText(error) });
     }
   }
 }
@@ -810,9 +855,18 @@ async function ingestListing(
 // disagree about the same failure. `kind` is coarse on purpose — `http-429` and
 // `fetch` are what an operator acts on; a stack trace in a nightly summary is
 // not (see `IngestStats.errorKinds`).
-function countError(stats: IngestStats, kind: string): void {
+//
+// `sample` is the exemplar: pass it wherever the URL and the reason are in hand,
+// which is every call site that has a URL. The first ERROR_SAMPLE_LIMIT per kind
+// are kept and the rest dropped — the count is the measure, the sample is only
+// there to say what the count is made of.
+function countError(stats: IngestStats, kind: string, sample?: { url: string; reason: string }): void {
   stats.errors += 1;
   stats.errorKinds = { ...(stats.errorKinds ?? {}), [kind]: (stats.errorKinds?.[kind] ?? 0) + 1 };
+  if (!sample) return;
+  const kept = stats.errorSamples ?? [];
+  if (kept.filter((entry) => entry.kind === kind).length >= ERROR_SAMPLE_LIMIT) return;
+  stats.errorSamples = [...kept, { kind, url: sample.url, reason: sample.reason }];
 }
 
 // EVERY OFFER THIS LISTING IS EVIDENCE FOR — one row, or one per pack.
@@ -915,14 +969,37 @@ async function walkListings(
   let urls = await productUrls(deps, adapter, stats);
   if (options.limit != null) urls = urls.slice(0, options.limit);
 
-  for (const url of urls) {
+  for (const [index, url] of urls.entries()) {
     if (!robots.isAllowed(pathOf(url))) continue;
+
+    // THE BUDGET IS NOT AN ERROR, and separating the two is the whole point of
+    // this arm (#270). `fetchText` throws MaxPagesExceededError once `maxPages` is
+    // spent, and folding that into the catch below charged one "fetch error" per
+    // URL the run had not reached — thousands of them, on a walk where every
+    // single request had succeeded. The budget stops the walk; what is left over
+    // is a count, not a failure.
+    let page: { status: number; body: string };
     try {
-      const { status, body } = await deps.fetcher.fetchText(url);
-      if (status !== 200) {
-        countError(stats, `http-${status}`);
-        continue;
+      page = await deps.fetcher.fetchText(url);
+    } catch (error) {
+      if (error instanceof MaxPagesExceededError) {
+        stats.locsBeyondBudget = urls.length - index;
+        break;
       }
+      countError(stats, "fetch", { url, reason: errorText(error) });
+      continue;
+    }
+
+    const { status, body } = page;
+    if (status !== 200) {
+      countError(stats, `http-${status}`, { url, reason: `status ${status}` });
+      continue;
+    }
+
+    // Everything past the fetch is `ingest`: the page arrived, and what failed was
+    // our reading or writing of it. Counting these as `fetch` said "we could not
+    // reach the vendor" about a vendor we had just read.
+    try {
       const { product, productMarkup, category, categorySource, photoUrl, variants } = extractProductMarkup(
         body,
         adapter,
@@ -955,8 +1032,7 @@ async function walkListings(
 
       await ingestListing(deps, options, posture, crawlRunId, url, listing, product, photoUrl, stats);
     } catch (error) {
-      countError(stats, "fetch");
-      void error;
+      countError(stats, "ingest", { url, reason: errorText(error) });
     }
   }
 }
@@ -1253,7 +1329,7 @@ async function tryEnrichCandidates(
   for (const candidate of ranked) {
     const { status, body } = await deps.fetcher.fetchText(candidate.url);
     if (status !== 200) {
-      countError(stats, `http-${status}`);
+      countError(stats, `http-${status}`, { url: candidate.url, reason: `status ${status}` });
       continue;
     }
     const { product, productMarkup, category, categorySource, photoUrl, variants, catalogTaxonomy } =
@@ -1455,8 +1531,8 @@ async function tryEnrichCandidates(
     let captured: PhotoCapture = "skipped";
     try {
       captured = await capturePhoto(deps, options.vendorId, posture, ask.cigarId, best.photoUrl, stats);
-    } catch {
-      countError(stats, "photo");
+    } catch (error) {
+      countError(stats, "photo", { url: best.photoUrl ?? best.url, reason: errorText(error) });
     }
     return captured === "refused" ? "photo_refused" : "match";
   }

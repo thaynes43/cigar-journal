@@ -252,6 +252,19 @@ function formatSummary(
   const kinds = Object.entries(s.errorKinds ?? {}).sort(([a], [b]) => a.localeCompare(b));
   if (kinds.length > 0) {
     lines.push(`  errors by kind: ${kinds.map(([kind, count]) => `${kind}=${count}`).join(" ")}`);
+    // AND WHAT THEY SAID. The kind line survives a redeploy-free diagnosis only if
+    // it carries content: `fetch=3357` is a number, `fetch /x ECONNRESET` is a
+    // lead. One line per sample, capped per kind in `countError`, so the block
+    // stays short enough to read in a Job log.
+    for (const sample of s.errorSamples ?? []) {
+      lines.push(`    ${sample.kind}  ${sample.url}  ${sample.reason}`);
+    }
+  }
+  // NOT AN ERROR — the walk ran out of page budget with enumeration left (#270).
+  // Printed next to the error block precisely because it used to be counted in it:
+  // an operator reading `errors=10453` was reading this number.
+  if (s.locsBeyondBudget) {
+    lines.push(`  locs beyond page budget (maxPages=${adapter.maxPages ?? "-"}): ${s.locsBeyondBudget}`);
   }
   const sampling = s.sitemapSampling;
   if (sampling) {
