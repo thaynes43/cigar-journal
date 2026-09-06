@@ -86,6 +86,55 @@ export function windowKeys(tokens: string[], maxLength = MAX_ALIAS_TOKENS): stri
   return [...new Set(tokenWindows(tokens, maxLength).map((window) => window.key))].filter((key) => key !== "");
 }
 
+// A leading run of a name's tokens, folded into a key, with the raw text on
+// both sides of the cut. The `-`-joined key is what `aliases`/`slug` hold, so a
+// window is one exact probe; `residue` is what a matched window leaves behind,
+// which for a query is the product the user actually named.
+export interface LeadingWindow {
+  key: string;
+  prefix: string;
+  residue: string;
+}
+
+// Every LEADING window of a name, longest first.
+//
+// The general `tokenWindows` scan is deliberately not this: it matches anywhere
+// in a title, because a vendor writes `Cigars - Padrón 1964` and the brand sits
+// mid-string. A CONVERSATIONAL MENTION IS NOT A VENDOR TITLE — the user says
+// "La Flor Dominicana La Nox", brand first — and an infix brand there is far
+// likelier to be a word the marca does not own (`Flor de Oliva Robusto`) than a
+// brand claim. Restricting to the prefix keeps that class of wrong anchor out
+// of search entirely.
+//
+// The cut is on WHITESPACE tokens, not on folded ones, so a residue keeps its
+// own spelling: `A.J.` folds to two key tokens but is one word of the name.
+export function leadingWindows(text: string, maxLength = MAX_ALIAS_TOKENS): LeadingWindow[] {
+  const raw = text.trim().split(/\s+/).filter((token) => token !== "");
+  const windows: LeadingWindow[] = [];
+  const key: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    key.push(...foldTokens(raw[i]!));
+    if (key.length === 0) continue; // a punctuation-only lead keys on nothing yet
+    if (key.length > maxLength) break;
+    windows.push({
+      key: key.join("-"),
+      prefix: raw.slice(0, i + 1).join(" "),
+      residue: raw.slice(i + 1).join(" "),
+    });
+  }
+  return windows.reverse();
+}
+
+// The text left when the longest leading window a key set claims is struck off,
+// or null when the name starts with none of them. `LFD La Nox` against La Flor
+// Dominicana's keys is `La Nox`; `Ashton VSG` against them is null.
+export function leadingResidue(text: string, keys: ReadonlySet<string>): string | null {
+  for (const window of leadingWindows(text)) {
+    if (keys.has(window.key)) return window.residue;
+  }
+  return null;
+}
+
 // A registry row as the anchor step needs it: an id, a display name and the
 // folded keys it answers to. Deliberately structural rather than a table type —
 // brands, lines and blends are all matched by exactly this shape, so one

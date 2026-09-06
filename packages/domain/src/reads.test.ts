@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { brands } from "@cj/db";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
 import {
@@ -334,6 +335,83 @@ describe("read services", () => {
     expect(result.matches[0]!.canonicalName).toBe("Vanguard Reserve Hemingway Short Story");
     expect(result.guidance).toBe("multiple_matches");
     expect(result.guidance).not.toBe("single_match");
+  });
+
+  // #303. The catalog writes a marca one way and the user says it another. The
+  // registry alias is the only fact that bridges them, and every assertion here
+  // is about the query reaching the row it named — not about the guidance, which
+  // is unchanged.
+  describe("searchCigars resolves a brand abbreviation through the registry", () => {
+    beforeAll(async () => {
+      await h.deps.db.insert(brands).values({
+        name: "La Flor Dominicana",
+        slug: "la-flor-dominicana",
+        aliases: ["la-flor-dominicana", "lfd"],
+      });
+      await h.seedCigar({ canonicalName: "LFD La Nox", brand: "La Flor Dominicana" });
+      await h.seedCigar({
+        canonicalName: "La Flor Dominicana Andalusian Bull",
+        brand: "La Flor Dominicana",
+      });
+      await h.seedCigar({ canonicalName: "La Flor Dominicana Oro No. 6", brand: "La Flor Dominicana" });
+      await h.seedCigar({ canonicalName: "La Flor Dominicana Suave Maceo", brand: "La Flor Dominicana" });
+      await h.seedCigar({ canonicalName: "La Flor Dominicana Capitulo II", brand: "La Flor Dominicana" });
+      await h.seedCigar({
+        canonicalName: "La Flor Dominicana Ligero Cabinet Oscuro",
+        brand: "La Flor Dominicana",
+      });
+      // Another marca's shorter name, sharing the product word. On the raw query
+      // it scores higher than the cigar the abbreviation named.
+      await h.seedCigar({ canonicalName: "Aganorsa Leaf Ligero", brand: "Aganorsa Leaf" });
+    });
+
+    // The reported defect: five siblings that spell the brand out ranked above
+    // the one cigar the query named, which the candidate pool then cut.
+    it("the spelled-out brand reaches the row that abbreviates it", async () => {
+      const result = await searchCigars(h.deps, userA, {
+        query: "La Flor Dominicana La Nox",
+      });
+      expect(result.matches[0]!.canonicalName).toBe("LFD La Nox");
+    });
+
+    it("the abbreviation reaches the row that spells the brand out", async () => {
+      const result = await searchCigars(h.deps, userA, { query: "LFD Andalusian Bull" });
+      expect(result.matches[0]!.canonicalName).toBe("La Flor Dominicana Andalusian Bull");
+      // Guidance is untouched: the query is not this row's canonical name.
+      expect(result.guidance).toBe("multiple_matches");
+
+      // The abbreviation is only half the resolution: with the brand unread, the
+      // query's own brand token is a residue that contradicts every candidate,
+      // so ranking falls through to raw similarity — and a shorter name under
+      // another marca that happens to share the product word wins.
+      const shared = await searchCigars(h.deps, userA, { query: "LFD Ligero" });
+      expect(shared.matches[0]!.canonicalName).toBe("La Flor Dominicana Ligero Cabinet Oscuro");
+    });
+
+    // An alias alone names the marca as squarely as spelling it out does.
+    it("a bare alias is a brand_match over that brand's cigars", async () => {
+      const result = await searchCigars(h.deps, userA, { query: "LFD", limit: 10 });
+      expect(result.guidance).toBe("brand_match");
+      expect(result.matches.length).toBeGreaterThanOrEqual(5);
+      expect(result.matches.every((m) => m.brand === "La Flor Dominicana")).toBe(true);
+    });
+
+    // No regression for a bare product mention: nothing leads the query that any
+    // brand answers to, so this is the pre-#303 path exactly.
+    it("a bare product mention still hits", async () => {
+      const result = await searchCigars(h.deps, userA, { query: "La Nox" });
+      expect(result.matches.some((m) => m.canonicalName === "LFD La Nox")).toBe(true);
+    });
+
+    // An unknown leading token resolves no brand, so the query is scored and
+    // ranked exactly as it was before — including the guidance it earns.
+    it("an unknown leading token behaves as before", async () => {
+      const unknown = await searchCigars(h.deps, userA, { query: "Zzyzx Andalusian Bull" });
+      expect(unknown.matches[0]!.canonicalName).toBe("La Flor Dominicana Andalusian Bull");
+      expect(unknown.guidance).toBe("multiple_matches");
+      const none = await searchCigars(h.deps, userA, { query: "zzyzx quuxbar" });
+      expect(none.guidance).toBe("no_match");
+    });
   });
 
   it("queryMySmokes rejects a malformed date filter as validation_error, not unavailable", async () => {

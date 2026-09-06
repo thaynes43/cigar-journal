@@ -55,6 +55,8 @@ import { vendorDisplaysPricesSql, offerIsDisplayableSql } from "./offer-display.
 import { compareOffersByTier, packagingTier, TIER_SINGLE } from "./packaging-tier.js";
 import { decodeSmokeCursor, encodeSmokeCursor, afterSmokeCursor } from "./smoke-cursor.js";
 import { rankByIdentity, CANDIDATE_POOL } from "./name-heuristics.js";
+import { fold, leadingResidue } from "./taxonomy-keys.js";
+import { resolveLeadingBrand, type LeadingBrand } from "./taxonomy-resolve.js";
 
 const DEFAULT_SMOKE_LIMIT = 10;
 const MAX_SMOKE_LIMIT = 25;
@@ -434,9 +436,12 @@ interface CigarMatchRow {
 }
 
 // The ranking pool carries its trigram score; the brand-exact query below does
-// not compute one and does not need one (it is ordered by name).
+// not compute one and does not need one (it is ordered by name). `brand_id` is
+// pool-only too: it is how a row is known to belong to the brand the query
+// named even when its canonical name spells that brand some other way.
 interface CigarPoolRow extends CigarMatchRow {
   sim: number | string;
+  brand_id: string | null;
 }
 
 function toCigarMatch(row: CigarMatchRow): CigarMatch {
@@ -454,6 +459,58 @@ function toCigarMatch(row: CigarMatchRow): CigarMatch {
     verification: row.verification,
     userSmokeCount: Number(row.user_smoke_count),
   };
+}
+
+// THE QUERY, RESTATED IN EVERY SPELLING ITS BRAND ANSWERS TO (#303).
+//
+// Trigram similarity scores a name as a whole, so a query that spells the brand
+// out cannot reach a row that abbreviates it: `La Flor Dominicana La Nox` scored
+// 0.30 against `LFD La Nox` and 0.55 against `La Flor Dominicana Andalusian
+// Bull` — the wrong cigar, by a wide margin, five times over, and the right one
+// cut by the candidate pool before ranking ever saw it.
+//
+// The brand's own spellings are the missing fact and the registry already holds
+// them (ADR-012 `brands.aliases`). Swapping the brand the user said for each one
+// gives `lfd La Nox`, which scores 1.0 against the row the query meant. Every
+// arm is a separate `%` against the trigram GIN index, so the pool is pulled by
+// the same indexed path as before — WIDER, never narrower: the original query is
+// always the first variant, so no row that matched before can stop matching.
+function searchVariants(query: string, brand: LeadingBrand | null): string[] {
+  if (brand == null || brand.residue === "") return [query];
+  const variants = new Map<string, string>([[query.toLowerCase(), query]]);
+  for (const spelling of brand.spellings) {
+    const variant = `${spelling} ${brand.residue}`;
+    if (!variants.has(variant.toLowerCase())) variants.set(variant.toLowerCase(), variant);
+  }
+  return [...variants.values()];
+}
+
+// The row's name as the QUERY WOULD HAVE WRITTEN IT — the brand token the user
+// used, then whatever the row says after its own brand token.
+//
+// Ranking is the second half of the same problem, and the pool alone does not
+// fix it: `rankByIdentity` reads the raw names, where `LFD La Nox` shares only
+// `la`/`nox` with the query and looks like a CONTRADICTION of it, while five
+// siblings that spell the brand out cover three of the query's words and rank
+// above the cigar that was named. Putting both sides in one spelling makes the
+// comparison what the issue says it is: once the brand matches, the product
+// tokens after it are the identity.
+//
+// A row of the brand whose name omits the brand entirely (`La Nox`, brand column
+// `La Flor Dominicana`) gets it prefixed, for the same reason — the brand column
+// is the row's own claim to that marca.
+//
+// Rows of OTHER brands are left exactly as they are: their brand tokens are a
+// different claim, which is precisely what should rank them down.
+function identityName(row: CigarPoolRow, brand: LeadingBrand | null, keys: Set<string>): string {
+  if (brand == null || brand.residue === "") return row.canonical_name;
+  const residue = leadingResidue(row.canonical_name, keys);
+  if (residue != null) return residue === "" ? brand.name : `${brand.name} ${residue}`;
+  const rowBrandKey = row.brand != null ? fold(row.brand) : "";
+  const ofBrand =
+    (row.brand_id != null && row.brand_id === brand.brandId) ||
+    (rowBrandKey !== "" && keys.has(rowBrandKey));
+  return ofBrand ? `${brand.name} ${row.canonical_name}` : row.canonical_name;
 }
 
 // Resolve conversational cigar mentions via trigram matching. Guidance tells the
@@ -478,44 +535,73 @@ export async function searchCigars(
   const limit = clamp(args.limit, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT);
   const query = args.query.trim();
 
+  // The brand the query starts with, if it starts with one. Null for a bare
+  // product mention (`La Nox`) and for an unknown leading token, and everything
+  // below then behaves exactly as it did before this existed.
+  const brand = await resolveLeadingBrand(deps.db, query);
+  const brandKeys = new Set(brand?.keys ?? []);
+  const variants = searchVariants(query, brand);
+  const nameSim = variants.map((variant) => sql`similarity(c.canonical_name, ${variant})`);
+  const nameHit = variants.map((variant) => sql`c.canonical_name % ${variant}`);
+
   const result = await deps.db.execute(sql`
-    SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches, c.ring_gauge, c.type, c.verification,
-      GREATEST(similarity(c.canonical_name, ${query}), similarity(coalesce(c.brand, ''), ${query})) AS sim,
+    SELECT c.id, c.canonical_name, c.brand, c.brand_id, c.line, c.vitola_name, c.length_inches, c.ring_gauge, c.type, c.verification,
+      GREATEST(${sql.join([...nameSim, sql`similarity(coalesce(c.brand, ''), ${query})`], sql`, `)}) AS sim,
       (SELECT count(*) FROM smokes s WHERE s.cigar_id = c.id AND s.user_id = ${principal.userId}) AS user_smoke_count
     FROM cigars c
     WHERE c.catalog_status = 'active'
-      AND (c.canonical_name % ${query} OR coalesce(c.brand, '') % ${query})
+      AND (${sql.join([...nameHit, sql`coalesce(c.brand, '') % ${query}`], sql` OR `)})
     ORDER BY sim DESC
     LIMIT ${CANDIDATE_POOL}
   `);
+  const rankQuery = brand != null && brand.residue !== "" ? `${brand.name} ${brand.residue}` : query;
   const matches: CigarMatch[] = rankByIdentity(
-    query,
+    rankQuery,
     result.rows as unknown as CigarPoolRow[],
-    (row) => ({ name: row.canonical_name, sim: Number(row.sim) }),
+    (row) => ({ name: identityName(row, brand, brandKeys), sim: Number(row.sim) }),
   )
     .slice(0, limit)
     .map(toCigarMatch);
 
-  if (matches.length === 0) return { matches, guidance: "no_match" };
-
   // An exact (case-insensitive) canonical-name hit is a confident resolution even
   // when weaker fuzzy hits trail it — proceed with the top match, keep the rest.
-  if (matches[0]!.canonicalName.toLowerCase() === query.toLowerCase()) {
+  // Judged on the name as the catalog stores it, never on the brand-normalized
+  // form ranking used: `single_match` means the user said this row's name.
+  if (matches.length > 0 && matches[0]!.canonicalName.toLowerCase() === query.toLowerCase()) {
     return { matches, guidance: "single_match" };
   }
 
   // The query names only a brand (no specific product): return that brand's
   // catalogued cigars and ask the user to narrow to a line/vitola.
-  const brandRows = await deps.db.execute(sql`
-    SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches, c.ring_gauge, c.type, c.verification,
-      (SELECT count(*) FROM smokes s WHERE s.cigar_id = c.id AND s.user_id = ${principal.userId}) AS user_smoke_count
-    FROM cigars c
-    WHERE c.catalog_status = 'active' AND lower(c.brand) = lower(${query})
-    ORDER BY c.canonical_name
-    LIMIT ${limit}
-  `);
-  const brandMatches = (brandRows.rows as unknown as CigarMatchRow[]).map(toCigarMatch);
-  if (brandMatches.length > 0) return { matches: brandMatches, guidance: "brand_match" };
+  //
+  // A BRAND IS ALSO ITS ABBREVIATIONS. `LFD` and `HdM` name a marca as squarely
+  // as spelling it out does, and the registry is what knows so — matching on the
+  // `brand` column alone answered the spelled-out query and left the alias to
+  // fuzzy luck (`HdM` trigram-matches no Hoyo de Monterrey name at all, so it
+  // reached `no_match`). That is why this now runs before the empty-pool exit:
+  // a resolved brand with nothing after it is a brand_match whether or not any
+  // name happens to look like it.
+  const brandOnly = brand != null && brand.residue === "";
+  if (matches.length > 0 || brandOnly) {
+    const brandConds: SQL[] = [sql`lower(c.brand) = lower(${query})`];
+    if (brandOnly && brand!.brandId != null) brandConds.push(sql`c.brand_id = ${brand!.brandId}`);
+    if (brandOnly) {
+      const spellings = brand!.spellings.map((spelling) => spelling.toLowerCase());
+      brandConds.push(sql`lower(c.brand) = ANY(${sql.param(spellings)}::text[])`);
+    }
+    const brandRows = await deps.db.execute(sql`
+      SELECT c.id, c.canonical_name, c.brand, c.line, c.vitola_name, c.length_inches, c.ring_gauge, c.type, c.verification,
+        (SELECT count(*) FROM smokes s WHERE s.cigar_id = c.id AND s.user_id = ${principal.userId}) AS user_smoke_count
+      FROM cigars c
+      WHERE c.catalog_status = 'active' AND (${sql.join(brandConds, sql` OR `)})
+      ORDER BY c.canonical_name
+      LIMIT ${limit}
+    `);
+    const brandMatches = (brandRows.rows as unknown as CigarMatchRow[]).map(toCigarMatch);
+    if (brandMatches.length > 0) return { matches: brandMatches, guidance: "brand_match" };
+  }
+
+  if (matches.length === 0) return { matches, guidance: "no_match" };
 
   // Anything reaching here is fuzzy without an exact canonical hit. A LONE fuzzy
   // candidate is NOT a confident resolution: trigram similarity is dominated by

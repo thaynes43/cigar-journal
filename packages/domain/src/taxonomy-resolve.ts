@@ -1,7 +1,7 @@
 import { sql, eq, inArray } from "drizzle-orm";
 import { blends, brands, lines } from "@cj/db";
 import type { Queryer } from "./deps.js";
-import { windowKeys, fold, anchorByAlias, registrySlugCandidates, MIN_ANCHOR_KEY_LENGTH, type AliasCandidate } from "./taxonomy-keys.js";
+import { windowKeys, fold, anchorByAlias, leadingWindows, registrySlugCandidates, MIN_ANCHOR_KEY_LENGTH, type AliasCandidate } from "./taxonomy-keys.js";
 import {
   assortmentPhrase,
   assortmentBrands,
@@ -117,6 +117,116 @@ export async function assortmentOf(db: Queryer, name: string): Promise<Assortmen
   const { keys } = tokenizeTitle(cleaned);
   const brandRows = await probeBrands(db, windowKeys(keys));
   return assortmentBrands(cleaned, brandRows) ? "multi-brand" : null;
+}
+
+// --------------------------------------------------------------------------
+// The brand a spoken query starts with — the registry half of search (#303).
+// --------------------------------------------------------------------------
+
+// The brand a query names, plus everything a caller needs to read the rest of
+// the query as the product: the spellings the catalog might have written that
+// brand with, the folded keys it answers to, and the text after it.
+export interface LeadingBrand {
+  // Null when the brand exists only as free text on `cigars.brand` — a catalog
+  // spelling with no registry row of its own.
+  brandId: string | null;
+  name: string;
+  keys: string[];
+  spellings: string[];
+  residue: string;
+}
+
+// A one-character key is not a marca, and `aliases` is a shared surface — the
+// crawler's anchor holds its own, stricter floor (MIN_ANCHOR_KEY_LENGTH) for
+// infix matches over vendor titles. Two characters is the floor here because
+// the abbreviations this exists for are two (`AF`, `RP`) and because a LEADING
+// window of a spoken mention is a far stronger claim than an infix one.
+const MIN_LEADING_KEY_LENGTH = 2;
+
+// How many spellings of the brand a caller gets back. Every one of them costs a
+// trigram probe at the call site, and the class that matters — the abbreviation
+// the catalog wrote instead of the full name — is short, so aliases come back
+// shortest first and the tail of a heavily-aliased marca is dropped.
+const MAX_BRAND_SPELLINGS = 5;
+
+// DOES THIS QUERY START WITH A BRAND? — longest leading window wins, brands
+// probed by slug and by alias.
+//
+// The registry is asked first and the free-text `cigars.brand` column second.
+// The fallback is not redundant: 0026 seeded the registry FROM that column, but
+// a cigar added since can carry a brand string no registry row claims, and a
+// query naming it must still resolve. It runs only when the registry misses, so
+// the ordinary search costs one indexed probe.
+export async function resolveLeadingBrand(
+  db: Queryer,
+  query: string,
+): Promise<LeadingBrand | null> {
+  const windows = leadingWindows(query).filter(
+    (window) => window.key.length >= MIN_LEADING_KEY_LENGTH,
+  );
+  if (windows.length === 0) return null;
+  const keys = windows.map((window) => window.key);
+
+  const rows = (
+    await db.execute(sql`
+      SELECT id, name, slug, aliases FROM brands
+      WHERE slug = ANY(${sql.param(keys)}::text[]) OR aliases && ${sql.param(keys)}::text[]
+    `)
+  ).rows as unknown as { id: string; name: string; slug: string; aliases: string[] }[];
+
+  // One key → one brand, the same rule `anchorByAlias` applies: a key two rows
+  // claim is dropped rather than arbitrated, because a confidently wrong brand
+  // is worse than none at all.
+  const byKey = new Map<string, (typeof rows)[number] | null>();
+  for (const row of rows) {
+    for (const key of [row.slug, ...row.aliases]) {
+      if (key === "") continue;
+      const seen = byKey.get(key);
+      if (seen === undefined) byKey.set(key, row);
+      else if (seen !== null && seen.id !== row.id) byKey.set(key, null);
+    }
+  }
+  for (const window of windows) {
+    const brand = byKey.get(window.key);
+    if (!brand) continue;
+    const brandKeys = [...new Set([brand.slug, fold(brand.name), ...brand.aliases])].filter(
+      (key) => key !== "",
+    );
+    const aliasSpellings = [...brand.aliases].sort((a, b) => a.length - b.length || a.localeCompare(b));
+    const spellings = [...new Set([brand.name, brand.slug, ...aliasSpellings])].slice(
+      0,
+      MAX_BRAND_SPELLINGS,
+    );
+    return {
+      brandId: brand.id,
+      name: brand.name,
+      keys: brandKeys,
+      spellings,
+      residue: window.residue,
+    };
+  }
+
+  const prefixes = windows.map((window) => window.prefix.toLowerCase());
+  const catalogRows = (
+    await db.execute(sql`
+      SELECT DISTINCT btrim(c.brand) AS name FROM cigars c
+      WHERE c.catalog_status = 'active'
+        AND lower(btrim(c.brand)) = ANY(${sql.param(prefixes)}::text[])
+    `)
+  ).rows as unknown as { name: string }[];
+  const bySpelling = new Map(catalogRows.map((row) => [row.name.toLowerCase(), row.name]));
+  for (const window of windows) {
+    const name = bySpelling.get(window.prefix.toLowerCase());
+    if (name == null) continue;
+    return {
+      brandId: null,
+      name,
+      keys: [fold(name)].filter((key) => key !== ""),
+      spellings: [name],
+      residue: window.residue,
+    };
+  }
+  return null;
 }
 
 // --------------------------------------------------------------------------
