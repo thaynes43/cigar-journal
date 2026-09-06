@@ -3470,6 +3470,54 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  it("states the true lifetime under a MOVING clock, not the fixed one", async () => {
+    // THE PRODUCTION CLOCK ADVANCES (index.ts: `now: () => new Date()`), and the
+    // handler reads it a few milliseconds after the open stamped
+    // `expires_at = now + 48h`. Under the harness's frozen clock a fresh drop has
+    // exactly 48h left and any rounding rule looks right; under a real one it has
+    // 47h59m59.99s, which flooring would announce as "47 hours" on a drop one
+    // millisecond old. This test runs its own server on a clock that ticks.
+    let tick = HARNESS_CLOCK.getTime();
+    const movingApp = buildApp(
+      {
+        ...h.deps,
+        now: () => {
+          tick += 5;
+          return new Date(tick);
+        },
+      },
+      storage,
+    );
+    const moving = movingApp.listen(0);
+    const movingUrl = `http://127.0.0.1:${(moving.address() as AddressInfo).port}`;
+    const token = await dropUser();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+
+    try {
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL(`${movingUrl}/mcp`), {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } },
+        }),
+      );
+
+      const fresh = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      expect(fresh.shareWithUser).toContain("It works for 48 hours.");
+      expect(fresh.shareWithUser).not.toContain("47 hours");
+
+      // Thirteen hours and a few minutes before the drop expires.
+      tick = Date.parse(fresh.expiresAt) - (13 * 3600_000 + 7 * 60_000);
+      const resumed = payloadOf(
+        await call(client, "open_photo_drop", { photoDropId: fresh.photoDropId }),
+      ) as OpenedDrop;
+      expect(resumed.photoDropId).toBe(fresh.photoDropId);
+      expect(resumed.shareWithUser).toContain("It works for about 13 hours more.");
+      expect(resumed.shareWithUser).not.toContain("48 hours");
+    } finally {
+      await client.close().catch(() => {});
+      await new Promise<void>((resolve) => moving.close(() => resolve()));
+    }
+  });
+
   it("get_photo_drop reads the drop and hands back no link", async () => {
     const token = await dropUser();
     await withClient(token, async (client) => {

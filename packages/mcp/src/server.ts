@@ -780,11 +780,17 @@ function toUpdatePurchaseInput(
 // #302). Derived from the drop's own `expires_at`, which is the whole point — the
 // tool used to state the 48-hour constant on a drop with thirteen hours left, in
 // a sentence written to be relayed to the user verbatim.
+//
+// HOURS ROUND, minutes floor. The handler reads the clock a few milliseconds
+// AFTER the open stamped `expires_at = now + 48h`, so a freshly minted drop has
+// 47h59m59.99s left and flooring would have it announce itself as "47 hours" the
+// moment it was created. Rounding is also what a person would say: a drop with
+// 13h50m left has about fourteen hours, not thirteen.
 function remainingLifetime(expiresAt: string, now: Date): string {
   const ms = Math.max(60_000, new Date(expiresAt).getTime() - now.getTime());
   const minutes = Math.floor(ms / 60_000);
   if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
-  const hours = Math.floor(minutes / 60);
+  const hours = Math.round(minutes / 60);
   return `${hours} ${hours === 1 ? "hour" : "hours"}`;
 }
 
