@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.43.0](https://github.com/thaynes43/cigar-journal/compare/v0.42.0...v0.43.0) (2026-09-06)
+
+
+### Features
+
+* **domain,mcp:** a photo drop is one session's; get_photo_drop reads without rotating; honest expiry copy ([#302](https://github.com/thaynes43/cigar-journal/issues/302)) ([#304](https://github.com/thaynes43/cigar-journal/issues/304)) ([6dc1e95](https://github.com/thaynes43/cigar-journal/commit/6dc1e956c0e0d2b218aeea7b1fa2d24d03d6589c))
+
+
+### Bug Fixes
+
+* **domain:** search_cigars resolves brand abbreviations through the registry aliases ([#303](https://github.com/thaynes43/cigar-journal/issues/303)) ([#305](https://github.com/thaynes43/cigar-journal/issues/305)) ([e070805](https://github.com/thaynes43/cigar-journal/commit/e07080579eac1e9fcbb4b83ea5c0a3040a4e4212))
+
 ## [0.42.0](https://github.com/thaynes43/cigar-journal/compare/v0.41.0...v0.42.0) (2026-09-03)
 
 
