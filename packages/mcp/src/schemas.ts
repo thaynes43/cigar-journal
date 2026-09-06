@@ -801,7 +801,7 @@ export const addSmokePhotoSchema = z
     // itself, since that is the schema the converter emits under `properties.image`.
     image: fileParamHandle
       .describe(
-        "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. Omit it and the tool returns a one-time upload link instead.",
+        "The user's attached photo, filled by the client host when it forwards a file with the call. Leave it empty: never paste a URL, an id, or a local file path here. A host that can upload a local file fills it itself; when nothing arrives, delivery says no_image_received and the upload link is the path.",
       )
       .optional(),
   })
@@ -809,19 +809,38 @@ export const addSmokePhotoSchema = z
 
 // ---- photo drop -------------------------------------------------------------
 
-// open_photo_drop takes NO id: the smoke it collects photos for does not exist
-// yet, and the drop it returns is the caller's own (one open drop per user,
-// ADR-014). The only argument is the same host-filled `image` handle
-// add_smoke_photo declares — a forwarded image goes straight into the drop, and
-// the link comes back either way. Strict for the same reason add_smoke_photo is:
-// the published shape is what a host's file hydration reads (issue #202).
+// open_photo_drop names no SMOKE: the smoke it collects photos for does not exist
+// yet. Its only id is an optional `photoDropId`, the explicit resume (issue
+// #302) — without one the tool opens "the drop for the smoke in progress", which
+// is the caller's drop inside the session gap or a new one. The other argument is
+// the same host-filled `image` handle add_smoke_photo declares: a forwarded image
+// goes straight into the drop, and the link comes back either way. Strict for the
+// same reason add_smoke_photo is: the published shape is what a host's file
+// hydration reads (issue #202).
 export const openPhotoDropSchema = z
   .object({
+    photoDropId: z
+      .string()
+      .optional()
+      .describe(
+        "A photoDropId from an earlier open_photo_drop, to continue that drop and get a fresh link for it. Omit for the smoke in progress: a drop opened hours after the last one is a new smoke and gets a new drop.",
+      ),
     image: fileParamHandle
       .describe(
-        "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. The drop link comes back either way; an image that does arrive is stored into the drop.",
+        "The user's attached photo, filled by the client host when it forwards a file with the call. Leave it empty: never paste a URL, an id, or a local file path here. A host that can upload a local file fills it itself; when nothing arrives, delivery says no_image_received and the upload link is the path.",
       )
       .optional(),
+  })
+  .strict();
+
+// get_photo_drop reads a drop and touches nothing (issue #302). One id, owner
+// scoped — a drop that is not the caller's reads exactly like one that never
+// existed.
+export const getPhotoDropSchema = z
+  .object({
+    photoDropId: z
+      .string()
+      .describe("Id of the drop to read, from a prior open_photo_drop result."),
   })
   .strict();
 
@@ -1376,6 +1395,22 @@ export const openPhotoDropOutput = z
   })
   .passthrough();
 
+// What the drop holds, with NO LINK anywhere in it (issue #302). Minting is
+// open_photo_drop's job — a read that returned a URL would have had to rotate the
+// token to produce one, which is the defect this tool exists to remove.
+export const getPhotoDropOutput = z
+  .object({
+    photoDropId: z.string(),
+    status: z.string(),
+    expiresAt: z.string(),
+    sessionStartedAt: z.string(),
+    lastOpenedAt: z.string(),
+    smokeId: z.string().nullable(),
+    photoCount: z.number(),
+    photos: z.array(looseObject),
+  })
+  .passthrough();
+
 export type SearchCigarsArgs = z.infer<typeof searchCigarsSchema>;
 export type GetCigarArgs = z.infer<typeof getCigarSchema>;
 export type GetMySmokesArgs = z.infer<typeof getMySmokesSchema>;
@@ -1388,6 +1423,7 @@ export type RecordPurchaseArgs = z.infer<typeof recordPurchaseSchema>;
 export type RecordPurchaseBatchArgs = z.infer<typeof recordPurchaseBatchSchema>;
 export type AddSmokePhotoArgs = z.infer<typeof addSmokePhotoSchema>;
 export type OpenPhotoDropArgs = z.infer<typeof openPhotoDropSchema>;
+export type GetPhotoDropArgs = z.infer<typeof getPhotoDropSchema>;
 
 // ---- curation surface (admin only; DESIGN-003 wave 4a, issue #126) ----------
 //

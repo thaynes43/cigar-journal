@@ -9,6 +9,7 @@ import { addSmokePhoto, listSmokePhotos, MAX_PHOTOS_PER_SMOKE } from "./smoke-ph
 import { getSmoke } from "./reads.js";
 import {
   openPhotoDrop,
+  getPhotoDrop,
   claimPhotoDrop,
   sweepPhotoDrops,
   getPhotoDropByToken,
@@ -21,7 +22,13 @@ import {
   PHOTO_DROP_TTL_SECONDS,
   DROP_SESSION_GAP_HOURS,
 } from "./photo-drops.js";
-import { PhotoLimitError, PhotoNotFoundError, SmokeNotFoundError, UploadTokenInvalidError } from "./errors.js";
+import {
+  PhotoDropNotFoundError,
+  PhotoLimitError,
+  PhotoNotFoundError,
+  SmokeNotFoundError,
+  UploadTokenInvalidError,
+} from "./errors.js";
 import type { Principal, ProcessedImage } from "./index.js";
 
 // The clock the harness starts on. `deps.now` drives every expiry decision, so a
@@ -617,10 +624,10 @@ describe("photo drops", () => {
     expect(fresh.photoDropId).not.toBe(stale.photoDropId);
   });
 
-  // The drop's SESSION window (ADR-016). `created_at` cannot be the smoke's
-  // start: one open drop per user means the same drop carries evening after
-  // evening — the drop the 2026-09-02 save claimed had been created 23 hours
-  // earlier and was merely re-opened for that night's first photo.
+  // The drop's SESSION window (ADR-016, amended by issue #302). One open drop per
+  // SESSION: an open inside the gap continues the drop, an open past it starts a
+  // new one, and only a named `photoDropId` carries a drop across the gap. The
+  // session stamp is what a late claim reads for the smoke's start.
   describe("session window", () => {
     async function dropRow(id: string) {
       const rows = await h.deps.db.select().from(photoDrops).where(eq(photoDrops.id, id));
@@ -647,39 +654,103 @@ describe("photo drops", () => {
       expect(row.lastOpenedAt.toISOString()).toBe(later.toISOString());
     });
 
-    it("starts a new session when the re-open falls past the gap", async () => {
+    it("opens a NEW drop past the gap and leaves the old one entirely alone", async () => {
+      // The 2026-09-05 incident (issue #302): a new smoke's first photo landed in
+      // a drop that still held the previous evening's, because the re-open reset
+      // the timing and kept the photos. Past the gap the open is a new smoke.
       const first = await openPhotoDrop(h.deps, storage, user);
+      const staged = await stagePhotoByToken(h.deps, storage, { token: first.token, image: image() });
+      const before = await dropRow(first.photoDropId);
+
       const tomorrow = new Date(BASE.getTime() + (DROP_SESSION_GAP_HOURS + 1) * 3600_000);
       h.setNow(tomorrow);
       const again = await openPhotoDrop(h.deps, storage, user);
-      expect(again.reused).toBe(true);
 
+      // A different drop, empty, and reported as the new drop it is.
+      expect(again.photoDropId).not.toBe(first.photoDropId);
+      expect(again.reused).toBe(false);
+      expect(again.photoCount).toBe(0);
+      const fresh = await dropRow(again.photoDropId);
+      expect(fresh.sessionStartedAt.toISOString()).toBe(tomorrow.toISOString());
+      expect(fresh.lastOpenedAt.toISOString()).toBe(tomorrow.toISOString());
+
+      // The old drop is UNTOUCHED — not its token, not either stamp.
+      const after = await dropRow(first.photoDropId);
+      expect(after.tokenHash).toBe(before.tokenHash);
+      expect(after.lastOpenedAt.toISOString()).toBe(before.lastOpenedAt.toISOString());
+      expect(after.sessionStartedAt.toISOString()).toBe(before.sessionStartedAt.toISOString());
+      expect(after.expiresAt.toISOString()).toBe(before.expiresAt.toISOString());
+
+      // Its photo stayed with it rather than being handed to tonight's smoke,
+      // and its link still works: a late photo through it lands where it was
+      // meant to.
+      const old = await getPhotoDropByToken(h.deps, { token: first.token });
+      expect(old.photos.map((p) => p.photoId)).toEqual([staged.photoId]);
+      const late = await stagePhotoByToken(h.deps, storage, { token: first.token, image: image() });
+      const stillOld = await getPhotoDropByToken(h.deps, { token: first.token });
+      expect(stillOld.photos.map((p) => p.photoId)).toEqual([staged.photoId, late.photoId]);
+      expect(await getPhotoDropByToken(h.deps, { token: again.token })).toMatchObject({ photos: [] });
+    });
+
+    it("resumes a named drop past the gap with a fresh token, keeping its photos and session start", async () => {
+      const first = await openPhotoDrop(h.deps, storage, user);
+      const staged = await stagePhotoByToken(h.deps, storage, { token: first.token, image: image() });
+
+      const tomorrow = new Date(BASE.getTime() + (DROP_SESSION_GAP_HOURS + 1) * 3600_000);
+      h.setNow(tomorrow);
+      const resumed = await openPhotoDrop(h.deps, storage, user, { photoDropId: first.photoDropId });
+
+      expect(resumed.photoDropId).toBe(first.photoDropId);
+      expect(resumed.reused).toBe(true);
+      expect(resumed.photoCount).toBe(1);
+      expect(resumed.expiresAt).toBe(first.expiresAt);
+
+      // A resume CONTINUES the session — the caller lost the link, not the smoke
+      // — but the rotation is the point, so the old link is dead.
       const row = await dropRow(first.photoDropId);
-      expect(row.sessionStartedAt.toISOString()).toBe(tomorrow.toISOString());
+      expect(row.sessionStartedAt.toISOString()).toBe(BASE.toISOString());
       expect(row.lastOpenedAt.toISOString()).toBe(tomorrow.toISOString());
-      // The drop itself is the same one — only its session moved. Which is the
-      // whole point: creation and session start have parted company, and it is
-      // the session the save reads.
-      expect(again.photoDropId).toBe(first.photoDropId);
-      expect(row.sessionStartedAt.getTime()).not.toBe(row.createdAt.getTime());
+      await expect(assertPhotoDropUsable(h.deps, { token: first.token })).rejects.toBeInstanceOf(
+        UploadTokenInvalidError,
+      );
+      const view = await getPhotoDropByToken(h.deps, { token: resumed.token });
+      expect(view.photos.map((p) => p.photoId)).toEqual([staged.photoId]);
+      expect(await auditActions(first.photoDropId)).toContain("photo_drop.rotate");
+    });
+
+    it("refuses to resume another user's drop, a claimed drop, or a malformed id", async () => {
+      const other = await h.createUser(`drop-other-${newRequestId()}@example.com`);
+      const theirs = await openPhotoDrop(h.deps, storage, other);
+      const mine = await openPhotoDrop(h.deps, storage, user);
+      const smokeId = await newSmoke();
+      await claimPhotoDrop(h.deps, user, { photoDropId: mine.photoDropId, smokeId });
+
+      for (const photoDropId of [theirs.photoDropId, mine.photoDropId, "not-a-uuid", newRequestId()]) {
+        await expect(
+          openPhotoDrop(h.deps, storage, user, { photoDropId }),
+        ).rejects.toBeInstanceOf(PhotoDropNotFoundError);
+      }
+      // The refusal wrote nothing: the other user's drop still answers its link.
+      await assertPhotoDropUsable(h.deps, { token: theirs.token });
     });
 
     it("a late claim fills the start from the session, and never overwrites one", async () => {
-      // The drop is a day old and was re-opened at the start of tonight's smoke,
-      // so the session — not the creation — is what the claim writes.
+      // Yesterday's drop is still open and untouched; tonight's smoke gets its
+      // own, and the session — not the creation — is what the claim writes.
       const created = new Date("2026-09-01T02:50:00.000Z");
       h.setNow(created);
       const drop = await openPhotoDrop(h.deps, storage, user);
       const lit = new Date("2026-09-02T01:04:00.000Z");
       h.setNow(lit);
-      // Tonight's first photo re-opens the same drop, which resets its session.
-      const reopened = await openPhotoDrop(h.deps, storage, user);
-      expect(reopened.photoDropId).toBe(drop.photoDropId);
-      await stagePhotoByToken(h.deps, storage, { token: reopened.token, image: image() });
+      // Tonight's first photo is a day past the gap, so it opens a NEW drop whose
+      // session starts now (issue #302) — and it is that drop the save claims.
+      const tonight = await openPhotoDrop(h.deps, storage, user);
+      expect(tonight.photoDropId).not.toBe(drop.photoDropId);
+      await stagePhotoByToken(h.deps, storage, { token: tonight.token, image: image() });
 
       h.setNow(new Date("2026-09-02T02:20:00.000Z"));
       const smokeId = await newSmoke();
-      const claim = await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+      const claim = await claimPhotoDrop(h.deps, user, { photoDropId: tonight.photoDropId, smokeId });
       expect(claim.status).toBe("claimed");
 
       const after = await getSmoke(h.deps, user, { smokeId });
@@ -688,7 +759,7 @@ describe("photo drops", () => {
 
       // Re-claiming is idempotent and COALESCEs, so nothing is restamped.
       h.setNow(new Date("2026-09-02T04:00:00.000Z"));
-      await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+      await claimPhotoDrop(h.deps, user, { photoDropId: tonight.photoDropId, smokeId });
       const again = await getSmoke(h.deps, user, { smokeId });
       expect(again.startedAt).toEqual({ value: lit.toISOString(), source: "photo-drop" });
     });
@@ -704,6 +775,81 @@ describe("photo drops", () => {
       const after = await getSmoke(h.deps, user, { smokeId });
       expect(after.startedAt).toBeNull();
       expect(after.durationMinutes).toBeNull();
+    });
+  });
+
+  // Reading a drop by id (issue #302). The model's only way to ask "how many
+  // photos?" used to be to open the drop again, which rotates the token — so the
+  // count-check killed the link the user had already been sent. The whole point
+  // of this read is that it is not an event.
+  describe("getPhotoDrop", () => {
+    it("returns the drop, its session stamps and its photos", async () => {
+      const drop = await openPhotoDrop(h.deps, storage, user);
+      const first = await stagePhotoByToken(h.deps, storage, { token: drop.token, image: image() });
+      const second = await stagePhotoByToken(h.deps, storage, {
+        token: drop.token,
+        kind: "band",
+        image: image(),
+      });
+
+      const view = await getPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId });
+      expect(view).toMatchObject({
+        photoDropId: drop.photoDropId,
+        status: "open",
+        expiresAt: drop.expiresAt,
+        sessionStartedAt: BASE.toISOString(),
+        lastOpenedAt: BASE.toISOString(),
+        smokeId: null,
+        photoCount: 2,
+      });
+      expect(view.photos.map((p) => p.photoId)).toEqual([first.photoId, second.photoId]);
+      expect(view.photos.map((p) => p.kind)).toEqual(["cigar", "band"]);
+      expect(view.photos.every((p) => p.attached === false)).toBe(true);
+      // No link, ever: minting one is open_photo_drop's job, and producing one
+      // here would have had to rotate the token.
+      expect(view).not.toHaveProperty("token");
+      expect(view).not.toHaveProperty("uploadUrl");
+    });
+
+    it("names the smoke and the attached photos once a save has claimed the drop", async () => {
+      const drop = await openPhotoDrop(h.deps, storage, user);
+      const staged = await stagePhotoByToken(h.deps, storage, { token: drop.token, image: image() });
+      const smokeId = await newSmoke();
+      await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+
+      const view = await getPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId });
+      expect(view.status).toBe("attached");
+      expect(view.smokeId).toBe(smokeId);
+      expect(view.photoCount).toBe(1);
+      expect(view.photos).toMatchObject([{ photoId: staged.photoId, attached: true }]);
+    });
+
+    it("writes nothing at all — no rotation, no stamp, no audit row", async () => {
+      const drop = await openPhotoDrop(h.deps, storage, user);
+      const before = await h.deps.db.select().from(photoDrops).where(eq(photoDrops.id, drop.photoDropId));
+      const auditBefore = await h.deps.db.select().from(auditLog).where(eq(auditLog.userId, user.userId));
+
+      // A clock the read would have stamped, had it stamped anything.
+      h.setNow(new Date(BASE.getTime() + 3600_000));
+      await getPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId });
+
+      const after = await h.deps.db.select().from(photoDrops).where(eq(photoDrops.id, drop.photoDropId));
+      expect(after[0]).toEqual(before[0]);
+      const auditAfter = await h.deps.db.select().from(auditLog).where(eq(auditLog.userId, user.userId));
+      expect(auditAfter).toHaveLength(auditBefore.length);
+      // And the link the caller already had still works.
+      await assertPhotoDropUsable(h.deps, { token: drop.token });
+    });
+
+    it("answers another user's drop and a malformed id the same way: not found", async () => {
+      const other = await h.createUser(`drop-other-${newRequestId()}@example.com`);
+      const theirs = await openPhotoDrop(h.deps, storage, other);
+
+      for (const photoDropId of [theirs.photoDropId, "not-a-uuid", newRequestId()]) {
+        await expect(getPhotoDrop(h.deps, user, { photoDropId })).rejects.toBeInstanceOf(
+          PhotoDropNotFoundError,
+        );
+      }
     });
   });
 

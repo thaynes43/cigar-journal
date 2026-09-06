@@ -672,6 +672,22 @@ export interface PhotoDropView {
   photos: PhotoDropPhotoView[];
 }
 
+// The drop as its OWNER reads it, by id and without touching it (issue #302).
+// PhotoDropView's fields plus the two session stamps and the count, and minus
+// the one thing a read may never hand out: a link. Reading a drop is not an
+// event — no rotation, no stamp, no audit row — which is what makes it safe to
+// call in the middle of a smoke to see what the user has dropped.
+export interface PhotoDropOwnerView {
+  photoDropId: string;
+  status: PhotoDropStatus;
+  expiresAt: string;
+  sessionStartedAt: string;
+  lastOpenedAt: string;
+  smokeId: string | null;
+  photoCount: number;
+  photos: PhotoDropPhotoView[];
+}
+
 // A drop handed to its owner. `token` is the raw URL token, returned EXACTLY
 // once — only its hash is stored, so a reused drop (`reused: true`) comes back
 // with a freshly minted one and the previous link is dead.

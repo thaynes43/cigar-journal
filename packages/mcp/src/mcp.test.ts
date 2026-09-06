@@ -290,7 +290,7 @@ describe("@cj/mcp adapter", () => {
 
   // ---- discovery ------------------------------------------------------------
 
-  it("lists exactly the thirty-four tools with readOnlyHint on the eight reads, and sends the contract instructions", async () => {
+  it("lists exactly the thirty-five tools with readOnlyHint on the nine reads, and sends the contract instructions", async () => {
     await withClient(ownerFull, async (client) => {
       expect(client.getInstructions()).toBe(INSTRUCTIONS);
 
@@ -307,6 +307,7 @@ describe("@cj/mcp adapter", () => {
           "get_offers",
           "get_smoke",
           "open_photo_drop",
+          "get_photo_drop",
           "record_price",
           "record_purchase",
           "record_purchase_batch",
@@ -347,6 +348,7 @@ describe("@cj/mcp adapter", () => {
         "get_my_smokes",
         "get_smoke",
         "get_my_inventory",
+        "get_photo_drop",
         "get_curation_queue",
       ])
         expect(readOnly(r)).toBe(true);
@@ -377,7 +379,7 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
-  it("tools/list declares the same file input on open_photo_drop, and no smokeId", async () => {
+  it("tools/list declares the file input and the resume id on open_photo_drop, and no smokeId", async () => {
     // The drop takes the SAME host-forwarded attachment add_smoke_photo takes
     // (ADR-014), so it must publish the same declaration — the `_meta` list and a
     // real top-level `image` property, or ChatGPT forwards nothing. And it must
@@ -396,7 +398,7 @@ describe("@cj/mcp adapter", () => {
         properties?: Record<string, unknown>;
         required?: string[];
       };
-      expect(Object.keys(inputSchema.properties ?? {})).toEqual(["image"]);
+      expect(Object.keys(inputSchema.properties ?? {})).toEqual(["photoDropId", "image"]);
       expect(inputSchema.required ?? []).toEqual([]);
       expect(drop.annotations?.readOnlyHint).not.toBe(true);
       expect(drop.annotations?.idempotentHint).not.toBe(true);
@@ -501,7 +503,7 @@ describe("@cj/mcp adapter", () => {
         },
         additionalProperties: false,
         description:
-          "The user's attached photo. The client fills this when a file is attached to the message — never populate it, invent its fields, or paste a URL/id here yourself. Omit it and the tool returns a one-time upload link instead.",
+          "The user's attached photo, filled by the client host when it forwards a file with the call. Leave it empty: never paste a URL, an id, or a local file path here. A host that can upload a local file fills it itself; when nothing arrives, delivery says no_image_received and the upload link is the path.",
       });
 
       // Restated outside the whole-object compare because they are the two
@@ -3306,8 +3308,9 @@ describe("@cj/mcp adapter", () => {
 
   // ---- open_photo_drop and the photo-drop claims (ADR-014, issue #263) ------
   //
-  // ONE OPEN DROP PER USER is the invariant every test here has to respect: a
-  // second open returns the FIRST drop with a fresh token. So each test that
+  // ONE OPEN DROP PER SESSION is the invariant every test here has to respect
+  // (issue #302): a second open inside the session gap returns the FIRST drop
+  // with a fresh token, and one past it opens a new drop. So each test that
   // asserts on `reused` or `photoCount` gets its own user — sharing `owner` would
   // make the results depend on file order rather than on the code.
 
@@ -3362,7 +3365,7 @@ describe("@cj/mcp adapter", () => {
       expect(data).not.toHaveProperty("staged");
       // The sentence to relay carries the link and its lifetime.
       expect(data.shareWithUser).toContain(data.uploadUrl);
-      expect(data.shareWithUser).toContain("48 hours");
+      expect(data.shareWithUser).toContain("It works for 48 hours.");
     });
   });
 
@@ -3383,7 +3386,9 @@ describe("@cj/mcp adapter", () => {
       // The photo staged through the dead link is still in the drop — this is what
       // lets a model that lost the id in a long chat recover the user's photos.
       expect(second.photoCount).toBe(1);
-      expect(second.shareWithUser).toContain("it already holds 1 photo,");
+      expect(second.shareWithUser).toContain("it already holds 1 photo;");
+      // The lifetime is the drop's own, and a re-used drop has less of it left.
+      expect(second.shareWithUser).toContain("It works for about 48 hours more.");
 
       await expect(assertPhotoDropUsable(h.deps, { token: firstToken })).rejects.toMatchObject({
         code: "upload_token_invalid",
@@ -3391,6 +3396,178 @@ describe("@cj/mcp adapter", () => {
       await expect(
         assertPhotoDropUsable(h.deps, { token: tokenOf(second.uploadUrl) }),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  // The harness clock is frozen (createHarness), so a test that needs a gap or a
+  // partly spent lifetime moves it and puts it back — every other test in this
+  // file reads it as the constant it is.
+  const HARNESS_CLOCK = new Date("2026-08-27T12:00:00.000Z");
+  async function atTime<T>(when: Date, fn: () => Promise<T>): Promise<T> {
+    h.setNow(when);
+    try {
+      return await fn();
+    } finally {
+      h.setNow(HARNESS_CLOCK);
+    }
+  }
+
+  it("opening hours later starts a NEW drop and leaves the old link alive", async () => {
+    // The 2026-09-05 incident (issue #302): tonight's first photo joined last
+    // night's in a drop that had merely been re-opened.
+    const token = await dropUser();
+    await withClient(token, async (client) => {
+      const first = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      const firstToken = tokenOf(first.uploadUrl);
+      await stageIntoDrop(firstToken, "cigar");
+
+      const tomorrow = new Date(HARNESS_CLOCK.getTime() + 5 * 3600_000);
+      const next = await atTime(tomorrow, async () =>
+        payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop,
+      );
+
+      expect(next.photoDropId).not.toBe(first.photoDropId);
+      expect(next.reused).toBe(false);
+      expect(next.photoCount).toBe(0);
+      expect(next.shareWithUser).not.toContain("already holds");
+      // The old link was not rotated, so a late photo still reaches its own smoke.
+      await expect(assertPhotoDropUsable(h.deps, { token: firstToken })).resolves.toBeUndefined();
+    });
+  });
+
+  it("open_photo_drop with a photoDropId resumes that drop and states the time actually left", async () => {
+    const token = await dropUser();
+    await withClient(token, async (client) => {
+      const first = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      const firstToken = tokenOf(first.uploadUrl);
+      const photoId = await stageIntoDrop(firstToken, "cigar");
+
+      // Thirteen hours before the drop expires — the live case that said "48
+      // hours" while thirteen were left.
+      const late = new Date(Date.parse(first.expiresAt) - 13 * 3600_000);
+      const resumed = await atTime(late, async () =>
+        payloadOf(
+          await call(client, "open_photo_drop", { photoDropId: first.photoDropId }),
+        ) as OpenedDrop,
+      );
+
+      expect(resumed.photoDropId).toBe(first.photoDropId);
+      expect(resumed.reused).toBe(true);
+      expect(resumed.photoCount).toBe(1);
+      expect(resumed.expiresAt).toBe(first.expiresAt);
+      expect(resumed.shareWithUser).toContain("it already holds 1 photo;");
+      expect(resumed.shareWithUser).toContain("It works for about 13 hours more.");
+      expect(resumed.shareWithUser).not.toContain("48 hours");
+      // The resume rotated the link, which is what the caller asked for.
+      await expect(assertPhotoDropUsable(h.deps, { token: firstToken })).rejects.toMatchObject({
+        code: "upload_token_invalid",
+      });
+
+      const read = payloadOf(
+        await call(client, "get_photo_drop", { photoDropId: first.photoDropId }),
+      ) as { photos: { photoId: string }[] };
+      expect(read.photos.map((ph) => ph.photoId)).toEqual([photoId]);
+    });
+  });
+
+  it("states the true lifetime under a MOVING clock, not the fixed one", async () => {
+    // THE PRODUCTION CLOCK ADVANCES (index.ts: `now: () => new Date()`), and the
+    // handler reads it a few milliseconds after the open stamped
+    // `expires_at = now + 48h`. Under the harness's frozen clock a fresh drop has
+    // exactly 48h left and any rounding rule looks right; under a real one it has
+    // 47h59m59.99s, which flooring would announce as "47 hours" on a drop one
+    // millisecond old. This test runs its own server on a clock that ticks.
+    let tick = HARNESS_CLOCK.getTime();
+    const movingApp = buildApp(
+      {
+        ...h.deps,
+        now: () => {
+          tick += 5;
+          return new Date(tick);
+        },
+      },
+      storage,
+    );
+    const moving = movingApp.listen(0);
+    const movingUrl = `http://127.0.0.1:${(moving.address() as AddressInfo).port}`;
+    const token = await dropUser();
+    const client = new Client({ name: "test-client", version: "0.0.0" });
+
+    try {
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL(`${movingUrl}/mcp`), {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } },
+        }),
+      );
+
+      const fresh = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      expect(fresh.shareWithUser).toContain("It works for 48 hours.");
+      expect(fresh.shareWithUser).not.toContain("47 hours");
+
+      // Thirteen hours and a few minutes before the drop expires.
+      tick = Date.parse(fresh.expiresAt) - (13 * 3600_000 + 7 * 60_000);
+      const resumed = payloadOf(
+        await call(client, "open_photo_drop", { photoDropId: fresh.photoDropId }),
+      ) as OpenedDrop;
+      expect(resumed.photoDropId).toBe(fresh.photoDropId);
+      expect(resumed.shareWithUser).toContain("It works for about 13 hours more.");
+      expect(resumed.shareWithUser).not.toContain("48 hours");
+    } finally {
+      await client.close().catch(() => {});
+      await new Promise<void>((resolve) => moving.close(() => resolve()));
+    }
+  });
+
+  it("get_photo_drop reads the drop and hands back no link", async () => {
+    const token = await dropUser();
+    await withClient(token, async (client) => {
+      const drop = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      const photoId = await stageIntoDrop(tokenOf(drop.uploadUrl), "band");
+
+      const read = payloadOf(await call(client, "get_photo_drop", { photoDropId: drop.photoDropId })) as {
+        photoDropId: string;
+        status: string;
+        expiresAt: string;
+        sessionStartedAt: string;
+        lastOpenedAt: string;
+        smokeId: string | null;
+        photoCount: number;
+        photos: { photoId: string; kind: string; attached: boolean }[];
+      };
+
+      expect(read).toMatchObject({
+        photoDropId: drop.photoDropId,
+        status: "open",
+        expiresAt: drop.expiresAt,
+        smokeId: null,
+        photoCount: 1,
+      });
+      expect(read.photos).toMatchObject([{ photoId, kind: "band", attached: false }]);
+      // Minting is open_photo_drop's job: a read that returned a URL would have
+      // had to rotate the token to produce it (issue #302).
+      expect(JSON.stringify(read)).not.toContain(`${ORIGIN}/d/`);
+      for (const key of ["uploadUrl", "token", "shareWithUser"]) {
+        expect(read).not.toHaveProperty(key);
+      }
+      // And the link the user already has still works.
+      await expect(assertPhotoDropUsable(h.deps, { token: tokenOf(drop.uploadUrl) })).resolves.toBeUndefined();
+    });
+  });
+
+  it("get_photo_drop answers another user's drop with photo_drop_not_found", async () => {
+    const mine = await dropUser();
+    const theirs = await dropUser();
+    const drop = await withClient(theirs, async (client) =>
+      payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop,
+    );
+
+    await withClient(mine, async (client) => {
+      expect(errorOf(await call(client, "get_photo_drop", { photoDropId: drop.photoDropId })).code).toBe(
+        "photo_drop_not_found",
+      );
+      expect(errorOf(await call(client, "get_photo_drop", { photoDropId: "not-a-uuid" })).code).toBe(
+        "photo_drop_not_found",
+      );
     });
   });
 

@@ -5,7 +5,7 @@
 
 export const SERVER_INFO = { name: "cigar-journal", version: "0.1.0" } as const;
 
-// The tool surface. The first twenty are the conversational journal contract
+// The tool surface. The first twenty-one are the conversational journal contract
 // (reads annotated readOnlyHint). The final fourteen are the admin catalog-curation
 // surface (DESIGN-003 wave 4a/4b, issue #126; the taxonomy five from ADR-012 Wave 3,
 // issue #196): the ops-agent tools, gated on `curation:*` scope AND an admin-role
@@ -26,10 +26,13 @@ export const TOOL_NAMES = [
   // The ledger's counterpart to update_smoke's cigar op (ADR-017): re-point one
   // purchase lot at the right catalog entry, per record and never bulk.
   "update_purchase",
-  // The two photo verbs. open_photo_drop comes first because it comes first in
+  // The three photo verbs. open_photo_drop comes first because it comes first in
   // time: it takes a photo of the smoke IN PROGRESS, before there is a smokeId
-  // for add_smoke_photo to bind to (ADR-014, issue #263).
+  // for add_smoke_photo to bind to (ADR-014, issue #263). get_photo_drop reads a
+  // drop without touching it — the question that used to be asked by re-opening,
+  // which rotated the token and killed the user's link (issue #302).
   "open_photo_drop",
+  "get_photo_drop",
   "add_smoke_photo",
   "set_want",
   "set_favorite",
@@ -98,6 +101,10 @@ export const TOOL_SCOPES: Record<ToolName, string[]> = {
   // rides journal:write like every other personal write — no new scope, and an
   // already-minted connector token reaches it with no re-consent (ADR-014).
   open_photo_drop: ["journal:write"],
+  // The read of the caller's own drop rides journal:read like every other
+  // personal read (issue #302): it mints nothing and writes nothing, so it has no
+  // claim on a write scope.
+  get_photo_drop: ["journal:read"],
   add_smoke_photo: ["journal:write"],
   set_want: ["journal:write"],
   set_favorite: ["journal:write"],
@@ -258,14 +265,18 @@ smoke goes to that same link. Keep the photoDropId and pass it to save_smoke,
 which attaches the dropped photos to the saved smoke and reports how many in
 photoDrop.attached — never ask the user to send a photo again at the end; when
 attached is 0 and they meant to add one, say the link is still open and a photo
-added now lands on the saved smoke. Opening a drop while one is open returns
-the same drop with a fresh link. After a save, add_smoke_photo with the smoke
-id returns a one-time upload link for a photo of that saved smoke, and with a
-photoDropId attaches a drop the save did not carry. If the host forwarded an
-attached image with either call the photo is stored directly and no link is
-needed; delivery.status reports which happened. Never fill the image argument
-yourself, and never paste an image, a chat file link, or a file id into any
-field. A photo never blocks saving the smoke.
+added now lands on the saved smoke. To check what a drop holds, use
+get_photo_drop with its id: it reads the drop and never changes the link.
+Opening again within the same smoke returns that drop with a fresh link and the
+earlier link stops working, so open again only when the user needs the link;
+hours after the last one, an open starts a new drop for the new smoke, and
+passing photoDropId continues a specific drop instead. After a save,
+add_smoke_photo with the smoke id returns a one-time upload link for a photo of
+that saved smoke, and with a photoDropId attaches a drop the save did not carry.
+If the host forwarded an attached image with either call the photo is stored
+directly and no link is needed; delivery.status reports which happened. Leave
+the image argument empty — never paste an image, a URL, a chat file link, a file
+id, or a local file path into it. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
