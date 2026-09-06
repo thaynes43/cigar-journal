@@ -103,6 +103,19 @@ export interface ErrorSample {
 // 11,000 URLs still writes a summary an operator reads rather than scrolls.
 const ERROR_SAMPLE_LIMIT = 5;
 
+// ONE LINE, AND A SHORT ONE. `errorText` on a driver error is not a sentence: a
+// Drizzle insert failure stringifies to `Failed query: insert into "offers" …`
+// carrying every parameter, the whole raw listing payload included — roughly 3 KB
+// for one sample, printed into a Job log and persisted into `crawl_runs.stats`.
+// The first line under a cap keeps the thing that identifies the failure and
+// drops the transcript; a sample is a lead, not a record.
+const ERROR_SAMPLE_REASON_MAX = 200;
+
+function sampleReason(reason: string): string {
+  const line = reason.split("\n", 1)[0]!.trim();
+  return line.length > ERROR_SAMPLE_REASON_MAX ? `${line.slice(0, ERROR_SAMPLE_REASON_MAX)}…` : line;
+}
+
 export interface IngestStats {
   pagesFetched: number;
   listingsParsed: number;
@@ -866,7 +879,7 @@ function countError(stats: IngestStats, kind: string, sample?: { url: string; re
   if (!sample) return;
   const kept = stats.errorSamples ?? [];
   if (kept.filter((entry) => entry.kind === kind).length >= ERROR_SAMPLE_LIMIT) return;
-  stats.errorSamples = [...kept, { kind, url: sample.url, reason: sample.reason }];
+  stats.errorSamples = [...kept, { kind, url: sample.url, reason: sampleReason(sample.reason) }];
 }
 
 // EVERY OFFER THIS LISTING IS EVIDENCE FOR — one row, or one per pack.
