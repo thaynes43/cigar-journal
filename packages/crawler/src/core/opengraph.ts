@@ -62,6 +62,27 @@ export function metaContent(html: string, key: string): string | null {
   return null;
 }
 
+// THE SAME `<meta>` SWEEP, KEYED ON `itemprop` INSTEAD (#270). `metaContent`
+// identifies a tag by `property ?? name`, which is the whole of OpenGraph and
+// none of schema.org microdata — so J.J. Fox's
+// `<meta itemprop="availability" content="https://schema.org/InStock" />`, the
+// only stock signal its pages publish, was invisible. Every one of its 223 offers
+// on 2026-09-06 was written with `in_stock = NULL`: not "out of stock", *unknown*,
+// on a vendor that had said so on every page.
+//
+// Deliberately a FALLBACK and not a merge: where a vendor publishes both, the
+// OpenGraph value stays authoritative and nothing about the vendors that already
+// work changes.
+function itempropContent(html: string, key: string): string | null {
+  for (const tag of html.match(META_RE) ?? []) {
+    const attrs = attributes(tag);
+    if (attrs.itemprop?.toLowerCase() !== key) continue;
+    const value = decodeEntities(attrs.content ?? "").trim();
+    if (value) return value;
+  }
+  return null;
+}
+
 function canonicalUrl(html: string): string | null {
   for (const tag of html.match(LINK_RE) ?? []) {
     const attrs = attributes(tag);
@@ -131,7 +152,7 @@ export function extractOpenGraphProduct(html: string): OpenGraphProduct | null {
 
   const price = metaContent(html, "product:price:amount");
   const currency = metaContent(html, "product:price:currency");
-  const stock = availability(metaContent(html, "og:availability"));
+  const stock = availability(metaContent(html, "og:availability") ?? itempropContent(html, "availability"));
   const image = extractOgImage(html);
   const brand = metaContent(html, "og:brand");
   const url = canonicalUrl(html) ?? metaContent(html, "og:url");

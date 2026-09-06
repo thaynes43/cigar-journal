@@ -28,7 +28,7 @@ import {
   type Principal,
 } from "@cj/domain";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
-import { runIngest, type IngestDeps } from "./core/ingest.js";
+import { runIngest, type IngestDeps, type IngestStats } from "./core/ingest.js";
 import { existingCrawlerLink, resolveListing, upsertListingMatch } from "./core/match.js";
 import { pathOf } from "./core/product-url.js";
 import {
@@ -3714,5 +3714,230 @@ describe("crawler ingest (embedded Postgres)", () => {
     const below = await enrichRun(lower, missRoutes);
     expect(below.stats.enrich!.requests).toBe(1);
     expect((await ledgerRows(requestId)).map((r) => r.vendorId)).not.toContain(ccTop);
+  });
+
+  // --- #270: the walk tells a budget from a failure ---------------------------
+  //
+  // `errors` was one number over unlike things, and the seed/offers walk wrapped
+  // the fetch AND everything downstream of it in a single catch that labelled the
+  // lot `fetch` — the fetcher's OWN safety cap included. So a capped vendor spent
+  // its budget and then charged one "fetch error" for every URL it had not
+  // reached: the first unattended fleet offers run (2026-09-06) reported
+  // `errors=10453` for Small Batch and `errors=3357` for 2 Guys on a night when
+  // not one request had failed, both of them exactly `productLocs - pagesFetched`.
+  // A summary that cannot tell a budget from an outage is the summary that hides
+  // the next outage, which is what it did for Small Batch's real 0-listing failure
+  // the same night.
+
+  // The six product locs the budget cases enumerate. Ordered so the two the cap
+  // affords are parseable cigars: what the budget bought has to survive, or
+  // "spent the budget" and "walked nothing" would read the same.
+  const BUDGET_URLS = [PADRON_URL, OLIVA_URL, PADRON_BOX_URL, OLIVA_ROBUSTO_URL, LIGHTER_URL, SAMPLER_URL];
+
+  const budgetRoutes = () => ({
+    [ROBOTS]: { body: loadFixture("robots.txt") },
+    [SITEMAP]: { body: urlsetXml(BUDGET_URLS) },
+    [PADRON_URL]: { body: loadFixture("product-padron.html") },
+    [OLIVA_URL]: { body: loadFixture("product-oliva.html") },
+    [PADRON_BOX_URL]: { body: loadFixture("product-padron-box.html") },
+    [OLIVA_ROBUSTO_URL]: { body: loadFixture("product-oliva-robusto.html") },
+    [LIGHTER_URL]: { body: loadFixture("product-lighter.html") },
+    [SAMPLER_URL]: { body: loadFixture("product-sampler.html") },
+  });
+
+  // Every walk case below writes matches and offers, and two of them deliberately
+  // fail most of their fetches. They get their own registry row so the seed cases
+  // above keep asserting against a vendor no error case has touched.
+  const walkVendor = (name: string) => makeVendor(name, "NC");
+
+  const runStats = async (id: string): Promise<IngestStats> =>
+    (await pg.db.select().from(crawlRuns).where(eq(crawlRuns.id, id)))[0]!.stats as IngestStats;
+
+  it("a walk that spends its page budget counts the locs it never reached, and reports no error", async () => {
+    const vendor = await walkVendor("Budget Walk");
+    // robots.txt and the sitemap come out of the same budget the real fetcher
+    // meters, so four pages buys exactly two product URLs. The third trips the
+    // cap — which is checked BEFORE the request, so it is never visited either.
+    const fetcher = createMockFetcher(budgetRoutes(), 4);
+
+    const run = await runIngest(deps(fetcher, null), { adapter: foxCigar, vendorId: vendor, mode: "offers" });
+
+    expect(run.status).toBe("succeeded");
+    expect(fetcher.requested).toEqual([ROBOTS, SITEMAP, PADRON_URL, OLIVA_URL]);
+
+    // NOT AN ERROR — the whole point. Six locs, two walked, four left over.
+    expect(run.stats.locsBeyondBudget).toBe(4);
+    expect(run.stats.errors).toBe(0);
+    expect(run.stats.errorKinds).toBeUndefined();
+    expect(run.stats.errorSamples).toBeUndefined();
+
+    // And the pages the budget DID buy are still ingested: a cap stops the walk,
+    // it does not void it.
+    expect(run.stats.listingsParsed).toBe(2);
+    expect(run.stats.pagesFetched).toBe(4);
+
+    // The nightly report reads the crawl_runs JSONB, which is the surface that
+    // said `errors=10453`.
+    const persisted = await runStats(run.crawlRunId!);
+    expect(persisted.errors).toBe(0);
+    expect(persisted.locsBeyondBudget).toBe(4);
+    expect(persisted.errorKinds).toBeUndefined();
+  });
+
+  // The remainder is absent, not zero, on the same terms as every other optional
+  // counter in this shape: a run that walked its whole enumeration serialises into
+  // crawl_runs byte-identically to what it did before the field existed.
+  it("a walk that reaches the end of the enumeration writes no budget remainder at all", async () => {
+    const vendor = await walkVendor("Unbudgeted Walk");
+    const routes = { ...budgetRoutes(), [SITEMAP]: { body: urlsetXml([PADRON_URL, OLIVA_URL]) } };
+
+    const run = await runIngest(deps(createMockFetcher(routes), null), {
+      adapter: foxCigar,
+      vendorId: vendor,
+      mode: "offers",
+    });
+
+    expect(run.status).toBe("succeeded");
+    expect(run.stats.listingsParsed).toBe(2);
+    expect(run.stats.errors).toBe(0);
+    expect(run.stats.locsBeyondBudget).toBeUndefined();
+    expect(await runStats(run.crawlRunId!)).not.toHaveProperty("locsBeyondBudget");
+  });
+
+  // The other half of the separation: a throw that is NOT the budget is still an
+  // error, and now says which URL and what it said. The reason used to be
+  // swallowed with `void error`, so the 2026-09-03 fleet run's `errors=47` cost an
+  // in-cluster fetch Job to discover that all 47 were one status code the run had
+  // already read.
+  it("a fetch that really throws is still an error, and names the URL and the reason", async () => {
+    const vendor = await walkVendor("Unreachable Walk");
+    const base = createMockFetcher({
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([PADRON_URL, OLIVA_URL]) },
+      [PADRON_URL]: { body: loadFixture("product-padron.html") },
+      [OLIVA_URL]: { body: loadFixture("product-oliva.html") },
+    });
+    const flaky: MockFetcher = {
+      requested: base.requested,
+      get pagesFetched() {
+        return base.pagesFetched;
+      },
+      fetchText: async (url: string) => {
+        if (url === OLIVA_URL) throw new Error("ECONNRESET");
+        return base.fetchText(url);
+      },
+      fetchBinary: (url: string) => base.fetchBinary(url),
+    };
+
+    const run = await runIngest(deps(flaky, null), { adapter: foxCigar, vendorId: vendor, mode: "offers" });
+
+    expect(run.status).toBe("succeeded");
+    expect(run.stats.errors).toBe(1);
+    expect(run.stats.errorKinds).toEqual({ fetch: 1 });
+    expect(run.stats.errorSamples).toEqual([{ kind: "fetch", url: OLIVA_URL, reason: "ECONNRESET" }]);
+    // A genuine failure is never a budget remainder, and the walk carries on past
+    // it — the sibling URL before it still parsed.
+    expect(run.stats.locsBeyondBudget).toBeUndefined();
+    expect(run.stats.listingsParsed).toBe(1);
+  });
+
+  // A non-200 is the kind an operator most often has to act on, and the status is
+  // the whole content of it: Cigarworld's 47 consecutive `429 PageViewCount
+  // restriction` responses were a rate rule the run could have read off the
+  // response and instead reported as an anonymous count.
+  it("a non-200 samples the status alongside the URL", async () => {
+    const vendor = await walkVendor("Gone Walk");
+    const routes = {
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([PADRON_URL, OLIVA_URL]) },
+      [PADRON_URL]: { body: loadFixture("product-padron.html") },
+      [OLIVA_URL]: { status: 500, body: "" },
+    };
+
+    const run = await runIngest(deps(createMockFetcher(routes), null), {
+      adapter: foxCigar,
+      vendorId: vendor,
+      mode: "offers",
+    });
+
+    expect(run.stats.errors).toBe(1);
+    expect(run.stats.errorKinds).toEqual({ "http-500": 1 });
+    expect(run.stats.errorSamples).toEqual([{ kind: "http-500", url: OLIVA_URL, reason: "status 500" }]);
+    expect(run.stats.listingsParsed).toBe(1);
+  });
+
+  // THE CAP IS PER KIND, NOT PER RUN, and that is the difference between a
+  // diagnosis and a coin flip: a run drowning in one failure must not crowd out
+  // the single instance of another. Small Batch's real outage was one fact in a
+  // night whose report was thousands of copies of something else.
+  it("keeps five exemplars of each kind while the counts run past them", async () => {
+    const vendor = await walkVendor("Flooded Walk");
+    const gone = Array.from({ length: 7 }, (_, i) => `https://foxcigar.com/shop/gone-${i + 1}/`);
+    const unreachable = "https://foxcigar.com/shop/unreachable/";
+    // The lone throw is walked LAST, after seven 500s have already exhausted their
+    // own exemplars. Under a per-run cap it is the sample that would be dropped.
+    const base = createMockFetcher({
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([...gone, unreachable]) },
+      ...Object.fromEntries(gone.map((url) => [url, { status: 500, body: "" }])),
+    });
+    const flooded: MockFetcher = {
+      requested: base.requested,
+      get pagesFetched() {
+        return base.pagesFetched;
+      },
+      fetchText: async (url: string) => {
+        if (url === unreachable) throw new Error("socket hang up");
+        return base.fetchText(url);
+      },
+      fetchBinary: (url: string) => base.fetchBinary(url),
+    };
+
+    const run = await runIngest(deps(flooded, null), { adapter: foxCigar, vendorId: vendor, mode: "offers" });
+
+    // The COUNT is the measure and keeps climbing; the samples only say what it is
+    // made of.
+    expect(run.stats.errors).toBe(8);
+    expect(run.stats.errorKinds).toEqual({ "http-500": 7, fetch: 1 });
+
+    const samples = run.stats.errorSamples!;
+    expect(samples.filter((s) => s.kind === "http-500").map((s) => s.url)).toEqual(gone.slice(0, 5));
+    expect(samples.filter((s) => s.kind === "fetch")).toEqual([
+      { kind: "fetch", url: unreachable, reason: "socket hang up" },
+    ]);
+    expect(samples).toHaveLength(6);
+  });
+
+  // "We could not reach the vendor" and "we could not read what the vendor sent"
+  // are the first question an operator asks, and they used to share a key because
+  // one catch covered the fetch and the parse and the write alike. This page
+  // arrives and parses, and dies on the write — an int4 overflow on the derived
+  // per-stick — which is an `ingest`, not a `fetch`.
+  it("a throw after the page is in hand is an ingest error, not a fetch one", async () => {
+    const vendor = await walkVendor("Unwritable Walk");
+    const routes = {
+      [ROBOTS]: { body: loadFixture("robots.txt") },
+      [SITEMAP]: { body: urlsetXml([PADRON_URL]) },
+      [PADRON_URL]: { body: loadFixture("product-padron.html").replace("24.50", "99999999.99") },
+    };
+
+    const run = await runIngest(deps(createMockFetcher(routes), null), {
+      adapter: foxCigar,
+      vendorId: vendor,
+      mode: "offers",
+    });
+
+    expect(run.status).toBe("succeeded");
+    // The page was read — the listing parsed — and only the write failed.
+    expect(run.stats.listingsParsed).toBe(1);
+    expect(run.stats.offersWritten).toBe(0);
+    expect(run.stats.errorKinds).toEqual({ ingest: 1 });
+    expect(run.stats.errorSamples).toHaveLength(1);
+    expect(run.stats.errorSamples![0]).toMatchObject({ kind: "ingest", url: PADRON_URL });
+    // The reason is the driver's own message, and the driver names the STATEMENT
+    // rather than the Postgres condition (`integer out of range` reaches us only
+    // as `error.cause`). It still says the thing the kind exists to say — the
+    // offers write is what failed, on a page we had already read.
+    expect(run.stats.errorSamples![0]!.reason).toContain('insert into "offers"');
   });
 });

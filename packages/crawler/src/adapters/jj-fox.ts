@@ -39,7 +39,14 @@ import type { ExclusionVendorAdapter } from "./types.js";
 //               an `itemtype="…/Product"` itemscope, exactly the 2 Guys shape.
 //               There is NO `og:upc` and NO `og:brand`, so a listing from this
 //               vendor carries no sku and no brand; matching v2 reads the name.
-//               `og:availability` is absent too, so stock stays unknown. Being
+//               `og:availability` is absent too — but the page DOES publish
+//               stock, as schema.org microdata: a
+//               `<meta itemprop="availability" content="…/InStock">` on every
+//               product page (re-read live 2026-09-06). The extractor keyed only
+//               on `property`/`name`, so it never saw it and all 223 offers from
+//               the first offers walk were written `in_stock = NULL`. Read as an
+//               `og:availability` fallback since #270; an out-of-stock line omits
+//               the meta entirely, so absence still reads as unknown. Being
 //               an OpenGraph vendor also means `normalizeListing` may read
 //               packaging out of `og:description` when a name states none
 //               (#270); here that description is a one-line blurb ("The

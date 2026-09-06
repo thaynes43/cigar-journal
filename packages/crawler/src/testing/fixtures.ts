@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { ProcessedPhoto } from "@cj/photos";
-import { MaxBytesExceededError, type Fetcher } from "../core/fetcher.js";
+import { MaxBytesExceededError, MaxPagesExceededError, type Fetcher } from "../core/fetcher.js";
 
 // Test-only helpers: load the recorded Fox fixtures, drive ingest through an
 // injected in-memory fetcher (no network — guardrail), and a photo-pipeline stub
@@ -31,7 +31,13 @@ export interface MockFetcher extends Fetcher {
 
 // A Fetcher backed by a fixed url→response map. Every fetchText counts as a page
 // (as the real fetcher does), and unmapped URLs answer 404.
-export function createMockFetcher(routes: Record<string, MockRoute>): MockFetcher {
+//
+// `maxPages` mirrors the real fetcher's safety cap, THROW included: the cap is
+// enforced before the request, so the URL that trips it is never fetched. Without
+// this seam a budget-exhausted walk could only be exercised against the network,
+// which is how the walk came to charge one error per unreached URL unnoticed
+// (#270).
+export function createMockFetcher(routes: Record<string, MockRoute>, maxPages?: number): MockFetcher {
   let pages = 0;
   const requested: string[] = [];
   const hits = new Map<string, number>();
@@ -41,6 +47,7 @@ export function createMockFetcher(routes: Record<string, MockRoute>): MockFetche
       return pages;
     },
     async fetchText(url: string) {
+      if (maxPages != null && pages >= maxPages) throw new MaxPagesExceededError(maxPages);
       requested.push(url);
       pages += 1;
       const route = routes[url];

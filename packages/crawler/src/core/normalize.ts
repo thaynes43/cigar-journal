@@ -145,14 +145,52 @@ function toCents(price: string | number | undefined): number | null {
   return Math.round(numeric * 100);
 }
 
+// A `priceSpecification` that is neither a spec nor an array of them, but an
+// OBJECT WRAPPING ONE UNDER A NUMERIC KEY — the Woo/Yoast shape Montefortuna
+// publishes (#270):
+//
+//   "priceSpecification": { "0": { "@type": "UnitPriceSpecification",
+//                                  "price": "446", "priceCurrency": "USD" },
+//                           "priceCurrency": "EUR" }
+//
+// `firstOf` returns a non-array unchanged, so the wrapper itself became the spec:
+// its only own scalar is `priceCurrency`, so every one of the vendor's 194 offers
+// on 2026-09-06 was written `price = NULL` with `currency = 'EUR'` — the currency
+// read off a node whose number was one level down. Descend one level to the first
+// nested object that actually carries a `price`.
+function resolvePriceSpecification(
+  value: JsonLdPriceSpecification | JsonLdPriceSpecification[] | undefined,
+): JsonLdPriceSpecification | undefined {
+  const spec = firstOf(value);
+  if (!spec || typeof spec !== "object" || spec.price != null) return spec;
+  // `JsonLdPriceSpecification` declares only `price`/`priceCurrency`, so the
+  // extra keys parsed off the wire are invisible to the type and `Object.values`
+  // would narrow to nothing. The cast says what the JSON actually is.
+  for (const nested of Object.values(spec as Record<string, unknown>)) {
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) continue;
+    const candidate = nested as JsonLdPriceSpecification;
+    if (candidate.price != null) return candidate;
+  }
+  return spec;
+}
+
 // The first offer's first priceSpecification is the price of record; fall back to
 // the offer's own `price`/`priceCurrency` when no priceSpecification is present.
+//
+// THE CURRENCY COMES FROM THE SAME NODE AS THE NUMBER. Reading them from
+// different nodes is what turned a $446 listing into a null-priced EUR offer
+// above, and a price labelled with someone else's currency is worse than no price
+// at all — it is a number the display layer would believe.
 function priceFromOffer(offer: JsonLdOffer | undefined): { cents: number | null; currency: string | null } {
   if (!offer) return { cents: null, currency: null };
-  const spec: JsonLdPriceSpecification | undefined = firstOf(offer.priceSpecification);
-  const cents = toCents(spec?.price ?? offer.price);
-  const currency = spec?.priceCurrency ?? offer.priceCurrency ?? null;
-  return { cents, currency };
+  const spec = resolvePriceSpecification(offer.priceSpecification);
+  const specCents = toCents(spec?.price);
+  if (specCents != null) return { cents: specCents, currency: spec?.priceCurrency ?? offer.priceCurrency ?? null };
+  const offerCents = toCents(offer.price);
+  if (offerCents != null) return { cents: offerCents, currency: offer.priceCurrency ?? spec?.priceCurrency ?? null };
+  // No number anywhere: the currency is still the best thing known about the
+  // missing price, and reporting it is what this did before.
+  return { cents: null, currency: spec?.priceCurrency ?? offer.priceCurrency ?? null };
 }
 
 function availabilityToStock(availability: string | undefined): boolean | null {
