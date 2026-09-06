@@ -375,6 +375,13 @@ result:
   guidance: single_match       # single_match | multiple_matches | brand_match | no_match
 ```
 
+A query that starts with a brand resolves through the brand registry, so the
+spelling the user says and the spelling the catalog wrote are interchangeable:
+`La Flor Dominicana La Nox` reaches `LFD La Nox`, `LFD Andalusian Bull` reaches
+`La Flor Dominicana Andalusian Bull`, and the words after the brand decide which
+of that brand's cigars leads. An abbreviation alone (`LFD`, `HdM`) is a
+`brand_match` like the full name. Brand keys live in `brands.aliases` (ADR-012).
+
 Guidance is the client's instruction for what to do next:
 
 - `single_match`: proceed with the top match. Emitted **only** when the top hit
