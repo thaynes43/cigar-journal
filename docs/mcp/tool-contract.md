@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-Thirty-four tools over the application services, client-neutral: any MCP client
+Thirty-five tools over the application services, client-neutral: any MCP client
 (ChatGPT Web, Claude Code, Codex, future first-party) gets the same surface.
 Schemas here are conceptual until frozen after the Phase 0 spike; field
 semantics and error codes are normative. Governing decisions: ADR-004 (auth),
@@ -31,9 +31,9 @@ ADR-005 (integration). Client capability differences live in
    user's last look before persisting.
 
 Scopes: `catalog:read` (search_cigars, get_cigar, browse_catalog, get_offers),
-`journal:read` (get_my_smokes, get_smoke, get_my_inventory), `journal:write`
+`journal:read` (get_my_smokes, get_smoke, get_my_inventory, get_photo_drop), `journal:write`
 (save_smoke, add_cigar, record_purchase, record_purchase_batch, update_smoke,
-update_purchase, add_smoke_photo, set_want, set_favorite,
+update_purchase, open_photo_drop, add_smoke_photo, set_want, set_favorite,
 request_cigar_enrichment, update_cigar, record_price — including
 lazy catalog create inside save/add, the enrichment queue write, conversational
 catalog repair, and chat-submitted price observations). There is no
@@ -168,14 +168,18 @@ smoke goes to that same link. Keep the photoDropId and pass it to save_smoke,
 which attaches the dropped photos to the saved smoke and reports how many in
 photoDrop.attached — never ask the user to send a photo again at the end; when
 attached is 0 and they meant to add one, say the link is still open and a photo
-added now lands on the saved smoke. Opening a drop while one is open returns
-the same drop with a fresh link. After a save, add_smoke_photo with the smoke
-id returns a one-time upload link for a photo of that saved smoke, and with a
-photoDropId attaches a drop the save did not carry. If the host forwarded an
-attached image with either call the photo is stored directly and no link is
-needed; delivery.status reports which happened. Never fill the image argument
-yourself, and never paste an image, a chat file link, or a file id into any
-field. A photo never blocks saving the smoke.
+added now lands on the saved smoke. To check what a drop holds, use
+get_photo_drop with its id: it reads the drop and never changes the link.
+Opening again within the same smoke returns that drop with a fresh link and the
+earlier link stops working, so open again only when the user needs the link;
+hours after the last one, an open starts a new drop for the new smoke, and
+passing photoDropId continues a specific drop instead. After a save,
+add_smoke_photo with the smoke id returns a one-time upload link for a photo of
+that saved smoke, and with a photoDropId attaches a drop the save did not carry.
+If the host forwarded an attached image with either call the photo is stored
+directly and no link is needed; delivery.status reports which happened. Leave
+the image argument empty — never paste an image, a URL, a chat file link, a file
+id, or a local file path into it. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -1255,15 +1259,17 @@ expires. This is the photo path for a live smoke — `add_smoke_photo` needs a
 again at the end is the failure this tool exists to remove.
 
 ```yaml
-arguments: {}                    # no smoke yet, nothing to name; `image` as on add_smoke_photo
+arguments:
+  photoDropId: pd_01kf           # optional — resume THIS drop, whatever the gap (issue #302)
+                                 # `image` as on add_smoke_photo; no smokeId, the smoke does not exist yet
 
 result:
   photoDropId: pd_01kf
   uploadUrl: https://cigars.haynesnetwork.com/d/<token>
   expiresAt: "2026-09-03T20:15:00Z"       # 48h after opening
-  reused: false                  # true when the user already had an open drop — same photos, fresh link
+  reused: false                  # true when this open continued or resumed a drop — same photos, fresh link
   photoCount: 0                  # photos already in the drop (meaningful when reused)
-  shareWithUser: "Send the user this link to add photos during the smoke: https://… — every photo of this smoke goes there, and they attach to the review when it is saved. It lasts 48 hours."
+  shareWithUser: "Send the user this link to add photos during the smoke: https://… — every photo of this smoke goes there, and they attach to the review when it is saved. It works for 48 hours."
   delivery:                      # as on add_smoke_photo: why no image arrived with the call
     status: no_image_received
     detail: "No image arrived with this call. Chat attachments are not forwarded to this server by any current client, so the upload link is the path — relay it. This is the expected outcome, not a failure."
@@ -1285,17 +1291,64 @@ result:
   the user set a photo's kind, caption it, or remove it. A single-use link is
   right for one photo of a saved smoke; it is wrong for an event that produces
   several photos over hours.
-- **One open drop per user.** Opening again while a drop is open (unclaimed,
-  unexpired) returns *that* drop — `reused: true`, its `photoCount` — with a
-  fresh token; the earlier link stops working. The raw token is never stored, so
-  reuse must rotate. This is what lets a model that lost the id in a long chat
-  recover the photos by opening again.
+- **One open drop per session** (ADR-014 as amended, issue #302). Opening again
+  within `DROP_SESSION_GAP_HOURS` of the last open returns *that* drop —
+  `reused: true`, its `photoCount` — with a fresh token; the earlier link stops
+  working. The raw token is never stored, so reuse must rotate. Past the gap the
+  open is a new smoke and gets a **new drop**; the previous one is untouched and
+  keeps its own link until it expires, so a late photo still lands on the smoke
+  it was taken for. `photoDropId` resumes a named drop whatever the gap, and is
+  the only way to continue one past it — a resume continues the session
+  (`session_started_at` does not move) and rotates the token like any other
+  re-open. To see what a drop holds without touching it, use `get_photo_drop`.
+- **The stated lifetime is the drop's own.** `shareWithUser` derives it from
+  `expiresAt` at the moment of the call — "It works for 48 hours." on a fresh
+  drop, "It works for about 13 hours more." on a re-used one — never from the
+  48-hour constant.
 - **Nothing is claimed implicitly.** A drop attaches only through a
   `photoDropId` the caller passes (`save_smoke`, or `add_smoke_photo` for a late
   claim). Unclaimed drops expire and are swept seven days after opening.
 - Scope `journal:write`. Errors: `unavailable` when photo storage is unconfigured.
   The same file intake and `photo_intake` diagnostics as `add_smoke_photo` apply
   (the record names the tool).
+
+## get_photo_drop — read
+
+Read one of the user's photo drops by id, **touching nothing** (issue #302).
+Before it, the only way to ask what a drop held was to open it again — and that
+rotates the token, so on 2026-09-05 a count-check killed the link the user had
+already been sent. This tool writes nothing at all: no rotation, no stamp, no
+audit row, no sweep. A read is not an event.
+
+```yaml
+arguments:
+  photoDropId: pd_01kf
+
+result:
+  photoDropId: pd_01kf
+  status: open                   # open | attached | closed (PhotoDropStatus)
+  expiresAt: "2026-09-03T20:15:00Z"
+  sessionStartedAt: "2026-09-02T01:04:00Z"
+  lastOpenedAt: "2026-09-02T01:04:00Z"
+  smokeId: null                  # the smoke once one has claimed the drop
+  photoCount: 2
+  photos:
+    - photoId: ph_01kg
+      kind: cigar
+      caption: "First third"
+      width: 1080
+      height: 1440
+      createdAt: "2026-09-02T01:12:00Z"
+      attached: false            # true once it is on the smoke
+```
+
+- **No link, ever.** Minting one is `open_photo_drop`'s job; a read that returned
+  a URL would have had to rotate the token to produce it.
+- Owner-scoped, one answer for every miss: another user's drop, a drop that never
+  existed and a malformed id are all `photo_drop_not_found`.
+- A closed drop reports `closed` and no photos, exactly as its own page does —
+  the link is over and the remainder belongs to the sweep.
+- Scope `journal:read`; `readOnlyHint: true`.
 
 ## add_smoke_photo — write, link-first
 
@@ -2456,7 +2509,7 @@ error:
 | `cigar_ambiguous` | yes | `ask_user` (candidates included) |
 | `smoke_not_found` | no | none — id came from nowhere; re-query history |
 | `purchase_not_found` | no | none — the lot is not the caller's or never existed; re-query `get_my_inventory` |
-| `photo_drop_not_found` | no | none — the drop is not the caller's or never existed; `open_photo_drop` returns the user's open drop |
+| `photo_drop_not_found` | no | none — the drop is not the caller's, never existed, or is claimed/expired; `open_photo_drop` with no id returns the drop for the smoke in progress |
 | `version_conflict` | yes | `retrieve_latest_and_retry` via `get_smoke` |
 | `idempotency_conflict` | no | new `clientRequestId` for a genuinely new intent |
 | `unavailable` | yes | retry once with the same envelope, then tell the user; the fallback below preserves the entry |

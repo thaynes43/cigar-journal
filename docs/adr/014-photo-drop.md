@@ -52,6 +52,9 @@ smoke exists, that takes every photo of that smoke until it expires.**
   the id in a two-hour chat opens again and gets the same photos back. The
   cost is that two simultaneous smokes by one user share a drop; the page
   shows what is in it and the user can remove a photo.
+  *Amended 2026-09-06 (issue #302): one open drop per **session** — a re-open
+  past the session gap opens a fresh drop, and `photoDropId` resumes a named
+  one.*
 - **`save_smoke` claims.** `photoDropId` on the save moves the drop's staged
   photos onto the new smoke and binds the drop to it, so a photo added through
   the same link afterwards lands directly on the smoke until the link expires.
@@ -122,6 +125,28 @@ smoke exists, that takes every photo of that smoke until it expires.**
   0036), both domain defaults and the MCP description now say `cigar`. Existing
   rows are not backfilled — an `other` already stored was never a claim the user
   made, and rewriting it would invent one.
+
+- **2026-09-06 — a drop is one session's, and reading it costs nothing (issue
+  #302).** "One open drop per user" was written for a model that lost the id in
+  a long chat, and it made the drop carry across evenings: on 2026-09-05 a new
+  smoke's first photo landed in a drop that still held the previous night's, and
+  the model's count-check re-opened the drop, which rotated the token and killed
+  the link the user had already been sent. Three changes. **A re-open past the
+  session gap opens a fresh drop.** The previous drop stays open under its own
+  link until it expires, so a late photo through that link still lands where it
+  was meant to, and its staged photos wait for the retention sweep rather than
+  being handed to the next smoke; "one open drop per user" is now one open drop
+  per *session*, the session being `DROP_SESSION_GAP_HOURS`. **`get_photo_drop`
+  reads a drop** — status, expiry, the photos with their ids, kinds and captions,
+  and the smoke once one has claimed it — owner-scoped, and it rotates nothing
+  and moves no stamp: a read is never an event. **Explicit resume:**
+  `open_photo_drop` takes an optional `photoDropId`; naming an open drop returns
+  that drop with a fresh link whatever the gap (the rotation is the point — the
+  caller lost the link), and it is the only way to continue a drop past the gap.
+  Without an id the open is "the drop for the smoke in progress": the one within
+  the gap, or a new one. **The expiry the tool states is the expiry the drop
+  has**: the sentence is derived from `expiresAt` at the moment of the call,
+  never from the constant, so a re-open says how long is actually left.
 
 ## Alternatives considered
 

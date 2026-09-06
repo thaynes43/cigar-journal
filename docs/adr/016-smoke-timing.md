@@ -41,7 +41,11 @@ never stored.**
   per user (ADR-014) means a drop is routinely re-used across evenings — the
   drop tonight's save claimed was 23 hours old when the 01:04Z open began the
   session — so the drop's creation time is not the start; its most recent
-  opening run is. A save that names a `photoDropId` and states no `startedAt`
+  opening run is. *Amended 2026-09-06 (issue #302): the gap now decides which
+  DROP the open belongs to, not which session an existing drop is in — a
+  re-open past it opens a fresh drop whose stamps are both that open, so
+  `session_started_at` is written once and never reset. The reading below is
+  unchanged; see the amendment on ADR-014.* A save that names a `photoDropId` and states no `startedAt`
   takes that drop's `session_started_at`, source `photo-drop`. The read happens
   inside the save transaction (a read cannot fail the save; a missing or
   foreign drop derives nothing — the claim itself stays post-commit as ADR-014
