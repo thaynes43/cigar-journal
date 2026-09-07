@@ -98,19 +98,19 @@ describe("no_match guidance", () => {
   });
 });
 
-// Forwarding is not a failure (#288, #202). No current client hands a chat
-// attachment to this server, so `no_image_received` is the OUTCOME, not a fault —
-// and the model reads three strings on the way to learning that: the delivery
-// detail it may repeat to the user, and one sentence in each photo tool's
-// description. All three shipped together and must stay together, so the pin is
-// on the load-bearing clause rather than on whole paragraphs (the register
-// differs on purpose). The contract carries the same detail verbatim because the
+// A missing attachment is not a failure (#288, #202). Some hosts forward a chat
+// attachment and most do not — forwarding was first observed 2026-09-06 — so
+// `no_image_received` is an OUTCOME, not a fault, and the model reads three
+// strings on the way to learning that: the delivery detail it may repeat to the
+// user, and one sentence in each photo tool's description. All three shipped
+// together and must stay together, so the pin is on the load-bearing clause
+// rather than on whole paragraphs (the register differs on purpose). The contract carries the same detail verbatim because the
 // document is where the wording is reviewed.
 describe("no_image_received is the expected outcome", () => {
   const read = (relative: string): string => readFileSync(new URL(relative, import.meta.url), "utf8");
 
   const DETAIL =
-    "No image arrived with this call. Chat attachments are not forwarded to this server by any current client, so the upload link is the path — relay it. This is the expected outcome, not a failure.";
+    "No image arrived with this call. When the host forwards an attached photo it is stored directly; when it does not, the upload link is the path — relay it. This is a normal outcome, not a failure.";
 
   it("is the delivery detail the adapter ships", () => {
     expect(read("./server.ts")).toContain(DETAIL);
@@ -123,10 +123,8 @@ describe("no_image_received is the expected outcome", () => {
   it.each([
     ["open_photo_drop", "relay the link and do not report it as a problem."],
     ["add_smoke_photo", "relay the upload link and do not report it as a problem."],
-  ])("%s tells the model it is the normal outcome", (_tool, tail) => {
+  ])("%s tells the model not to report it as a problem", (_tool, tail) => {
     const server = read("./server.ts");
-    expect(server).toContain(
-      `delivery.status no_image_received is the normal outcome on every current client — ${tail}`,
-    );
+    expect(server).toContain(`When delivery.status is no_image_received, ${tail}`);
   });
 });

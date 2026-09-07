@@ -720,8 +720,9 @@ export const recordPurchaseBatchSchema = z
 
 // The image is a HOST-FILLED file input, not model text. Per OpenAI's Apps SDK a
 // tool must DECLARE its file inputs — a top-level property listed in the
-// tool-level `_meta["openai/fileParams"]` (published in tools/list) — or ChatGPT
-// never forwards the attached image. We declare `image` here and list it in that
+// tool-level `_meta["openai/fileParams"]` (published in tools/list). The declaration
+// is what a host hydrates; forwarding was first observed on 2026-09-06 (issue #202),
+// through the argument channel. We declare `image` here and list it in that
 // _meta on the add_smoke_photo registration (server.ts). ChatGPT then populates
 // `image` with `{ download_url, file_id, mime_type?, file_name? }` (download_url is
 // a SHORT-LIVED signed URL). The legacy request-level `_meta["openai/fileParams"]`
@@ -732,8 +733,9 @@ export const recordPurchaseBatchSchema = z
 // admits exactly these four properties and nothing else, so the published JSON
 // schema carries `additionalProperties: false`.
 //
-// WHY IT IS STRICT. ChatGPT has never hydrated `image` for this connector
-// (tool-contract.md, "Open lead"). Integrations that reportedly do receive files
+// WHY IT IS STRICT. When this was written ChatGPT had never hydrated `image` for
+// this connector (tool-contract.md, "Open lead"); a desktop host did on 2026-09-06,
+// with this exact shape published. Integrations that reportedly do receive files
 // declare exactly this four-property shape, and host-side hydration may key on the
 // PUBLISHED shape rather than on the `openai/fileParams` declaration alone — so
 // emitting the reference shape verbatim is the cheapest falsifiable experiment
