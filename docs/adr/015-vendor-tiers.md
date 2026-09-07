@@ -204,6 +204,74 @@ CronJob pair in haynes-ops because the CLI takes one `--vendor` (#156).
     layer would believe it. Nothing was dropping the price on tier grounds —
     tier 2 is a *display* rule, applied at read time, not a write-time refusal.
 
+- **2026-09-06 — the seed/offers walk resumes from `vendors.crawl_cursor`: a
+  page budget is a chunk, not a wall (issue #270).** The amendment above
+  diagnosed the truncation and named the fix. This is the fix, and it is what
+  makes a vendor larger than one run reachable at all.
+  - **The walk starts after the last URL the previous COMPLETED run of the same
+    vendor+mode reached**, and wraps to the top when the enumeration ends.
+    `seed` and `offers` carry separate positions — separate budgets, separate
+    `crawl_runs` histories — and `enrich` carries none: it drains the gap-fill
+    queue with targeted lookups and walks no enumeration at all.
+  - **The position is a URL, not an index.** Sitemaps change between Sundays: a
+    shop that adds nine products at the top shifts every index below them, and
+    an index cursor would skip nine URLs — or re-walk nine — with nothing able
+    to notice. A URL is checkable. On resume it is looked up in the FRESH
+    enumeration and the walk starts after it; a URL the vendor has retired
+    resolves to nothing, so the walk starts from the top and SAYS SO
+    (`cursorMissing`) rather than restarting in silence. It also survives a
+    sampling vendor whose enumeration order genuinely varies between runs, which
+    no index could.
+  - **One jsonb, three lanes, and every write MERGES.** The column now holds
+    `{"archivePage": 87, "offers": {"lastUrl": …, "total": …, "finishedAt": …}}`.
+    The reviewer's cursor (#199) and a shop's position share the row, so a
+    whole-object write from either lane would send the other back to the top of
+    its walk. No migration: 0038 made the column deliberately uninterpreted, an
+    existing `{"archivePage": N}` reads unchanged with the shop key simply
+    absent, and there is nothing to backfill.
+  - **Written only in the run's completion transaction**, exactly as the review
+    cursor is. A failed or deadline-killed run leaves the cursor where it was
+    and re-walks that chunk — a cursor advanced by a run that then died would
+    skip those pages in silence, which is the one failure mode a resumable walk
+    has.
+  - **A wrap is a full pass.** Reaching the end of the enumeration inside the
+    budget resets the position to the top (an explicit `lastUrl: null`, keeping
+    the pass's length and finish for the record) and records `passCompleted` in
+    the run stats. That stat is how an operator tells a vendor one run covers
+    from a vendor that has only ever seen its first 500 URLs.
+  - **`--from-top` and `--limit`.** `--from-top` ignores the stored cursor for
+    one run — re-reading a vendor's head after a reshuffle — and still records
+    where it stopped: skipping the read is a one-run decision, skipping the
+    write would pin the lane at the top permanently. `--limit N` takes the next
+    N FROM the resume position; a limited run that re-walked the head of the
+    sitemap every time is the defect this change exists to remove. The summary
+    line is `walk: resumed at 2,124 of 10,951 (cursor <url>)`, or `from top`,
+    plus `pass completed` when it wrapped.
+  - **Operator seed — Small Batch, once, after this deploys.** Nothing seeds a
+    cursor automatically, and a lane with no stored position starts at the top:
+    for Small Batch that is one more 500-page pass through landing pages. The
+    boundary was bisected live on 2026-09-06 in the sitemap's gate-accepted
+    order — `accepted[2122] = /all-pro-series` is the last landing page,
+    `accepted[2123] = /powstanie-sbc26` the first product — so seeding the
+    offers cursor to "after `/all-pro-series`" puts the very next chunk on
+    products:
+
+    ```sql
+    UPDATE vendors
+       SET crawl_cursor = coalesce(crawl_cursor, '{}'::jsonb)
+                          || jsonb_build_object('offers', jsonb_build_object(
+                               'lastUrl',    'https://www.smallbatchcigar.com/all-pro-series',
+                               'total',      10951,
+                               'finishedAt', '2026-09-06T00:00:00.000Z'))
+     WHERE name = 'Small Batch Cigar';
+    ```
+
+    `total` and `finishedAt` are provenance only — the resume reads neither —
+    and the URL must match the sitemap's `loc` byte for byte. That is what makes
+    the seed self-checking: the next run's summary must read `walk: resumed at
+    2,124 of …`, and `from top … gone from the enumeration` there means the
+    string missed and the seed should be re-applied with the loc as published.
+
 - **2026-09-03 — the nopCommerce variant-price extractor, and one listing may
   now write several offers (issue #270, first unattended fleet run).** This ADR
   named the extractor and left it unbuilt, so Small Batch Cigar — a tier-1

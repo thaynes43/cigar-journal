@@ -50,6 +50,15 @@ import {
   walkReviews,
   type ReviewWalkStats,
 } from "./reviews.js";
+import {
+  isWalkMode,
+  mergeWalkCursor,
+  readWalkCursor,
+  walkCursorWrap,
+  walkResume,
+  type WalkCursor,
+  type WalkMode,
+} from "./walk-cursor.js";
 import { openCrawlRun, reclaimStrandedRuns, type SignalHost } from "./run-record.js";
 import { CRAWLER_UA_TOKEN, MAX_IMAGE_BYTES, MaxPagesExceededError, type Fetcher } from "./fetcher.js";
 
@@ -206,6 +215,37 @@ export interface IngestStats {
   // resumable chunking tracked under #270. Absent when the walk reached the end of
   // the enumeration, like its siblings.
   locsBeyondBudget?: number;
+  // WHERE THIS WALK STARTED AND WHETHER IT FINISHED (#270). Present on every
+  // seed/offers run and on no other mode, so an enrich or reviewer run's JSONB is
+  // byte-identical to what it was before this field existed.
+  //
+  // The counters above are all "what happened"; without this one they have no
+  // frame. `pages=500 listings=0` reads as an outage until you know the walk spent
+  // those 500 pages at position 1 of 10,951 — and once the walk resumes, "500
+  // pages" is a chunk whose position is the only thing that says whether the
+  // vendor is being covered at all.
+  walk?: {
+    // 1-based position in THIS enumeration of the first URL the walk took. 1 is
+    // the top.
+    resumedAt: number;
+    // The enumeration length this run saw, after the product gate.
+    total: number;
+    // The URL the stored cursor named, when it named one. Absent on a walk that
+    // started from the top with nothing stored, and on `--from-top`.
+    cursorUrl?: string;
+    // The stored cursor named a URL this enumeration no longer contains, so the
+    // walk started over. Not an error — shops retire products — but it costs a
+    // pass, so it is said out loud.
+    cursorMissing?: true;
+    // The walk reached the END of the enumeration inside its budget: a full pass,
+    // and the cursor wrapped back to the top for the next run. Absent otherwise,
+    // which is the normal state of a vendor bigger than one run.
+    passCompleted?: true;
+    // The operator passed `--from-top`, so the stored cursor was ignored for this
+    // run. Recorded because the position this run then writes would otherwise look
+    // like a lane that had walked backwards on its own.
+    fromTop?: true;
+  };
   // Present only for a vendor with sitemapSampling configured — absent keeps the
   // JSONB byte-identical for every other vendor.
   sitemapSampling?: {
@@ -296,6 +336,12 @@ export interface IngestOptions {
   mode: CrawlMode;
   limit?: number | null;
   dryRun?: boolean;
+  // Ignore the stored `vendors.crawl_cursor` for THIS run and walk from the first
+  // URL (#270, `--from-top`). An operator re-walking a vendor from the top after a
+  // sitemap reshuffle, or confirming what the first chunk holds. The run still
+  // WRITES where it stopped: skipping the read is a one-run decision, and leaving
+  // the lane pinned at the top would be a permanent one.
+  fromTop?: boolean;
 }
 
 // THIS VENDOR'S REGISTRY POSTURE, read once per run (see runIngest) and threaded
@@ -964,26 +1010,63 @@ async function recordListingOffers(
 
 // --- mode: seed / offers -----------------------------------------------------
 
+// THE PAGE BUDGET IS A CHUNK, NOT A WALL (#270). The walk resumes after the URL
+// the previous COMPLETED run of this vendor+mode stopped on, walks its budget from
+// there, and hands back the position it reached — written by `runIngest` in the
+// completion transaction, so a run that fails re-walks its chunk rather than
+// skipping it. Reaching the end of the enumeration wraps to the top. See
+// `walk-cursor.ts` for why the position is a URL and not an index.
+//
+// Returns the entry to store for this lane, or `undefined` when the run has
+// nothing to say about it: an empty enumeration, or a budget already spent by
+// robots + sitemap before the first product page. `undefined` means LEAVE THE
+// COLUMN ALONE, never "reset it" — a run that advanced nowhere has no opinion,
+// and writing "from the top" would silently discard a real position.
 async function walkListings(
   deps: IngestDeps,
   options: IngestOptions,
   posture: VendorPosture,
+  cursor: unknown,
   crawlRunId: string | null,
   stats: IngestStats,
   report: string[],
-): Promise<void> {
+): Promise<WalkCursor | undefined> {
   const { adapter } = options;
+  const mode: WalkMode = options.mode === "seed" ? "seed" : "offers";
   const robots = await fetchRobots(deps, adapter);
   const gatePath = robotsGatePath(adapter);
   if (!robots.isAllowed(gatePath)) {
     throw new RobotsDisallowedError(gatePath);
   }
 
-  let urls = await productUrls(deps, adapter, stats);
-  if (options.limit != null) urls = urls.slice(0, options.limit);
+  const urls = await productUrls(deps, adapter, stats);
+  const resume = options.fromTop ? { index: 0 } : walkResume(urls, readWalkCursor(cursor, mode));
 
-  for (const [index, url] of urls.entries()) {
-    if (!robots.isAllowed(pathOf(url))) continue;
+  // `--limit` SLICES FROM THE RESUME POSITION, not from the top: a one-off drain
+  // bounded at 50 is "the next 50 this lane owes", the same 50 the unbounded run
+  // would have taken first. Slicing from the top would make every limited run
+  // re-walk the same head of the enumeration, which is the defect this whole
+  // change exists to remove.
+  const end = options.limit != null ? Math.min(urls.length, resume.index + options.limit) : urls.length;
+  const window = urls.slice(resume.index, end);
+  const walkStats: NonNullable<IngestStats["walk"]> = { resumedAt: resume.index + 1, total: urls.length };
+  if (resume.cursorUrl) walkStats.cursorUrl = resume.cursorUrl;
+  if (resume.missing) walkStats.cursorMissing = true;
+  if (options.fromTop) walkStats.fromTop = true;
+  stats.walk = walkStats;
+
+  // The last position this walk ADVANCED PAST, in window coordinates. A URL
+  // refused by robots, or one that errored, still counts: the walk is done with
+  // it, and re-offering it next run would pin the lane in front of a page that
+  // can never be fetched. -1 is "advanced past nothing".
+  let lastOffset = -1;
+  let budgetSpent = false;
+
+  for (const [offset, url] of window.entries()) {
+    if (!robots.isAllowed(pathOf(url))) {
+      lastOffset = offset;
+      continue;
+    }
 
     // THE BUDGET IS NOT AN ERROR, and separating the two is the whole point of
     // this arm (#270). `fetchText` throws MaxPagesExceededError once `maxPages` is
@@ -996,12 +1079,15 @@ async function walkListings(
       page = await deps.fetcher.fetchText(url);
     } catch (error) {
       if (error instanceof MaxPagesExceededError) {
-        stats.locsBeyondBudget = urls.length - index;
+        stats.locsBeyondBudget = window.length - offset;
+        budgetSpent = true;
         break;
       }
+      lastOffset = offset;
       countError(stats, "fetch", { url, reason: errorText(error) });
       continue;
     }
+    lastOffset = offset;
 
     const { status, body } = page;
     if (status !== 200) {
@@ -1048,6 +1134,18 @@ async function walkListings(
       countError(stats, "ingest", { url, reason: errorText(error) });
     }
   }
+
+  const finishedAt = deps.now().toISOString();
+  // A FULL PASS: the budget outlasted the enumeration and the window ran to its
+  // true end (`--limit` truncating the window is not the end of anything). The
+  // cursor wraps, and the run says so — this is the line that tells an operator a
+  // vendor is fully covered by one run and needs no chunking at all.
+  if (!budgetSpent && end === urls.length && window.length > 0) {
+    walkStats.passCompleted = true;
+    return walkCursorWrap(urls.length, finishedAt);
+  }
+  if (lastOffset < 0) return undefined;
+  return { lastUrl: urls[resume.index + lastOffset]!, total: urls.length, finishedAt };
 }
 
 // --- mode: enrich ------------------------------------------------------------
@@ -1752,10 +1850,14 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
   // review walk, so it rides the existing enrich fleet rather than needing a
   // schedule of its own.
   const review = reviewSourceOf(options.adapter);
+  // Where the seed/offers walk stopped (#270), or undefined for every other lane
+  // and for a walk that advanced nowhere. Captured here rather than returned
+  // through `run` because only the SUCCESS path below may act on it.
+  let walkCursor: WalkCursor | undefined;
   const run = async (crawlRunId: string | null): Promise<void> => {
     if (review) await runReviewLane(deps, options, review, crawlCursor, crawlRunId, stats, report);
     else if (options.mode === "enrich") await drainEnrichment(deps, options, posture, crawlRunId, stats, report);
-    else await walkListings(deps, options, posture, crawlRunId, stats, report);
+    else walkCursor = await walkListings(deps, options, posture, crawlCursor, crawlRunId, stats, report);
   };
 
   if (options.dryRun) {
@@ -1785,12 +1887,20 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
   try {
     await run(record.crawlRunId);
     stats.pagesFetched = deps.fetcher.pagesFetched;
-    // THE CURSOR MOVES WITH THE COMPLETION ROW, in one transaction (#199). Only a
-    // reviewer's `enrich` run produces one; every other run passes `undefined`,
-    // which leaves the column alone rather than resetting it. The failure path
-    // below deliberately has no equivalent: a run that did not finish must re-walk
-    // the pages it was on, and an advanced cursor would skip them in silence.
-    await record.close("succeeded", { stats, cursor: reviewCursorWrite(stats.reviews) });
+    // THE CURSOR MOVES WITH THE COMPLETION ROW, in one transaction (#199, and now
+    // #270 for the shop walk). A reviewer's `enrich` run advances its archive page;
+    // a seed/offers walk advances its own key; an enrich drain has no position and
+    // passes `undefined`, which leaves the column alone rather than resetting it.
+    // Both writes MERGE into the stored value — one lane's resume point must never
+    // cost another lane its own. The failure path below deliberately has no
+    // equivalent: a run that did not finish must re-walk the pages it was on, and
+    // an advanced cursor would skip them in silence.
+    const cursor = review
+      ? reviewCursorWrite(stats.reviews, crawlCursor)
+      : walkCursor && isWalkMode(options.mode)
+        ? mergeWalkCursor(crawlCursor, options.mode, walkCursor)
+        : undefined;
+    await record.close("succeeded", { stats, cursor });
     return { crawlRunId: record.crawlRunId, status: "succeeded", stats, report };
   } catch (error) {
     stats.pagesFetched = deps.fetcher.pagesFetched;

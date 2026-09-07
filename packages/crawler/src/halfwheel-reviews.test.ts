@@ -454,4 +454,24 @@ describe("halfwheel reviewer lane (embedded Postgres)", () => {
     expect(result.crawlRunId).toBeNull();
     expect(await cursorOf()).toEqual({ archivePage: 9 });
   });
+
+  it("advances the archive page without disturbing a shop walk's position (#270)", async () => {
+    // `crawl_cursor` stopped being this lane's private property when the seed and
+    // offers walks got resume positions of their own. A whole-object write here
+    // would silently send a capped shop walk back to the top of its sitemap — the
+    // exact defect #270 exists to remove — so the reviewer merges into the stored
+    // value, as the shop walk does in the other direction.
+    await setCursor({
+      archivePage: 5,
+      offers: { lastUrl: "https://example.test/product-2123", total: 10951, finishedAt: "2026-09-06T08:00:00.000Z" },
+    });
+    const fetcher = createMockFetcher(routes({ [indexPage(5)]: { body: fixture("reviews-index-page2.html") } }));
+    const result = await runIngest(deps(fetcher), { adapter: halfwheel, vendorId: sourceId, mode: "enrich" });
+
+    expect(result.status).toBe("succeeded");
+    expect(await cursorOf()).toEqual({
+      archivePage: 7,
+      offers: { lastUrl: "https://example.test/product-2123", total: 10951, finishedAt: "2026-09-06T08:00:00.000Z" },
+    });
+  });
 });

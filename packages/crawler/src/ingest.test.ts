@@ -293,12 +293,15 @@ describe("crawler ingest (embedded Postgres)", () => {
     expect(runs.every((r) => r.status === "succeeded")).toBe(true);
     expect(runs.every((r) => r.finishedAt !== null && r.stats !== null)).toBe(true);
 
-    // A SHOP HAS NO RESUME POINT (migration 0038, #199). Its sitemap walk sees the
-    // whole catalogue every night, so there is nothing to remember between runs —
-    // and three completed runs must leave `crawl_cursor` NULL rather than writing
-    // a value the vendor lane would then have to interpret.
+    // A SHOP'S RESUME POINT, WHICH IT NOW HAS (#270 amends migration 0038, #199).
+    // 0038 said a sitemap walk sees the whole catalogue every night and remembers
+    // nothing — true only while the page budget outlasts the enumeration, which on
+    // a real vendor it does not. Each of these three runs DID read its whole
+    // (three-URL) sitemap, so each completed a pass and wrapped: the stored
+    // position is an explicit `lastUrl: null`, which means "start at the top", not
+    // an absent column.
     const [shop] = await pg.db.select({ cursor: vendors.crawlCursor }).from(vendors).where(eq(vendors.id, vendorId));
-    expect(shop!.cursor).toBeNull();
+    expect(shop!.cursor).toMatchObject({ offers: { lastUrl: null } });
   });
 
   // PACKAGING IS NEVER IDENTITY (ADR-012), and this is the case that says so end
@@ -3939,5 +3942,209 @@ describe("crawler ingest (embedded Postgres)", () => {
     // as `error.cause`). It still says the thing the kind exists to say — the
     // offers write is what failed, on a page we had already read.
     expect(run.stats.errorSamples![0]!.reason).toContain('insert into "offers"');
+  });
+
+  // --- #270: the page budget is a chunk, not a wall ---------------------------
+  //
+  // The other half of the same night. Small Batch's walk did not merely
+  // MIS-REPORT its budget, it re-spent it on the same 500 URLs every Sunday — and
+  // because its nopCommerce sitemap lists 2,123 landing pages before the first
+  // product, those 500 pages could never contain a cigar. `maxPages` only bounds a
+  // run; what makes a vendor reachable is a run that starts where the last one
+  // stopped. The position is a URL and not an index because sitemaps change
+  // between Sundays (see core/walk-cursor.ts).
+
+  const cursorOf = async (vendor: string): Promise<unknown> =>
+    (await pg.db.select({ cursor: vendors.crawlCursor }).from(vendors).where(eq(vendors.id, vendor)))[0]!.cursor;
+
+  const setCursor = async (vendor: string, cursor: unknown): Promise<void> => {
+    await pg.db.update(vendors).set({ crawlCursor: cursor }).where(eq(vendors.id, vendor));
+  };
+
+  it("a capped walk records the last URL it reached, and the next run resumes after it", async () => {
+    const vendor = await walkVendor("Chunked Walk");
+
+    // Chunk one. The same cap as the budget case above: robots + sitemap + two
+    // products, four locs left over.
+    const first = await runIngest(deps(createMockFetcher(budgetRoutes(), 4), null), {
+      adapter: foxCigar,
+      vendorId: vendor,
+      mode: "offers",
+    });
+
+    expect(first.status).toBe("succeeded");
+    expect(first.stats.locsBeyondBudget).toBe(4);
+    expect(first.stats.walk).toEqual({ resumedAt: 1, total: 6 });
+    // THE POSITION IS THE LAST URL WALKED, stored under this MODE's key, and
+    // written in the completion transaction (run-record.ts) rather than as a
+    // second UPDATE.
+    expect(await cursorOf(vendor)).toEqual({
+      offers: { lastUrl: OLIVA_URL, total: 6, finishedAt: "2026-08-28T12:00:00.000Z" },
+    });
+
+    // Chunk two, same vendor, same cap, same enumeration: the two URLs the first
+    // run could not afford, and not one it had already read.
+    const fetcher = createMockFetcher(budgetRoutes(), 4);
+    const second = await runIngest(deps(fetcher, null), { adapter: foxCigar, vendorId: vendor, mode: "offers" });
+
+    expect(fetcher.requested).toEqual([ROBOTS, SITEMAP, PADRON_BOX_URL, OLIVA_ROBUSTO_URL]);
+    expect(second.stats.walk).toEqual({ resumedAt: 3, total: 6, cursorUrl: OLIVA_URL });
+    expect(second.stats.locsBeyondBudget).toBe(2);
+    expect(await cursorOf(vendor)).toMatchObject({ offers: { lastUrl: OLIVA_ROBUSTO_URL } });
+    // The stat survives into the ledger, so a Sunday's coverage is answerable from
+    // `crawl_runs` without re-reading the vendor.
+    expect((await runStats(second.crawlRunId!)).walk).toMatchObject({ resumedAt: 3, total: 6 });
+  });
+
+  it("wraps to the top and reports a completed pass when the walk reaches the end", async () => {
+    const vendor = await walkVendor("Wrapping Walk");
+    await setCursor(vendor, {
+      offers: { lastUrl: OLIVA_ROBUSTO_URL, total: 6, finishedAt: "2026-08-27T12:00:00.000Z" },
+    });
+
+    const fetcher = createMockFetcher(budgetRoutes());
+    const run = await runIngest(deps(fetcher, null), { adapter: foxCigar, vendorId: vendor, mode: "offers" });
+
+    expect(fetcher.requested).toEqual([ROBOTS, SITEMAP, LIGHTER_URL, SAMPLER_URL]);
+    expect(run.stats.locsBeyondBudget).toBeUndefined();
+    expect(run.stats.walk).toEqual({ resumedAt: 5, total: 6, cursorUrl: OLIVA_ROBUSTO_URL, passCompleted: true });
+    // A FULL PASS RESETS THE POSITION, as an explicit null rather than by dropping
+    // the key: the column keeps saying how long the enumeration was and when the
+    // pass closed, and the next run starts at the first URL again.
+    expect(await cursorOf(vendor)).toEqual({
+      offers: { lastUrl: null, total: 6, finishedAt: "2026-08-28T12:00:00.000Z" },
+    });
+  });
+
+  it("starts over when the stored URL is no longer in the enumeration, and says so", async () => {
+    const vendor = await walkVendor("Vanished Cursor");
+    const retired = "https://foxcigar.com/shop/discontinued-corona/";
+    await setCursor(vendor, { offers: { lastUrl: retired, total: 6, finishedAt: "2026-08-27T12:00:00.000Z" } });
+
+    const fetcher = createMockFetcher(budgetRoutes(), 4);
+    const run = await runIngest(deps(fetcher, null), { adapter: foxCigar, vendorId: vendor, mode: "offers" });
+
+    // A retired product is not an error — but it does cost this vendor a pass, so
+    // the run says the position was lost rather than looking like a lane that had
+    // never resumed at all.
+    expect(fetcher.requested).toEqual([ROBOTS, SITEMAP, PADRON_URL, OLIVA_URL]);
+    expect(run.stats.errors).toBe(0);
+    expect(run.stats.walk).toEqual({ resumedAt: 1, total: 6, cursorUrl: retired, cursorMissing: true });
+    expect(await cursorOf(vendor)).toMatchObject({ offers: { lastUrl: OLIVA_URL } });
+  });
+
+  it("leaves the cursor exactly where it was when the run fails, and re-walks that chunk", async () => {
+    const vendor = await walkVendor("Failed Chunk");
+    await setCursor(vendor, { offers: { lastUrl: OLIVA_URL, total: 6, finishedAt: "2026-08-27T12:00:00.000Z" } });
+
+    // The walk's OWN budget can no longer fail a run (#307 — it breaks cleanly),
+    // so the failure here is the enumeration: a sitemap read that dies is the same
+    // shape as the deadline kill this guarantee exists for.
+    const base = createMockFetcher(budgetRoutes(), 4);
+    const dying: MockFetcher = {
+      requested: base.requested,
+      get pagesFetched() {
+        return base.pagesFetched;
+      },
+      fetchText: async (url: string) => {
+        if (url === SITEMAP) throw new Error("ECONNRESET");
+        return base.fetchText(url);
+      },
+      fetchBinary: (url: string) => base.fetchBinary(url),
+    };
+
+    const failed = await runIngest(deps(dying, null), { adapter: foxCigar, vendorId: vendor, mode: "offers" });
+    expect(failed.status).toBe("failed");
+    expect(await cursorOf(vendor)).toMatchObject({ offers: { lastUrl: OLIVA_URL } });
+
+    // AND THE CHUNK IS RE-WALKED, which is the point of not advancing it: the next
+    // run takes the two URLs the failed one owed, not the two after them.
+    const fetcher = createMockFetcher(budgetRoutes(), 4);
+    await runIngest(deps(fetcher, null), { adapter: foxCigar, vendorId: vendor, mode: "offers" });
+    expect(fetcher.requested).toEqual([ROBOTS, SITEMAP, PADRON_BOX_URL, OLIVA_ROBUSTO_URL]);
+  });
+
+  it("--from-top ignores the stored cursor for one run, and still records where it stopped", async () => {
+    const vendor = await walkVendor("From Top");
+    await setCursor(vendor, { offers: { lastUrl: OLIVA_URL, total: 6, finishedAt: "2026-08-27T12:00:00.000Z" } });
+
+    const fetcher = createMockFetcher(budgetRoutes(), 4);
+    const run = await runIngest(deps(fetcher, null), {
+      adapter: foxCigar,
+      vendorId: vendor,
+      mode: "offers",
+      fromTop: true,
+    });
+
+    expect(fetcher.requested).toEqual([ROBOTS, SITEMAP, PADRON_URL, OLIVA_URL]);
+    expect(run.stats.walk).toEqual({ resumedAt: 1, total: 6, fromTop: true });
+    // Skipping the READ is a one-run decision; skipping the WRITE would be a
+    // permanent one, pinning the lane at the top of the sitemap for good.
+    expect(await cursorOf(vendor)).toMatchObject({ offers: { lastUrl: OLIVA_URL } });
+  });
+
+  it("--limit takes the next N from the resume position, not the first N of the sitemap", async () => {
+    const vendor = await walkVendor("Limited Walk");
+    await setCursor(vendor, { offers: { lastUrl: OLIVA_URL, total: 6, finishedAt: "2026-08-27T12:00:00.000Z" } });
+
+    const fetcher = createMockFetcher(budgetRoutes());
+    const run = await runIngest(deps(fetcher, null), {
+      adapter: foxCigar,
+      vendorId: vendor,
+      mode: "offers",
+      limit: 2,
+    });
+
+    expect(fetcher.requested).toEqual([ROBOTS, SITEMAP, PADRON_BOX_URL, OLIVA_ROBUSTO_URL]);
+    // A truncated window is not the end of the enumeration: no wrap, no completed
+    // pass, and the position moves by exactly the two the operator asked for.
+    expect(run.stats.walk).toEqual({ resumedAt: 3, total: 6, cursorUrl: OLIVA_URL });
+    expect(await cursorOf(vendor)).toMatchObject({ offers: { lastUrl: OLIVA_ROBUSTO_URL } });
+  });
+
+  it("keeps the modes and the reviewer archive apart in one jsonb", async () => {
+    const vendor = await walkVendor("Shared Cursor");
+    // A reviewer's archive page (#199) and a seed position, already in the column.
+    await setCursor(vendor, {
+      archivePage: 87,
+      seed: { lastUrl: PADRON_URL, total: 6, finishedAt: "2026-08-20T12:00:00.000Z" },
+    });
+
+    await runIngest(deps(createMockFetcher(budgetRoutes(), 4), null), {
+      adapter: foxCigar,
+      vendorId: vendor,
+      mode: "offers",
+    });
+
+    // ONE LANE'S RESUME POINT NEVER COSTS ANOTHER ITS OWN: the offers walk merges
+    // into the stored value rather than replacing it, so `archivePage` and the seed
+    // lane's position both survive a write they had nothing to do with — and the
+    // offers walk started from the TOP, because the seed key is not its key.
+    expect(await cursorOf(vendor)).toEqual({
+      archivePage: 87,
+      seed: { lastUrl: PADRON_URL, total: 6, finishedAt: "2026-08-20T12:00:00.000Z" },
+      offers: { lastUrl: OLIVA_URL, total: 6, finishedAt: "2026-08-28T12:00:00.000Z" },
+    });
+  });
+
+  it("a dry run resumes from the cursor and never moves it", async () => {
+    const vendor = await walkVendor("Dry Walk");
+    const stored = { offers: { lastUrl: OLIVA_URL, total: 6, finishedAt: "2026-08-27T12:00:00.000Z" } };
+    await setCursor(vendor, stored);
+
+    const fetcher = createMockFetcher(budgetRoutes(), 4);
+    const run = await runIngest(deps(fetcher, null), {
+      adapter: foxCigar,
+      vendorId: vendor,
+      mode: "offers",
+      dryRun: true,
+    });
+
+    // It reads the position — the report has to describe the chunk that would
+    // actually be walked — and writes nothing at all, having opened no run row to
+    // write it in.
+    expect(fetcher.requested).toEqual([ROBOTS, SITEMAP, PADRON_BOX_URL, OLIVA_ROBUSTO_URL]);
+    expect(run.stats.walk).toMatchObject({ resumedAt: 3, cursorUrl: OLIVA_URL });
+    expect(await cursorOf(vendor)).toEqual(stored);
   });
 });
