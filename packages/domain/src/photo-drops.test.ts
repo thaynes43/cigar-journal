@@ -242,6 +242,35 @@ describe("photo drops", () => {
     expect(tombstones[0]!.after).toBeNull();
   });
 
+  it("stamps the caller's correlationId on the audit row, staged and after the claim", async () => {
+    // The drop upload route mints one id per request and logs it (issue: the
+    // landing was invisible in Loki). It is only a join if it reaches the row —
+    // before this, every upload through a drop link audited with a null id, so a
+    // log line and the write it caused could not be tied together.
+    const drop = await openPhotoDrop(h.deps, storage, user);
+    const staging = newRequestId();
+    await stagePhotoByToken(h.deps, storage, {
+      token: drop.token,
+      image: image(),
+      correlationId: staging,
+    });
+    const staged = await auditRows("staged_photo.add");
+    expect(staged).toHaveLength(1);
+    expect(staged[0]!.correlationId).toBe(staging);
+
+    // After the claim the same link writes smoke_photo.add instead, and that row
+    // has to carry it too — the post-claim upload is the same request shape.
+    const smokeId = await newSmoke();
+    await claimPhotoDrop(h.deps, user, { photoDropId: drop.photoDropId, smokeId });
+    const attaching = newRequestId();
+    await stagePhotoByToken(h.deps, storage, {
+      token: drop.token,
+      image: image(),
+      correlationId: attaching,
+    });
+    expect((await auditRows("smoke_photo.add")).map((r) => r.correlationId)).toContain(attaching);
+  });
+
   it("claims a drop onto a smoke, moving every staged photo with its id and audit", async () => {
     const drop = await openPhotoDrop(h.deps, storage, user);
     const staged = [

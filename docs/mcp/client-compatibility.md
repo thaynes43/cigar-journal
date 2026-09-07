@@ -381,6 +381,13 @@ and its logging stay — they are what separates a host that forwards from one t
 does not. And `no_image_received` stays a normal outcome, not a failure; only the
 claim that no client forwards was removed from the copy.
 
+**Follow-up (2026-09-07).** The probe recorded that `openai/userAgent` *existed*
+and never its value, so the two signatures above could be told apart only by
+guessing from `metaKeys`. `photo_intake_request` now carries
+`client: { id, userAgent }` — the resolved OAuth client and that header's value,
+each bounded to 64 characters and the only `_meta` value ever logged
+(security-and-observability.md).
+
 ## 2026-08-31 — gap-fill hardened: the two-call path, stated as an invariant
 
 The server `INSTRUCTIONS` "Gap-fill" paragraph and `add_cigar`'s tool description

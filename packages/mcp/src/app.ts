@@ -7,7 +7,7 @@ import { photoStorageFromEnv, type PhotoStorage } from "@cj/photos";
 import { createMcpServer } from "./server.js";
 import { bearerAuth } from "./auth.js";
 import { jsonResponseEnabled } from "./config.js";
-import { mcpEvent } from "./logger.js";
+import { mcpEvent, logScalar } from "./logger.js";
 import { describeRequestMeta, shapeOf } from "./photo-intake.js";
 
 // The JSON-RPC body limit for /mcp. See the note on the express.json() call below:
@@ -35,21 +35,15 @@ const MAX_BODY_BYTES = "100kb";
 //
 // It sits AFTER bearerAuth on purpose: before it, an unauthenticated caller could
 // write arbitrary key names into Loki.
-// A correlation handle, bounded. Strings are truncated, numbers pass through, and
-// anything else becomes its type name rather than its content — the value is only
-// ever used to join two log lines, so shape is irrelevant and unbounded input is a
-// liability.
-const MAX_LOG_SCALAR = 64;
-function scalarForLog(value: unknown): string | number | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value === "number") return Number.isFinite(value) ? value : "<number>";
-  if (typeof value === "string") {
-    return value.length > MAX_LOG_SCALAR ? `${value.slice(0, MAX_LOG_SCALAR)}…` : value;
-  }
-  return `<${Array.isArray(value) ? "array" : typeof value}>`;
-}
+// Correlation handles and the two allow-listed client-identity values are bounded
+// by `logScalar` (logger.ts) — the value is only ever used to join or separate log
+// lines, so unbounded input is a liability.
 
-function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): void {
+function logPhotoIntakeRequest(
+  body: unknown,
+  sessionId: string | undefined,
+  clientId: string | undefined,
+): void {
   const messages = Array.isArray(body) ? body : [body];
   for (const message of messages) {
     if (typeof message !== "object" || message === null) continue;
@@ -79,8 +73,8 @@ function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): vo
       // They are correlation handles, so a bounded scalar is all that is useful;
       // logging them raw would let an unvalidated request write arbitrary
       // structure into Loki.
-      sessionId: scalarForLog(sessionId),
-      rpcId: scalarForLog(rpc.id),
+      sessionId: logScalar(sessionId),
+      rpcId: logScalar(rpc.id),
       // `paramKeys` is the whole point of the probe and was missing: without it the
       // record only described the two places we ALREADY look (`arguments` and
       // `params._meta`), so it could never answer "does the host put the file
@@ -91,6 +85,19 @@ function logPhotoIntakeRequest(body: unknown, sessionId: string | undefined): vo
       argImage: shapeOf(image),
       metaKeys: shapeOf(call._meta).keys,
       metaFileParams: describeRequestMeta(call._meta),
+      // The two ALLOW-LISTED value exceptions on this record
+      // (security-and-observability.md). Two ChatGPT surfaces reach this endpoint
+      // under the same OAuth client with different `_meta` and different
+      // forwarding behaviour — one has never forwarded a file, the other does —
+      // and without these the records are indistinguishable, so "which surface
+      // fails to forward?" is unanswerable. Both are bounded; no other `_meta`
+      // value is ever logged.
+      client: {
+        id: clientId ?? null,
+        userAgent:
+          logScalar((call._meta as Record<string, unknown> | undefined)?.["openai/userAgent"]) ??
+          null,
+      },
     });
   }
 }
@@ -183,7 +190,11 @@ export function buildApp(
     bearerAuth(deps.db),
     (req, _res, next) => {
       try {
-        logPhotoIntakeRequest(req.body, req.headers["mcp-session-id"] as string | undefined);
+        logPhotoIntakeRequest(
+          req.body,
+          req.headers["mcp-session-id"] as string | undefined,
+          (req as Request & { auth?: { clientId?: string } }).auth?.clientId,
+        );
       } catch {
         // A diagnostic must never fail a request.
       }

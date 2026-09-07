@@ -48,14 +48,42 @@ interface StateBody {
   photos: PhotoBody[];
 }
 
-function post(token: string, file: File, kind?: string): Promise<Response> {
+function post(token: string, file: File, kind?: string, ua?: string): Promise<Response> {
   const form = new FormData();
   form.set("file", file);
   if (kind !== undefined) form.set("kind", kind);
   return routeMod.POST(
-    new Request(`http://localhost/api/photo-drops/${token}`, { method: "POST", body: form }),
+    new Request(`http://localhost/api/photo-drops/${token}`, {
+      method: "POST",
+      body: form,
+      headers: ua === undefined ? undefined : { "user-agent": ua },
+    }),
     { params: Promise.resolve({ token }) },
   );
+}
+
+// Capture the structured `[web]` lines emitted while `fn` runs. webEvent writes
+// through console.log, so this is the wire format an operator greps in Loki.
+async function captureLog<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+  const lines: string[] = [];
+  const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    lines.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+  });
+  try {
+    return { value: await fn(), lines };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+function uploadRecord(lines: string[]): Record<string, unknown> {
+  const marker = "[web] photo_drop_upload ";
+  const line = lines.find((l) => l.includes(marker));
+  expect(line, `no photo_drop_upload line; saw: ${lines.join(" | ")}`).toBeDefined();
+  return JSON.parse(line!.slice(line!.indexOf("{", line!.indexOf(marker)))) as Record<
+    string,
+    unknown
+  >;
 }
 
 function get(token: string): Promise<Response> {
@@ -253,5 +281,96 @@ describe("/api/photo-drops/[token]", () => {
     const upload = await post("not-a-real-token", png());
     expect(upload.status).toBe(410);
     expect(await codeOf(upload)).toBe("upload_token_invalid");
+  });
+  // ---- the upload's own log line (issue: the landing was invisible) ---------
+  //
+  // On 2026-09-07 an `open_photo_drop` minted a link, the owner uploaded through
+  // it 27 seconds later, and the ONLY trace was a staged row with a null
+  // correlation id: nothing in Loki said the photo had landed, and nothing joined
+  // it to the mint. These pin the line that ends that.
+
+  it("logs a staged upload with the drop id, the photo id, and the decoded image", async () => {
+    const ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15";
+    const { value, lines } = await captureLog(() => post(token, png(), "band", ua));
+    expect(value.status).toBe(201);
+    const photo = (await value.json()) as PhotoBody;
+
+    const record = uploadRecord(lines);
+    expect(record.outcome).toBe("staged");
+    expect(record.status).toBe(201);
+    // The join to the mint, and the join to the audit row this request wrote.
+    expect(record.photoDropId).toBe(photoDropId);
+    expect(record.photoId).toBe(photo.photoId);
+    expect(typeof record.correlationId).toBe("string");
+    expect(record.width).toBe(1);
+    expect(record.height).toBe(1);
+    expect(record.mime).toBe("image/jpeg");
+    expect(record.bytes).toBeGreaterThan(0);
+    expect(typeof record.ms).toBe("number");
+    // Bounded: a phone is distinguishable from a curl without taking the header
+    // as written.
+    expect(record.ua).toBe(`${ua.slice(0, 64)}…`);
+    // The token IS the authorization: it never reaches the log, in any form.
+    expect(lines.join("\n")).not.toContain(token);
+  });
+
+  it("logs each rejection with the code the page reads, and never the token", async () => {
+    const cases: [string, number, () => Promise<Response>][] = [
+      [
+        "rejected:too_large",
+        413,
+        () =>
+          post(
+            token,
+            new File([new Uint8Array(MAX_UPLOAD_BYTES + 1)], "huge.jpg", { type: "image/jpeg" }),
+          ),
+      ],
+      [
+        "rejected:unreadable",
+        422,
+        () => post(token, new File([Buffer.from("not an image")], "x.jpg", { type: "image/jpeg" })),
+      ],
+      ["rejected:bad_kind", 400, () => post(token, png(), "portrait")],
+    ];
+
+    for (const [outcome, status, run] of cases) {
+      const { value, lines } = await captureLog(run);
+      expect(value.status).toBe(status);
+      const record = uploadRecord(lines);
+      expect(record.outcome).toBe(outcome);
+      expect(record.status).toBe(status);
+      // A rejected file never became a photo, but the drop it was aimed at is
+      // still named — that is what makes a failing link diagnosable.
+      expect(record.photoDropId).toBe(photoDropId);
+      expect(record.photoId).toBeNull();
+      expect(lines.join("\n")).not.toContain(token);
+    }
+  });
+
+  it("logs a dead link with a null drop id and no token", async () => {
+    const { value, lines } = await captureLog(() => post("not-a-real-token", png()));
+    expect(value.status).toBe(410);
+
+    const record = uploadRecord(lines);
+    expect(record.outcome).toBe("rejected:upload_token_invalid");
+    expect(record.status).toBe(410);
+    // Unknown, expired and closed collapse to one answer, and the log keeps that
+    // promise: there is no id to name and the token is not hashed into the line.
+    expect(record.photoDropId).toBeNull();
+    expect(lines.join("\n")).not.toContain("not-a-real-token");
+  });
+
+  it("logs the photo-limit rejection with the domain code", async () => {
+    for (let i = 0; i < MAX_PHOTOS_PER_DROP; i++) {
+      expect((await post(token, png(`p${i}.png`))).status).toBe(201);
+    }
+    const { value, lines } = await captureLog(() => post(token, png("13.png")));
+    expect(value.status).toBe(409);
+
+    const record = uploadRecord(lines);
+    expect(record.outcome).toBe("rejected:photo_limit");
+    expect(record.status).toBe(409);
+    expect(record.photoDropId).toBe(photoDropId);
+    expect(record.photoId).toBeNull();
   });
 });

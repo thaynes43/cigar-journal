@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { db } from "@cj/db";
 import {
   assertPhotoDropUsable,
   getPhotoDropByToken,
   stagePhotoByToken,
+  type DomainError,
   UploadTokenInvalidError,
   type Deps,
 } from "@cj/domain";
@@ -10,6 +12,7 @@ import { processPhoto, UnsupportedImageTypeError } from "@cj/photos";
 import { photoStorage, MAX_UPLOAD_BYTES } from "@/lib/photos";
 import { domainErrorResponse, uploadErrorResponse } from "@/lib/photo-http";
 import { isSmokePhotoKind } from "@/lib/photo-kinds";
+import { webEvent, logScalar } from "@/lib/log";
 
 // The photo drop's own endpoints (ADR-014, issue #263): what `/d/<token>` reads,
 // and where it posts. Anonymous — the token in the path IS the authorization,
@@ -59,48 +62,107 @@ export async function GET(
   }
 }
 
+// EVERY upload attempt leaves exactly one `[web] photo_drop_upload` line, staged
+// or rejected (lib/log.ts). `photoDropId` is the join to the `open_photo_drop`
+// that minted the link and `correlationId` the join to the audit row this request
+// writes — before this, a mint whose photo never landed and one whose photo
+// landed fine were the same silence. The token is NEVER logged, in any form: it
+// is the whole authorization, so an unknown or expired one logs a null drop id
+// rather than a hash.
 export async function POST(
   req: Request,
   ctx: { params: Promise<{ token: string }> },
 ): Promise<Response> {
-  if (!photoStorage) return uploadErrorResponse("unavailable", 503);
+  const startedAt = Date.now();
+  const correlationId = randomUUID();
+  // Host-writable, so bounded — enough to tell a phone camera upload from a curl.
+  const ua = logScalar(req.headers.get("user-agent"));
+  const seen: {
+    photoDropId: string | null;
+    photoId: string | null;
+    bytes: number | null;
+    width: number | null;
+    height: number | null;
+    mime: string | null;
+  } = { photoDropId: null, photoId: null, bytes: null, width: null, height: null, mime: null };
+
+  // `outcome` is `staged` or `rejected:<code>`, where the code is the one the
+  // page reads off the envelope — so the log line and the user's message name the
+  // same failure.
+  const done = (outcome: string, res: Response): Response => {
+    webEvent("photo_drop_upload", {
+      correlationId,
+      photoDropId: seen.photoDropId,
+      photoId: seen.photoId,
+      outcome,
+      status: res.status,
+      bytes: seen.bytes,
+      width: seen.width,
+      height: seen.height,
+      mime: seen.mime,
+      ua,
+      ms: Date.now() - startedAt,
+    });
+    return res;
+  };
+
+  if (!photoStorage) return done("rejected:unavailable", uploadErrorResponse("unavailable", 503));
   const { token } = await ctx.params;
 
   try {
-    await assertPhotoDropUsable(deps(), { token });
+    // The id is for the log line only — the response is unchanged, so a dead link
+    // still answers one 410 with nothing to probe.
+    seen.photoDropId = (await assertPhotoDropUsable(deps(), { token })).photoDropId;
   } catch (error) {
     if (error instanceof UploadTokenInvalidError) {
-      return uploadErrorResponse("upload_token_invalid", 410);
+      return done("rejected:upload_token_invalid", uploadErrorResponse("upload_token_invalid", 410));
     }
     throw error;
   }
 
   const form = await req.formData();
   const file = form.get("file");
-  if (!(file instanceof File)) return uploadErrorResponse("validation_error", 400);
+  if (!(file instanceof File)) {
+    return done("rejected:no_file", uploadErrorResponse("validation_error", 400));
+  }
+  // Declared first, then what actually arrived, then what was stored — the line
+  // always states the most it knows about the bytes at the point it was written.
+  seen.bytes = file.size;
+  seen.mime = logScalar(file.type);
 
   // The kind arrives on an anonymous request and lands in a `text` column, so it
   // is checked here rather than trusted; omitting it is fine and means "cigar"
   // (#287) — the drop page's chips then open on `Cigar` already selected.
   const rawKind = form.get("kind");
   if (rawKind !== null && !isSmokePhotoKind(rawKind)) {
-    return uploadErrorResponse("validation_error", 400);
+    return done("rejected:bad_kind", uploadErrorResponse("validation_error", 400));
   }
   const kind = rawKind === null ? undefined : rawKind;
 
-  if (file.size > MAX_UPLOAD_BYTES) return uploadErrorResponse("too_large", 413);
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return done("rejected:too_large", uploadErrorResponse("too_large", 413));
+  }
   const input = Buffer.from(await file.arrayBuffer());
   // `file.size` is what the multipart part declared; this is what actually
   // arrived. Checking both keeps the ceiling honest without buffering twice.
-  if (input.byteLength > MAX_UPLOAD_BYTES) return uploadErrorResponse("too_large", 413);
+  seen.bytes = input.byteLength;
+  if (input.byteLength > MAX_UPLOAD_BYTES) {
+    return done("rejected:too_large", uploadErrorResponse("too_large", 413));
+  }
 
   let processed;
   try {
     processed = await processPhoto(input, file.type);
   } catch (error) {
-    if (error instanceof UnsupportedImageTypeError) return uploadErrorResponse("unsupported_type", 415);
-    return uploadErrorResponse("unreadable", 422);
+    if (error instanceof UnsupportedImageTypeError) {
+      return done("rejected:unsupported_type", uploadErrorResponse("unsupported_type", 415));
+    }
+    return done("rejected:unreadable", uploadErrorResponse("unreadable", 422));
   }
+  seen.bytes = processed.full.byteLength;
+  seen.width = processed.width;
+  seen.height = processed.height;
+  seen.mime = processed.contentType;
 
   // Staged before the claim, straight onto the smoke after it — the drop decides,
   // and the page renders whichever it says (`attached`).
@@ -108,6 +170,7 @@ export async function POST(
     const view = await stagePhotoByToken(deps(), photoStorage, {
       token,
       kind,
+      correlationId,
       image: {
         full: processed.full,
         thumb: processed.thumb,
@@ -117,8 +180,13 @@ export async function POST(
         bytes: processed.full.byteLength,
       },
     });
-    return Response.json(view, { status: 201 });
+    seen.photoId = view.photoId;
+    return done("staged", Response.json(view, { status: 201 }));
   } catch (error) {
-    return domainErrorResponse(error);
+    // domainErrorResponse re-throws anything that is not a DomainError, so a 500
+    // is Next's and leaves no line here — by design: this record describes the
+    // upload contract, not an unhandled fault.
+    const res = domainErrorResponse(error);
+    return done(`rejected:${(error as DomainError).code}`, res);
   }
 }

@@ -3395,7 +3395,7 @@ describe("@cj/mcp adapter", () => {
       });
       await expect(
         assertPhotoDropUsable(h.deps, { token: tokenOf(second.uploadUrl) }),
-      ).resolves.toBeUndefined();
+      ).resolves.toEqual({ photoDropId: second.photoDropId });
     });
   });
 
@@ -3431,7 +3431,7 @@ describe("@cj/mcp adapter", () => {
       expect(next.photoCount).toBe(0);
       expect(next.shareWithUser).not.toContain("already holds");
       // The old link was not rotated, so a late photo still reaches its own smoke.
-      await expect(assertPhotoDropUsable(h.deps, { token: firstToken })).resolves.toBeUndefined();
+      await expect(assertPhotoDropUsable(h.deps, { token: firstToken })).resolves.toEqual({ photoDropId: first.photoDropId });
     });
   });
 
@@ -3550,7 +3550,9 @@ describe("@cj/mcp adapter", () => {
         expect(read).not.toHaveProperty(key);
       }
       // And the link the user already has still works.
-      await expect(assertPhotoDropUsable(h.deps, { token: tokenOf(drop.uploadUrl) })).resolves.toBeUndefined();
+      await expect(assertPhotoDropUsable(h.deps, { token: tokenOf(drop.uploadUrl) })).resolves.toEqual({
+        photoDropId: drop.photoDropId,
+      });
     });
   });
 
@@ -3648,6 +3650,96 @@ describe("@cj/mcp adapter", () => {
       // add_smoke_photo.
       expect(record.rpcId).toEqual(probe.rpcId);
       expect(record.sessionId).toEqual(probe.sessionId);
+    });
+  });
+
+  it("names the drop on open_photo_drop's outcome line, so a mint joins the upload that lands", async () => {
+    // The mint half of the mint→landing join. On 2026-09-07 an `open_photo_drop`
+    // was followed 27 seconds later by an upload through the link it minted, and
+    // no key in Loki tied the two together.
+    await withClient(await dropUser(), async (client) => {
+      const { value, lines } = await captureMcpLog(() => call(client, "open_photo_drop", {}));
+      const drop = payloadOf(value) as OpenedDrop;
+
+      const called = eventPayload(lines, "tool_called");
+      expect(called.tool).toBe("open_photo_drop");
+      expect(called.photoDropId).toBe(drop.photoDropId);
+      // The intake runs BEFORE the mint, so the drop has no id yet when that line
+      // is written — the outcome line is where the id can be.
+      expect(eventPayload(lines, "photo_intake").photoDropId).toBeUndefined();
+    });
+  });
+
+  it("names the drop on an add_smoke_photo claim, refused or not", async () => {
+    await withClient(await dropUser(), async (client) => {
+      const drop = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+      const smokeId = await saveBareSmoke(client, "drop-claim-log");
+
+      const { lines } = await captureMcpLog(() =>
+        call(client, "add_smoke_photo", { smokeId, photoDropId: drop.photoDropId }),
+      );
+      expect(eventPayload(lines, "tool_called").photoDropId).toBe(drop.photoDropId);
+      // Mode C runs no intake, so the outcome line is the only record it writes.
+      expect(lines.some((l) => l.includes("[mcp] photo_intake {"))).toBe(false);
+
+      const missing = randomUUID();
+      const refused = await captureMcpLog(() =>
+        call(client, "add_smoke_photo", { smokeId, photoDropId: missing }),
+      );
+      expect(refused.value.isError).toBe(true);
+      const failed = eventPayload(refused.lines, "tool_error");
+      expect(failed.code).toBe("photo_drop_not_found");
+      expect(failed.photoDropId).toBe(missing);
+    });
+  });
+
+  it("records the OAuth client and the host's userAgent on the intake probe, bounded", async () => {
+    // The two ChatGPT surfaces (client-compatibility.md) arrive under the same
+    // OAuth client with different `_meta` and different forwarding behaviour —
+    // one has never forwarded a file, the other does — and the probe could not
+    // tell them apart because it recorded that `openai/userAgent` EXISTED and
+    // never what it said. These are the only two allow-listed value exceptions.
+    const user = await h.createUser(`ua-${randomUUID()}@example.com`);
+    const minted = await mintToken(ALL_SCOPES, user.userId);
+    const userAgent = "ChatGPT/1.2026.240 (iOS 26.1; iPhone17,2; build 918273)";
+
+    await withClient(minted.token, async (client) => {
+      const { lines } = await captureMcpLog(() =>
+        client.callTool({
+          name: "open_photo_drop",
+          arguments: {},
+          _meta: { "openai/userAgent": userAgent, "openai/subject": "subject-must-not-be-logged" },
+        }),
+      );
+
+      const probe = eventPayload(lines, "photo_intake_request");
+      expect(probe.client).toEqual({ id: minted.clientId, userAgent });
+      // Every OTHER _meta value stays a key name, the rule unchanged.
+      expect(probe.metaKeys).toEqual(["openai/subject", "openai/userAgent"]);
+      expect(lines.join("\n")).not.toContain("subject-must-not-be-logged");
+    });
+
+    // Host-writable, so bounded like a key name: a hostile client cannot grow the
+    // line without limit.
+    await withClient(minted.token, async (client) => {
+      const { lines } = await captureMcpLog(() =>
+        client.callTool({
+          name: "open_photo_drop",
+          arguments: {},
+          _meta: { "openai/userAgent": "u".repeat(500) },
+        }),
+      );
+      const probe = eventPayload(lines, "photo_intake_request");
+      expect((probe.client as { userAgent: string }).userAgent).toBe(`${"u".repeat(64)}…`);
+    });
+  });
+
+  it("leaves client.userAgent null when the host sends none", async () => {
+    await withClient(await dropUser(), async (client) => {
+      const { lines } = await captureMcpLog(() => call(client, "open_photo_drop", {}));
+      const probe = eventPayload(lines, "photo_intake_request");
+      expect((probe.client as { userAgent: unknown }).userAgent).toBeNull();
+      expect(typeof (probe.client as { id: unknown }).id).toBe("string");
     });
   });
 

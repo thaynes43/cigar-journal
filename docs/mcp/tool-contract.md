@@ -1698,9 +1698,12 @@ names the call it came from, with every other field identical.
   **before** the SDK validates input, so a call the SDK rejects still leaves a
   record. Fields: `tool`, `paramKeys` (the keys of `params` **itself**, so a file handed
   over somewhere the server never reads it still shows up), `argKeys`, `argImage`
-  shape, `metaKeys`, `metaFileParams` shape + `count`. This is the class of call
-  that previously left no trace at all, and it is what will settle whether the host
-  puts the file somewhere the server never looked.
+  shape, `metaKeys`, `metaFileParams` shape + `count`, and `client`
+  (`{ id, userAgent }` — the resolved OAuth client and the value of
+  `openai/userAgent`, each bounded to 64 characters, both null when absent). This is
+  the class of call that previously left no trace at all, and it is what will settle
+  whether the host puts the file somewhere the server never looked; `client.userAgent`
+  is what separates the two ChatGPT surfaces that arrive under one OAuth client.
 - **`request_rejected`** — written when `express.json()` refuses the body (over the
   100KB limit, or not JSON). Such a request never reaches auth, the probe or the
   SDK, so without this line it is the one shape that fails with no record at all.
@@ -1708,11 +1711,19 @@ names the call it came from, with every other field identical.
   the body is untrusted and unparsed, so nothing from it is logged. The response is
   a JSON-RPC error envelope rather than Express's default HTML page.
 
-All three obey the **shape-not-values** rule (security-and-observability.md): key
-names, JSON types, and a per-key "non-empty string" flag — never a handle's values.
-There are exactly two bounded exceptions, both named there: `fetch.host` and
-`fetch.declaredType` (truncated to 64 characters, since `mime_type` is
-host-writable).
+A fourth line names the drop rather than the intake: **`tool_called` /
+`tool_error`** carry `photoDropId` for `open_photo_drop` (the drop it just minted)
+and for an `add_smoke_photo` claim (the drop named in the arguments, recorded even
+when the claim is refused). The intake runs before the mint, so the drop has no id
+yet when `photo_intake` is written — the outcome line is where the mint shares a
+key with the `[web] photo_drop_upload` that lands through the link.
+
+All three intake lines obey the **shape-not-values** rule
+(security-and-observability.md): key names, JSON types, and a per-key "non-empty
+string" flag — never a handle's values. There are exactly four bounded exceptions,
+all named there: `fetch.host`, `fetch.declaredType` (truncated to 64 characters,
+since `mime_type` is host-writable), and `client.id` / `client.userAgent` on
+`photo_intake_request`.
 
 ## set_want — write, idempotent
 

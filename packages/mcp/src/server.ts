@@ -159,7 +159,7 @@ import {
 } from "./photo-intake.js";
 import { jsonResult, errorResult, toErrorPayload, type ToolResult } from "./results.js";
 import { smokeUrl, uploadUrl, dropUrl } from "./config.js";
-import { mcpEvent } from "./logger.js";
+import { mcpEvent, logScalar } from "./logger.js";
 
 // The thirty-five-tool cigar-journal surface (docs/mcp/tool-contract.md). A THIN adapter
 // (ADR-005): every tool derives the principal from the token, calls the matching
@@ -610,27 +610,41 @@ function curationAttribution(args: { runId?: string | null; confidence?: number 
   };
 }
 
+// Extra fields a tool body stamps onto its own `tool_called` / `tool_error` line.
+// Every value is bounded by `logScalar` — some come from arguments.
+type MarkFn = (fields: Record<string, unknown>) => void;
+
 // Run a tool body with uniform auth, scope enforcement, logging, and contract
 // error mapping. Domain errors become isError tool results the model can read
 // and act on; nothing leaks (no SQL, stacks, secrets, or other users).
 async function run(
   tool: ToolName,
   authInfo: AuthInfo | undefined,
-  fn: (ctx: AuthContext, correlationId: string) => Promise<ToolResult>,
+  fn: (ctx: AuthContext, correlationId: string, mark: MarkFn) => Promise<ToolResult>,
 ): Promise<ToolResult> {
   const correlationId = randomUUID();
   const started = Date.now();
+  // Join keys only knowable INSIDE the tool body — the drop a mint has just
+  // created has no id until it exists, so it cannot be on the intake line that
+  // precedes it. Stamped here so it rides the outcome line whichever way the call
+  // ends, which is what gives an `open_photo_drop` in Loki a key in common with
+  // the `[web] photo_drop_upload` that lands through the link it minted.
+  const marks: Record<string, unknown> = {};
+  const mark: MarkFn = (fields) => {
+    for (const [key, value] of Object.entries(fields)) marks[key] = logScalar(value) ?? null;
+  };
   try {
     const ctx = authContext(authInfo);
     assertToolScope(tool, ctx.scopes);
-    const result = await fn(ctx, correlationId);
-    mcpEvent("tool_called", { tool, correlationId, latencyMs: Date.now() - started });
+    const result = await fn(ctx, correlationId, mark);
+    mcpEvent("tool_called", { tool, correlationId, ...marks, latencyMs: Date.now() - started });
     return result;
   } catch (error) {
     const payload = toErrorPayload(error, correlationId);
     mcpEvent("tool_error", {
       tool,
       correlationId,
+      ...marks,
       code: payload.code,
       latencyMs: Date.now() - started,
     });
@@ -1351,7 +1365,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       },
     },
     (args, extra) =>
-      run("open_photo_drop", extra.authInfo, async ({ principal }, correlationId) => {
+      run("open_photo_drop", extra.authInfo, async ({ principal }, correlationId, mark) => {
         const intake = await intakePhoto({
           tool: "open_photo_drop",
           image: args.image,
@@ -1367,6 +1381,9 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           correlationId,
           actor: "mcp",
         });
+        // The mint's half of the mint→landing join (ADR-014): the upload that
+        // arrives through this link minutes later logs the same drop id.
+        mark({ photoDropId: drop.photoDropId });
         const url = dropUrl(drop.token);
 
         // A forwarded image goes STRAIGHT INTO the drop it just opened, through
@@ -1474,7 +1491,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       },
     },
     (args, extra) =>
-      run("add_smoke_photo", extra.authInfo, async ({ principal }, correlationId) => {
+      run("add_smoke_photo", extra.authInfo, async ({ principal }, correlationId, mark) => {
         // MODE C — a drop the save did not carry (ADR-014). It takes no intake and
         // mints no link: the photos already exist, staged against the drop, and
         // the whole call is the claim that moves them onto this smoke. It runs
@@ -1488,6 +1505,9 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
         // to a different smoke is a validation_error naming the field — the photos
         // belong to that other smoke and moving them would take them off it.
         if (args.photoDropId !== undefined) {
+          // Stamped before the claim so a rejected one names the drop too — this
+          // path runs no intake, so the outcome line is its only record.
+          mark({ photoDropId: args.photoDropId });
           const photoDrop = await claimPhotoDrop(deps, principal, {
             photoDropId: args.photoDropId,
             smokeId: args.smokeId,
