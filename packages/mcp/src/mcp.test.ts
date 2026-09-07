@@ -402,6 +402,11 @@ describe("@cj/mcp adapter", () => {
       expect(inputSchema.required ?? []).toEqual([]);
       expect(drop.annotations?.readOnlyHint).not.toBe(true);
       expect(drop.annotations?.idempotentHint).not.toBe(true);
+      // A second open is still not idempotent — it mints — but it is no longer
+      // destructive, and the description says so (issue #316): a model that read
+      // the old sentence had to assume it was retiring the user's link.
+      expect(drop.annotations?.destructiveHint).toBe(false);
+      expect(drop.description).toContain("every earlier link keeps working");
     });
   });
 
@@ -3369,10 +3374,10 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
-  it("opening again returns the same drop with a fresh link, and kills the old one", async () => {
-    // The rotation is forced, not chosen: only the token HASH is stored, so a
-    // reissue cannot re-derive the previous raw token and necessarily replaces it.
-    // The cost is stated in the ADR and pinned here — the earlier link stops working.
+  it("opening again mints another link and leaves the one the user has working", async () => {
+    // A continue MINTS, it does not rotate (issue #316). Only the token HASH is
+    // stored, so the caller cannot be handed the same link back — but the page the
+    // user already has open is holding the earlier one, and it stays valid.
     const token = await dropUser();
     await withClient(token, async (client) => {
       const first = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
@@ -3383,19 +3388,22 @@ describe("@cj/mcp adapter", () => {
       expect(second.photoDropId).toBe(first.photoDropId);
       expect(second.reused).toBe(true);
       expect(second.uploadUrl).not.toBe(first.uploadUrl);
-      // The photo staged through the dead link is still in the drop — this is what
+      // The photo staged through the first link is still in the drop — this is what
       // lets a model that lost the id in a long chat recover the user's photos.
       expect(second.photoCount).toBe(1);
+      // The relayed sentence LEADS with the link that still works, so the model
+      // does not present the new URL as a replacement for a dead one.
+      expect(second.shareWithUser).toMatch(/^The link the user already has still works;/);
       expect(second.shareWithUser).toContain("it already holds 1 photo;");
       // The lifetime is the drop's own, and a re-used drop has less of it left.
       expect(second.shareWithUser).toContain("It works for about 48 hours more.");
 
-      await expect(assertPhotoDropUsable(h.deps, { token: firstToken })).rejects.toMatchObject({
-        code: "upload_token_invalid",
-      });
-      await expect(
-        assertPhotoDropUsable(h.deps, { token: tokenOf(second.uploadUrl) }),
-      ).resolves.toEqual({ photoDropId: second.photoDropId });
+      // BOTH links reach the same drop.
+      for (const t of [firstToken, tokenOf(second.uploadUrl)]) {
+        await expect(assertPhotoDropUsable(h.deps, { token: t })).resolves.toEqual({
+          photoDropId: first.photoDropId,
+        });
+      }
     });
   });
 
@@ -3458,10 +3466,13 @@ describe("@cj/mcp adapter", () => {
       expect(resumed.shareWithUser).toContain("it already holds 1 photo;");
       expect(resumed.shareWithUser).toContain("It works for about 13 hours more.");
       expect(resumed.shareWithUser).not.toContain("48 hours");
-      // The resume rotated the link, which is what the caller asked for.
-      await expect(assertPhotoDropUsable(h.deps, { token: firstToken })).rejects.toMatchObject({
-        code: "upload_token_invalid",
-      });
+      // The resume minted the link the caller asked for and left the one the user
+      // is holding alive (issue #316).
+      for (const t of [firstToken, tokenOf(resumed.uploadUrl)]) {
+        await expect(assertPhotoDropUsable(h.deps, { token: t })).resolves.toEqual({
+          photoDropId: first.photoDropId,
+        });
+      }
 
       const read = payloadOf(
         await call(client, "get_photo_drop", { photoDropId: first.photoDropId }),
@@ -3544,7 +3555,7 @@ describe("@cj/mcp adapter", () => {
       });
       expect(read.photos).toMatchObject([{ photoId, kind: "band", attached: false }]);
       // Minting is open_photo_drop's job: a read that returned a URL would have
-      // had to rotate the token to produce it (issue #302).
+      // had to mint a token to produce it (issue #302).
       expect(JSON.stringify(read)).not.toContain(`${ORIGIN}/d/`);
       for (const key of ["uploadUrl", "token", "shareWithUser"]) {
         expect(read).not.toHaveProperty(key);

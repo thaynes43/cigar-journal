@@ -170,8 +170,8 @@ photoDrop.attached — never ask the user to send a photo again at the end; when
 attached is 0 and they meant to add one, say the link is still open and a photo
 added now lands on the saved smoke. To check what a drop holds, use
 get_photo_drop with its id: it reads the drop and never changes the link.
-Opening again within the same smoke returns that drop with a fresh link and the
-earlier link stops working, so open again only when the user needs the link;
+Opening again within the same smoke returns that drop with another link and
+every earlier link keeps working, so open again only when the user needs one;
 hours after the last one, an open starts a new drop for the new smoke, and
 passing photoDropId continues a specific drop instead. After a save,
 add_smoke_photo with the smoke id returns a one-time upload link for a photo of
@@ -1274,7 +1274,7 @@ result:
   photoDropId: pd_01kf
   uploadUrl: https://cigars.haynesnetwork.com/d/<token>
   expiresAt: "2026-09-03T20:15:00Z"       # 48h after opening
-  reused: false                  # true when this open continued or resumed a drop — same photos, fresh link
+  reused: false                  # true when this open continued or resumed a drop — same photos, another link
   photoCount: 0                  # photos already in the drop (meaningful when reused)
   shareWithUser: "Send the user this link to add photos during the smoke: https://… — every photo of this smoke goes there, and they attach to the review when it is saved. It works for 48 hours."
   delivery:                      # as on add_smoke_photo: why no image arrived with the call
@@ -1298,16 +1298,19 @@ result:
   the user set a photo's kind, caption it, or remove it. A single-use link is
   right for one photo of a saved smoke; it is wrong for an event that produces
   several photos over hours.
-- **One open drop per session** (ADR-014 as amended, issue #302). Opening again
-  within `DROP_SESSION_GAP_HOURS` of the last open returns *that* drop —
-  `reused: true`, its `photoCount` — with a fresh token; the earlier link stops
-  working. The raw token is never stored, so reuse must rotate. Past the gap the
-  open is a new smoke and gets a **new drop**; the previous one is untouched and
-  keeps its own link until it expires, so a late photo still lands on the smoke
-  it was taken for. `photoDropId` resumes a named drop whatever the gap, and is
-  the only way to continue one past it — a resume continues the session
-  (`session_started_at` does not move) and rotates the token like any other
-  re-open. To see what a drop holds without touching it, use `get_photo_drop`.
+- **One open drop per session** (ADR-014 as amended, issues #302 and #316).
+  Opening again within `DROP_SESSION_GAP_HOURS` of the last open returns *that*
+  drop — `reused: true`, its `photoCount` — with **another** token, and every
+  earlier link keeps working: a drop holds a bounded set of valid hashes
+  (`PHOTO_DROP_TOKENS_MAX`, oldest pruned first), so the page the user has open
+  is never cut off. The raw token is never stored, which is why a continue mints
+  rather than re-issuing the same link. Past the gap the open is a new smoke and
+  gets a **new drop**; the previous one is untouched and keeps its own link until
+  it expires, so a late photo still lands on the smoke it was taken for.
+  `photoDropId` resumes a named drop whatever the gap, and is the only way to
+  continue one past it — a resume continues the session (`session_started_at`
+  does not move) and mints like any other re-open. To see what a drop holds
+  without touching it, use `get_photo_drop`.
 - **The stated lifetime is the drop's own.** `shareWithUser` derives it from
   `expiresAt` at the moment of the call — "It works for 48 hours." on a fresh
   drop, "It works for about 13 hours more." on a re-used one — never from the
@@ -1323,9 +1326,9 @@ result:
 
 Read one of the user's photo drops by id, **touching nothing** (issue #302).
 Before it, the only way to ask what a drop held was to open it again — and that
-rotates the token, so on 2026-09-05 a count-check killed the link the user had
-already been sent. This tool writes nothing at all: no rotation, no stamp, no
-audit row, no sweep. A read is not an event.
+rotated the token, so on 2026-09-05 a count-check killed the link the user had
+already been sent. This tool writes nothing at all: it mints nothing, stamps
+nothing, and writes no audit row and no sweep. A read is not an event.
 
 ```yaml
 arguments:
@@ -1350,7 +1353,7 @@ result:
 ```
 
 - **No link, ever.** Minting one is `open_photo_drop`'s job; a read that returned
-  a URL would have had to rotate the token to produce it.
+  a URL would have had to mint a token to produce it.
 - Owner-scoped, one answer for every miss: another user's drop, a drop that never
   existed and a malformed id are all `photo_drop_not_found`.
 - A closed drop reports `closed` and no photos, exactly as its own page does —

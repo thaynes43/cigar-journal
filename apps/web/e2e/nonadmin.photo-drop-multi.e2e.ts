@@ -18,9 +18,9 @@ import type { Handoff } from "./seed.js";
 // pipeline into the harness object store, and every read is an HTTP call to the
 // running app.
 //
-// It runs on the NON-ADMIN account because one open drop per user means opening
-// a second drop for the admin would rotate the token `anon.photo-drop.e2e.ts` is
-// holding and kill that spec's link.
+// It runs on the NON-ADMIN account because one open drop per user means an open
+// on the admin would return the very drop `anon.photo-drop.e2e.ts` is walking,
+// and the two specs would be uploading into each other.
 
 // A real 1×1 PNG — the pipeline decodes and re-encodes it, so a placeholder that
 // is not an image would fail the upload rather than the assertion.
