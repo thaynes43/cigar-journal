@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createFetcher, MaxBytesExceededError } from "./fetcher.js";
+import { describeError } from "./errors.js";
 import { loadFixture } from "../testing/fixtures.js";
 
 // The download bound (issue: brand images). Every assertion here is about bytes
@@ -284,5 +285,40 @@ describe("a throttled response (429/503)", () => {
     const result = await five.fetcher.fetchText("https://example.test/b");
     expect(result.status).toBe(200);
     expect(five.slept).toContain(1000); // RETRY_BACKOFF_MS, unchanged
+  });
+});
+
+// THE CHAIN SURVIVES THE FETCH LAYER (2026-09-07). Node's fetch reports every
+// transport fault as the same `TypeError: fetch failed` and parks the real one on
+// `cause`; the fetcher's retry rethrows the error AS IT CAME, so the code is still
+// there for the summary to print.
+describe("a network failure", () => {
+  const certExpired = () =>
+    Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }),
+    });
+
+  it("rethrows the original error with its cause intact after the one retry", async () => {
+    let calls = 0;
+    const fetcher = createFetcher({
+      minIntervalMs: 0,
+      jitterMs: 0,
+      allowFastInterval: true,
+      sleep: () => Promise.resolve(),
+      fetchImpl: () => {
+        calls += 1;
+        return Promise.reject(certExpired());
+      },
+    });
+
+    const error = await fetcher.fetchText("https://www.2guyscigars.com/robots.txt").then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    // Two attempts, then the vendor's own error — not a wrapper that flattened it.
+    expect(calls).toBe(2);
+    expect((error as { cause?: { code?: string } }).cause?.code).toBe("CERT_HAS_EXPIRED");
+    expect(describeError(error)).toBe("fetch failed (CERT_HAS_EXPIRED: certificate has expired)");
   });
 });

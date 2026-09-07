@@ -121,6 +121,17 @@ CronJob pair in haynes-ops because the CLI takes one `--vendor` (#156).
 
 ## Amendments
 
+- **2026-09-07 — every reported reason carries the error's `cause` chain
+  (issue #270).** The 02:00 enrich fleet reported 2 Guys as `status=failed` /
+  `error: fetch failed`, which read as an upgrade regression; the shop's TLS
+  certificate had expired, and Node's fetch says that same sentence for a dead
+  host, a DNS failure and a bad certificate alike, parking the fault on `cause`.
+  Every summary site — the run-fatal `error:` line, the per-kind `errorSamples`
+  reasons, the fleet roll-up, and the `crawl_runs.error` column — now formats
+  through one `describeError` helper that appends the chain, code first:
+  `fetch failed (CERT_HAS_EXPIRED: certificate has expired)`. Bounded at five
+  causes and cycle-safe, so the line stays one line.
+
 - **2026-09-06 — a page budget is not an outage, and the error line now says
   what the errors were (issue #270).** The first unattended fleet **offers** walk
   reported five-figure error counts on vendors where nothing had failed: Small

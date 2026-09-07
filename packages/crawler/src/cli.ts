@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { createDatabase, swallowShutdownErrors, vendors, type Database } from "@cj/db";
 import { photoStorageFromEnv } from "@cj/photos";
 import { getAdapter, adapterSlugs } from "./adapters/index.js";
+import { describeError } from "./core/errors.js";
 import { createFetcher } from "./core/fetcher.js";
 import { runIngest, type CrawlMode, type IngestResult } from "./core/ingest.js";
 import { runFleet, type FleetResult } from "./core/fleet.js";
@@ -721,6 +722,6 @@ async function main(): Promise<number> {
 main()
   .then((code) => process.exit(code))
   .catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
+    console.error(describeError(error));
     process.exit(1);
   });

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
 import { startTestPostgres, type TestPostgres } from "@cj/db/testing";
 import { createDatabase, swallowShutdownErrors, vendors, crawlRuns, type Pool } from "@cj/db";
+import { createFetcher } from "./fetcher.js";
 import { runFleet, selectEnabledFleet } from "./fleet.js";
 import type { IngestResult } from "./ingest.js";
 import { foxCigar } from "../adapters/fox-cigar.js";
@@ -14,7 +15,9 @@ import type { VendorAdapter } from "../adapters/types.js";
 // itself is injected: `runVendor` records who was asked and answers with a canned
 // result. The real wiring (polite fetcher, storage, runIngest) is exercised
 // vendor-by-vendor in ingest.test.ts, and duplicating it here would test the
-// fetcher again instead of testing the loop.
+// fetcher again instead of testing the loop. The one exception is the cause-chain
+// case below, whose whole claim is that a real fetch failure reaches this catch
+// still carrying what it said.
 
 describe("fleet walk (embedded Postgres)", () => {
   let pg: TestPostgres;
@@ -157,6 +160,44 @@ describe("fleet walk (embedded Postgres)", () => {
     expect(fleet.outcomes[1]!.error).toMatch(/adapter exploded/);
     // Which is what the CLI turns into exit code 1.
     expect(fleet.failed).toBe(2);
+  });
+
+  // WHAT THE FAILURE ACTUALLY WAS (2026-09-07, issue #270). The nightly enrich
+  // fleet recorded 2 Guys as `status=failed / error: fetch failed` when the shop's
+  // TLS certificate had expired — Node's fetch says that sentence for every
+  // transport fault and parks the real one on `cause`. This drives the REAL
+  // fetcher through the fleet's per-vendor catch: the fetch of robots.txt is the
+  // first request a vendor run makes, and it is the one that threw that night.
+  it("carries a fetch failure's cause chain into the per-vendor error", async () => {
+    await clearRegistry();
+    await register(foxCigar, { tier: 1 });
+    await register(cubanLous, { tier: 2 });
+
+    const certExpired = () =>
+      Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }),
+      });
+
+    const fleet = await runFleet(pg.db, pool, {
+      mode: "enrich",
+      runVendor: async (adapter) => {
+        if (adapter.slug !== "fox-cigar") return result("succeeded");
+        const fetcher = createFetcher({
+          minIntervalMs: 0,
+          jitterMs: 0,
+          allowFastInterval: true,
+          sleep: () => Promise.resolve(),
+          fetchImpl: () => Promise.reject(certExpired()),
+        });
+        await fetcher.fetchText(new URL("/robots.txt", adapter.url).toString());
+        return result("succeeded");
+      },
+    });
+
+    // The line an operator reads, and the one that says which side the fault is on.
+    expect(fleet.outcomes[0]!.error).toBe("fetch failed (CERT_HAS_EXPIRED: certificate has expired)");
+    expect(fleet.outcomes[1]!.status).toBe("succeeded");
+    expect(fleet.failed).toBe(1);
   });
 
   // An enabled row nothing can crawl is a registry/deploy mismatch. It is NAMED

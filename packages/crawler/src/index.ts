@@ -25,6 +25,9 @@ export {
   cubanLous,
 } from "./adapters/index.js";
 
+// One line for an operator: an error's message plus its `cause` chain, so a
+// nightly summary says `CERT_HAS_EXPIRED` rather than only `fetch failed`.
+export { describeError } from "./core/errors.js";
 export { parseRobots, type Robots } from "./core/robots.js";
 export {
   createFetcher,
