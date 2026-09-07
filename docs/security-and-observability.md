@@ -48,17 +48,37 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
   value, and a per-key "is a non-empty string" flag, nothing else; key names are
   capped at 20 per record and truncated to 64 characters so a hostile handle keyed
   by an identifier cannot smuggle data in or grow the line without bound. There are
-  exactly **two** deliberate exceptions, both bounded: `fetch.host` (hostname only,
+  exactly **four** deliberate exceptions, all bounded: `fetch.host` (hostname only,
   never path/query/fragment), because it is the only way to tell an egress block
   from an upstream 403 and a hostname is not the credential; and
   `fetch.declaredType`, the handle's `mime_type` or the response's content-type,
   **truncated to 64 characters** — it is host- and model-writable, so it is capped
   like a key name, and without it the magic-byte `sniffedType` has nothing to be
-  compared against. `photo_intake_request` sits **after** auth on purpose — before
-  it, an unauthenticated caller could write arbitrary key names into Loki — and is
-  wrapped in try/catch so a diagnostic can never become an outage. Its `paramKeys`
-  field describes `params` itself, not only the two places the server reads, so a
-  host that puts the file somewhere unexpected is visible rather than silent.
+  compared against. Since 2026-09-07 there are **two more**, both on
+  `photo_intake_request` and both bounded to 64 characters: `client.id`, the
+  resolved OAuth client, and `client.userAgent`, the value of the
+  `openai/userAgent` request-`_meta` key. Two ChatGPT surfaces reach this endpoint
+  under the same OAuth client with different forwarding behaviour — one has never
+  forwarded a file, the other does — and without the user-agent value the records
+  are indistinguishable, so "which surface drops the file?" is unanswerable. No
+  other `_meta` value is ever logged. `photo_intake_request` sits **after** auth on
+  purpose — before it, an unauthenticated caller could write arbitrary key names
+  into Loki — and is wrapped in try/catch so a diagnostic can never become an
+  outage. Its `paramKeys` field describes `params` itself, not only the two places
+  the server reads, so a host that puts the file somewhere unexpected is visible
+  rather than silent.
+- **Photo drop uploads — one line per attempt (2026-09-07).** The drop's upload
+  endpoint (`POST /api/photo-drops/<token>`, ADR-014) emits one `[web]
+  photo_drop_upload` record per request, staged or rejected: `correlationId`,
+  `photoDropId`, `photoId`, `outcome` (`staged` or `rejected:<code>`), `status`,
+  `bytes`, `width`, `height`, `mime`, `ua` (User-Agent, truncated to 64), `ms`. The
+  link had **no logging at all**: a mint whose photo never landed and one whose
+  photo landed fine produced the same silence. `photoDropId` is the join to the
+  `open_photo_drop` that minted the link (which now carries it on `tool_called`),
+  and `correlationId` — minted per request and passed into `stagePhotoByToken` — is
+  the join to the audit row the upload writes. The token is never logged, in any
+  form: it is the whole authorization, so an unknown or expired one records a null
+  `photoDropId` rather than a hash.
 - **No request fails without a record.** `express.json()` guards `/mcp` with an
   explicit **100KB** body limit — deliberately small, because the body is buffered
   *before* bearer auth and the limit is therefore an unauthenticated memory budget

@@ -485,9 +485,19 @@ export async function getPhotoDropByToken(deps: Deps, args: { token: string }): 
 // assertPhotoUploadTokenUsable does for the single-use links, and the same absence
 // of an oracle: unknown, expired and closed-by-deletion are one error. It grants
 // nothing; the stage that follows re-reads the drop.
-export async function assertPhotoDropUsable(deps: Deps, args: { token: string }): Promise<void> {
+//
+// The drop's id comes back for the CALLER'S OWN log line, not for the response:
+// the route has already resolved the drop here, and without the id every upload
+// that follows — staged or rejected — would be unjoinable to the `open_photo_drop`
+// that minted the link. Nothing about it reaches the client, so the link is still
+// no oracle.
+export async function assertPhotoDropUsable(
+  deps: Deps,
+  args: { token: string },
+): Promise<{ photoDropId: string }> {
   const drop = await loadDropByToken(deps, args.token);
   if (dropStatus(drop, deps.now()) === "closed") throw new UploadTokenInvalidError();
+  return { photoDropId: drop.id };
 }
 
 // Put a photo into the drop. Before the claim it is staged; after it, the same
