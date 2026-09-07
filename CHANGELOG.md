@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.0](https://github.com/thaynes43/cigar-journal/compare/v0.44.2...v0.45.0) (2026-09-07)
+
+
+### Features
+
+* **photos:** a drop keeps every link it has issued — a continue mints, it no longer rotates ([#316](https://github.com/thaynes43/cigar-journal/issues/316)) ([#317](https://github.com/thaynes43/cigar-journal/issues/317)) ([143e7e0](https://github.com/thaynes43/cigar-journal/commit/143e7e0ba11f84663cd2bdca665b863f626f989a))
+
 ## [0.44.2](https://github.com/thaynes43/cigar-journal/compare/v0.44.1...v0.44.2) (2026-09-07)
 
 
