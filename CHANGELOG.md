@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.44.1](https://github.com/thaynes43/cigar-journal/compare/v0.44.0...v0.44.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **mcp:** a forwarded attachment is a normal outcome now — copy stops saying no client forwards ([#202](https://github.com/thaynes43/cigar-journal/issues/202)) ([#311](https://github.com/thaynes43/cigar-journal/issues/311)) ([8f3642d](https://github.com/thaynes43/cigar-journal/commit/8f3642deb5b18224c4b4ed60f6a2d5152affac46))
+
 ## [0.44.0](https://github.com/thaynes43/cigar-journal/compare/v0.43.1...v0.44.0) (2026-09-07)
 
 
