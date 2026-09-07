@@ -130,8 +130,19 @@ export function reviewCursorPage(stored: unknown): number {
 // nothing to say about the cursor — a shop, or a reviewer under `seed`/`offers`.
 // `undefined` means LEAVE THE COLUMN ALONE and never "reset it": a lane that did
 // not walk the archive has no opinion about where the next walk starts.
-export function reviewCursorWrite(stats: ReviewWalkStats | undefined): ReviewCursor | undefined {
-  return stats ? { archivePage: stats.cursorTo } : undefined;
+//
+// MERGED INTO THE STORED VALUE, not written over it (#270). The column stopped
+// being this lane's private property when the shop walk got a resume cursor of its
+// own: `crawl_cursor` now holds `archivePage` beside a `seed`/`offers` key, and a
+// whole-object write here would silently reset a walk that shares the row. A
+// stored value that is not an object has nothing to preserve.
+export function reviewCursorWrite(
+  stats: ReviewWalkStats | undefined,
+  stored?: unknown,
+): (ReviewCursor & Record<string, unknown>) | undefined {
+  if (!stats) return undefined;
+  const base = typeof stored === "object" && stored !== null ? { ...(stored as Record<string, unknown>) } : {};
+  return { ...base, archivePage: stats.cursorTo };
 }
 
 // The review shape of an adapter, or null. Written as a function rather than
