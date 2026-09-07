@@ -42,6 +42,7 @@ interface CrawlArgs {
   runId: string | null;
   yes: boolean;
   limit: number | null;
+  fromTop: boolean;
   databaseUrl: string | null;
   help: boolean;
 }
@@ -51,8 +52,8 @@ const MODES = new Set<CrawlMode>(["seed", "offers", "enrich"]);
 const USAGE = `vendor crawler (ADR-006)
 
 usage:
-  crawl --vendor <slug> --mode <seed|offers|enrich> [--dry-run] [--limit N] [--database-url <url>]
-  crawl --all-enabled --mode <offers|enrich> [--dry-run] [--limit N] [--database-url <url>]
+  crawl --vendor <slug> --mode <seed|offers|enrich> [--dry-run] [--limit N] [--from-top] [--database-url <url>]
+  crawl --all-enabled --mode <offers|enrich> [--dry-run] [--limit N] [--from-top] [--database-url <url>]
   crawl --vendor <slug> --probe [--database-url <url>]
   crawl --import-approved <file> [--yes] [--database-url <url>]
   crawl --brand-images [--dry-run] [--limit N] [--brand "<name>"] [--refresh]
@@ -93,7 +94,13 @@ usage:
                      rows that already carry bytes (never ambiguous or suppressed)
   --run-id           stamp brand_images.run_id for this run
   --limit N          cap listings walked (seed/offers), requests drained (enrich),
-                     or brands checked (--brand-images)
+                     or brands checked (--brand-images). A seed/offers walk counts
+                     from its RESUME POSITION, not from the top of the sitemap.
+  --from-top         seed/offers: ignore vendors.crawl_cursor for this run and walk
+                     from the first URL. The run still records where it stopped, so
+                     the next one resumes from there. Use after a sitemap reshuffle
+                     or to re-read a vendor's head; --dry-run to look without
+                     moving the cursor at all.
   --database-url     Postgres URL (default: env DATABASE_URL)
 
 env:
@@ -115,6 +122,7 @@ function parseArgs(argv: string[]): CrawlArgs {
     runId: null,
     yes: false,
     limit: null,
+    fromTop: false,
     databaseUrl: null,
     help: false,
   };
@@ -163,6 +171,9 @@ function parseArgs(argv: string[]): CrawlArgs {
         args.limit = value;
         break;
       }
+      case "--from-top":
+        args.fromTop = true;
+        break;
       case "--database-url":
         args.databaseUrl = argv[++i] ?? null;
         break;
@@ -244,6 +255,22 @@ function formatSummary(
       `matches-auto=${s.matchesAuto} cigars-created=${s.cigarsCreated} offers=${s.offersWritten} ` +
       `photos=${s.photosCaptured} errors=${s.errors}`,
   ];
+  // WHERE THE WALK STARTED, on the line under the counters (#270). Everything
+  // above is "what happened"; without this line it has no frame — `pages=500
+  // listings=0` reads as an outage until you know the walk spent those 500 pages
+  // at position 1 of 10,951, and once the walk resumes the position is the only
+  // thing that says whether the vendor is being covered at all.
+  const walk = s.walk;
+  if (walk) {
+    const total = walk.total.toLocaleString("en-US");
+    const where =
+      walk.resumedAt > 1
+        ? `resumed at ${walk.resumedAt.toLocaleString("en-US")} of ${total} (cursor ${walk.cursorUrl})`
+        : `from top of ${total}` +
+          (walk.cursorMissing ? ` (cursor ${walk.cursorUrl} is gone from the enumeration)` : "") +
+          (walk.fromTop ? " (--from-top)" : "");
+    lines.push(`  walk: ${where}${walk.passCompleted ? " — pass completed" : ""}`);
+  }
   // WHAT THE ERRORS WERE, on the line under the count (#270). A bare `errors=47`
   // is a number an operator can only act on by reproducing the run: the
   // 2026-09-03 Cigarworld drain needed an in-cluster fetch Job to learn that all
@@ -436,7 +463,7 @@ async function runFleetMode(args: CrawlArgs, mode: CrawlMode, databaseUrl: strin
             storage,
             now: () => new Date(),
           },
-          { adapter, vendorId, mode, limit: args.limit, dryRun: args.dryRun },
+          { adapter, vendorId, mode, limit: args.limit, dryRun: args.dryRun, fromTop: args.fromTop },
         ),
       onVendor: (outcome, adapter) => {
         if (outcome.drift.length > 0) console.warn(formatVendorPostureDrift(outcome.name, outcome.drift).join("\n"));
@@ -669,7 +696,7 @@ async function main(): Promise<number> {
     const lane = await withVendorLaneLock(pool, vendorId, mode, () =>
       runIngest(
         { db, fetcher, storage, now: () => new Date() },
-        { adapter, vendorId, mode, limit: args.limit, dryRun: args.dryRun },
+        { adapter, vendorId, mode, limit: args.limit, dryRun: args.dryRun, fromTop: args.fromTop },
       ),
     );
 
