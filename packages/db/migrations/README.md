@@ -554,6 +554,13 @@ init container at startup (ADR-003).
   every vendor row keeps forever). Written in the SAME TRANSACTION as the
   `crawl_runs` completion row, so a failed run leaves it untouched and re-walks
   those pages — a cursor advanced by a run that then died would skip them silently.
+  **Amended by #270:** a shop needs one after all. `adapter.maxPages` bounds a run
+  and not a catalogue, so a capped vendor re-walked the same first N URLs every
+  week; the `seed` and `offers` lanes now store their own resume position (the last
+  URL walked) under their own key beside `archivePage`, and every lane MERGES into
+  the stored value rather than replacing it. Still no migration and no backfill:
+  the column is uninterpreted by design, and an existing `{"archivePage": N}` reads
+  unchanged with the shop keys simply absent.
 - `0039_brand_abbreviation_aliases.sql` — the marca abbreviations a smoker
   speaks (`lfd`, `ajf`, `ryj`, `hdm`, `pdr`, `rp`, `af`), added to
   `brands.aliases` (issue #303). `search_cigars` reads the registry to find the
