@@ -25,6 +25,7 @@ import {
 } from "@cj/domain";
 import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedPhoto } from "@cj/photos";
 import type { VendorAdapter } from "../adapters/types.js";
+import { describeError } from "./errors.js";
 import { collectSitemapSamples, collectSitemapUrls } from "./sitemap.js";
 import { filterProductUrls, pathOf, robotsGatePath } from "./product-url.js";
 import type { JsonLdProduct } from "./jsonld.js";
@@ -112,10 +113,11 @@ export interface ErrorSample {
 // 11,000 URLs still writes a summary an operator reads rather than scrolls.
 const ERROR_SAMPLE_LIMIT = 5;
 
-// ONE LINE, AND A SHORT ONE. `errorText` on a driver error is not a sentence: a
-// Drizzle insert failure stringifies to `Failed query: insert into "offers" …`
-// carrying every parameter, the whole raw listing payload included — roughly 3 KB
-// for one sample, printed into a Job log and persisted into `crawl_runs.stats`.
+// ONE LINE, AND A SHORT ONE. `describeError` on a driver error is not a
+// sentence: a Drizzle insert failure stringifies to `Failed query: insert into
+// "offers" …` carrying every parameter, the whole raw listing payload included —
+// roughly 3 KB for one sample, printed into a Job log and persisted into
+// `crawl_runs.stats`.
 // The first line under a cap keeps the thing that identifies the failure and
 // drops the transcript; a sample is a lead, not a record.
 const ERROR_SAMPLE_REASON_MAX = 200;
@@ -400,10 +402,6 @@ function emptyStats(): IngestStats {
 
 function priceToDecimal(priceCents: number | null): string | null {
   return priceCents != null ? (priceCents / 100).toFixed(2) : null;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 // --- robots + sitemap gate ---------------------------------------------------
@@ -905,7 +903,7 @@ async function ingestListing(
       await capturePhoto(deps, options.vendorId, posture, cigarId, photoUrl, stats);
     } catch (error) {
       // Photo ingestion is isolated from the offer write (ADR-007).
-      countError(stats, "photo", { url: photoUrl ?? url, reason: errorText(error) });
+      countError(stats, "photo", { url: photoUrl ?? url, reason: describeError(error) });
     }
   }
 }
@@ -1084,7 +1082,7 @@ async function walkListings(
         break;
       }
       lastOffset = offset;
-      countError(stats, "fetch", { url, reason: errorText(error) });
+      countError(stats, "fetch", { url, reason: describeError(error) });
       continue;
     }
     lastOffset = offset;
@@ -1131,7 +1129,7 @@ async function walkListings(
 
       await ingestListing(deps, options, posture, crawlRunId, url, listing, product, photoUrl, stats);
     } catch (error) {
-      countError(stats, "ingest", { url, reason: errorText(error) });
+      countError(stats, "ingest", { url, reason: describeError(error) });
     }
   }
 
@@ -1643,7 +1641,7 @@ async function tryEnrichCandidates(
     try {
       captured = await capturePhoto(deps, options.vendorId, posture, ask.cigarId, best.photoUrl, stats);
     } catch (error) {
-      countError(stats, "photo", { url: best.photoUrl ?? best.url, reason: errorText(error) });
+      countError(stats, "photo", { url: best.photoUrl ?? best.url, reason: describeError(error) });
     }
     return captured === "refused" ? "photo_refused" : "match";
   }
@@ -1867,7 +1865,7 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
       return { crawlRunId: null, status: "succeeded", stats, report };
     } catch (error) {
       stats.pagesFetched = deps.fetcher.pagesFetched;
-      return { crawlRunId: null, status: "failed", stats, error: errorText(error), report };
+      return { crawlRunId: null, status: "failed", stats, error: describeError(error), report };
     }
   }
 
@@ -1904,7 +1902,7 @@ export async function runIngest(deps: IngestDeps, options: IngestOptions): Promi
     return { crawlRunId: record.crawlRunId, status: "succeeded", stats, report };
   } catch (error) {
     stats.pagesFetched = deps.fetcher.pagesFetched;
-    const message = errorText(error);
+    const message = describeError(error);
     await record.close("failed", { stats, error: message });
     return { crawlRunId: record.crawlRunId, status: "failed", stats, error: message, report };
   } finally {

@@ -165,6 +165,7 @@ export function createFetcher(options: FetcherOptions = {}): Fetcher {
     // One retry on a 429/503, a 5xx, or a network/timeout error. A throttled
     // response also arms the shared cooldown, so the wait is served by `throttle`
     // at the top of the next iteration — and by every request after this one.
+    let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
       await throttle();
       const controller = new AbortController();
@@ -191,15 +192,24 @@ export function createFetcher(options: FetcherOptions = {}): Fetcher {
         return res;
       } catch (error) {
         clearTimeout(timer);
+        lastError = error;
         if (attempt === 0) {
           await sleep(RETRY_BACKOFF_MS);
           continue;
         }
+        // RETHROWN AS IT CAME. Node's fetch says only `TypeError: fetch failed`
+        // and parks the actual fault (`CERT_HAS_EXPIRED`, `ECONNRESET`, an abort)
+        // on `cause`; re-wrapping it here without carrying the chain would cost
+        // the operator the only line worth reading. `describeError` at the
+        // summary sites is what turns that chain back into a sentence.
         throw error;
       }
     }
-    // Unreachable: the loop either returns or throws.
-    throw new Error(`fetch failed: ${url}`);
+    // Unreachable: the loop either returns or throws. `cause` is carried anyway —
+    // the discipline this guard is under is that nothing in the fetch layer drops
+    // the chain, and a guard that quietly did would be the one exception nobody
+    // thinks to check.
+    throw new Error(`fetch failed: ${url}`, { cause: lastError });
   }
 
   return {

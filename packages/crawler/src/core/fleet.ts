@@ -1,6 +1,7 @@
 import { asc, eq } from "drizzle-orm";
 import { vendors, type Database, type Pool } from "@cj/db";
 import { getAdapterByName } from "../adapters/index.js";
+import { describeError } from "./errors.js";
 import type { VendorAdapter } from "../adapters/types.js";
 import type { CrawlMode, IngestResult } from "./ingest.js";
 import { withVendorLaneLock } from "./run-record.js";
@@ -103,10 +104,6 @@ export async function selectEnabledFleet(db: Database): Promise<FleetVendorRow[]
     .orderBy(asc(vendors.tier), asc(vendors.name));
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 // Walk the enabled fleet serially, one vendor at a time, in tier order.
 //
 // A vendor's failure is CAUGHT here and recorded, never rethrown: `runIngest`
@@ -154,7 +151,7 @@ export async function runFleet(
         ? { ...base, status: lane.value.status, result: lane.value, error: lane.value.error ?? null }
         : { ...base, status: "skipped", result: null, error: null };
     } catch (error) {
-      outcome = { ...base, status: "failed", result: null, error: errorText(error) };
+      outcome = { ...base, status: "failed", result: null, error: describeError(error) };
     }
 
     outcomes.push(outcome);

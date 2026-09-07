@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { brandImages, type BrandImageRow, type Database } from "@cj/db";
 import { brandSlug } from "@cj/domain";
 import { processPhoto as defaultProcessPhoto, type PhotoStorage, type ProcessedPhoto } from "@cj/photos";
+import { describeError } from "./errors.js";
 import { MAX_IMAGE_BYTES, MaxBytesExceededError, type Fetcher } from "./fetcher.js";
 import {
   entitiesUrl,
@@ -463,7 +464,7 @@ export async function runBrandImages(
         await processBrand(deps, item, options, stats, report);
       } catch (error) {
         stats.errors += 1;
-        report.push(`${item.brand}: error (${error instanceof Error ? error.message : String(error)})`);
+        report.push(`${item.brand}: error (${describeError(error)})`);
       }
     }
 
@@ -489,7 +490,7 @@ export async function runBrandImages(
       status: "failed",
       stats,
       report,
-      error: error instanceof Error ? error.message : String(error),
+      error: describeError(error),
     };
   }
 }
@@ -538,7 +539,7 @@ export async function probeBrandTaxonomy(
         }
       }
     } catch (error) {
-      report.push(`${brand}: ${error instanceof Error ? error.message : String(error)}`);
+      report.push(`${brand}: ${describeError(error)}`);
     }
   }
 
