@@ -388,6 +388,24 @@ guessing from `metaKeys`. `photo_intake_request` now carries
 each bounded to 64 characters and the only `_meta` value ever logged
 (security-and-observability.md).
 
+**2026-09-07 — the ChatGPT iOS app never forwards; the link is the phone's
+path.** With the `client.userAgent` value logged (#315), the surface that never
+forwards has a name: `ChatGPT/1.2026.237 (iOS 26.6.1; iPhone18,4; build
+33230022603)`. On 2026-09-07 14:34:47 UTC, after the owner re-imported the
+connector and attached a photo to the message, its `open_photo_drop` call
+carried `argKeys: []` and no `openai/fileParams` — nothing on any channel — and
+the `_meta` keys were `openai/locale, openai/organization, openai/session,
+openai/subject, openai/userAgent, openai/userLocation, timezone`, without the
+`callId`/`itemId`/`progressToken` the forwarding desktop surface sends. Same
+OAuth client as the two desktop forwards of 2026-09-05/06. The link path then
+worked as designed: `photo_drop_upload outcome=staged` 37 seconds later,
+1080×1440 JPEG from iPhone Safari, and the model's follow-up was
+`get_photo_drop` (no mint, #316). Conclusion: on iOS, `no_image_received` is the
+expected result of every call and the relayed link is the workflow, not a
+fallback; there is nothing server-side to fix, and a connector re-import does
+not change what the app sends. Re-test only when the iOS app's build number
+changes.
+
 ## 2026-08-31 — gap-fill hardened: the two-call path, stated as an invariant
 
 The server `INSTRUCTIONS` "Gap-fill" paragraph and `add_cigar`'s tool description
