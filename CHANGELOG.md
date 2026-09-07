@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.44.2](https://github.com/thaynes43/cigar-journal/compare/v0.44.1...v0.44.2) (2026-09-07)
+
+
+### Bug Fixes
+
+* **crawler:** vendor error lines carry the fetch cause chain (CERT_HAS_EXPIRED, not "fetch failed") ([#313](https://github.com/thaynes43/cigar-journal/issues/313)) ([897bbe1](https://github.com/thaynes43/cigar-journal/commit/897bbe1dc913f4c4958a533acd2c3d026a94fba3))
+* **photos:** log every drop-link upload and correlate it with the MCP intake that minted the link ([#315](https://github.com/thaynes43/cigar-journal/issues/315)) ([276bec2](https://github.com/thaynes43/cigar-journal/commit/276bec223e82f4c668109aaca45b4fd21e9a3201))
+
 ## [0.44.1](https://github.com/thaynes43/cigar-journal/compare/v0.44.0...v0.44.1) (2026-09-07)
 
 
