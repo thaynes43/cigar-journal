@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.44.0](https://github.com/thaynes43/cigar-journal/compare/v0.43.1...v0.44.0) (2026-09-07)
+
+
+### Features
+
+* **crawler:** the seed/offers walk resumes from vendors.crawl_cursor — a page budget is a chunk, not a wall ([#270](https://github.com/thaynes43/cigar-journal/issues/270)) ([#309](https://github.com/thaynes43/cigar-journal/issues/309)) ([5d63417](https://github.com/thaynes43/cigar-journal/commit/5d634170b0c963755cd4b1ae49abe4d657d2bf51))
+
 ## [0.43.1](https://github.com/thaynes43/cigar-journal/compare/v0.43.0...v0.43.1) (2026-09-06)
 
 
