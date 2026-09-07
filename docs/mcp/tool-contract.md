@@ -1279,9 +1279,9 @@ result:
   shareWithUser: "Send the user this link to add photos during the smoke: https://… — every photo of this smoke goes there, and they attach to the review when it is saved. It works for 48 hours."
   delivery:                      # as on add_smoke_photo: why no image arrived with the call
     status: no_image_received
-    detail: "No image arrived with this call. Chat attachments are not forwarded to this server by any current client, so the upload link is the path — relay it. This is the expected outcome, not a failure."
+    detail: "No image arrived with this call. When the host forwards an attached photo it is stored directly; when it does not, the upload link is the path — relay it. This is a normal outcome, not a failure."
 
-# With a forwarded image (never observed on this connector — see add_smoke_photo):
+# With a forwarded image (first observed 2026-09-06 — see add_smoke_photo):
 result:
   photoDropId: pd_01kf
   uploadUrl: …
@@ -1390,7 +1390,7 @@ result:
   shareWithUser: "Send the user this link to add their photo: https://… — it works once and is valid for 24 hours."
   delivery:                      # why there is no photo, in terms the model can act on
     status: no_image_received    # | image_reference_unusable | image_fetch_failed | image_unreadable
-    detail: "No image arrived with this call. Chat attachments are not forwarded to this server by any current client, so the upload link is the path — relay it. This is the expected outcome, not a failure."
+    detail: "No image arrived with this call. When the host forwards an attached photo it is stored directly; when it does not, the upload link is the path — relay it. This is a normal outcome, not a failure."
 
 # Mode A — opportunistic: a host forwarded a file with the call
 result:
@@ -1414,19 +1414,21 @@ result:
   page; the token is the authorization, consumed atomically on first successful
   use — after the file has been validated, so a rejected photo leaves the link
   usable (see `apps/web/app/api/photo-uploads/[token]/route.ts`).
-- **Attached image (mode A) — opportunistic, never observed on this connector.**
+- **Attached image (mode A) — opportunistic, and host-dependent.**
   Declared via `_meta["openai/fileParams"]`, so a host that forwards a file gets a
   direct store: the server fetches it (15s timeout, 20MB cap), runs the shared
   pipeline (EXIF applied + all metadata/GPS stripped, normalized JPEG + thumb),
   and files it under the smoke. **As of 2026-08-31 it has never fired here.** A
   live ChatGPT call captured in Loki carried no `openai/fileParams` on any channel
   (`metaFileParams: {"type":"absent"}`, no `image` argument, no undeclared keys),
-  and `mode: attached` has never been seen in production. ChatGPT *does* hydrate
-  `openai/fileParams` for some servers — third-party operators report receiving
-  `{ file_id, download_url }` objects — so the mechanism is real; it has simply
-  never been pointed at this connector, most likely a host-side gating policy
-  rather than anything wrong with our declaration. No other client has the
-  mechanism at all. See [client-compatibility.md](client-compatibility.md). The
+  and `mode: attached` had not been seen in production. **It fired on 2026-09-06**
+  (issue #202): an `open_photo_drop` call from a ChatGPT desktop host arrived with
+  the declared `image` argument hydrated, and the server fetched and stored the
+  file — through the ARGUMENT channel, not `_meta["openai/fileParams"]`, which has
+  still never been observed. So the declaration and the published shape were never
+  the problem; hydration is host-side, and ChatGPT web still forwards nothing. No
+  other client has the mechanism at all. See
+  [client-compatibility.md](client-compatibility.md). The
   path stays declared and implemented because it costs nothing and is how this
   works the day a host does forward a file; it is not what the model or the docs
   should lead with. Only the HOST can forward a file, and the description tells
@@ -1456,13 +1458,13 @@ the thing that actually works — was withheld. The signal is not lost: it moves
 the `photo_intake` log record (below), which is queryable and alertable, unlike an
 error the user never sees. Consequence to watch: a systemic fetch regression is now
 quieter in the tool result, so a sustained non-`attached` rate deserves an alert —
-though with attachment unobserved, the current non-`attached` rate is 100%.
+though with attachment rare, the non-`attached` rate is near 100%.
 
 `delivery` (mode B only) tells the model **why**, without leaking anything:
 
 | `delivery.status` | Meaning | What the model should do |
 |---|---|---|
-| `no_image_received` | Nothing was forwarded on either channel — the normal outcome on every current client. | Hand over the link. Never report it as a problem. |
+| `no_image_received` | Nothing was forwarded on either channel — a normal outcome, not a failure. | Hand over the link. Never report it as a problem. |
 | `image_reference_unusable` | A file handle arrived carrying nothing the server can read. | Hand over the link. |
 | `image_fetch_failed` | A reference arrived but the image could not be retrieved. | Hand over the link. |
 | `image_unreadable` | Bytes arrived but are not a readable photo. | Hand over the link. |
@@ -1535,9 +1537,10 @@ invalid/expired failure (`upload_token_invalid`) surfaces on the upload page (41
 
 **The tool declares its file input.** Per OpenAI's Apps SDK
 ([reference](https://developers.openai.com/apps-sdk/reference)) a tool that wants
-an attached file MUST declare it, or ChatGPT forwards nothing (the owner-blocking
-bug: the receive path worked, but with no declaration ChatGPT never sent the
-image). `add_smoke_photo` therefore declares an **optional** top-level `image`
+an attached file MUST declare it — the declaration is what a host hydrates (the
+owner-blocking bug: the receive path worked, but with no declaration ChatGPT never
+sent the image; forwarding was first observed 2026-09-06, issue #202).
+`add_smoke_photo` therefore declares an **optional** top-level `image`
 property and lists it in the **tool-level** `_meta["openai/fileParams"]: ["image"]`
 published in `tools/list`. The MCP SDK (1.30.x) carries this via a `_meta`
 pass-through on `registerTool` — no response hooking needed. The `image` property
