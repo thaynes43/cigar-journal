@@ -146,8 +146,8 @@ export const PERSONAL_SCOPE = "journal:read";
 
 // OpenAI Apps SDK file-input declaration, shared by the two photo tools. A tool
 // must DECLARE which top-level input properties carry files, as a string[] in the
-// tool-level `_meta["openai/fileParams"]` published in tools/list, or ChatGPT never
-// forwards the user's attached image (developers.openai.com/apps-sdk). We list the
+// tool-level `_meta["openai/fileParams"]` published in tools/list; the declaration is
+// what a host hydrates (developers.openai.com/apps-sdk). We list the
 // `image` property (schemas.ts) here and pass this on both registrations
 // (server.ts): open_photo_drop takes a forwarded image into the drop exactly as
 // add_smoke_photo takes one onto the smoke (ADR-014).

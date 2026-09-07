@@ -382,7 +382,7 @@ describe("@cj/mcp adapter", () => {
   it("tools/list declares the file input and the resume id on open_photo_drop, and no smokeId", async () => {
     // The drop takes the SAME host-forwarded attachment add_smoke_photo takes
     // (ADR-014), so it must publish the same declaration — the `_meta` list and a
-    // real top-level `image` property, or ChatGPT forwards nothing. And it must
+    // real top-level `image` property — the declaration a host hydrates. And it must
     // publish NO smokeId: the smoke it collects for does not exist yet, which is
     // the entire reason the tool is here.
     await withClient(ownerFull, async (client) => {

@@ -37,7 +37,7 @@ spike, since then against production and the Loki record) · `documented`
 | Tool availability late in a long conversation | unverified — a full-length smoke has still never been measured end to end. Real sessions have run since launch, but nothing in the record establishes tool availability late in one, so this stays open rather than being marked green by association | **verified**: tools persist for the session | **verified**: tools persist for the session | client-dependent |
 | Token refresh / long-lived link | **verified** 08-31 — authenticated tool calls from the same connector are in the Loki record on 08-30 and 08-31, days after the 08-26/27 authorization, with no re-consent in between | **verified** 08-26: silent refresh after 10-min token expiry, rotation honored (server `refresh_rotated`) | unverified (session outlived no token in test) | client-dependent |
 | Reconnect after expiry | **verified** 08-31, implied by the row above — the 1h access tokens had long expired, so those calls rode a refresh; not driven as an isolated test | **verified** 08-26: post-expiry call succeeds, no user interaction | unverified | client-dependent |
-| In-chat file attachment → tool args | **unsupported in practice** — verified 08-31 and again 09-01 with the image attached to the *same message* under the strict reference schema: the host forwards nothing on any channel. The photo drop (ADR-014) is the flow for a live smoke; the upload link for a saved one | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported** — Codex source gates `fileParams` to its first-party apps server | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
+| In-chat file attachment → tool args | **works from ChatGPT since 2026-09-06** — an `open_photo_drop` call from the ChatGPT Work desktop host arrived with the declared `image` argument hydrated and the server stored the file (argument channel; the `_meta["openai/fileParams"]` channel has never been observed). ChatGPT **web** still forwards nothing on any channel — verified 08-31, 09-01, 09-03 — so the upload link stays the fallback: the photo drop (ADR-014) for a live smoke, the one-time link for a saved one | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported** — Codex source gates `fileParams` to its first-party apps server | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
 
 ¹ Owner's account, Developer Mode, 2026-08-26 (spike). **Production
 verified 2026-08-27**: ChatGPT Web connected to the real server end to end
@@ -321,15 +321,16 @@ about the mechanism; the value is that the drop's own tool now shows it, with no
 `image` argument published for a model to fill.
 
 **What changed because of it (#288).** The wording, not the intake. The
-`delivery.detail` for `no_image_received` now reads
+`delivery.detail` for `no_image_received` reads, in its current form
 
-> No image arrived with this call. Chat attachments are not forwarded to this
-> server by any current client, so the upload link is the path — relay it. This is
-> the expected outcome, not a failure.
+> No image arrived with this call. When the host forwards an attached photo it is
+> stored directly; when it does not, the upload link is the path — relay it. This
+> is a normal outcome, not a failure.
 
-and `open_photo_drop` / `add_smoke_photo` each carry one sentence saying
-`no_image_received` is the normal outcome on every current client and must not be
-reported as a problem. The old sentence ("No image arrived with this call.") was
+and `open_photo_drop` / `add_smoke_photo` each carry one sentence telling the model
+to relay the link and not report `no_image_received` as a problem. (The 09-03
+wording said no current client forwards; 09-06 falsified that and it was replaced —
+see the section below.) The old sentence ("No image arrived with this call.") was
 true and read as a fault, which cost the owner a turn of the model apologizing
 before it relayed the link that works.
 
@@ -342,6 +343,43 @@ and no existing schema changes shape (R-MCP-4). The ChatGPT per-conversation
 schema cache applies as always — the new tool and the two arguments reach an
 in-flight conversation only after a connector refresh and a new chat, and until
 then a `photoDropId` fails validation client-side rather than reaching the server.
+
+## 2026-09-06 — forwarding observed
+
+The first hydrated file input this server has ever received. Owner session in
+**ChatGPT Work (desktop host adapter)**, prod v0.42.0, from Loki
+(`photo_intake_request` / `photo_intake`):
+
+```
+01:40:49Z open_photo_drop  argKeys ["image"]  argImage object, filled
+                           download_url, file_id, file_name, mime_type
+                           metaFileParams {"type":"absent"}, count 0
+          photo_intake     outcome attached, channel argument, mode attached
+                           fetched sdmntprcentralus.oaiusercontent.com 200,
+                           170,310 bytes, image/jpeg declared and sniffed, 142 ms
+01:44:39Z open_photo_drop  argKeys []  argImage absent  metaFileParams absent
+          photo_intake     outcome no_delivery, channel none, mode upload_url
+```
+
+`metaKeys` on both: `callId, itemId, openai/organization, openai/session,
+openai/subject, openai/userLocation, progressToken` — a different host signature
+from ChatGPT web's, which carries `openai/locale`, `openai/userAgent` and
+`timezone` and none of `callId`, `itemId`, `progressToken`.
+
+**What it settles.** Mode A works end to end: this host hydrates the strict `image`
+schema through the **argument** channel, the server fetched and stored the file, and
+the photo landed on the smoke. The declaration and the published shape were never
+the cause of the three earlier misses — those were host-side — and the upstream
+question sharpens from "is hydration gated?" to "why does the same connector get its
+file input hydrated from the ChatGPT Work desktop host and never from ChatGPT web?".
+The `_meta["openai/fileParams"]` channel remains unobserved on any client.
+
+**What stays.** The upload link keeps leading in the tool descriptions and the
+server instructions, because every other host measured forwards nothing and the
+same host forwarded nothing on its own next turn. The `photo_intake_request` probe
+and its logging stay — they are what separates a host that forwards from one that
+does not. And `no_image_received` stays a normal outcome, not a failure; only the
+claim that no client forwards was removed from the copy.
 
 ## 2026-08-31 — gap-fill hardened: the two-call path, stated as an invariant
 
@@ -439,11 +477,12 @@ and the journal's own record shows conversational smokes alongside the imported
 archive. Remaining watch item, unchanged: connector availability across a very
 long conversation (matrix row above).
 
-**Photos take a link, on every client.** No host forwards an in-chat attachment
-into tool arguments (matrix row, and the 08-31 and 09-01 sections below). During
-a smoke the model opens a photo drop (`open_photo_drop`, ADR-014) as soon as a
-photo appears and the user adds each photo to it once; `save_smoke` claims the
-drop. For a smoke that is already saved, `add_smoke_photo` returns a one-time
+**Photos take a link, unless the host forwards.** Only the ChatGPT desktop host
+has ever placed an in-chat attachment into tool arguments, first on 2026-09-06;
+every other client measured forwards nothing (matrix row, and the dated sections
+below). During a smoke the model opens a photo drop (`open_photo_drop`, ADR-014)
+as soon as a photo appears and the user adds each photo to it once; `save_smoke`
+claims the drop. For a smoke that is already saved, `add_smoke_photo` returns a one-time
 upload link.
 
 **Fallback (if a client loses write tools):** the model produces the exact
