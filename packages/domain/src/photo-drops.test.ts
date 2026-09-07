@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { auditLog, photoDrops, stagedSmokePhotos } from "@cj/db";
+import { auditLog, photoDrops, photoDropTokens, stagedSmokePhotos } from "@cj/db";
 import { createMemoryPhotoStorage, type PhotoStorage } from "@cj/photos";
 import { createHarness, newRequestId, type DomainHarness } from "./testing/harness.js";
 import { saveSmoke } from "./save-smoke.js";
@@ -19,6 +19,7 @@ import {
   removePhotoDropPhoto,
   getPhotoDropPhotoObject,
   MAX_PHOTOS_PER_DROP,
+  PHOTO_DROP_TOKENS_MAX,
   PHOTO_DROP_TTL_SECONDS,
   DROP_SESSION_GAP_HOURS,
 } from "./photo-drops.js";
@@ -84,6 +85,13 @@ describe("photo drops", () => {
     return rows.filter((r) => r.action === action);
   }
 
+  async function dropTokens(dropId: string) {
+    return h.deps.db
+      .select()
+      .from(photoDropTokens)
+      .where(eq(photoDropTokens.photoDropId, dropId));
+  }
+
   async function auditActions(dropId: string): Promise<string[]> {
     const rows = await h.deps.db.select().from(auditLog).where(eq(auditLog.userId, user.userId));
     return rows
@@ -99,9 +107,12 @@ describe("photo drops", () => {
     expect(drop.token).toHaveLength(43); // 32 random bytes, base64url
     expect(drop.expiresAt).toBe(new Date(BASE.getTime() + PHOTO_DROP_TTL_SECONDS * 1000).toISOString());
 
-    // The raw token is returned, never stored.
+    // The raw token is returned, never stored — and a fresh drop starts with ONE
+    // link (issue #316), written in the same transaction as the drop itself.
+    const tokens = await dropTokens(drop.photoDropId);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]!.tokenHash).not.toBe(drop.token);
     const rows = await h.deps.db.select().from(photoDrops).where(eq(photoDrops.id, drop.photoDropId));
-    expect(rows[0]!.tokenHash).not.toBe(drop.token);
     expect(rows[0]!.claimedAt).toBeNull();
     expect(rows[0]!.smokeId).toBeNull();
 
@@ -111,7 +122,7 @@ describe("photo drops", () => {
     expect(await auditActions(drop.photoDropId)).toContain("photo_drop.open");
   });
 
-  it("re-opens the same drop with a fresh token and kills the old link", async () => {
+  it("re-opens the same drop with another link and leaves the earlier one working", async () => {
     const first = await openPhotoDrop(h.deps, storage, user);
     await stagePhotoByToken(h.deps, storage, { token: first.token, image: image() });
     await stagePhotoByToken(h.deps, storage, { token: first.token, kind: "band", image: image() });
@@ -124,20 +135,110 @@ describe("photo drops", () => {
     // The expiry runs from the OPENING; re-opening does not extend it.
     expect(second.expiresAt).toBe(first.expiresAt);
 
-    // The raw token is not re-derivable, so handing the drop back necessarily
-    // rotated it — the earlier link is now simply unknown.
-    await expect(assertPhotoDropUsable(h.deps, { token: first.token })).rejects.toBeInstanceOf(
-      UploadTokenInvalidError,
-    );
-    await expect(getPhotoDropByToken(h.deps, { token: first.token })).rejects.toBeInstanceOf(
-      UploadTokenInvalidError,
-    );
+    // A continue MINTS, it does not rotate (issue #316). The raw token is not
+    // re-derivable, so the caller gets a new link — and the page the user still
+    // has open is holding the earlier one, so it stays valid. Both reach the same
+    // drop and see the same photos.
+    for (const token of [first.token, second.token]) {
+      await expect(assertPhotoDropUsable(h.deps, { token })).resolves.toEqual({
+        photoDropId: first.photoDropId,
+      });
+      const view = await getPhotoDropByToken(h.deps, { token });
+      expect(view.photos).toHaveLength(2);
+      expect(view.photos.every((p) => p.attached === false)).toBe(true);
+    }
 
-    await assertPhotoDropUsable(h.deps, { token: second.token });
-    const view = await getPhotoDropByToken(h.deps, { token: second.token });
-    expect(view.photos).toHaveLength(2);
-    expect(view.photos.every((p) => p.attached === false)).toBe(true);
-    expect(await auditActions(first.photoDropId)).toContain("photo_drop.rotate");
+    // And a photo through the EARLIER link lands in the drop the later one reads.
+    const late = await stagePhotoByToken(h.deps, storage, { token: first.token, image: image() });
+    const seen = await getPhotoDropByToken(h.deps, { token: second.token });
+    expect(seen.photos.map((p) => p.photoId)).toContain(late.photoId);
+
+    expect(await auditActions(first.photoDropId)).toContain("photo_drop.mint");
+    expect((await auditRows("photo_drop.mint"))[0]!.after).toMatchObject({
+      photoDropId: first.photoDropId,
+      tokens: 2,
+    });
+    expect(await dropTokens(first.photoDropId)).toHaveLength(2);
+  });
+
+  it("keeps at most PHOTO_DROP_TOKENS_MAX links, and the oldest is the one that dies", async () => {
+    // The set is bounded, so one more open than the ceiling retires the first
+    // link — the only way a link dies before its drop does.
+    const opens = [await openPhotoDrop(h.deps, storage, user)];
+    for (let i = 0; i < PHOTO_DROP_TOKENS_MAX; i++) {
+      opens.push(await openPhotoDrop(h.deps, storage, user));
+    }
+    const dropId = opens[0]!.photoDropId;
+    expect(new Set(opens.map((o) => o.photoDropId))).toEqual(new Set([dropId]));
+    expect(await dropTokens(dropId)).toHaveLength(PHOTO_DROP_TOKENS_MAX);
+
+    // A pruned link is indistinguishable from one that never existed.
+    await expect(assertPhotoDropUsable(h.deps, { token: opens[0]!.token })).rejects.toBeInstanceOf(
+      UploadTokenInvalidError,
+    );
+    await expect(
+      stagePhotoByToken(h.deps, storage, { token: opens[0]!.token, image: image() }),
+    ).rejects.toBeInstanceOf(UploadTokenInvalidError);
+
+    for (const open of opens.slice(1)) {
+      await expect(assertPhotoDropUsable(h.deps, { token: open.token })).resolves.toEqual({
+        photoDropId: dropId,
+      });
+    }
+
+    // The audit row counts what is live AFTER the prune, so the ceiling is legible
+    // from the trail alone.
+    const minted = (await auditRows("photo_drop.mint"))
+      .map((r) => (r.after as { tokens: number }).tokens)
+      .sort((a, b) => a - b);
+    expect(minted).toEqual([2, 3, 4, 5, 5]);
+  });
+
+  it("keeps every live link working through the claim", async () => {
+    const first = await openPhotoDrop(h.deps, storage, user);
+    const second = await openPhotoDrop(h.deps, storage, user);
+    await stagePhotoByToken(h.deps, storage, { token: first.token, image: image() });
+
+    const smokeId = await newSmoke();
+    expect(await claimPhotoDrop(h.deps, user, { photoDropId: first.photoDropId, smokeId })).toMatchObject({
+      status: "claimed",
+      attached: 1,
+    });
+
+    // The claim binds the DROP, not a link: a photo through either one goes
+    // straight onto the smoke, exactly as the single-token drop's did.
+    const viaFirst = await stagePhotoByToken(h.deps, storage, { token: first.token, image: image() });
+    const viaSecond = await stagePhotoByToken(h.deps, storage, { token: second.token, image: image() });
+    expect([viaFirst.attached, viaSecond.attached]).toEqual([true, true]);
+
+    const photos = await listSmokePhotos(h.deps, user, { smokeId });
+    expect(photos).toHaveLength(3);
+    expect(photos.map((p) => p.photoId)).toEqual(
+      expect.arrayContaining([viaFirst.photoId, viaSecond.photoId]),
+    );
+    for (const token of [first.token, second.token]) {
+      expect((await getPhotoDropByToken(h.deps, { token })).smokeId).toBe(smokeId);
+    }
+  });
+
+  it("takes every one of a drop's links with it when the drop is swept", async () => {
+    const stale = await openPhotoDrop(h.deps, storage, user);
+    const alsoStale = await openPhotoDrop(h.deps, storage, user);
+    expect(alsoStale.photoDropId).toBe(stale.photoDropId);
+
+    await h.deps.db
+      .update(photoDrops)
+      .set({ createdAt: new Date(BASE.getTime() - 8 * 86_400 * 1000) })
+      .where(eq(photoDrops.id, stale.photoDropId));
+    expect(await sweepPhotoDrops(h.deps, storage, { userId: user.userId })).toMatchObject({ drops: 1 });
+
+    // The token rows cascade with the drop, so no link outlives it.
+    expect(await dropTokens(stale.photoDropId)).toEqual([]);
+    for (const token of [stale.token, alsoStale.token]) {
+      await expect(getPhotoDropByToken(h.deps, { token })).rejects.toBeInstanceOf(
+        UploadTokenInvalidError,
+      );
+    }
   });
 
   it("stages photos under drop/ keys up to the cap, then refuses", async () => {
@@ -703,9 +804,9 @@ describe("photo drops", () => {
       expect(fresh.sessionStartedAt.toISOString()).toBe(tomorrow.toISOString());
       expect(fresh.lastOpenedAt.toISOString()).toBe(tomorrow.toISOString());
 
-      // The old drop is UNTOUCHED — not its token, not either stamp.
+      // The old drop is UNTOUCHED — no link minted on it, neither stamp moved.
       const after = await dropRow(first.photoDropId);
-      expect(after.tokenHash).toBe(before.tokenHash);
+      expect(await dropTokens(first.photoDropId)).toHaveLength(1);
       expect(after.lastOpenedAt.toISOString()).toBe(before.lastOpenedAt.toISOString());
       expect(after.sessionStartedAt.toISOString()).toBe(before.sessionStartedAt.toISOString());
       expect(after.expiresAt.toISOString()).toBe(before.expiresAt.toISOString());
@@ -735,16 +836,23 @@ describe("photo drops", () => {
       expect(resumed.expiresAt).toBe(first.expiresAt);
 
       // A resume CONTINUES the session — the caller lost the link, not the smoke
-      // — but the rotation is the point, so the old link is dead.
+      // — and mints one without retiring the link the user may still hold (#316).
       const row = await dropRow(first.photoDropId);
       expect(row.sessionStartedAt.toISOString()).toBe(BASE.toISOString());
       expect(row.lastOpenedAt.toISOString()).toBe(tomorrow.toISOString());
-      await expect(assertPhotoDropUsable(h.deps, { token: first.token })).rejects.toBeInstanceOf(
-        UploadTokenInvalidError,
-      );
-      const view = await getPhotoDropByToken(h.deps, { token: resumed.token });
-      expect(view.photos.map((p) => p.photoId)).toEqual([staged.photoId]);
-      expect(await auditActions(first.photoDropId)).toContain("photo_drop.rotate");
+      expect(resumed.token).not.toBe(first.token);
+      for (const token of [first.token, resumed.token]) {
+        await expect(assertPhotoDropUsable(h.deps, { token })).resolves.toEqual({
+          photoDropId: first.photoDropId,
+        });
+        const view = await getPhotoDropByToken(h.deps, { token });
+        expect(view.photos.map((p) => p.photoId)).toEqual([staged.photoId]);
+      }
+      const late = await stagePhotoByToken(h.deps, storage, { token: first.token, image: image() });
+      expect(
+        (await getPhotoDropByToken(h.deps, { token: resumed.token })).photos.map((p) => p.photoId),
+      ).toEqual([staged.photoId, late.photoId]);
+      expect(await auditActions(first.photoDropId)).toContain("photo_drop.mint");
     });
 
     it("refuses to resume another user's drop, a claimed drop, or a malformed id", async () => {

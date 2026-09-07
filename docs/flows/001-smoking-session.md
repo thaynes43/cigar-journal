@@ -54,7 +54,8 @@ The claim runs after the save commits and never fails it; a drop the save did
 not carry is attached later with `add_smoke_photo { smokeId, photoDropId }`.
 Checking what the drop holds is `get_photo_drop { photoDropId }`, which touches
 nothing — asking by re-opening rotated the token and killed the user's link
-(issue #302).
+(issue #302), and even now that a re-open only mints beside the old link
+(issue #316), a read is not an event.
 The link keeps working for the saved smoke until it expires, so a photo of the
 nub taken after the save needs nothing new. The drop also dates the smoke: the
 opening that began this session is where `startedAt` comes from when the user

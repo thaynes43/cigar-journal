@@ -1,8 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, ne, notInArray, or, sql } from "drizzle-orm";
 import {
   auditLog,
   photoDrops,
+  photoDropTokens,
   smokePhotos,
   smokes,
   stagedSmokePhotos,
@@ -89,6 +90,14 @@ export const MAX_PHOTO_CAPTION_LENGTH = 200;
 export const DROP_SESSION_GAP_HOURS = 4;
 const DROP_SESSION_GAP_MS = DROP_SESSION_GAP_HOURS * 3600 * 1000;
 
+// How many of a drop's links stay valid at once (issue #316). A continue mints
+// another link and leaves the earlier ones working — the page the user has open is
+// holding one — but a set with no ceiling would let one long session accumulate
+// live links without limit, so past this the oldest is pruned. Five: more opens
+// than any observed session has made, and small enough that a leaked link is
+// retired by the ones that follow it.
+export const PHOTO_DROP_TOKENS_MAX = 5;
+
 export interface OpenPhotoDropInput {
   // Resume a NAMED drop (issue #302). Present means "this drop, whatever the
   // gap": it comes back with a fresh link, continuing its session rather than
@@ -145,18 +154,21 @@ export interface RemovePhotoDropPhotoInput {
 
 // Hand the caller a drop link. ONE OPEN DROP PER SESSION (ADR-014 as amended by
 // issue #302): an unclaimed, unexpired drop last opened inside
-// DROP_SESSION_GAP_HOURS is returned again with a FRESH token, which is what lets
+// DROP_SESSION_GAP_HOURS is returned again with ANOTHER token, which is what lets
 // a model that lost the id in a two-hour chat get its photos back. Past that gap
 // the previous run is over and this open is a new smoke, so it gets a NEW drop —
-// and the old one is left entirely alone: its token is not rotated, its stamps do
+// and the old one is left entirely alone: no token is minted on it, its stamps do
 // not move, its staged photos stay with it, and its own link keeps working until
 // it expires, so a late photo through that link still lands where it was meant
 // to. `photoDropId` overrides all of that and resumes the named drop.
 //
-// Rotation is forced, not chosen — only the hash is stored, so the earlier raw
-// token is not re-derivable and re-issuing necessarily kills the old link. The
-// expiry is NOT extended: 48 hours run from the opening, not from the last
-// mention, and the caller states the remainder rather than the constant.
+// A continue MINTS, it does not rotate (issue #316): only hashes are stored,
+// so the earlier raw token is not re-derivable and the caller who lost the link
+// needs a new one — but the earlier link is left valid, because the page the user
+// still has open is holding it. A drop keeps at most PHOTO_DROP_TOKENS_MAX hashes;
+// past that the oldest is pruned, which is the only way a link dies before the
+// drop does. The expiry is NOT extended: 48 hours run from the opening, not from
+// the last mention, and the caller states the remainder rather than the constant.
 export async function openPhotoDrop(
   deps: Deps,
   storage: PhotoStorage,
@@ -184,18 +196,51 @@ export async function openPhotoDrop(
     // caller saying "that drop" — neither is a new smoke. `last_opened_at`
     // always advances; it is what the next gap is measured from.
     await deps.db.transaction(async (tx) => {
-      await tx
-        .update(photoDrops)
-        .set({ tokenHash, lastOpenedAt: now })
-        .where(eq(photoDrops.id, existing.id));
+      const minted = await tx
+        .insert(photoDropTokens)
+        .values({ photoDropId: existing.id, tokenHash })
+        .returning({ id: photoDropTokens.id });
+      await tx.update(photoDrops).set({ lastOpenedAt: now }).where(eq(photoDrops.id, existing.id));
+
+      // The set is bounded, so the mint prunes in the same transaction that made
+      // it necessary: keep the newest PHOTO_DROP_TOKENS_MAX, drop the rest. The
+      // row just minted is excluded from the delete explicitly rather than trusted
+      // to sort newest — the caller must never be handed a link this statement
+      // then removes, whatever `issued_at` ties the database clock produces.
+      await tx.delete(photoDropTokens).where(
+        and(
+          eq(photoDropTokens.photoDropId, existing.id),
+          ne(photoDropTokens.id, minted[0]!.id),
+          notInArray(
+            photoDropTokens.id,
+            tx
+              .select({ id: photoDropTokens.id })
+              .from(photoDropTokens)
+              .where(eq(photoDropTokens.photoDropId, existing.id))
+              .orderBy(desc(photoDropTokens.issuedAt), desc(photoDropTokens.id))
+              .limit(PHOTO_DROP_TOKENS_MAX),
+          ),
+        ),
+      );
+
+      const live = await tx
+        .select({ value: count() })
+        .from(photoDropTokens)
+        .where(eq(photoDropTokens.photoDropId, existing.id));
+
       await tx.insert(auditLog).values({
         userId: principal.userId,
         ...auditActor(principal, input.actor ?? "web"),
-        action: "photo_drop.rotate",
+        action: "photo_drop.mint",
         smokeId: null,
         before: null,
-        // Never the hash and never the raw token — only which drop and until when.
-        after: { photoDropId: existing.id, expiresAt: existing.expiresAt.toISOString() },
+        // Never a hash and never a raw token — only which drop, until when, and
+        // how many of its links are live once the prune has run.
+        after: {
+          photoDropId: existing.id,
+          expiresAt: existing.expiresAt.toISOString(),
+          tokens: Number(live[0]?.value ?? 0),
+        },
         correlationId: input.correlationId ?? null,
       });
     });
@@ -221,13 +266,16 @@ export async function openPhotoDrop(
       // A fresh drop opens its own session: both stamps are this open (ADR-016).
       .values({
         userId: principal.userId,
-        tokenHash,
         expiresAt,
         sessionStartedAt: now,
         lastOpenedAt: now,
       })
       .returning();
     const row = inserted[0]!;
+    // A fresh drop starts with ONE link (issue #316) — the set grows only when a
+    // later open continues this drop — and it is written in the same transaction:
+    // a drop with no token row would be a drop nothing could reach.
+    await tx.insert(photoDropTokens).values({ photoDropId: row.id, tokenHash });
     await tx.insert(auditLog).values({
       userId: principal.userId,
       ...auditActor(principal, input.actor ?? "web"),
@@ -779,15 +827,24 @@ async function ownedDrop(deps: Deps, principal: Principal, photoDropId: string):
   return drop;
 }
 
+// The one place a raw token becomes a drop, for every token-authorized service in
+// this file. A drop is reached through ANY of its live hashes (issue #316) and
+// behaves identically down every one of them — the join is the only difference
+// between the link the user is holding and the link the model was handed last.
+//
 // A dead drop still RESOLVES — `closed` is a state its page reports, not an
-// error — so only an unknown token is invalid here.
+// error — so only an unknown token is invalid here, and unknown covers every way
+// a hash can be absent: never minted, pruned past PHOTO_DROP_TOKENS_MAX, or
+// cascaded away with a swept or deleted drop. One error for all of them, so the
+// link is no oracle for which.
 async function loadDropByToken(deps: Deps, token: string): Promise<PhotoDropRow> {
   const rows = await deps.db
-    .select()
-    .from(photoDrops)
-    .where(eq(photoDrops.tokenHash, hashToken(token)))
+    .select({ drop: photoDrops })
+    .from(photoDropTokens)
+    .innerJoin(photoDrops, eq(photoDrops.id, photoDropTokens.photoDropId))
+    .where(eq(photoDropTokens.tokenHash, hashToken(token)))
     .limit(1);
-  const drop = rows[0];
+  const drop = rows[0]?.drop;
   if (!drop) throw new UploadTokenInvalidError();
   return drop;
 }

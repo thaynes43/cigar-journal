@@ -55,6 +55,8 @@ smoke exists, that takes every photo of that smoke until it expires.**
   *Amended 2026-09-06 (issue #302): one open drop per **session** — a re-open
   past the session gap opens a fresh drop, and `photoDropId` resumes a named
   one.*
+  *Amended 2026-09-07 (issue #316): a continue mints another link and leaves
+  every earlier one working — see Amendments.*
 - **`save_smoke` claims.** `photoDropId` on the save moves the drop's staged
   photos onto the new smoke and binds the drop to it, so a photo added through
   the same link afterwards lands directly on the smoke until the link expires.
@@ -147,6 +149,21 @@ smoke exists, that takes every photo of that smoke until it expires.**
   the gap, or a new one. **The expiry the tool states is the expiry the drop
   has**: the sentence is derived from `expiresAt` at the moment of the call,
   never from the constant, so a re-open says how long is actually left.
+
+- **2026-09-07 — a continue keeps every link alive (issue #316).** The #302
+  amendment removed rotation's trap across evenings and left it inside one: on
+  2026-09-07 the model re-opened a live drop 64 seconds after the user's phone had
+  uploaded through the link, and the page still open in the user's hand held a
+  dead token — its next photo 410'd. The link the model relays sits in the chat
+  transcript regardless, so rotating it shrinks nothing; it only cuts off the
+  page. Decision: **a drop holds a bounded set of valid tokens, not one.** Every
+  open of a live drop — inside the session gap or by `photoDropId` — mints a fresh
+  link for the caller *and* leaves every earlier link working until the drop
+  expires; at most `PHOTO_DROP_TOKENS_MAX` (5) per drop, oldest pruned first.
+  "The raw token is never stored" stands — only hashes are kept, in a child table
+  — which is exactly why a continue hands out another link rather than the same
+  one. A fresh drop still starts with a single token; expiry and the claim are
+  unchanged; `get_photo_drop` remains the read that mints nothing.
 
 ## Alternatives considered
 

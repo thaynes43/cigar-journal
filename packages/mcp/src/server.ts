@@ -812,9 +812,11 @@ function remainingLifetime(expiresAt: string, now: Date): string {
 }
 
 // The sentence the model relays. A fresh drop states its full lifetime; a re-used
-// or resumed one states what is actually left and names what is already waiting,
-// so a model that lost the id can tell the user their photos are still there
-// rather than reopening the subject.
+// or resumed one LEADS WITH THE LINK THE USER ALREADY HAS (issue #316) — it is
+// still valid, and a model told only about the new one would relay a second URL
+// as though the first had died — then states what is actually left and names what
+// is already waiting, so a model that lost the id can tell the user their photos
+// are still there rather than reopening the subject.
 function shareDropSentence(args: {
   url: string;
   expiresAt: string;
@@ -827,8 +829,10 @@ function shareDropSentence(args: {
     args.reused && args.photoCount > 0
       ? `it already holds ${args.photoCount} ${args.photoCount === 1 ? "photo" : "photos"}; `
       : "";
-  const lifetime = args.reused ? `It works for about ${remaining} more.` : `It works for ${remaining}.`;
-  return `Send the user this link to add photos during the smoke: ${args.url} — ${holds}every photo of this smoke goes there, and they attach to the review when it is saved. ${lifetime}`;
+  const collects = "every photo of this smoke goes there, and they attach to the review when it is saved.";
+  return args.reused
+    ? `The link the user already has still works; this one reaches the same drop: ${args.url} — ${holds}${collects} It works for about ${remaining} more.`
+    : `Send the user this link to add photos during the smoke: ${args.url} — ${collects} It works for ${remaining}.`;
 }
 
 export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpServer {
@@ -1345,9 +1349,11 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // multi-use for its lifetime, so re-minting per photo would train the user to
       // wait for a new link they do not need. And it now says where to send the
       // "how many photos?" question (issue #302): the model asked it by re-opening
-      // the drop, which rotated the token and killed the link the user already had.
+      // the drop, which then rotated the token and killed the link the user
+      // already had — a continue mints beside it now (issue #316), but a second
+      // URL for a link that still works is still noise to relay.
       description:
-        "Open a photo drop for the smoke in progress: a link the user adds photos to at any point during the smoke, before it is saved. Call it the moment a photo appears in the conversation or the user says they took one, and relay the link (shareWithUser is the sentence to say); the same link takes every later photo of this smoke, so relay it once. Keep the photoDropId and pass it to save_smoke, which attaches the dropped photos to the saved smoke; the link then keeps working for that smoke until it expires. To see what a drop holds, use get_photo_drop — it never changes the link. Opening again within the same session returns the same drop with a fresh link, and the earlier link stops working; a re-open hours after the last one starts a new drop, and passing photoDropId resumes a specific drop instead. If the client forwarded an attached image with the call it is stored into the drop directly (delivery reports which happened). Leave the image argument empty — never fill in a URL, an id, or a file path. When delivery.status is no_image_received, relay the link and do not report it as a problem.",
+        "Open a photo drop for the smoke in progress: a link the user adds photos to at any point during the smoke, before it is saved. Call it the moment a photo appears in the conversation or the user says they took one, and relay the link (shareWithUser is the sentence to say); the same link takes every later photo of this smoke, so relay it once. Keep the photoDropId and pass it to save_smoke, which attaches the dropped photos to the saved smoke; the link then keeps working for that smoke until it expires. To see what a drop holds, use get_photo_drop — it never changes the link. Opening again within the same session returns the same drop with another link, and every earlier link keeps working — a page the user already has open is never cut off; a re-open hours after the last one starts a new drop, and passing photoDropId resumes a specific drop instead. If the client forwarded an attached image with the call it is stored into the drop directly (delivery reports which happened). Leave the image argument empty — never fill in a URL, an id, or a file path. When delivery.status is no_image_received, relay the link and do not report it as a problem.",
       inputSchema: openPhotoDropSchema,
       outputSchema: openPhotoDropOutput,
       // The same file-input declaration add_smoke_photo publishes: a host that
@@ -1356,10 +1362,8 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
-        // Not idempotent: a second open ROTATES the token, which kills the link
-        // the first one returned (the raw token is never stored, so reuse must
-        // re-mint). Same drop, different link — a client that treats the call as
-        // repeatable would hand the user a dead URL.
+        // Not idempotent by result — a second open mints another token — but no
+        // longer destructive in effect: every earlier link stays valid (issue #316).
         idempotentHint: false,
         title: "Open photo drop",
       },
@@ -1432,7 +1436,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       title: "Get photo drop",
       // THE READ THAT COSTS NOTHING (issue #302). The model had exactly one way to
       // ask "how many photos are in the drop?" — open it again — and that call
-      // rotates the token, so on 2026-09-05 the count-check killed the link the
+      // rotated the token, so on 2026-09-05 the count-check killed the link the
       // user had already been sent. A read is not an event, and this one says so
       // in its own text: it never rotates, never restamps, and returns no link.
       description:

@@ -448,7 +448,8 @@ init container at startup (ADR-003).
   `photo_drops.smoke_id` is ON DELETE SET NULL so deleting a smoke CLOSES its drop
   (claimed with no smoke reads `closed`) instead of erasing the claim. The 7-day
   sweep of an unclaimed drop and its objects runs lazily, when the same user next
-  opens one.
+  opens one. **Amended by 0040:** minting a new link no longer kills the old one —
+  a drop's hashes moved to `photo_drop_tokens` and `token_hash` left this table.
 - `0034_vendor_tiers.sql` — `vendors.tier` (ADR-015, crawl audit #270): a
   `smallint NOT NULL DEFAULT 2` CHECKed to `[1, 9]`, 1 being the highest
   authority. A tier is an ORDINAL an admin reads and types, not a score, so the
@@ -570,3 +571,24 @@ init container at startup (ADR-003).
   schema change: a brand with no registry row is skipped, an alias already
   curated on is a no-op, and both guards enforce the column's one invariant —
   a key resolves to exactly one brand.
+- `0040_photo_drop_tokens.sql` — a drop holds a bounded SET of valid token
+  hashes, not one (ADR-014 amendment 2026-09-07, issue #316). Every open of a
+  live drop overwrote `photo_drops.token_hash`, so the page the user still had
+  open died the moment the model opened the drop again: on 2026-09-07 the re-open
+  landed **64 seconds** after that phone had uploaded through the link, and its
+  next photo 410'd. The link the model relays sits in the chat transcript
+  regardless, so rotating it shrinks nothing — it only cuts off the page. The new
+  `photo_drop_tokens` is that set: one row per link the drop has handed out,
+  cascading from the drop so expiry, deletion and the 7-day sweep still take every
+  link with it, and UNIQUE on the hash so a token still resolves to exactly one
+  drop. The at-rest discipline is untouched — only the SHA-256 is stored, never
+  the raw token — which is precisely WHY a continue mints ANOTHER link instead of
+  re-issuing the same one. The ceiling is `PHOTO_DROP_TOKENS_MAX` in @cj/domain
+  (5), whose prune runs in the mint's own transaction rather than as a constraint
+  here: it is a policy on how many links may be live, not a shape the database can
+  express. **The backfill is one row per existing drop**, carrying the hash it
+  already answers to and stamped `coalesce(last_opened_at, created_at)` — when
+  that link was minted — so every link in a user's hand survives the deploy. Then
+  `token_hash` is DROPPED from `photo_drops`: a column that meant "the drop's one
+  valid hash" cannot also mean "one of its valid hashes", and leaving it would
+  give `loadDropByToken` two places to read.

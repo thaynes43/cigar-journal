@@ -1398,8 +1398,9 @@ export const openPhotoDropOutput = z
   .passthrough();
 
 // What the drop holds, with NO LINK anywhere in it (issue #302). Minting is
-// open_photo_drop's job — a read that returned a URL would have had to rotate the
-// token to produce one, which is the defect this tool exists to remove.
+// open_photo_drop's job — a read that returned a URL would have had to mint a
+// token to produce one, and when this tool was written that also rotated the
+// drop's only link, which is the defect it exists to remove.
 export const getPhotoDropOutput = z
   .object({
     photoDropId: z.string(),

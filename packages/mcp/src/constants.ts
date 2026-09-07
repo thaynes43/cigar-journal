@@ -267,8 +267,8 @@ photoDrop.attached — never ask the user to send a photo again at the end; when
 attached is 0 and they meant to add one, say the link is still open and a photo
 added now lands on the saved smoke. To check what a drop holds, use
 get_photo_drop with its id: it reads the drop and never changes the link.
-Opening again within the same smoke returns that drop with a fresh link and the
-earlier link stops working, so open again only when the user needs the link;
+Opening again within the same smoke returns that drop with another link and
+every earlier link keeps working, so open again only when the user needs one;
 hours after the last one, an open starts a new drop for the new smoke, and
 passing photoDropId continues a specific drop instead. After a save,
 add_smoke_photo with the smoke id returns a one-time upload link for a photo of

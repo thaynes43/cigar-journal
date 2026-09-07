@@ -44,6 +44,7 @@ describe("migrations", () => {
         "listing_matches",
         "offers",
         "photo_drops",
+        "photo_drop_tokens",
         "photo_upload_tokens",
         "purchases",
         "staged_smoke_photos",
