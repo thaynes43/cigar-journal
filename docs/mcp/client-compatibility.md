@@ -37,7 +37,7 @@ spike, since then against production and the Loki record) · `documented`
 | Tool availability late in a long conversation | unverified — a full-length smoke has still never been measured end to end. Real sessions have run since launch, but nothing in the record establishes tool availability late in one, so this stays open rather than being marked green by association | **verified**: tools persist for the session | **verified**: tools persist for the session | client-dependent |
 | Token refresh / long-lived link | **verified** 08-31 — authenticated tool calls from the same connector are in the Loki record on 08-30 and 08-31, days after the 08-26/27 authorization, with no re-consent in between | **verified** 08-26: silent refresh after 10-min token expiry, rotation honored (server `refresh_rotated`) | unverified (session outlived no token in test) | client-dependent |
 | Reconnect after expiry | **verified** 08-31, implied by the row above — the 1h access tokens had long expired, so those calls rode a refresh; not driven as an isolated test | **verified** 08-26: post-expiry call succeeds, no user interaction | unverified | client-dependent |
-| In-chat file attachment → tool args | **works from ChatGPT since 2026-09-06** — an `open_photo_drop` call from the ChatGPT Work desktop host arrived with the declared `image` argument hydrated and the server stored the file (argument channel; the `_meta["openai/fileParams"]` channel has never been observed). ChatGPT **web** still forwards nothing on any channel — verified 08-31, 09-01, 09-03 — so the upload link stays the fallback: the photo drop (ADR-014) for a live smoke, the one-time link for a saved one | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported** — Codex source gates `fileParams` to its first-party apps server | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
+| In-chat file attachment → tool args | **works from ChatGPT since 2026-09-06** — an `open_photo_drop` call from ChatGPT on the **Astra** model (iPhone app) arrived with the declared `image` argument hydrated and the server stored the file (argument channel; the `_meta["openai/fileParams"]` channel has never been observed). GPT-5.x forwards nothing on any channel — web verified 08-31, 09-01, 09-03; iOS app verified 09-07 ×3 — the gate is the model's pipeline, not the app — so the upload link stays the fallback: the photo drop (ADR-014) for a live smoke, the one-time link for a saved one | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported** — Codex source gates `fileParams` to its first-party apps server | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
 
 ¹ Owner's account, Developer Mode, 2026-08-26 (spike). **Production
 verified 2026-08-27**: ChatGPT Web connected to the real server end to end
@@ -346,8 +346,8 @@ then a `photoDropId` fails validation client-side rather than reaching the serve
 
 ## 2026-09-06 — forwarding observed
 
-The first hydrated file input this server has ever received. Owner session in
-**ChatGPT Work (desktop host adapter)**, prod v0.42.0, from Loki
+The first hydrated file input this server has ever received. Owner session on the
+**Astra** model in the ChatGPT iPhone app, prod v0.42.0, from Loki
 (`photo_intake_request` / `photo_intake`):
 
 ```
@@ -362,17 +362,17 @@ The first hydrated file input this server has ever received. Owner session in
 ```
 
 `metaKeys` on both: `callId, itemId, openai/organization, openai/session,
-openai/subject, openai/userLocation, progressToken` — a different host signature
+openai/subject, openai/userLocation, progressToken` — a different signature
 from ChatGPT web's, which carries `openai/locale`, `openai/userAgent` and
 `timezone` and none of `callId`, `itemId`, `progressToken`.
 
-**What it settles.** Mode A works end to end: this host hydrates the strict `image`
+**What it settles.** Mode A works end to end: this model hydrates the strict `image`
 schema through the **argument** channel, the server fetched and stored the file, and
 the photo landed on the smoke. The declaration and the published shape were never
 the cause of the three earlier misses — those were host-side — and the upstream
 question sharpens from "is hydration gated?" to "why does the same connector get its
-file input hydrated from the ChatGPT Work desktop host and never from ChatGPT web?".
-The `_meta["openai/fileParams"]` channel remains unobserved on any client.
+file input hydrated on the Astra model and never on GPT-5.x?". The
+`_meta["openai/fileParams"]` channel remains unobserved on any client.
 
 **What stays.** The upload link keeps leading in the tool descriptions and the
 server instructions, because every other host measured forwards nothing and the
@@ -388,23 +388,25 @@ guessing from `metaKeys`. `photo_intake_request` now carries
 each bounded to 64 characters and the only `_meta` value ever logged
 (security-and-observability.md).
 
-**2026-09-07 — the ChatGPT iOS app never forwards; the link is the phone's
-path.** With the `client.userAgent` value logged (#315), the surface that never
-forwards has a name: `ChatGPT/1.2026.237 (iOS 26.6.1; iPhone18,4; build
-33230022603)`. On 2026-09-07 14:34:47 UTC, after the owner re-imported the
-connector and attached a photo to the message, its `open_photo_drop` call
-carried `argKeys: []` and no `openai/fileParams` — nothing on any channel — and
-the `_meta` keys were `openai/locale, openai/organization, openai/session,
-openai/subject, openai/userAgent, openai/userLocation, timezone`, without the
-`callId`/`itemId`/`progressToken` the forwarding desktop surface sends. Same
-OAuth client as the two desktop forwards of 2026-09-05/06. The link path then
-worked as designed: `photo_drop_upload outcome=staged` 37 seconds later,
-1080×1440 JPEG from iPhone Safari, and the model's follow-up was
-`get_photo_drop` (no mint, #316). Conclusion: on iOS, `no_image_received` is the
-expected result of every call and the relayed link is the workflow, not a
-fallback; there is nothing server-side to fix, and a connector re-import does
-not change what the app sends. Re-test only when the iOS app's build number
-changes.
+**2026-09-07/08 — forwarding is gated by the model, not the app.** With the
+`client.userAgent` value logged (#315), the surface that never forwards has a
+name: `ChatGPT/1.2026.237 (iOS 26.6.1; iPhone18,4; build 33230022603)` running
+GPT-5.6. On 2026-09-07 — 03:35, 14:34 and 23:30 UTC, the last after a connector
+re-import — its `open_photo_drop` calls carried `argKeys: []` and no
+`openai/fileParams`, with `_meta` keys `openai/locale, openai/organization,
+openai/session, openai/subject, openai/userAgent, openai/userLocation,
+timezone`. The owner then confirmed (2026-09-08) that the two forwards of
+2026-09-05/06 were the **Astra** model on the same iPhone app: full file object
+hydrated, `_meta` keys `callId, itemId, progressToken, …` — a signature that
+shares nothing with GPT-5.6's. Same app, same connector, same OAuth client; two
+tool-call pipelines. Astra is priced out of daily use, so under GPT-5.x
+`no_image_received` is the expected result of every call and the relayed link is
+the workflow: it staged the photo 37 s and 41 s after the mint on the 14:34 and
+23:30 runs, and GPT-5.6's own account of the 23:30 run (a bug report it wrote
+against its host) agrees — image visible to the model, nothing forwarded, schema
+correct. Nothing server-side to fix. Re-test when the model changes, not the app
+build; an Astra call will show its signature on `photo_intake_request` (its
+`_meta` carries no `openai/userAgent`, so expect `client.userAgent: null`).
 
 ## 2026-08-31 — gap-fill hardened: the two-call path, stated as an invariant
 
@@ -502,13 +504,13 @@ and the journal's own record shows conversational smokes alongside the imported
 archive. Remaining watch item, unchanged: connector availability across a very
 long conversation (matrix row above).
 
-**Photos take a link, unless the host forwards.** Only the ChatGPT desktop host
-has ever placed an in-chat attachment into tool arguments, first on 2026-09-06;
-every other client measured forwards nothing (matrix row, and the dated sections
-below). During a smoke the model opens a photo drop (`open_photo_drop`, ADR-014)
-as soon as a photo appears and the user adds each photo to it once; `save_smoke`
-claims the drop. For a smoke that is already saved, `add_smoke_photo` returns a one-time
-upload link.
+**Photos take a link, unless the model forwards.** Only ChatGPT on the **Astra**
+model has ever placed an in-chat attachment into tool arguments, first on
+2026-09-06; every other model and client measured forwards nothing (matrix row,
+and the dated sections below). During a smoke the model opens a photo drop
+(`open_photo_drop`, ADR-014) as soon as a photo appears and the user adds each
+photo to it once; `save_smoke` claims the drop. For a smoke that is already
+saved, `add_smoke_photo` returns a one-time upload link.
 
 **Fallback (if a client loses write tools):** the model produces the exact
 `save_smoke` payload as text; the user pastes it into the site's import page
