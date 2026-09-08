@@ -226,13 +226,14 @@ type DeliveryStatus =
   | "image_unreadable";
 
 // `no_image_received` is a NORMAL outcome, not a failure, and the detail says so
-// (#288). Forwarding is real but host-dependent: on 2026-09-06 an `open_photo_drop`
-// call from a ChatGPT desktop host arrived with the `image` argument hydrated and the
-// server stored the file — the first forwarded attachment observed here (#202) — while
-// ChatGPT web has never forwarded on any channel. So the detail no longer claims no
-// client forwards; it says the link is the path whenever nothing arrives, because a
-// model that reads this as a fault reports a problem to the user and delays the one
-// thing that works: relaying the link.
+// (#288). Forwarding is real but model-dependent: on 2026-09-06 an `open_photo_drop`
+// call from ChatGPT on the Astra model (iPhone app) arrived with the `image` argument
+// hydrated and the server stored the file — the first forwarded attachment observed here
+// (#202) — while GPT-5.x has never forwarded on any channel, on web or iOS — the gate is
+// the model's pipeline, not the app. So the detail no longer claims no client forwards; it
+// says the link is the path whenever nothing arrives, because a model that reads this as a
+// fault reports a problem to the user and delays the one thing that works: relaying the
+// link.
 const DELIVERY_DETAIL: Record<DeliveryStatus, string> = {
   no_image_received:
     "No image arrived with this call. When the host forwards an attached photo it is stored directly; when it does not, the upload link is the path — relay it. This is a normal outcome, not a failure.",

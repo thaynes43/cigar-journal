@@ -1425,12 +1425,13 @@ result:
   live ChatGPT call captured in Loki carried no `openai/fileParams` on any channel
   (`metaFileParams: {"type":"absent"}`, no `image` argument, no undeclared keys),
   and `mode: attached` had not been seen in production. **It fired on 2026-09-06**
-  (issue #202): an `open_photo_drop` call from a ChatGPT desktop host arrived with
-  the declared `image` argument hydrated, and the server fetched and stored the
-  file — through the ARGUMENT channel, not `_meta["openai/fileParams"]`, which has
-  still never been observed. So the declaration and the published shape were never
-  the problem; hydration is host-side, and ChatGPT web still forwards nothing. No
-  other client has the mechanism at all. See
+  (issue #202): an `open_photo_drop` call from ChatGPT on the Astra model (iPhone
+  app) arrived with the declared `image` argument hydrated, and the server fetched
+  and stored the file — through the ARGUMENT channel, not
+  `_meta["openai/fileParams"]`, which has still never been observed. So the
+  declaration and the published shape were never the problem; hydration is gated by
+  the model's pipeline, not the app, and GPT-5.x still forwards nothing on web or
+  iOS. No other client has the mechanism at all. See
   [client-compatibility.md](client-compatibility.md). The
   path stays declared and implemented because it costs nothing and is how this
   works the day a host does forward a file; it is not what the model or the docs

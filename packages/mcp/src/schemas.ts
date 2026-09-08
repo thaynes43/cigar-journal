@@ -734,7 +734,7 @@ export const recordPurchaseBatchSchema = z
 // schema carries `additionalProperties: false`.
 //
 // WHY IT IS STRICT. When this was written ChatGPT had never hydrated `image` for
-// this connector (tool-contract.md, "Open lead"); a desktop host did on 2026-09-06,
+// this connector (tool-contract.md, "Open lead"); the Astra model did on 2026-09-06,
 // with this exact shape published. Integrations that reportedly do receive files
 // declare exactly this four-property shape, and host-side hydration may key on the
 // PUBLISHED shape rather than on the `openai/fileParams` declaration alone — so
