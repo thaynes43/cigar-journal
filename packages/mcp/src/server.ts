@@ -174,6 +174,9 @@ import { mcpEvent, logScalar } from "./logger.js";
 // (PHOTO_FILE_PARAMS_META) — the declaration is what a host hydrates, and forwarding
 // was first observed on 2026-09-06 (issue #202), through the argument channel.
 // Both photo tools declare it and share one intake path (intakePhoto below).
+// A host that does not forward on its own may still UPLOAD a local file the model
+// names for it (ChatGPT Work / the Codex apps pipeline, 2026-09-08/09) and deliver
+// shape 1 — the wire shape is identical; see schemas.ts, "HOST-UPLOADED LOCAL FILE".
 // Two delivery shapes are accepted and normalized into one intake path:
 //   1. `image` ARGUMENT value — `{ download_url, file_id, mime_type?, file_name? }`
 //      the client fills in for the declared file param (the standard Apps SDK path).
@@ -226,17 +229,21 @@ type DeliveryStatus =
   | "image_unreadable";
 
 // `no_image_received` is a NORMAL outcome, not a failure, and the detail says so
-// (#288). Forwarding is real but model-dependent: on 2026-09-06 an `open_photo_drop`
-// call from ChatGPT on the Astra model (iPhone app) arrived with the `image` argument
-// hydrated and the server stored the file — the first forwarded attachment observed here
-// (#202) — while GPT-5.x has never forwarded on any channel, on web or iOS — the gate is
-// the model's pipeline, not the app. So the detail no longer claims no client forwards; it
-// says the link is the path whenever nothing arrives, because a model that reads this as a
-// fault reports a problem to the user and delays the one thing that works: relaying the
-// link.
+// (#288). Forwarding is real but host-dependent: every hydrated `image` this server
+// has received (2026-09-06, 09-08, 09-09 ×2) carried the `_meta` signature of the
+// ChatGPT Work / Codex apps pipeline (`callId`, `itemId`, `progressToken`, no
+// `openai/userAgent`) — the host that uploads a local file the MODEL names
+// (schemas.ts, "HOST-UPLOADED LOCAL FILE") — while ChatGPT web and the iOS app on
+// GPT-5.x have never forwarded on any channel. So the detail names the one retry
+// that works — call again with the path the host reported — and otherwise says the
+// link is the path, because a model that reads this as a fault reports a problem to
+// the user and delays the one thing that works: relaying the link. The retry is
+// bounded by construction: a host that reported no path has nothing to pass, an
+// in-session re-open lands on the same drop, and add_smoke_photo mints one more
+// single-use link beside the first; no link is revoked (#316).
 const DELIVERY_DETAIL: Record<DeliveryStatus, string> = {
   no_image_received:
-    "No image arrived with this call. When the host forwards an attached photo it is stored directly; when it does not, the upload link is the path — relay it. This is a normal outcome, not a failure.",
+    "No image arrived with this call. If the host reported a local file path for the attachment, call again with that path in image and the host uploads it; otherwise the upload link is the path — relay it. This is a normal outcome, not a failure.",
   image_reference_unusable: "An image reference arrived, but it carried nothing the server can read.",
   image_fetch_failed: "An image reference arrived, but the image could not be retrieved.",
   image_unreadable: "An image arrived, but it is not a readable photo.",
@@ -1353,8 +1360,11 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // the drop, which then rotated the token and killed the link the user
       // already had — a continue mints beside it now (issue #316), but a second
       // URL for a link that still works is still noise to relay.
+      //
+      // THE PATH SENTENCE (2026-09-09): see add_smoke_photo below — the same clause
+      // on both tools, because the host appends the same sentence to both.
       description:
-        "Open a photo drop for the smoke in progress: a link the user adds photos to at any point during the smoke, before it is saved. Call it the moment a photo appears in the conversation or the user says they took one, and relay the link (shareWithUser is the sentence to say); the same link takes every later photo of this smoke, so relay it once. Keep the photoDropId and pass it to save_smoke, which attaches the dropped photos to the saved smoke; the link then keeps working for that smoke until it expires. To see what a drop holds, use get_photo_drop — it never changes the link. Opening again within the same session returns the same drop with another link, and every earlier link keeps working — a page the user already has open is never cut off; a re-open hours after the last one starts a new drop, and passing photoDropId resumes a specific drop instead. If the client forwarded an attached image with the call it is stored into the drop directly (delivery reports which happened). Leave the image argument empty — never fill in a URL, an id, or a file path. When delivery.status is no_image_received, relay the link and do not report it as a problem.",
+        "Open a photo drop for the smoke in progress: a link the user adds photos to at any point during the smoke, before it is saved. Call it the moment a photo appears in the conversation or the user says they took one, and relay the link (shareWithUser is the sentence to say); the same link takes every later photo of this smoke, so relay it once. Keep the photoDropId and pass it to save_smoke, which attaches the dropped photos to the saved smoke; the link then keeps working for that smoke until it expires. To see what a drop holds, use get_photo_drop — it never changes the link. Opening again within the same session returns the same drop with another link, and every earlier link keeps working — a page the user already has open is never cut off; a re-open hours after the last one starts a new drop, and passing photoDropId resumes a specific drop instead. If the client forwarded an attached image with the call it is stored into the drop directly (delivery reports which happened). Pass the attached photo in image only as the local file path the host reported for it, and only when the host states that image takes a path (the host then uploads the file); otherwise leave image empty — never invent a URL, an id, or a path. When delivery.status is no_image_received, relay the link and do not report it as a problem.",
       inputSchema: openPhotoDropSchema,
       outputSchema: openPhotoDropOutput,
       // The same file-input declaration add_smoke_photo publishes: a host that
@@ -1482,8 +1492,16 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       // described as the opportunistic branch it is. `delivery.status` keeps its own
       // vocabulary (below): it earns its place by telling the model the truth about
       // what arrived, which is exactly what the probe was built to learn.
+      //
+      // THE PATH SENTENCE (2026-09-09). ChatGPT Work's host shows the model `image`
+      // as a string and appends "provide the absolute path to that file here"; the
+      // model passes the attachment's path and the host uploads it (schemas.ts,
+      // "HOST-UPLOADED LOCAL FILE"). v0.43.0's "never fill in … a file path"
+      // contradicted that host sentence, the model obeyed ours — `open_photo_drop({})`,
+      // nothing forwarded, link fallback — so both descriptions now say when a path
+      // is right (the host asked for one) and when it is not (everything else).
       description:
-        "Add a photo to a smoke that is already saved. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. With photoDropId it instead attaches the photos of that drop to the smoke (for a drop save_smoke did not carry) and mints no link. If the client forwarded an attached image with the call, the photo is stored directly and no link is needed (delivery reports which happened). For a photo taken during a smoke that is not saved yet, use open_photo_drop. Leave the image argument empty — never fill in a URL, an id, or a file path. When delivery.status is no_image_received, relay the upload link and do not report it as a problem.",
+        "Add a photo to a smoke that is already saved. Returns a one-time upload link — share it with the user; it works once and lasts 24 hours. With photoDropId it instead attaches the photos of that drop to the smoke (for a drop save_smoke did not carry) and mints no link. If the client forwarded an attached image with the call, the photo is stored directly and no link is needed (delivery reports which happened). For a photo taken during a smoke that is not saved yet, use open_photo_drop. Pass the attached photo in image only as the local file path the host reported for it, and only when the host states that image takes a path (the host then uploads the file); otherwise leave image empty — never invent a URL, an id, or a path. When delivery.status is no_image_received, relay the upload link and do not report it as a problem.",
       inputSchema: addSmokePhotoSchema,
       outputSchema: addSmokePhotoOutput,
       // Declare `image` as a file input so ChatGPT forwards the attached photo.

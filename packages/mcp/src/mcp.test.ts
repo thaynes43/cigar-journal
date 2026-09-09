@@ -508,7 +508,7 @@ describe("@cj/mcp adapter", () => {
         },
         additionalProperties: false,
         description:
-          "The user's attached photo, filled by the client host when it forwards a file with the call. Leave it empty: never paste a URL, an id, or a local file path here. A host that can upload a local file fills it itself; when nothing arrives, delivery says no_image_received and the upload link is the path.",
+          "The user's attached photo, delivered by the client host. If the host states that this parameter takes an absolute local file path, pass the attachment's path exactly as the host reported it: the host uploads the file and fills in the handle before the call reaches this server. Otherwise leave it empty — never invent a URL, a file id, or a path. When nothing arrives, delivery says no_image_received and the upload link is the path.",
       });
 
       // Restated outside the whole-object compare because they are the two
@@ -3639,6 +3639,111 @@ describe("@cj/mcp adapter", () => {
         });
       },
     );
+  });
+
+  it("open_photo_drop retried with a host-uploaded image stages into the same drop, keeps the first link alive, and adds no duplicate", async () => {
+    // The retry a host that uploads local files produces: the first call arrives
+    // bare and is told `no_image_received`, the model calls again with the path the
+    // host reported, and the host substitutes the file handle on the way in. The
+    // photo has to land in the drop the user ALREADY has a link to — not a second
+    // drop, and not a second copy — and the mint that the re-open performs must leave
+    // that first link working (issue #316: a continue mints, it never revokes).
+    await withFixture(
+      (_req, res) => {
+        res.writeHead(200, { "content-type": "image/png", "content-length": PNG_FIXTURE.byteLength });
+        res.end(PNG_FIXTURE);
+      },
+      async (fixtureUrl) => {
+        await withClient(await dropUser(), async (client) => {
+          const first = payloadOf(await call(client, "open_photo_drop", {})) as OpenedDrop;
+          expect(first.delivery?.status).toBe("no_image_received");
+          expect(first.reused).toBe(false);
+          expect(first.photoCount).toBe(0);
+          expect(first).not.toHaveProperty("staged");
+          const linkA = first.uploadUrl;
+
+          // NO photoDropId: the model is retrying the same call, not resuming a
+          // drop it kept the id for, so the in-session re-open has to find it.
+          const { value, lines } = await captureMcpLog(() =>
+            call(client, "open_photo_drop", {
+              image: {
+                download_url: fixtureUrl,
+                file_id: "file_retry",
+                mime_type: "image/png",
+                file_name: "IMG_retry.png",
+              },
+            }),
+          );
+          const second = payloadOf(value) as OpenedDrop;
+          const linkB = second.uploadUrl;
+
+          expect(second.photoDropId).toBe(first.photoDropId);
+          expect(second.reused).toBe(true);
+          expect(second.staged).toBeDefined();
+          expect(second.staged!.kind).toBe("cigar");
+          expect(second.staged!.width).toBeGreaterThan(0);
+          expect(second.photoCount).toBe(1);
+          // A stored image leaves nothing for `delivery` to explain.
+          expect(second).not.toHaveProperty("delivery");
+          // Only the hash is stored, so the retry cannot hand back link A.
+          expect(linkB).not.toBe(linkA);
+
+          // BOTH links reach the one drop, holding the one photo.
+          for (const link of [linkA, linkB]) {
+            const view = await getPhotoDropByToken(h.deps, { token: tokenOf(link) });
+            expect(view.status).toBe("open");
+            expect(view.photos.map((ph) => ph.photoId)).toEqual([second.staged!.photoId]);
+          }
+
+          // And the model's own read agrees: one photo, not yet claimed by a smoke.
+          const read = payloadOf(
+            await call(client, "get_photo_drop", { photoDropId: first.photoDropId }),
+          ) as {
+            photoCount: number;
+            photos: { photoId: string; kind: string; attached: boolean }[];
+          };
+          expect(read.photoCount).toBe(1);
+          expect(read.photos).toMatchObject([
+            { photoId: second.staged!.photoId, kind: "cigar", attached: false },
+          ]);
+
+          const record = eventPayload(lines, "photo_intake");
+          expect(record.tool).toBe("open_photo_drop");
+          expect(record.outcome).toBe("attached");
+          expect(record.channel).toBe("argument");
+          expect(record.mode).toBe("attached");
+        });
+      },
+    );
+  });
+
+  it("open_photo_drop with `image` as a string is refused before the handler and the probe records the shape", async () => {
+    // The other half of that retry: when the host does NOT substitute a handle, the
+    // path it reported arrives as plain text — a local file this process cannot open,
+    // and input no drop can be built from. It has to surface as a VALIDATION ERROR,
+    // never as the ordinary `no_image_received` outcome, which would tell the model
+    // the photo merely had not arrived and invite the identical retry forever.
+    // Against the strict published schema the SDK refuses it before `run()`, so the
+    // raw-body probe is the whole record — which is exactly what it is for.
+    const image = "/workspace/scratch/abc/upload/IMG_1.jpeg";
+    await withClient(await dropUser(), async (client) => {
+      const { value, lines } = await captureMcpLog(() =>
+        call(client, "open_photo_drop", { image }),
+      );
+
+      expect(value.isError).toBe(true);
+
+      const probe = eventPayload(lines, "photo_intake_request");
+      expect(probe.tool).toBe("open_photo_drop");
+      expect(probe.argKeys).toEqual(["image"]);
+      expect(probe.argImage).toEqual({ type: "string", keys: [], filled: [] });
+      // The handler never ran: no `photo_intake` line, and no outcome line either.
+      expect(lines.some((l) => l.includes("[mcp] photo_intake {"))).toBe(false);
+      expect(lines.some((l) => l.includes("[mcp] tool_called"))).toBe(false);
+      // Key names only — a path the host passed through is a VALUE, and the probe
+      // never copies one.
+      expect(lines.join("\n")).not.toContain("IMG_1.jpeg");
+    });
   });
 
   it("open_photo_drop writes the intake records under its own tool name", async () => {

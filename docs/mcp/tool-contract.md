@@ -177,9 +177,11 @@ passing photoDropId continues a specific drop instead. After a save,
 add_smoke_photo with the smoke id returns a one-time upload link for a photo of
 that saved smoke, and with a photoDropId attaches a drop the save did not carry.
 If the host forwarded an attached image with either call the photo is stored
-directly and no link is needed; delivery.status reports which happened. Leave
-the image argument empty — never paste an image, a URL, a chat file link, a file
-id, or a local file path into it. A photo never blocks saving the smoke.
+directly and no link is needed; delivery.status reports which happened. Fill
+the image argument only when the host states it takes a local file path: pass
+the attachment's path as the host reported it and the host uploads the file.
+Otherwise leave it empty — never paste an image, a URL, a chat file link, or a
+file id into it. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
@@ -1279,7 +1281,7 @@ result:
   shareWithUser: "Send the user this link to add photos during the smoke: https://… — every photo of this smoke goes there, and they attach to the review when it is saved. It works for 48 hours."
   delivery:                      # as on add_smoke_photo: why no image arrived with the call
     status: no_image_received
-    detail: "No image arrived with this call. When the host forwards an attached photo it is stored directly; when it does not, the upload link is the path — relay it. This is a normal outcome, not a failure."
+    detail: "No image arrived with this call. If the host reported a local file path for the attachment, call again with that path in image and the host uploads it; otherwise the upload link is the path — relay it. This is a normal outcome, not a failure."
 
 # With a forwarded image (first observed 2026-09-06 — see add_smoke_photo):
 result:
@@ -1365,8 +1367,9 @@ result:
 Attach a review-bound photo to one of the user's smokes (ADR-007, issue #44).
 The tool returns a **one-time upload link** for the user to open on their phone;
 if the host happened to forward a file with the call, the photo is stored
-directly instead. The image is **never** a tool argument the model writes — it
-arrives attached by the HOST, or not at all — and the tool auto-detects which. A
+directly instead. The image is a file input the HOST delivers — forwarded on its
+own, or uploaded from the local path the model passes when the host asks for one
+(ChatGPT Work, 2026-09-09; "File intake" below) — and the tool auto-detects which. A
 photo failure is fully isolated from `save_smoke`: separate tool, separate
 result, its own storage transaction. For a photo taken *during* a smoke that is
 not yet saved, the path is `open_photo_drop` above; this tool is for a photo of
@@ -1393,7 +1396,7 @@ result:
   shareWithUser: "Send the user this link to add their photo: https://… — it works once and is valid for 24 hours."
   delivery:                      # why there is no photo, in terms the model can act on
     status: no_image_received    # | image_reference_unusable | image_fetch_failed | image_unreadable
-    detail: "No image arrived with this call. When the host forwards an attached photo it is stored directly; when it does not, the upload link is the path — relay it. This is a normal outcome, not a failure."
+    detail: "No image arrived with this call. If the host reported a local file path for the attachment, call again with that path in image and the host uploads it; otherwise the upload link is the path — relay it. This is a normal outcome, not a failure."
 
 # Mode A — opportunistic: a host forwarded a file with the call
 result:
@@ -1430,14 +1433,24 @@ result:
   and stored the file — through the ARGUMENT channel, not
   `_meta["openai/fileParams"]`, which has still never been observed. So the
   declaration and the published shape were never the problem; hydration is gated by
-  the model's pipeline, not the app, and GPT-5.x still forwards nothing on web or
-  iOS. No other client has the mechanism at all. See
-  [client-compatibility.md](client-compatibility.md). The
-  path stays declared and implemented because it costs nothing and is how this
-  works the day a host does forward a file; it is not what the model or the docs
-  should lead with. Only the HOST can forward a file, and the description tells
-  the model never to paste a chat file URL (e.g. `chatgpt.com/...`) as text —
-  those links are unreachable outside ChatGPT and will 403.
+  the host's pipeline, and GPT-5.x on ChatGPT web and the iOS app still forwards
+  nothing. **2026-09-09 — the mechanism, named.** Every hydrated `image` this
+  server has received (09-06, 09-08, 09-09 ×2) carried the `_meta` signature of
+  the ChatGPT Work / Codex apps pipeline, which does not hydrate on its own: it
+  shows the model `image` as a *string*, appends "This parameter expects an
+  absolute local file path. If you want to upload a file, provide the absolute
+  path to that file here." (a literal in the codex binary), and when the model
+  passes the attachment's path it uploads the file and substitutes the handle.
+  The v0.43.0 description forbade a path; on 2026-09-09 the model obeyed it,
+  called `open_photo_drop({})`, and nothing arrived
+  ([client-compatibility.md](client-compatibility.md), 2026-09-09). Both photo
+  descriptions and the `image` text now say to pass the path when the host asks
+  for one and to leave `image` empty otherwise. No other client has a mechanism
+  at all. The path stays declared and implemented because it is how this works
+  on that host; the link still leads because it works everywhere. The description
+  still tells the model never to invent a URL — a chat file URL
+  (e.g. `chatgpt.com/...`) pasted as text is unreachable outside ChatGPT and
+  will 403.
 
   **Open lead.** ChatGPT integrations that reportedly do receive files declare a
   strict four-property file schema for the param; we publish the object through a
@@ -1468,7 +1481,7 @@ though with attachment rare, the non-`attached` rate is near 100%.
 
 | `delivery.status` | Meaning | What the model should do |
 |---|---|---|
-| `no_image_received` | Nothing was forwarded on either channel — a normal outcome, not a failure. | Hand over the link. Never report it as a problem. |
+| `no_image_received` | Nothing arrived on either channel — a normal outcome, not a failure. | If the host reported a local file path for the attachment, call again with it in `image`; otherwise hand over the link. Never report it as a problem. |
 | `image_reference_unusable` | A file handle arrived carrying nothing the server can read. | Hand over the link. |
 | `image_fetch_failed` | A reference arrived but the image could not be retrieved. | Hand over the link. |
 | `image_unreadable` | Bytes arrived but are not a readable photo. | Hand over the link. |
@@ -1588,14 +1601,35 @@ this reverts.
 2. request-level **`_meta["openai/fileParams"]`** — the same entry shape (array or
    single object) carried in request metadata.
 
-**Neither has ever been observed carrying a file *here*.** Both are accepted on
-the strength of the published specs and of other operators' reports, not of a call
-we have seen: the 2026-08-31 Loki capture found no `fileParams` on either channel.
-An earlier draft of this section called the `_meta` delivery "production-proven" —
-proven for ChatGPT's own apps, perhaps, but never for this server, and the probe
-that could have shown it returned the opposite. Keep both readers: the cost is a
-branch, other servers demonstrably do receive these handles, and the day one
-arrives here we want it to just work. Do not plan on either firing.
+**Delivery 1 is observed; delivery 2 is not.** The `image` argument has arrived
+hydrated four times (2026-09-06, 09-08, 09-09 ×2), every time from the ChatGPT
+Work / Codex apps pipeline (below); the `_meta` channel has never carried a file
+here — it is kept on the strength of the published spec and other operators'
+reports (an earlier draft called it "production-proven", which was true of
+ChatGPT's own apps and never of this server). Keep both readers: the cost is a
+branch, and the day the `_meta` shape arrives we want it to just work.
+
+**Host-uploaded local file — the one route that has fired (ChatGPT Work / Codex
+apps, 2026-09-09).** That host does not hydrate the declared object on its own.
+Its client rewrites the file param in the model-facing schema to a `string`,
+keeps this server's description and appends its own: "This parameter expects an
+absolute local file path. If you want to upload a file, provide the absolute
+path to that file here." (a literal in the codex binary, 0.153.4). The user's
+attachment is copied onto the host's filesystem and its path shown to the model;
+when the model passes that path in `image`, the host uploads the file and
+substitutes the delivery-1 handle before `tools/call` leaves the host — the
+`_meta` on those calls carries `callId`, `itemId`, `progressToken` and no
+`openai/userAgent`. The contract, in three parts: the **model** supplies the
+absolute path the host reported, and nothing else; the **host** uploads and
+rewrites; the **server** receives `{ download_url, file_id, mime_type, file_name }`
+and fetches it like any forwarded file. A raw path that reaches the server as
+text — a host that shows a path but does not upload — is refused by the strict
+schema before the handler runs (an `isError` validation result, recorded by
+`photo_intake_request` as `argImage.type: "string"`) and is never reported as
+`no_image_received`: the server cannot read a client's filesystem, and saying
+"nothing arrived" would hide that something did. The model-facing copy tells the
+model to pass the path only when the host says the argument takes one, so this
+branch exists for hosts that misbehave, not for the ones we know.
 
 In both, `download_url` is a **short-lived signed URL** the server must fetch
 promptly. Request `_meta` still takes precedence, with one fix: a *present but

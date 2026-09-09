@@ -110,7 +110,7 @@ describe("no_image_received is the expected outcome", () => {
   const read = (relative: string): string => readFileSync(new URL(relative, import.meta.url), "utf8");
 
   const DETAIL =
-    "No image arrived with this call. When the host forwards an attached photo it is stored directly; when it does not, the upload link is the path — relay it. This is a normal outcome, not a failure.";
+    "No image arrived with this call. If the host reported a local file path for the attachment, call again with that path in image and the host uploads it; otherwise the upload link is the path — relay it. This is a normal outcome, not a failure.";
 
   it("is the delivery detail the adapter ships", () => {
     expect(read("./server.ts")).toContain(DETAIL);
@@ -126,5 +126,85 @@ describe("no_image_received is the expected outcome", () => {
   ])("%s tells the model not to report it as a problem", (_tool, tail) => {
     const server = read("./server.ts");
     expect(server).toContain(`When delivery.status is no_image_received, ${tail}`);
+  });
+});
+
+// The path sentence (2026-09-09). ChatGPT Work's host shows the model the `image`
+// file param as a string and appends "This parameter expects an absolute local
+// file path. If you want to upload a file, provide the absolute path to that file
+// here."; the model passes the attachment's path and the host uploads it. v0.43.0
+// told the model the opposite — "never fill in … a file path" on both tool
+// descriptions, "never paste … a local file path" on the argument, "never paste …
+// a local file path into it" in the instructions — and on 2026-09-09 the model
+// obeyed ours over the host's: `open_photo_drop({})`, nothing forwarded, link
+// fallback, a day after the same host had forwarded three photos. Every
+// model-facing string about `image` must therefore (a) say when a path IS the
+// right value — the host asked for one — and (b) never forbid a path outright.
+// Pinned on the two load-bearing halves per surface, and the old prohibitions are
+// pinned ABSENT, because a reviewer restoring "never … a file path" for tidiness
+// re-creates the incident.
+describe("the image argument's path guidance", () => {
+  const read = (relative: string): string => readFileSync(new URL(relative, import.meta.url), "utf8");
+
+  // The one-line description string of a photo tool registration, by its opening words.
+  function toolDescription(server: string, opening: string): string {
+    const line = server.split("\n").find((l) => l.includes(`"${opening}`));
+    if (!line) throw new Error(`no tool description starting with ${opening}`);
+    const match = /"((?:[^"\\]|\\.)*)"/.exec(line);
+    const text = match?.[1];
+    if (text === undefined) throw new Error(`unterminated description starting with ${opening}`);
+    return text;
+  }
+
+  const server = read("./server.ts");
+  const schemas = read("./schemas.ts");
+  const surfaces = [
+    { label: "open_photo_drop description", text: toolDescription(server, "Open a photo drop for the smoke in progress") },
+    { label: "add_smoke_photo description", text: toolDescription(server, "Add a photo to a smoke that is already saved") },
+    { label: "server instructions (Photos paragraph)", text: INSTRUCTIONS.replace(/\n/g, " ") },
+  ];
+
+  // The `image` argument description, once per photo tool.
+  const imageDescriptions = [...schemas.matchAll(/"(The user's attached photo, delivered by the client host\.[^"]*)"/g)].map((m) => m[1]);
+
+  it("both photo tools describe `image` identically", () => {
+    expect(imageDescriptions).toHaveLength(2);
+    expect(new Set(imageDescriptions).size).toBe(1);
+  });
+
+  it("the `image` argument says a host-reported local path is the value to pass, and the host uploads it", () => {
+    const text = imageDescriptions[0]!;
+    expect(text).toContain("takes an absolute local file path, pass the attachment's path exactly as the host reported it");
+    expect(text).toContain("the host uploads the file");
+    expect(text).toContain("Otherwise leave it empty");
+  });
+
+  it.each(surfaces)("$label says when a path is right and when image stays empty", ({ text }) => {
+    expect(text).toMatch(/host (states|reported)/);
+    expect(text).toMatch(/local file path/);
+    expect(text).toMatch(/host (then )?uploads/);
+    expect(text).toMatch(/leave (image|it) empty/);
+  });
+
+  const prohibitions = [
+    "never fill in a URL, an id, or a file path",
+    "never paste a URL, an id, or a local file path",
+    "or a local file path into it",
+    "never populate it",
+    "no URLs, ids, or invented fields",
+  ];
+
+  it.each([...surfaces, { label: "image argument description", text: imageDescriptions[0]! }])(
+    "$label never forbids a file path outright",
+    ({ text }) => {
+      for (const phrase of prohibitions) expect(text).not.toContain(phrase);
+    },
+  );
+
+  it("the no_image_received detail names the retry that works and keeps the link", () => {
+    const detail = /no_image_received:\s*\n\s*"([^"]*)"/.exec(server)?.[1];
+    expect(detail, "DELIVERY_DETAIL.no_image_received not found in server.ts").toBeDefined();
+    expect(detail).toContain("call again with that path in image");
+    expect(detail).toContain("the upload link is the path — relay it");
   });
 });

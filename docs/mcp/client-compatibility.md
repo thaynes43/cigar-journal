@@ -5,7 +5,7 @@ document goes stale by design** — client products evolve independently of
 this application. Re-verify before relying on any row.
 
 ```yaml
-lastReviewed: 2026-08-31        # go-live sweep, issue #97
+lastReviewed: 2026-09-09        # photo path sentence (2026-09-09 section); go-live sweep was #97, 08-31
 clientMatrixVerified: 2026-08-26 # Phase 0 spike, OAuth mode — all three target
                                 # clients driven live against
                                 # https://cigars.haynesnetwork.com. The per-cell
@@ -37,7 +37,7 @@ spike, since then against production and the Loki record) · `documented`
 | Tool availability late in a long conversation | unverified — a full-length smoke has still never been measured end to end. Real sessions have run since launch, but nothing in the record establishes tool availability late in one, so this stays open rather than being marked green by association | **verified**: tools persist for the session | **verified**: tools persist for the session | client-dependent |
 | Token refresh / long-lived link | **verified** 08-31 — authenticated tool calls from the same connector are in the Loki record on 08-30 and 08-31, days after the 08-26/27 authorization, with no re-consent in between | **verified** 08-26: silent refresh after 10-min token expiry, rotation honored (server `refresh_rotated`) | unverified (session outlived no token in test) | client-dependent |
 | Reconnect after expiry | **verified** 08-31, implied by the row above — the 1h access tokens had long expired, so those calls rode a refresh; not driven as an isolated test | **verified** 08-26: post-expiry call succeeds, no user interaction | unverified | client-dependent |
-| In-chat file attachment → tool args | **works from ChatGPT since 2026-09-06** — an `open_photo_drop` call from ChatGPT on the **Astra** model (iPhone app) arrived with the declared `image` argument hydrated and the server stored the file (argument channel; the `_meta["openai/fileParams"]` channel has never been observed). GPT-5.x forwards nothing on any channel — web verified 08-31, 09-01, 09-03; iOS app verified 09-07 ×3 — the gate is the model's pipeline, not the app — so the upload link stays the fallback: the photo drop (ADR-014) for a live smoke, the one-time link for a saved one | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported** — Codex source gates `fileParams` to its first-party apps server | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
+| In-chat file attachment → tool args | **works through ChatGPT Work / the Codex apps pipeline since 2026-09-06, as a host upload of a path the model passes** — four hydrated `open_photo_drop` calls (09-06, 09-08, 09-09 ×2), every one under the Codex-apps `_meta` signature (`callId`, `itemId`, `progressToken`, no `openai/userAgent`); that host shows the model `image` as a string plus "provide the absolute path to that file here", uploads the file and substitutes the handle (argument channel; the `_meta["openai/fileParams"]` channel has never been observed). Nothing is forwarded automatically anywhere: GPT-5.x on ChatGPT web (08-31, 09-01, 09-03) and the iOS app (09-07 ×3) sends nothing, and on 09-09 the Work session sent nothing when the model obeyed our "never … a file path" over the host's sentence (2026-09-09 section). The upload link stays the fallback: the photo drop (ADR-014) for a live smoke, the one-time link for a saved one | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported for a custom MCP server — verified in source 2026-09-09**: both halves of the adapter (schema masking at listing, upload at call) are gated on the server name `codex_apps`, so a user-configured server publishes `image` as the object and nothing uploads. Through the `codex_apps` server (ChatGPT Work) it is the route that works — see the ChatGPT column | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
 
 ¹ Owner's account, Developer Mode, 2026-08-26 (spike). **Production
 verified 2026-08-27**: ChatGPT Web connected to the real server end to end
@@ -407,6 +407,122 @@ against its host) agrees — image visible to the model, nothing forwarded, sche
 correct. Nothing server-side to fix. Re-test when the model changes, not the app
 build; an Astra call will show its signature on `photo_intake_request` (its
 `_meta` carries no `openai/userAgent`, so expect `client.userAgent: null`).
+
+## 2026-09-09 — the Work host uploads a path the model passes; our copy forbade it
+
+**The incident.** ChatGPT Work (tools reached as `mcp__codex_apps__cigar_journal_*`
+through a `functions.exec` cell), Tatuaje Monster Smash Drac, the photo attached
+in the conversation. The model called `open_photo_drop({})` — it omitted `image`
+because the tool description told it to — and the server said
+`no_image_received`; the owner uploaded through the link 23 minutes later.
+The night before, the same surface had forwarded three photos.
+
+| UTC | tool | argKeys | argImage | `_meta` keys | `photo_intake` |
+|---|---|---|---|---|---|
+| 09-08 16:37:10 | `open_photo_drop` | `["image"]` | object, all four filled | `callId, itemId, openai/organization, openai/session, openai/subject, openai/userLocation, progressToken` | `attached` / `argument` — 170,904 B image/jpeg |
+| 09-09 03:42:48 | `open_photo_drop` | `["image"]` | object, all four filled | same | `attached` / `argument` — 156,777 B |
+| 09-09 03:55:29 | `open_photo_drop` | `["image","photoDropId"]` | object, all four filled | same | `attached` / `argument` — 193,099 B |
+| **09-09 21:52:27** | `open_photo_drop` | **`[]`** | **absent** | **same** | **`no_delivery` / `none` / `upload_url`** — drop `40e7b755` |
+| 09-09 22:15:19 | `[web] photo_drop_upload` | — | — | — | `staged` 104,003 B 1080×1440, iPhone Safari, via the link |
+
+`client.userAgent` is `null` on all four MCP calls and `client.id` is the one OAuth
+client. **Same host signature, four calls, one difference: whether `image` was
+sent.** Intake is synchronous, so the empty call could not have been a forward
+that landed late; the 22:15 photo is the link.
+
+**The mechanism, from the codex source** (`openai/codex` at `eb680c0`, 2026-09-09;
+the client half — the hosted `codex_apps` server that republishes connectors is
+not public, so its inheriting this behaviour is an inference from the gates below):
+
+- *Listing.* `codex-rs/codex-mcp/src/codex_apps/file_params.rs` reads the tool's
+  `_meta["openai/fileParams"]`, then rewrites each named property in the
+  **model-facing** schema: keeps the server's description, appends "This parameter
+  expects an absolute local file path. If you want to upload a file, provide the
+  absolute path to that file here.", clears every other keyword, and sets
+  `type: "string"`. The model never sees our object. Before rewriting it records
+  whether the original object accepts `mime_type` / `file_name` (ours does).
+- *Call.* `codex-rs/core/src/mcp_openai_file.rs`, invoked from `mcp_tool_call.rs`
+  before `tools/call` is sent: for each declared param whose argument is a string,
+  read the file (relative paths resolve against the cwd), upload it to the ChatGPT
+  backend (`POST /files` → blob PUT → `POST /files/{id}/uploaded`), and substitute
+  `{ download_url, file_id, mime_type, file_name }` — the last two only when the
+  server's schema accepts them. A non-string value is passed through verbatim.
+- *Bad path.* A missing, unreadable or sandbox-denied file fails the **whole tool
+  call client-side** ("failed to upload `…` for `image`: …"); no upload starts and
+  no `tools/call` reaches the server. So a path the model passes never arrives here
+  as text, and a missing file is never reported as `no_image_received`.
+- *Gate.* Both halves run only for the server named `codex_apps` ("Disallow custom
+  MCPs from uploading files via fileParams"). A custom server in the Codex CLI gets
+  the object schema and no upload.
+- *Nothing is automatic.* The upload has exactly one caller and it only reads a
+  value already in `arguments`. An attachment reaches the model as an inline image
+  plus an `<image name="[Image #1]" path="/abs/path">` tag — or, when the read
+  fails, "Codex could not read the local image at `…`: …", which is the first line
+  the 09-09 conversation showed. The only route to a forwarded file is the model
+  typing that path into `image`.
+
+**Who wrote each sentence the model read.**
+
+| Text the model saw | Owner |
+|---|---|
+| "Leave the image argument empty — never fill in a URL, an id, or a file path." | this repo, both tool descriptions, v0.43.0–v0.45.0 |
+| "…Leave it empty: never paste a URL, an id, or a local file path here. A host that can upload a local file fills it itself…" | this repo, the `image` argument, v0.43.0–v0.45.0 |
+| "This parameter expects an absolute local file path. If you want to upload a file, provide the absolute path to that file here." | the Codex client, appended at listing time |
+| "delivery.status no_image_received is the normal outcome on every current client" | this repo, **v0.43.0 only** (removed by #311 in v0.44.1, 2026-09-07 01:13Z) |
+
+That last row dates the connector's schema: ChatGPT's app catalog snapshotted our
+`tools/list` between v0.43.0 (2026-09-06 22:00Z) and v0.44.1 and has served that
+copy since — this pod's own `~/.codex/cache/codex_apps_tools` holds the identical
+text, fetched 2026-09-06 23:21Z. Prod today publishes #311's wording. A copy fix
+therefore reaches Work only after the app is **re-linked or refreshed**; until
+then the model keeps reading the v0.43.0 prohibition.
+
+**Cause, confirmed.** The repository's own copy forbade the one value that makes
+this host forward — "never … a file path", strengthened in #304 on the day the
+first forward had just happened — while the host appended the opposite. On 09-08
+the model followed the host; on 09-09 it followed us. Nothing in the server's
+intake, declaration or published shape changed between the calls.
+
+**What changed (this PR).** Both tool descriptions, the `image` argument and the
+server instructions now say the same thing in three registers: pass the
+attachment's path in `image` only when the host states the argument takes one (it
+then uploads the file); otherwise leave it empty and never invent a URL, an id or
+a path. `no_image_received`'s detail names the retry that works — call again with
+the path the host reported — and otherwise the link. A retry inside the session
+lands on the same drop and mints another link beside the first (#316); the intake
+and the published shape are untouched, because the shape is what the host's
+walker reads and what has hydrated four times. Tests pin the affirmative clause on
+every surface and pin the old prohibitions *absent*, and cover the retry sequence
+(same drop, one photo, both links alive, `kind: cigar`) and a raw path arriving as
+text (refused before the handler, probed as `argImage.type: "string"`, never
+`no_image_received`).
+
+**Client comparison (2026-09-09).**
+
+| Client | Model supplies | Host transformation | Server receives | `delivery` | Photos | Evidence |
+|---|---|---|---|---|---|---|
+| ChatGPT Work / Codex apps, path passed | `image: "/workspace/…/upload/IMG.jpeg"` | reads + uploads, substitutes the four-field handle, `_meta` `callId/itemId/progressToken` | object, all four filled | — (`staged`) | 1 | **live**, Loki 09-08 16:37, 09-09 03:42, 03:55 |
+| ChatGPT Work / Codex apps, `{}` (the incident) | nothing | nothing to upload | `argKeys: []` | `no_image_received` | 0, then 1 via the link | **live**, Loki 09-09 21:52 + 22:15 |
+| ChatGPT Work, path to a missing file | `image: "/…/missing.jpeg"` | call fails client-side, no `tools/call` | nothing | — | 0 | **source-verified** (`openai_file_mcp.rs` test), not exercised live |
+| ChatGPT web / iOS app, GPT-5.x | nothing (no path exists to pass) | none | `argKeys: []` | `no_image_received` | via the link | **live**, 08-31 … 09-07 |
+| Claude Code / claude.ai | nothing (object schema, no host sentence) | none | `argKeys: []` | `no_image_received` | via the link | **live** for the link path; a Claude call with `image` unset is the mocked `{}` case |
+| Codex CLI, custom MCP server | nothing | none — adapter gated to `codex_apps` | `argKeys: []` | `no_image_received` | via the link | **source-verified** gate; not driven live |
+| Any host passing a raw path as text | `image: "/abs/path"` (string) | none | string, refused by the strict schema before the handler | `isError` validation result | 0 | **mocked** (mcp.test.ts) |
+| Retry in session with a handle | `image` handle after a bare call | n/a | object | — (`staged`) | 1, same drop, links A and B both valid | **mocked** (mcp.test.ts) |
+
+**What is not verified.** The model behind each Work call is not visible server-side
+(the owner attributes the successful forwards to Astra; the 09-09 miss carries the
+identical host signature, so the signature identifies the pipeline, not the
+model). Whether the attachment's copy existed on the host at 21:52 is unknown —
+the conversation showed both a read error and a later notice for the same path,
+and no call with the path was made, so it was never tested. No live Work or Claude
+call was driven from this pod for this fix: the owner's live drop was inside the
+session gap, so any `open_photo_drop` under his token would have landed in it.
+**What would prove it fixed:** after the app is refreshed in Work, a
+`photo_intake_request` for an `open_photo_drop` with `argKeys: ["image"]`, all
+four fields filled, `photo_intake outcome attached channel argument` — on a turn
+where the model was given the path — and, for the fallback, `argKeys: []` followed
+by the link, with the model relaying the link without reporting a problem.
 
 ## 2026-08-31 — gap-fill hardened: the two-call path, stated as an invariant
 
