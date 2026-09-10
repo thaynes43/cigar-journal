@@ -221,11 +221,21 @@ const assessment = z
         "Nicotine strength on the mild..full spectrum, e.g. medium-full. Omit if unstated.",
       ),
     body: z.string().nullish().describe("Body/weight of the smoke, e.g. full. Omit if unstated."),
+    // The verdict is EVIDENCED, not asserted (2026-09-10). Copy alone did not hold:
+    // the previous description already forbade inference and a model still read
+    // "Very smooth. 90/100" as a liked. `likedVerbatim` makes the claim checkable,
+    // and the server drops a `liked` that arrives without it.
     liked: z
       .boolean()
       .nullish()
       .describe(
-        "Only when the user explicitly said they liked or disliked it — never inferred from tone, prose, or the rating. Omit otherwise.",
+        "true or false only when the user said in words that they liked or disliked it, with those words quoted in likedVerbatim. A rating (even 90/100), praise in the notes, or a good impression is not a liked signal — omit. On update_smoke an explicit null clears it.",
+      ),
+    likedVerbatim: z
+      .string()
+      .nullish()
+      .describe(
+        'The user\'s own words stating the verdict, e.g. "I liked it", "loved this one", "not for me". Required whenever liked is sent — a liked that arrives without it is dropped and the result reports it. Never composed from a rating, a score, or tasting notes.',
       ),
     rating,
     impression: z.string().nullish().describe("The user's overall impression, in their words."),
@@ -1219,6 +1229,11 @@ export const saveSmokeOutput = z
     // claim runs, so `not_found` / `bound_elsewhere` / `failed` all arrive here
     // as a status on a successful save.
     photoDrop: looseObject.optional(),
+    // Fields the server refused to write because the evidence they require was
+    // missing — today only `assessment.liked` without `likedVerbatim`
+    // (2026-09-10). Present only when non-empty, so a clean save is byte-identical
+    // to what it was before the gate existed.
+    dropped: z.array(z.string()).optional(),
     replayed: z.boolean(),
   })
   .passthrough();
@@ -1292,6 +1307,11 @@ export const updateSmokeOutput = z
   .object({
     smoke: z.object({ smokeId: z.string(), version: z.number() }).passthrough(),
     changedFields: z.array(z.string()),
+    // Fields the change block asked for and the server refused to write for want
+    // of evidence — today only `assessment.liked` without `likedVerbatim`. Present
+    // only when non-empty; a dropped field is absent from `changedFields`, and the
+    // stored value is untouched.
+    dropped: z.array(z.string()).optional(),
     replayed: z.boolean(),
   })
   .passthrough();

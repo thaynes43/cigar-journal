@@ -142,7 +142,9 @@ Required affordances, per the UX research consensus:
   in tabular numerals (`$8.40 /stick`) — muted, not a badge, so the
   badge cap holds. Delivers R-PRICE-2 from data already on every tile.
 - **Badge row cap 3, priority unchanged:** remaining ×N · Want (accent) ·
-  rating seal; favorite stays the ember heart on the art corner
+  rating seal; favorite stays the ember heart on the art corner. The ♥ is
+  the Favorite mark alone — a smoke's `liked` flag carries no glyph on any
+  surface, and the seal shows the number or nothing (owner, 2026-09-10)
   (design.test.tsx pins these semantics — keep them).
 - **Grid mechanics:** `repeat(auto-fill, minmax(160px, 1fr))`, gap 3–4;
   fixed 3-col ≤480px (small-viewport fallback so minmax never overflows).

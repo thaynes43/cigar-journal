@@ -92,7 +92,7 @@ export function JournalList() {
                       ) : null}
                     </div>
                   </div>
-                  <RatingSeal rating={smoke.rating} liked={smoke.liked} size="sm" />
+                  <RatingSeal rating={smoke.rating} size="sm" />
                 </div>
                 {smoke.summary ? (
                   <p className="line-clamp-2 font-serif text-[0.9375rem] leading-relaxed text-muted">

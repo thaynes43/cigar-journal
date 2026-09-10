@@ -32,7 +32,9 @@ Supporting decisions:
   impression). Nothing is synthesized to fill the gaps.
 - **Overall descriptors** capture whole-smoke impressions independent of
   stages; **`liked`** (boolean, nullable) records coarse sentiment when no
-  number was given.
+  number was given. It stays in the model, the API and the smoke edit form,
+  but it has no visual mark: the ♥ is the catalog-level Favorite's alone
+  (owner, 2026-09-10).
 - **Smoked-at is provenance-aware** (`value`/`source`/`precision`): stated
   by the user → `user`; unstated on a live save → server stamps finalization
   time as `system-finalized` (system observation, not hallucination);

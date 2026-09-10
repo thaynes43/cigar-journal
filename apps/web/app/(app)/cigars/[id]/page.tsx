@@ -452,7 +452,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
                       </div>
                       <Chips items={smoke.descriptors.slice(0, 4)} />
                     </div>
-                    <RatingSeal rating={smoke.rating} liked={smoke.liked} size="sm" />
+                    <RatingSeal rating={smoke.rating} size="sm" />
                   </Link>
                 </li>
               );

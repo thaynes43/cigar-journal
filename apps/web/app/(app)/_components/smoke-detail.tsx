@@ -69,7 +69,7 @@ export function SmokeDetail({ smoke }: { smoke: SmokeView }) {
             <span className={`${ui.chipOutline} self-start`}>humidor</span>
           ) : null}
         </div>
-        <RatingSeal rating={assessment.rating} liked={assessment.liked} size="md" />
+        <RatingSeal rating={assessment.rating} size="md" />
       </header>
 
       {smoke.progression.length > 0 ? <BurnLine entries={smoke.progression} /> : null}

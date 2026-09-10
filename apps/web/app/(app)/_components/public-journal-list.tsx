@@ -87,7 +87,7 @@ export function PublicJournalList() {
                     </span>
                     <LocalDate format="smokedAt" value={smoke.smokedAt} className="label-caps" />
                   </div>
-                  <RatingSeal rating={smoke.rating} liked={smoke.liked} size="sm" />
+                  <RatingSeal rating={smoke.rating} size="sm" />
                 </div>
                 {smoke.summary ? (
                   <p className="line-clamp-2 font-serif text-[0.9375rem] leading-relaxed text-muted">
