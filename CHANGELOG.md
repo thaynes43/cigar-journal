@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.45.1](https://github.com/thaynes43/cigar-journal/compare/v0.45.0...v0.45.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* liked needs the user's words — the MCP drops an unevidenced liked, and ♥ means Favorite only ([#322](https://github.com/thaynes43/cigar-journal/issues/322)) ([2d4fc5f](https://github.com/thaynes43/cigar-journal/commit/2d4fc5fd83ea01be91bf0503f4af59f8d127f463))
+* **mcp:** the image argument takes the local path a host asks for — ChatGPT Work uploads it, our copy forbade it ([#321](https://github.com/thaynes43/cigar-journal/issues/321)) ([40b2424](https://github.com/thaynes43/cigar-journal/commit/40b2424fdace8613918733b0af300f10ca362b46))
+
 ## [0.45.0](https://github.com/thaynes43/cigar-journal/compare/v0.44.2...v0.45.0) (2026-09-07)
 
 
