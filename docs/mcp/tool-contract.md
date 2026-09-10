@@ -185,6 +185,7 @@ file id into it. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
+- liked is a stated verdict, never a mood: set it only when the user said in words that they liked or disliked the cigar, and quote those words in likedVerbatim — without them the server drops it. A rating, a score, or praise in the notes never implies liked.
 - approximatePosition and any position is a 0-1 fraction through the smoke (0 = light, 1 = nub).
 - descriptors are normalized kebab-case tags; specificDescriptors are the user's exact, unusual words kept verbatim.
 - smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time. Started and ended times are the same: state them only when the user gave them; a save that carries the photo drop takes its start from the drop, and the server derives the duration.
@@ -793,7 +794,8 @@ arguments:
   assessment:
     strength: medium-full        # mild..full spectrum, null ok
     body: full
-    liked: true                  # ONLY when explicitly stated — never inferred from tone/prose/rating; omit otherwise
+    liked: true                  # ONLY with likedVerbatim below; a rating or praise is not a liked signal
+    likedVerbatim: "Loved this one."   # the user's own words stating the verdict; never persisted, never echoed
     rating: null                 # 0-100 ONLY if the user stated one
     impression: >
       Complex and easy to like; burn issues on this stick only.
@@ -829,6 +831,7 @@ result:
     status: claimed              # claimed | not_found | bound_elsewhere | failed
     attached: 2                  #   photos moved onto this smoke by the claim
     pending: 0                   #   photos left in the drop (only when the smoke's photo cap was hit)
+  dropped: [assessment.liked]    # PRESENT ONLY when the evidence gate refused a field (see below)
   replayed: false
 ```
 
@@ -855,6 +858,20 @@ not double-deduct. **When (and only when) a `consumption` block is present, the
 result carries `holdingAfter { totalAcquired, remaining }`** — the derived stock
 after the smoke, so the model can confirm the new count without a follow-up read
 (additive; mirrors `record_purchase`).
+
+**`liked` is evidenced, never inferred.** `assessment.liked` is written only when
+`assessment.likedVerbatim` carries the user's own words stating the verdict ("I
+liked it", "not for me"). A `liked` arriving without them — or with a
+whitespace-only string — is dropped before the save: it stores as `null` and the
+result names it in `dropped: [assessment.liked]`. A rating, however high, praise
+in the notes, and a warm impression are not liked signals. On 2026-09-09 a client
+set it from "Very smooth. 90/100" while the schema description already forbade
+exactly that — so the rule is enforced now, not merely stated. The field carries
+no glyph on the web since the same day; the ♥ is the catalog Favorite's alone. `likedVerbatim` is evidence, not data: no
+column stores it and no read echoes it. To supply the verdict after a drop,
+correct the smoke with `update_smoke` carrying both fields; re-sending the save
+with the words added is a different intent, and the same `clientRequestId`
+answers `idempotency_conflict`.
 
 **Minimum validity:** a cigar reference plus at least one substantive field
 (non-empty progression, overallDescriptors, journal.narrative, or
@@ -1193,7 +1210,7 @@ arguments:
     startedAt: { value: "2026-08-25T21:00:00-04:00" }   # explicit null clears it and its source
     endedAt: { value: "2026-08-25T22:16:00-04:00" }     # an end before its start is a validation_error
     context: { location: garage }
-    assessment: { rating: 90 }
+    assessment: { rating: 90, liked: true, likedVerbatim: "I liked it" }  # liked needs the words; null clears it
     construction: { draw: good }
     journal: { title: null, narrative: null }   # explicit null clears; omitted keeps
     overallDescriptors: { add: [leather], remove: [] }
@@ -1207,6 +1224,7 @@ arguments:
 result:
   smoke: { smokeId: sm_01jc8x, version: 3 }
   changedFields: [assessment.rating, cigar, progression, consumption, startedAt, endedAt]
+  dropped: [assessment.liked]    # PRESENT ONLY when the evidence gate refused a field
   replayed: false
 ```
 
@@ -1219,6 +1237,14 @@ together. `durationMinutes` has no op: it is derived from the pair on read
 (`fromHumidor: false`), or re-attributes the humidor link (ADR-008); re-pointing
 the smoke's `cigar` clears a now-foreign lot automatically. The movement is
 audited in the same transaction as the smoke change.
+
+`assessment.liked` carries save_smoke's evidence gate unchanged: a boolean is
+applied only alongside `assessment.likedVerbatim`, and without it the field is
+dropped — the stored value stands, it is absent from `changedFields`, and it is
+named in `dropped`. An explicit `liked: null` needs no words; it clears the field
+like any other null op. When the dropped `liked` was the call's only operation
+nothing is written at all, and the answer is a `validation_error` on
+`changes.assessment.likedVerbatim` rather than a version bump.
 
 ## update_purchase — write, idempotent
 

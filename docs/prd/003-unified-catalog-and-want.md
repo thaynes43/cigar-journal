@@ -65,7 +65,9 @@ Consumption decision: [ADR-008](../adr/008-explicit-consumption.md).
   cigar unique, optional note, created_at), mirroring `wants`. Favorite =
   a cigar the user *loves*, distinct from Want (a cigar to try/own).
   Independent of want, owning, and smoking; never inferred (the per-smoke
-  `liked` field stays explicit-only). Surfaces: detail-page toggle beside
+  `liked` field stays explicit-only, and since 2026-09-10 the MCP server
+  enforces that with `likedVerbatim` — tool contract, save_smoke).
+  Surfaces: detail-page toggle beside
   Want, tile heart; MCP `set_favorite` plus `favorited` on catalog reads.
   Catalog merge re-points favorites (and wants) to the surviving cigar,
   de-duplicated. A Favorites shelf/facet may join the library later (not

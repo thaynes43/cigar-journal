@@ -208,3 +208,35 @@ describe("the image argument's path guidance", () => {
     expect(detail).toContain("the upload link is the path — relay it");
   });
 });
+
+// The liked evidence gate (2026-09-10). `assessment.liked` is the ♥ the web shows
+// beside a smoke, and on 2026-09-09 a hosted agent set it true from "Very smooth.
+// 90/100" — while the field description already said "never inferred from tone,
+// prose, or the rating". A prohibition a model can satisfy by believing it did not
+// infer is unenforceable, so the server now drops a `liked` that arrives without
+// the user's words in `likedVerbatim`. The instruction bullet is what tells the
+// model that BEFORE the drop happens, and it is the one surface a client reads
+// once at initialize rather than per call — so it is pinned on both copies.
+describe("the liked bullet", () => {
+  const BULLET =
+    "- liked is a stated verdict, never a mood: set it only when the user said in words that they liked or disliked the cigar, and quote those words in likedVerbatim — without them the server drops it. A rating, a score, or praise in the notes never implies liked.";
+
+  it("is in the server instructions the model receives", () => {
+    expect(INSTRUCTIONS).toContain(BULLET);
+  });
+
+  it("is in the tool contract's mirror of them", () => {
+    const contract = readFileSync(new URL("../../../docs/mcp/tool-contract.md", import.meta.url), "utf8");
+    expect(contract).toContain(BULLET);
+  });
+
+  // The bullet states the rule; the tool descriptions state the consequence, and
+  // a model that reads only the tool it is about to call must still learn it.
+  it("is restated on both write tool descriptions", () => {
+    const server = readFileSync(new URL("./server.ts", import.meta.url), "utf8");
+    const sentences = server.match(
+      /`assessment\.liked` is accepted only with `assessment\.likedVerbatim`/g,
+    );
+    expect(sentences, "save_smoke and update_smoke must each carry the sentence").toHaveLength(2);
+  });
+});

@@ -1196,6 +1196,222 @@ describe("@cj/mcp adapter", () => {
     });
   });
 
+  // ---- the liked evidence gate (2026-09-10) ---------------------------------
+  //
+  // On 2026-09-09 a hosted agent set `assessment.liked: true` on a smoke the user
+  // had only rated ("Very smooth. 90/100") — while the field description already
+  // said "never inferred from tone, prose, or the rating". The web renders the
+  // field as a ♥, so the owner read an invented favourite. Copy alone did not
+  // hold, so the verdict is EVIDENCED: `liked` is written only alongside the
+  // user's own words in `likedVerbatim`, which is itself never persisted.
+  describe("the liked evidence gate", () => {
+    async function assessmentOf(
+      client: Client,
+      smokeId: string,
+    ): Promise<Record<string, unknown>> {
+      const full = payloadOf(await call(client, "get_smoke", { smokeId })) as {
+        smoke: { assessment: Record<string, unknown> };
+      };
+      return full.smoke.assessment;
+    }
+
+    it("save_smoke drops a liked with no verbatim, stores null, and reports it", async () => {
+      await withClient(ownerFull, async (client) => {
+        // The incident's own shape: notes, a high rating, and an inferred verdict.
+        const { value, lines } = await captureMcpLog(() =>
+          call(client, "save_smoke", {
+            clientRequestId: randomUUID(),
+            cigar: { cigarId: primaryCigarId },
+            journal: { narrative: "Very smooth. 90/100." },
+            assessment: { rating: 90, liked: true, impression: "Very smooth." },
+          }),
+        );
+        const data = payloadOf(value) as { smoke: { smokeId: string }; dropped?: string[] };
+        expect(data.dropped).toEqual(["assessment.liked"]);
+
+        const stored = await assessmentOf(client, data.smoke.smokeId);
+        expect(stored.liked).toBeNull();
+        // Everything else the call carried still lands — the gate refuses one field.
+        expect(stored.rating).toBe(90);
+
+        // Auditable in Loki by field NAME. The log carries no argument values
+        // (logger.ts), so the mark says which field was refused and nothing more.
+        expect(eventPayload(lines, "tool_called").droppedFields).toBe("assessment.liked");
+      });
+    });
+
+    it("save_smoke keeps a liked backed by the user's words, and reports no drop", async () => {
+      await withClient(ownerFull, async (client) => {
+        const data = payloadOf(
+          await call(client, "save_smoke", {
+            clientRequestId: randomUUID(),
+            cigar: { cigarId: primaryCigarId },
+            overallDescriptors: ["cedar"],
+            assessment: { liked: true, likedVerbatim: "loved this one" },
+          }),
+        ) as { smoke: { smokeId: string } } & Record<string, unknown>;
+        // Absent, not empty — a clean save is byte-identical to what it was
+        // before the gate existed.
+        expect(data).not.toHaveProperty("dropped");
+
+        const stored = await assessmentOf(client, data.smoke.smokeId);
+        expect(stored.liked).toBe(true);
+        // Evidence, not data: nothing stores it and no read echoes it back.
+        expect(stored).not.toHaveProperty("likedVerbatim");
+      });
+    });
+
+    it("a whitespace-only verbatim is no evidence at all", async () => {
+      await withClient(ownerFull, async (client) => {
+        const data = payloadOf(
+          await call(client, "save_smoke", {
+            clientRequestId: randomUUID(),
+            cigar: { cigarId: primaryCigarId },
+            overallDescriptors: ["cedar"],
+            assessment: { liked: true, likedVerbatim: "   \n  " },
+          }),
+        ) as { smoke: { smokeId: string }; dropped?: string[] };
+        expect(data.dropped).toEqual(["assessment.liked"]);
+        expect((await assessmentOf(client, data.smoke.smokeId)).liked).toBeNull();
+      });
+    });
+
+    it("update_smoke leaves the stored liked untouched when the words are missing", async () => {
+      await withClient(ownerFull, async (client) => {
+        const smokeId = (
+          payloadOf(
+            await call(client, "save_smoke", {
+              clientRequestId: randomUUID(),
+              cigar: { cigarId: primaryCigarId },
+              overallDescriptors: ["cedar"],
+              assessment: { liked: true, likedVerbatim: "I liked it" },
+            }),
+          ) as { smoke: { smokeId: string } }
+        ).smoke.smokeId;
+
+        const corrected = payloadOf(
+          await call(client, "update_smoke", {
+            clientRequestId: randomUUID(),
+            smokeId,
+            changes: { assessment: { rating: 91, liked: false } },
+          }),
+        ) as { changedFields: string[]; dropped?: string[] };
+        expect(corrected.dropped).toEqual(["assessment.liked"]);
+        // The op never reached buildPatch, so it is absent from changedFields too.
+        expect(corrected.changedFields).toContain("assessment.rating");
+        expect(corrected.changedFields).not.toContain("assessment.liked");
+
+        const stored = await assessmentOf(client, smokeId);
+        expect(stored.liked).toBe(true);
+        expect(stored.rating).toBe(91);
+      });
+    });
+
+    it("update_smoke applies a liked backed by words, and never records the words", async () => {
+      await withClient(ownerFull, async (client) => {
+        const smokeId = (
+          payloadOf(
+            await call(client, "save_smoke", {
+              clientRequestId: randomUUID(),
+              cigar: { cigarId: primaryCigarId },
+              overallDescriptors: ["cedar"],
+            }),
+          ) as { smoke: { smokeId: string } }
+        ).smoke.smokeId;
+
+        const corrected = payloadOf(
+          await call(client, "update_smoke", {
+            clientRequestId: randomUUID(),
+            smokeId,
+            changes: { assessment: { liked: false, likedVerbatim: "not for me" } },
+          }),
+        ) as { changedFields: string[] } & Record<string, unknown>;
+        expect(corrected).not.toHaveProperty("dropped");
+        expect(corrected.changedFields).toEqual(["assessment.liked"]);
+        // The evidence is stripped before the domain: an unstripped key would
+        // show up here as `assessment.likedVerbatim` and in the audit row.
+        expect(corrected.changedFields).not.toContain("assessment.likedVerbatim");
+        expect(await assessmentOf(client, smokeId)).not.toHaveProperty("likedVerbatim");
+      });
+    });
+
+    it("update_smoke clears the field on an explicit null, with no words needed", async () => {
+      await withClient(ownerFull, async (client) => {
+        const smokeId = (
+          payloadOf(
+            await call(client, "save_smoke", {
+              clientRequestId: randomUUID(),
+              cigar: { cigarId: primaryCigarId },
+              overallDescriptors: ["cedar"],
+              assessment: { liked: true, likedVerbatim: "I liked it" },
+            }),
+          ) as { smoke: { smokeId: string } }
+        ).smoke.smokeId;
+
+        const cleared = payloadOf(
+          await call(client, "update_smoke", {
+            clientRequestId: randomUUID(),
+            smokeId,
+            changes: { assessment: { liked: null } },
+          }),
+        ) as { changedFields: string[] } & Record<string, unknown>;
+        expect(cleared).not.toHaveProperty("dropped");
+        expect(cleared.changedFields).toEqual(["assessment.liked"]);
+        expect((await assessmentOf(client, smokeId)).liked).toBeNull();
+      });
+    });
+
+    it("a liked-only update with no words writes nothing and names the missing field", async () => {
+      await withClient(ownerFull, async (client) => {
+        const smokeId = (
+          payloadOf(
+            await call(client, "save_smoke", {
+              clientRequestId: randomUUID(),
+              cigar: { cigarId: primaryCigarId },
+              overallDescriptors: ["cedar"],
+            }),
+          ) as { smoke: { smokeId: string; version: number } }
+        ).smoke.smokeId;
+
+        const result = await call(client, "update_smoke", {
+          clientRequestId: randomUUID(),
+          smokeId,
+          changes: { assessment: { liked: true } },
+        });
+        const error = errorOf(result);
+        expect(error.code).toBe("validation_error");
+        expect((error.fields as { path: string }[]).map((f) => f.path)).toContain(
+          "changes.assessment.likedVerbatim",
+        );
+
+        // Nothing was written: no version bump, no verdict.
+        const after = payloadOf(await call(client, "get_smoke", { smokeId })) as {
+          smoke: { version: number; assessment: { liked: unknown } };
+        };
+        expect(after.smoke.version).toBe(1);
+        expect(after.smoke.assessment.liked).toBeNull();
+      });
+    });
+
+    it("tools/list publishes likedVerbatim beside liked on both write tools", async () => {
+      await withClient(ownerFull, async (client) => {
+        const { tools } = await client.listTools();
+        for (const name of ["save_smoke", "update_smoke"] as const) {
+          const schema = tools.find((t) => t.name === name)!.inputSchema as {
+            properties: Record<string, { properties?: Record<string, { description?: string }> }>;
+          };
+          const props =
+            name === "save_smoke" ? schema.properties : schema.properties.changes!.properties!;
+          const assessment = props.assessment as {
+            properties: Record<string, { description?: string }>;
+          };
+          expect(Object.keys(assessment.properties)).toContain("likedVerbatim");
+          expect(assessment.properties.liked!.description).toContain("likedVerbatim");
+        }
+      });
+    });
+  });
+
   // ---- error shapes ---------------------------------------------------------
 
   it("cigar_ambiguous: described name matching two catalog rows returns candidates", async () => {

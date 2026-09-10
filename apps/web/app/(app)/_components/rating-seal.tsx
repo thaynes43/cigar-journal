@@ -1,41 +1,26 @@
-import type { ReactNode } from "react";
-
 // The 100-point rating as a band-seal mark. Absent rating renders no seal —
-// never a placeholder zero; a liked-only smoke still shows its heart.
+// never a placeholder zero, and never a mark for `liked`: the ♥ belongs to the
+// catalog-level Favorite alone (owner ruling, 2026-09-10).
 
-const SEAL: Record<"sm" | "md", { box: string; num: string; heart: string }> = {
-  sm: { box: "size-9 border", num: "text-sm", heart: "text-xs" },
-  md: { box: "size-14 border-2", num: "text-xl", heart: "text-xs" },
+const SEAL: Record<"sm" | "md", { box: string; num: string }> = {
+  sm: { box: "size-9 border", num: "text-sm" },
+  md: { box: "size-14 border-2", num: "text-xl" },
 };
-
-// `role="img"` so the label is actually announced — an aria-label on a bare
-// <span> is not reliably exposed, and the glyph alone reads as punctuation.
-function Heart({ className }: { className?: string }) {
-  return (
-    <span className={`text-ember ${className ?? ""}`} role="img" aria-label="Liked">
-      ♥
-    </span>
-  );
-}
 
 export function RatingSeal({
   rating,
-  liked,
   size = "sm",
 }: {
   rating: number | null | undefined;
-  liked?: boolean | null;
   size?: "sm" | "md";
 }) {
-  if (rating == null) return liked ? <Heart className={SEAL[size].heart} /> : null;
+  if (rating == null) return null;
 
   const s = SEAL[size];
-  // The overlay heart is a CHILD of the seal, never a sibling in a wrapper: it
-  // is absolutely positioned, so the seal's own padding box has to be its
-  // containing block. Hanging it off a wrapper instead would resolve
-  // `-right-1 -bottom-1` against a box 2px wider on each side (`border-2` at
-  // md), silently moving the glyph.
-  const seal = (overlay?: ReactNode) => (
+  return (
+    // `relative` is the inner keyline's containing block: it is inset from the
+    // seal's own padding box, so it has to resolve against the bordered element
+    // rather than any wrapper around it.
     <span
       className={`relative inline-flex shrink-0 items-center justify-center rounded-full border-accent/70 ${s.box}`}
     >
@@ -47,31 +32,6 @@ export function RatingSeal({
       <span className={`font-display font-semibold text-accent lining-nums tabular-nums ${s.num}`}>
         {rating}
       </span>
-      {overlay}
     </span>
-  );
-
-  if (!liked) return seal();
-
-  // At `md` the seal only ever sits on `--bg`, so the heart keeps its overlay,
-  // unmoved, and its backing plate matches the ground behind it. At `sm` every
-  // caller is a `bg-surface` card (journal card, public journal card, the cigar
-  // detail's "Your smokes" row), where that `bg-bg` plate is a mismatched notch
-  // cut into the ring — and the overhang pushes a 10px glyph into the card's
-  // padding. The heart becomes a sibling instead: the parents are already flex
-  // rows with a gap, so it reads as one more mark in the badge row.
-  if (size === "sm") {
-    return (
-      <span className="inline-flex shrink-0 items-center gap-1">
-        {seal()}
-        <Heart className={s.heart} />
-      </span>
-    );
-  }
-
-  return seal(
-    <span className="absolute -right-1 -bottom-1 flex items-center justify-center rounded-full bg-bg px-0.5">
-      <Heart className={s.heart} />
-    </span>,
   );
 }

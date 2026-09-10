@@ -282,6 +282,7 @@ file id into it. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
+- liked is a stated verdict, never a mood: set it only when the user said in words that they liked or disliked the cigar, and quote those words in likedVerbatim — without them the server drops it. A rating, a score, or praise in the notes never implies liked.
 - approximatePosition and any position is a 0-1 fraction through the smoke (0 = light, 1 = nub).
 - descriptors are normalized kebab-case tags; specificDescriptors are the user's exact, unusual words kept verbatim.
 - smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time. Started and ended times are the same: state them only when the user gave them; a save that carries the photo drop takes its start from the drop, and the server derives the duration.

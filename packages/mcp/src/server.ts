@@ -660,6 +660,38 @@ async function run(
   }
 }
 
+// ---- the liked evidence gate (2026-09-10) ----------------------------------
+//
+// `assessment.liked` rendered as a ♥ on the web until 2026-09-10, and the owner
+// read it as a favorite. On 2026-09-09 a hosted agent set it true on a smoke the user had
+// only rated ("Very smooth. 90/100") — while the field description already said
+// "never inferred from tone, prose, or the rating". Copy alone does not bind a
+// model, so the claim is now EVIDENCED: `liked` is written only alongside
+// `likedVerbatim`, the user's own words. Without them the server drops the field
+// and says so in the result.
+//
+// `likedVerbatim` is evidence, not data. Nothing persists it — no column, no
+// migration, no read that could echo it back — so it is stripped here, before the
+// domain, on both tools.
+type AssessmentArgs = NonNullable<SaveSmokeArgs["assessment"]>;
+
+const LIKED_FIELD = "assessment.liked";
+
+function gateLiked(assessment: AssessmentArgs | undefined): {
+  assessment: AssessmentArgs | undefined;
+  dropped: string[];
+} {
+  if (assessment === undefined) return { assessment: undefined, dropped: [] };
+  const { likedVerbatim, ...gated } = assessment;
+  const quoted = typeof likedVerbatim === "string" && likedVerbatim.trim().length > 0;
+  // Only a BOOLEAN verdict needs evidence. An explicit null is a clear, not a
+  // claim, and passes through — as does an omitted key, whose absence the
+  // update path reads as "leave it alone".
+  if (typeof gated.liked !== "boolean" || quoted) return { assessment: gated, dropped: [] };
+  delete gated.liked;
+  return { assessment: gated, dropped: [LIKED_FIELD] };
+}
+
 // Provenance is stamped server-side from the OAuth client — never from arguments
 // (security-and-observability.md). Envelope/provenance fields are excluded from
 // the idempotency fingerprint (@cj/domain fingerprint), so stamping them never
@@ -1122,7 +1154,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Save smoke",
       description:
-        "Persist one finished smoke, called once when the user signals the cigar is over — never per observation. Omit anything the user did not establish; sparse is correct. When you pass a consumption block (the ask-once 'From your humidor?' beat), the result adds holdingAfter { totalAcquired, remaining } so you can confirm the new count without another read. A described cigar can error cigar_ambiguous when the name lands a word away from a catalog sibling — show the user the search_cigars candidates; when they confirm one, save against that cigarId under the same clientRequestId, since the failed save wrote nothing. When they confirm none is theirs, create the distinct product with add_cigar confirmedDistinct:true and save against the cigarId it returns under a FRESH clientRequestId, because add_cigar has spent the first one. This tool has no confirmedDistinct of its own.",
+        "Persist one finished smoke, called once when the user signals the cigar is over — never per observation. Omit anything the user did not establish; sparse is correct. When you pass a consumption block (the ask-once 'From your humidor?' beat), the result adds holdingAfter { totalAcquired, remaining } so you can confirm the new count without another read. A described cigar can error cigar_ambiguous when the name lands a word away from a catalog sibling — show the user the search_cigars candidates; when they confirm one, save against that cigarId under the same clientRequestId, since the failed save wrote nothing. When they confirm none is theirs, create the distinct product with add_cigar confirmedDistinct:true and save against the cigarId it returns under a FRESH clientRequestId, because add_cigar has spent the first one. This tool has no confirmedDistinct of its own. `assessment.liked` is accepted only with `assessment.likedVerbatim` — the user's own words stating the verdict; sent without them it is dropped, stored as null, and named in `dropped`.",
       inputSchema: saveSmokeSchema,
       outputSchema: saveSmokeOutput,
       annotations: {
@@ -1133,8 +1165,21 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       },
     },
     (args, extra) =>
-      run("save_smoke", extra.authInfo, async ({ principal, clientId }, correlationId) => {
-        const result = await saveSmoke(deps, principal, toSaveInput(args, clientId, correlationId));
+      run("save_smoke", extra.authInfo, async ({ principal, clientId }, correlationId, mark) => {
+        // Evidence gate. A `liked` with no quoted words never reaches the domain,
+        // so it stores as null; the log line carries the field NAME (never the
+        // value — logger.ts logs no arguments) so a dropped inference is auditable.
+        const gate = gateLiked(args.assessment);
+        if (gate.dropped.length > 0) mark({ droppedFields: gate.dropped.join(",") });
+        const result = await saveSmoke(
+          deps,
+          principal,
+          toSaveInput(
+            args.assessment === undefined ? args : { ...args, assessment: gate.assessment },
+            clientId,
+            correlationId,
+          ),
+        );
         return jsonResult({
           smoke: {
             smokeId: result.smoke.smokeId,
@@ -1174,6 +1219,9 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
           // arrive as a status on a successful save, and the model reads
           // `attached` to tell the user how many photos landed.
           photoDrop: result.photoDrop,
+          // Present only when the gate refused a field — a clean save is
+          // byte-identical to what it returned before the gate existed.
+          dropped: gate.dropped.length > 0 ? gate.dropped : undefined,
           replayed: result.replayed,
         });
       }),
@@ -1291,7 +1339,7 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
     {
       title: "Update smoke",
       description:
-        "Apply explicit, field-scoped corrections to an existing smoke (rating, cigar, appended stages). Batch related corrections from the same exchange into ONE call rather than issuing several — one clientRequestId per correction intent. Reuse the clientRequestId on retries; unlisted fields are never touched.",
+        "Apply explicit, field-scoped corrections to an existing smoke (rating, cigar, appended stages). Batch related corrections from the same exchange into ONE call rather than issuing several — one clientRequestId per correction intent. Reuse the clientRequestId on retries; unlisted fields are never touched. `assessment.liked` is accepted only with `assessment.likedVerbatim` — the user's own words stating the verdict; sent without them it is dropped, the stored value stands, and it is named in `dropped`.",
       inputSchema: updateSmokeSchema,
       outputSchema: updateSmokeOutput,
       annotations: {
@@ -1302,13 +1350,37 @@ export function createMcpServer(deps: Deps, storage: PhotoStorage | null): McpSe
       },
     },
     (args, extra) =>
-      run("update_smoke", extra.authInfo, async ({ principal, clientId }, correlationId) => {
+      run("update_smoke", extra.authInfo, async ({ principal, clientId }, correlationId, mark) => {
+        // Same gate as save_smoke, one step deeper. A dropped `liked` leaves the
+        // stored value untouched: the op never reaches buildPatch, so it is
+        // absent from `changedFields` too.
+        const gate = gateLiked(args.changes.assessment);
+        const changes = { ...args.changes };
+        if (gate.assessment !== undefined) {
+          if (Object.keys(gate.assessment).length === 0) delete changes.assessment;
+          else changes.assessment = gate.assessment;
+        }
+        if (gate.dropped.length > 0) {
+          mark({ droppedFields: gate.dropped.join(",") });
+          // The drop emptied the call. Left to the domain this answers "At least
+          // one change operation is required", which reads as a malformed client
+          // rather than the missing evidence it is.
+          if (Object.keys(changes).length === 0) {
+            throw new ValidationError([
+              {
+                path: "changes.assessment.likedVerbatim",
+                message:
+                  "liked is written only with the user's own words quoting the verdict. Nothing was changed.",
+              },
+            ]);
+          }
+        }
         const result = await updateSmoke(
           deps,
           principal,
-          toUpdateInput(args, clientId, correlationId),
+          toUpdateInput({ ...args, changes }, clientId, correlationId),
         );
-        return jsonResult(result);
+        return jsonResult(gate.dropped.length > 0 ? { ...result, dropped: gate.dropped } : result);
       }),
   );
 

@@ -5,7 +5,7 @@ document goes stale by design** — client products evolve independently of
 this application. Re-verify before relying on any row.
 
 ```yaml
-lastReviewed: 2026-09-09        # photo path sentence (2026-09-09 section); go-live sweep was #97, 08-31
+lastReviewed: 2026-09-10        # liked evidence gate (2026-09-10 section); go-live sweep was #97, 08-31
 clientMatrixVerified: 2026-08-26 # Phase 0 spike, OAuth mode — all three target
                                 # clients driven live against
                                 # https://cigars.haynesnetwork.com. The per-cell
@@ -523,6 +523,45 @@ session gap, so any `open_photo_drop` under his token would have landed in it.
 four fields filled, `photo_intake outcome attached channel argument` — on a turn
 where the model was given the path — and, for the fallback, `argKeys: []` followed
 by the link, with the model relaying the link without reporting a problem.
+
+## 2026-09-10 — `liked` inferred from a rating; copy replaced by an evidence gate
+
+**The incident.** 2026-09-09, a ChatGPT-hosted agent (OAuth client
+`03d69de246759b5c62a6e28c1a8e0f0e`) saved smoke `f02e6a9f…`, Foundation
+Tabernacle, with `assessment.liked: true`. The user never said they liked it:
+their captured words were tasting notes plus "Very smooth. 90/100". The model
+read the rating and the tone as the verdict. The web then rendered `liked` as a ♥
+beside the smoke (`rating-seal.tsx`), so the owner saw a favorite he had not
+declared. That mark is gone the same day: the ♥ is the catalog Favorite's alone,
+and `liked` has no glyph.
+
+**Why copy did not hold.** The field description already said "Only when the user
+explicitly said they liked or disliked it — never inferred from tone, prose, or
+the rating." A prohibition the model can satisfy by *believing* it did not infer
+is unenforceable — the same failure mode as the 2026-09-09 path sentence, one
+layer up: there, our copy overrode the host's; here, the model's own reading
+overrode ours.
+
+**The fix.** The claim is now evidenced. `assessment.likedVerbatim`
+takes the user's own words stating the verdict, and `save_smoke` / `update_smoke`
+drop a boolean `liked` that arrives without them — stored `null` on a save, left
+untouched on an update — naming the field in the result's `dropped` array and
+stamping `droppedFields` on the call's `tool_called` line (field names only; the
+log still carries no argument values). `likedVerbatim` is never persisted and
+never read back. An explicit `liked: null` still clears the field with no words.
+
+**Manifest caching applies.** A client running a stale `tools/list` snapshot —
+the ChatGPT app catalog snapshots the tool schemas at link time (see *ChatGPT
+manifest caching*) — will keep sending the old `assessment` shape, so every
+`liked` it sends is dropped until the app is re-linked and the new schema is
+read. That is the safe direction to fail: a missing ♥ is a correction the owner
+can make, an invented one is a claim he did not make. The web edit form remains
+the manual path for setting `liked` directly, and is unaffected by the gate.
+
+**What would prove it working.** In Loki, a `tool_called` line for `save_smoke`
+or `update_smoke` carrying `droppedFields: assessment.liked`, and a subsequent
+save from a re-linked client carrying `likedVerbatim` whose `get_smoke` reads
+`liked: true`.
 
 ## 2026-08-31 — gap-fill hardened: the two-call path, stated as an invariant
 

@@ -64,57 +64,38 @@ describe("BandTile", () => {
 });
 
 describe("RatingSeal", () => {
-  it("renders nothing without a rating or a like", () => {
-    expect(renderToStaticMarkup(<RatingSeal rating={null} liked={null} />)).toBe("");
+  it("renders nothing without a rating", () => {
+    expect(renderToStaticMarkup(<RatingSeal rating={null} />)).toBe("");
   });
 
   it("never shows a placeholder zero, but shows a real zero", () => {
-    expect(renderToStaticMarkup(<RatingSeal rating={null} liked={false} />)).toBe("");
+    expect(renderToStaticMarkup(<RatingSeal rating={undefined} />)).toBe("");
     expect(renderToStaticMarkup(<RatingSeal rating={0} />)).toContain(">0<");
   });
 
-  it("renders the heart alone when liked without a rating", () => {
-    const html = renderToStaticMarkup(<RatingSeal rating={null} liked={true} />);
-    expect(html).toContain("♥");
-    expect(html).not.toContain("rounded-full");
-  });
-
-  it("integrates the heart into the seal when both exist", () => {
-    const html = renderToStaticMarkup(<RatingSeal rating={92} liked={true} />);
+  it("gives a liked smoke no glyph — the heart is the Favorite mark alone", () => {
+    // Owner ruling 2026-09-10: `assessment.liked` keeps its place in the data
+    // model, the API and the edit form, but the ♥ marks a catalog Favorite and
+    // nothing else. A caller still handing the seal a `liked` flag gets a bare
+    // number, and a liked smoke with no rating gets no seal at all.
+    const liked: { liked?: boolean } = { liked: true };
+    expect(renderToStaticMarkup(<RatingSeal rating={null} {...liked} />)).toBe("");
+    const html = renderToStaticMarkup(<RatingSeal rating={92} {...liked} />);
     expect(html).toContain(">92<");
-    expect(html).toContain("♥");
+    expect(html).not.toContain("♥");
+    expect(html).not.toContain('aria-label="Liked"');
+    expect(html).not.toContain("text-ember");
   });
 
-  it("names the lone heart for assistive tech", () => {
-    // An aria-label on a bare <span> is not reliably announced; the glyph needs
-    // a role before the label carries.
-    const html = renderToStaticMarkup(<RatingSeal rating={null} liked={true} />);
-    expect(html).toContain('role="img"');
-    expect(html).toContain('aria-label="Liked"');
-  });
-
-  it("hangs the sm heart beside the seal, not over it", () => {
-    // Every sm caller is a bg-surface card, so the overlay's bg-bg backing plate
-    // was a mismatched notch in the ring and the overhang pushed the glyph into
-    // the card's padding (issue #49).
-    const html = renderToStaticMarkup(<RatingSeal rating={92} liked={true} size="sm" />);
-    expect(html).not.toContain("bg-bg");
-    expect(html).not.toContain("-bottom-1");
-  });
-
-  it("keeps the md heart as an overlay anchored to the seal itself", () => {
-    // md only ever sits on --bg, where the backing plate matches the ground.
-    // The heart is absolutely positioned, so the ASSERTION THAT MATTERS is its
-    // containing block: the seal — `border-2`, inset 2px — must be the root
-    // element, not a wrapper around it. Hanging it off an unbordered wrapper
-    // renders the same classes and moves the glyph 2px on both axes.
-    const html = renderToStaticMarkup(<RatingSeal rating={92} liked={true} size="md" />);
+  it("anchors the inner keyline to the seal itself, not a wrapper", () => {
+    // The keyline is absolutely positioned at `inset-0.5`, so the bordered seal
+    // — `border-2`, inset 2px at md — must be the root element. An unbordered
+    // wrapper renders the same classes and moves the ring 2px on both axes.
+    const html = renderToStaticMarkup(<RatingSeal rating={92} size="md" />);
     const rootClass = /^<span class="([^"]*)"/.exec(html)?.[1] ?? "";
     expect(rootClass).toContain("size-14");
     expect(rootClass).toContain("border-2");
     expect(rootClass).toContain("relative");
-    expect(html).toContain("-bottom-1");
-    expect(html).toContain("bg-bg");
   });
 
   it("forces lining figures so a 3-digit score keeps the baseline", () => {

@@ -44,7 +44,7 @@ export function PublicSmokeDetail({ smoke }: { smoke: PublicSmokeView }) {
             </h1>
           )}
         </div>
-        <RatingSeal rating={assessment.rating} liked={assessment.liked} size="md" />
+        <RatingSeal rating={assessment.rating} size="md" />
       </header>
 
       {smoke.progression.length > 0 ? <BurnLine entries={smoke.progression} /> : null}
