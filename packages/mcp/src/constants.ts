@@ -274,9 +274,11 @@ passing photoDropId continues a specific drop instead. After a save,
 add_smoke_photo with the smoke id returns a one-time upload link for a photo of
 that saved smoke, and with a photoDropId attaches a drop the save did not carry.
 If the host forwarded an attached image with either call the photo is stored
-directly and no link is needed; delivery.status reports which happened. Leave
-the image argument empty — never paste an image, a URL, a chat file link, a file
-id, or a local file path into it. A photo never blocks saving the smoke.
+directly and no link is needed; delivery.status reports which happened. Fill
+the image argument only when the host states it takes a local file path: pass
+the attachment's path as the host reported it and the host uploads the file.
+Otherwise leave it empty — never paste an image, a URL, a chat file link, or a
+file id into it. A photo never blocks saving the smoke.
 
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.

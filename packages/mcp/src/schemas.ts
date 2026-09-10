@@ -728,6 +728,20 @@ export const recordPurchaseBatchSchema = z
 // a SHORT-LIVED signed URL). The legacy request-level `_meta["openai/fileParams"]`
 // delivery is still accepted server-side; both normalize into one fetch path.
 //
+// HOST-UPLOADED LOCAL FILE (2026-09-09, ChatGPT Work / the Codex apps pipeline).
+// That host does not hydrate this object on its own. It rewrites the declared
+// property to a STRING in the model-facing schema, appends its own sentence
+// ("This parameter expects an absolute local file path. If you want to upload a
+// file, provide the absolute path to that file here." — a literal in the codex
+// binary, 0.153.4), and when the model passes the path of the attachment's copy
+// on the host it uploads the file and substitutes this handle before the call
+// leaves the host. Every hydrated `image` this server has received (2026-09-06,
+// 09-08, 09-09 ×2) arrived that way, under that host's `_meta` signature. So the
+// description below must tell the model to pass the path when the host asks for
+// one. v0.43.0's said "never paste … a local file path"; on 2026-09-09 the model
+// obeyed it — `open_photo_drop({})`, argKeys [], nothing forwarded, link fallback
+// — a day after the same host had forwarded three photos.
+//
 // STRICT, and deliberately so — issue #202, experiment 1 (2026-08-31). Every
 // sub-field is optional and `image` itself stays out of `required`, but the object
 // admits exactly these four properties and nothing else, so the published JSON
@@ -803,7 +817,7 @@ export const addSmokePhotoSchema = z
     // itself, since that is the schema the converter emits under `properties.image`.
     image: fileParamHandle
       .describe(
-        "The user's attached photo, filled by the client host when it forwards a file with the call. Leave it empty: never paste a URL, an id, or a local file path here. A host that can upload a local file fills it itself; when nothing arrives, delivery says no_image_received and the upload link is the path.",
+        "The user's attached photo, delivered by the client host. If the host states that this parameter takes an absolute local file path, pass the attachment's path exactly as the host reported it: the host uploads the file and fills in the handle before the call reaches this server. Otherwise leave it empty — never invent a URL, a file id, or a path. When nothing arrives, delivery says no_image_received and the upload link is the path.",
       )
       .optional(),
   })
@@ -829,7 +843,7 @@ export const openPhotoDropSchema = z
       ),
     image: fileParamHandle
       .describe(
-        "The user's attached photo, filled by the client host when it forwards a file with the call. Leave it empty: never paste a URL, an id, or a local file path here. A host that can upload a local file fills it itself; when nothing arrives, delivery says no_image_received and the upload link is the path.",
+        "The user's attached photo, delivered by the client host. If the host states that this parameter takes an absolute local file path, pass the attachment's path exactly as the host reported it: the host uploads the file and fills in the handle before the call reaches this server. Otherwise leave it empty — never invent a URL, a file id, or a path. When nothing arrives, delivery says no_image_received and the upload link is the path.",
       )
       .optional(),
   })
