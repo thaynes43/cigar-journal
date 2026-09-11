@@ -1587,18 +1587,21 @@ sent the image; forwarding was first observed 2026-09-06, issue #202).
 property and lists it in the **tool-level** `_meta["openai/fileParams"]: ["image"]`
 published in `tools/list`. The MCP SDK (1.30.x) carries this via a `_meta`
 pass-through on `registerTool` — no response hooking needed. The `image` property
-is **optional** and every sub-field within it is optional, so a partial file object
-never blocks the call; it is kept out of `required`.
+is **optional**, so a call without a file still returns an upload link. When a
+host supplies `image`, `download_url` and `file_id` are required; `mime_type` and
+`file_name` are declared but optional, matching the current OpenAI file-input
+contract (2026-09-10). A partial handle fails validation before intake.
 
 **The published shape is STRICT (2026-08-31, issue #202 experiment 1).** `image` is
 a plain optional object admitting exactly `download_url`, `file_id`, `mime_type`
-and `file_name`, all optional strings, emitting `additionalProperties: false`:
+and `file_name`, emitting `additionalProperties: false`. Since 2026-09-10 the
+first two fields are required, as specified by the current OpenAI reference:
 
 ```json
 { "type": "object",
   "properties": { "download_url": {"type":"string"}, "file_id": {"type":"string"},
                   "mime_type": {"type":"string"}, "file_name": {"type":"string"} },
-  "additionalProperties": false }
+  "required": ["download_url", "file_id"], "additionalProperties": false }
 ```
 
 This replaced a `z.preprocess` + `.passthrough()` wrapper that preserved anything
