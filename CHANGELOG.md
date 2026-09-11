@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.2](https://github.com/thaynes43/cigar-journal/compare/v0.45.1...v0.45.2) (2026-09-11)
+
+
+### Bug Fixes
+
+* **photos:** align MCP file contract and handle malformed drop uploads ([#324](https://github.com/thaynes43/cigar-journal/issues/324)) ([dd954ee](https://github.com/thaynes43/cigar-journal/commit/dd954ee862e51d64fc51826955722164a2f31cfb))
+
 ## [0.45.1](https://github.com/thaynes43/cigar-journal/compare/v0.45.0...v0.45.1) (2026-09-10)
 
 
