@@ -208,6 +208,36 @@ describe("/api/photo-drops/[token]", () => {
     expect((await post(token, png())).status).toBe(201);
   });
 
+  it("answers a multipart body it cannot parse, instead of faulting with no record", async () => {
+    // A truncated upload — a real phone on a dropped connection — declares a
+    // boundary the body never delivers, and `formData()` throws on it. That
+    // reached no handler code at all: a 500 with no `photo_drop_upload` line,
+    // the only upload outcome this endpoint could not describe. It is now the
+    // page's ordinary validation refusal, recorded like every other one, and the
+    // link it was aimed at still works.
+    const { value, lines } = await captureLog(() =>
+      routeMod.POST(
+        new Request(`http://localhost/api/photo-drops/${token}`, {
+          method: "POST",
+          headers: { "content-type": "multipart/form-data; boundary=cut" },
+          body: "--cut\r\ncontent-disposition: form-data; name=\"file\"; filename=\"a.jpg\"\r\n",
+        }),
+        { params: Promise.resolve({ token }) },
+      ),
+    );
+
+    expect(value.status).toBe(400);
+    expect(await codeOf(value)).toBe("validation_error");
+    const record = uploadRecord(lines);
+    expect(record.outcome).toBe("rejected:malformed_body");
+    expect(record.photoDropId).toBe(photoDropId);
+    expect(record.photoId).toBeNull();
+    expect(lines.join("\n")).not.toContain(token);
+
+    // Nothing was spent: the multi-use link still takes the photo that follows.
+    expect((await post(token, png())).status).toBe(201);
+  });
+
   it("refuses a kind the column would otherwise take", async () => {
     const res = await post(token, png(), "portrait");
     expect(res.status).toBe(400);

@@ -5,7 +5,7 @@ document goes stale by design** — client products evolve independently of
 this application. Re-verify before relying on any row.
 
 ```yaml
-lastReviewed: 2026-09-10        # liked evidence gate (2026-09-10 section); go-live sweep was #97, 08-31
+lastReviewed: 2026-09-10        # phone upload + file-input contract; liked evidence gate
 clientMatrixVerified: 2026-08-26 # Phase 0 spike, OAuth mode — all three target
                                 # clients driven live against
                                 # https://cigars.haynesnetwork.com. The per-cell
@@ -20,6 +20,36 @@ productionEvidence: 2026-08-31  # live authenticated ChatGPT tool calls captured
 > The Cigar Journal supports journal reads and writes. Whether a particular
 > LLM client exposes those operations to its user is a property of that
 > client, not a limitation of the Cigar Journal domain.
+
+## 2026-09-10 — Codex phone upload and file-input contract
+
+A Codex phone session exposed both the direct `cigar-journal` MCP connection
+and the `codex_apps` connection. They reached the same photo drop but presented
+different `image` inputs: an object on the direct connection and a local path
+string on the app connection. Passing the attached JPEG's reported path through
+the app connection stored a 960 × 1280 photo. Uploading that JPEG through the
+existing multipart drop endpoint also worked. The test duplicate was removed,
+and `get_photo_drop` verified one photo remained for the ongoing smoke.
+
+The app connection still presented the older server instruction forbidding a
+local path, alongside the host's instruction to pass one. The direct connection
+presented the corrected server description. A deployment therefore does not
+establish that a client's cached tool descriptions have refreshed.
+
+The current [OpenAI file-input reference](https://developers.openai.com/plugins/reference#file-apis)
+requires file objects to declare all four handle properties, with `download_url`
+and `file_id` required and `mime_type` and `file_name` optional. It states that
+Scan Tools and plugin submission reject schemas that omit those requirements.
+The previous schema made all four optional. The contract now requires the two
+fields inside a supplied handle; the top-level `image` remains optional, so a
+bare call retains the upload-link fallback. Legacy request metadata keeps its
+existing intake behavior. A raw path reaching the server remains invalid.
+
+The recovery hint must require both a reported attachment path and an explicit
+host declaration that `image` accepts a local path. A local attachment alone
+does not establish that the connection uploads it. These observations establish
+a working app upload and a schema mismatch; they do not establish why ordinary
+ChatGPT attachments failed to arrive in earlier sessions.
 
 ## Matrix
 
@@ -659,10 +689,11 @@ and the journal's own record shows conversational smokes alongside the imported
 archive. Remaining watch item, unchanged: connector availability across a very
 long conversation (matrix row above).
 
-**Photos take a link, unless the model forwards.** Only ChatGPT on the **Astra**
-model has ever placed an in-chat attachment into tool arguments, first on
-2026-09-06; every other model and client measured forwards nothing (matrix row,
-and the dated sections below). During a smoke the model opens a photo drop
+**Photos take a link unless the host uploads the attachment.** Forwarding has
+been observed through the Codex apps connection, first on 2026-09-06; the
+2026-09-10 phone test also exercised that route. The connection's upload
+capability, rather than the model name alone, determines which input to pass
+(matrix row and dated sections above). During a smoke the model opens a photo drop
 (`open_photo_drop`, ADR-014) as soon as a photo appears and the user adds each
 photo to it once; `save_smoke` claims the drop. For a smoke that is already
 saved, `add_smoke_photo` returns a one-time upload link.

@@ -235,15 +235,19 @@ type DeliveryStatus =
 // `openai/userAgent`) — the host that uploads a local file the MODEL names
 // (schemas.ts, "HOST-UPLOADED LOCAL FILE") — while ChatGPT web and the iOS app on
 // GPT-5.x have never forwarded on any channel. So the detail names the one retry
-// that works — call again with the path the host reported — and otherwise says the
-// link is the path, because a model that reads this as a fault reports a problem to
-// the user and delays the one thing that works: relaying the link. The retry is
-// bounded by construction: a host that reported no path has nothing to pass, an
-// in-session re-open lands on the same drop, and add_smoke_photo mints one more
-// single-use link beside the first; no link is revoked (#316).
+// that works, and names it under BOTH conditions that make it work: the host has
+// to have STATED that `image` takes a local path AND reported one (2026-09-10). An
+// attachment the model can see is not evidence that this connection uploads it, and
+// a path sent to a host that does not is refused as a raw string rather than
+// retried into a drop. Otherwise the link is the path — a model that reads this as
+// a fault reports a problem to the user and delays the one thing that works:
+// relaying the link. The retry is bounded by construction: a host that reported no
+// path has nothing to pass, an in-session re-open lands on the same drop, and
+// add_smoke_photo mints one more single-use link beside the first; no link is
+// revoked (#316).
 const DELIVERY_DETAIL: Record<DeliveryStatus, string> = {
   no_image_received:
-    "No image arrived with this call. If the host reported a local file path for the attachment, call again with that path in image and the host uploads it; otherwise the upload link is the path — relay it. This is a normal outcome, not a failure.",
+    "No image arrived with this call. If the host states that image accepts a local file path and reported the attachment's path, call again with that path in image; the host uploads it. Otherwise relay the upload link. This is a normal outcome, not a failure.",
   image_reference_unusable: "An image reference arrived, but it carried nothing the server can read.",
   image_fetch_failed: "An image reference arrived, but the image could not be retrieved.",
   image_unreadable: "An image arrived, but it is not a readable photo.",

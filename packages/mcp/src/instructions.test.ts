@@ -110,7 +110,7 @@ describe("no_image_received is the expected outcome", () => {
   const read = (relative: string): string => readFileSync(new URL(relative, import.meta.url), "utf8");
 
   const DETAIL =
-    "No image arrived with this call. If the host reported a local file path for the attachment, call again with that path in image and the host uploads it; otherwise the upload link is the path — relay it. This is a normal outcome, not a failure.";
+    "No image arrived with this call. If the host states that image accepts a local file path and reported the attachment's path, call again with that path in image; the host uploads it. Otherwise relay the upload link. This is a normal outcome, not a failure.";
 
   it("is the delivery detail the adapter ships", () => {
     expect(read("./server.ts")).toContain(DETAIL);
@@ -201,11 +201,19 @@ describe("the image argument's path guidance", () => {
     },
   );
 
-  it("the no_image_received detail names the retry that works and keeps the link", () => {
+  // The retry is CONDITIONAL (2026-09-10). A host that never said `image` takes a
+  // path does not upload one, so a path sent to it arrives as a raw string and is
+  // refused — the detail must therefore gate the retry on the host's own
+  // declaration as well as on a reported path, the way the tool descriptions and
+  // the argument description already do, and must still leave the link as the
+  // otherwise.
+  it("the no_image_received detail gates the retry on the host's declaration and keeps the link", () => {
     const detail = /no_image_received:\s*\n\s*"([^"]*)"/.exec(server)?.[1];
     expect(detail, "DELIVERY_DETAIL.no_image_received not found in server.ts").toBeDefined();
+    expect(detail).toContain("If the host states that image accepts a local file path");
+    expect(detail).toContain("reported the attachment's path");
     expect(detail).toContain("call again with that path in image");
-    expect(detail).toContain("the upload link is the path — relay it");
+    expect(detail).toContain("Otherwise relay the upload link.");
   });
 });
 
