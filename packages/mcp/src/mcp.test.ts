@@ -506,16 +506,22 @@ describe("@cj/mcp adapter", () => {
             description: "Original file name, if the host provided one.",
           },
         },
+        required: ["download_url", "file_id"],
         additionalProperties: false,
         description:
           "The user's attached photo, delivered by the client host. If the host states that this parameter takes an absolute local file path, pass the attachment's path exactly as the host reported it: the host uploads the file and fills in the handle before the call reaches this server. Otherwise leave it empty — never invent a URL, a file id, or a path. When nothing arrives, delivery says no_image_received and the upload link is the path.",
       });
 
       // Restated outside the whole-object compare because they are the two
-      // properties a well-meaning edit is most likely to break: no sub-field is
-      // required, and `image` itself stays out of `required` — a partial or missing
-      // file must never block the call.
-      expect((inputSchema.properties.image as { required?: string[] }).required).toBeUndefined();
+      // properties a well-meaning edit is most likely to break, and since
+      // 2026-09-10 they point opposite ways: a SUPPLIED handle must carry both
+      // `download_url` and `file_id` (the current OpenAI file-input contract, which
+      // Scan Tools enforces), while `image` ITSELF stays out of the tool's
+      // `required` — a missing file must never block the call.
+      expect((inputSchema.properties.image as { required?: string[] }).required).toEqual([
+        "download_url",
+        "file_id",
+      ]);
       expect(inputSchema.required ?? []).not.toContain("image");
       expect((photo._meta as Record<string, unknown> | undefined)?.["openai/fileParams"]).toEqual([
         "image",
@@ -2942,19 +2948,32 @@ describe("@cj/mcp adapter", () => {
     }
   });
 
-  it("add_smoke_photo with a malformed `image` argument falls back to mode B, never errors", async () => {
+  it("add_smoke_photo refuses a partial `image` handle, and a bare call still returns the link", async () => {
+    // The 2026-09-10 contract: `download_url` and `file_id` are required WITHIN a
+    // supplied handle (the current OpenAI file-input reference), so a partial handle
+    // fails clearly instead of being silently read as "no file" — the shape a host
+    // is sending is then a validation error it can see, not a mode-B link that looks
+    // like success. The fallback it used to produce is the BARE call's, and that is
+    // the half this pins beside it: `image` stays optional, so a call with no file
+    // still mints the link and says why.
     await withClient(ownerFull, async (client) => {
-      const smokeId = await saveBareSmoke(client, "photo-malformed-arg");
-      // No usable download_url → the file object is treated as ABSENT → mode-B upload
-      // link, not an error (contract: unknown/malformed shapes fall back, never fail).
-      const result = await call(client, "add_smoke_photo", {
+      const smokeId = await saveBareSmoke(client, "photo-partial-handle");
+      const refused = await call(client, "add_smoke_photo", {
         smokeId,
         image: { file_id: "file_x", mime_type: "image/png" },
       });
+      expect(refused.isError).toBe(true);
+
+      const result = await call(client, "add_smoke_photo", { smokeId });
       expect(result.isError).not.toBe(true);
-      const data = payloadOf(result) as { mode: string; uploadUrl: string };
+      const data = payloadOf(result) as {
+        mode: string;
+        uploadUrl: string;
+        delivery: { status: string };
+      };
       expect(data.mode).toBe("upload_url");
       expect(data.uploadUrl).toMatch(new RegExp(`^${ORIGIN}/u/[A-Za-z0-9_-]+$`));
+      expect(data.delivery.status).toBe("no_image_received");
     });
   });
 
@@ -3032,17 +3051,25 @@ describe("@cj/mcp adapter", () => {
   });
 
   it("records `no_url` and the keys that DID arrive for a file_id-only handle", async () => {
-    // The owner's exact reported failure: ChatGPT sends a handle the server cannot
+    // The owner's exact reported failure: a host sends a handle the server cannot
     // resolve. The file lives in the user's ChatGPT workspace and only the host can
     // turn it into a download_url — so this is a NAMED permanent outcome, not a
     // retryable bug, and mode B stays the working path.
+    //
+    // On the REQUEST-`_meta` channel, which is where it still reaches the handler:
+    // since 2026-09-10 the declared `image` argument requires `download_url` and
+    // `file_id`, so a partial handle sent THERE is refused by the SDK before `run()`
+    // (the rejection test below). `_meta` is unvalidated legacy intake and keeps its
+    // behavior, which is exactly why the classifier still has to name this outcome.
     await withClient(ownerFull, async (client) => {
       const smokeId = await saveBareSmoke(client, "intake-file-id-only");
-      const { value, lines } = await captureMcpLog(() =>
-        call(client, "add_smoke_photo", {
-          smokeId,
-          image: { file_id: "file_abc123", mime_type: "image/jpeg" },
-        }),
+      const { value, lines } = await captureMcpLog(
+        () =>
+          client.callTool({
+            name: "add_smoke_photo",
+            arguments: { smokeId },
+            _meta: { "openai/fileParams": [{ file_id: "file_abc123", mime_type: "image/jpeg" }] },
+          }) as Promise<CallToolResult>,
       );
 
       expect(value.isError).not.toBe(true);
@@ -3052,11 +3079,12 @@ describe("@cj/mcp adapter", () => {
 
       const record = eventPayload(lines, "photo_intake");
       expect(record.outcome).toBe("no_url");
-      expect(record.channel).toBe("argument");
-      expect(record.argument).toEqual({
+      expect(record.channel).toBe("request_meta");
+      expect(record.requestMeta).toEqual({
         type: "object",
         keys: ["file_id", "mime_type"],
         filled: ["file_id", "mime_type"],
+        count: 1,
       });
       // Key NAMES only — the file id itself is a value and never lands in the log.
       expect(JSON.stringify(record)).not.toContain("file_abc123");
@@ -3081,6 +3109,16 @@ describe("@cj/mcp adapter", () => {
       { image: 5, type: "number", keys: [], filled: [] },
       // An object whose declared key carries the wrong type.
       { image: { download_url: 12 }, type: "object", keys: ["download_url"], filled: [] },
+      // A PARTIAL handle (2026-09-10): declared keys, right types, but missing one
+      // of the two the current file-input contract requires. It used to reach the
+      // handler and fall back to a link; it is now refused, and the probe is what
+      // keeps a host that really sends this shape diagnosable.
+      {
+        image: { file_id: "file_partial", mime_type: "image/jpeg" },
+        type: "object",
+        keys: ["file_id", "mime_type"],
+        filled: ["file_id", "mime_type"],
+      },
       // An undeclared key — newly refused, and the class most likely to be a real
       // host sending a URL under a name we do not publish. `additionalProperties:
       // false` is what makes this a rejection, and the probe names the key so a
@@ -3111,6 +3149,7 @@ describe("@cj/mcp adapter", () => {
         // Key names only: the probe never copies a handle's values.
         expect(lines.join("\n")).not.toContain("cdn.example");
         expect(lines.join("\n")).not.toContain("chatgpt.com/c/file-abc");
+        expect(lines.join("\n")).not.toContain("file_partial");
       }
     });
   });
@@ -3129,7 +3168,10 @@ describe("@cj/mcp adapter", () => {
         await withClient(ownerFull, async (client) => {
           const smokeId = await saveBareSmoke(client, "intake-fetch-failed");
           const { value, lines } = await captureMcpLog(() =>
-            call(client, "add_smoke_photo", { smokeId, image: { download_url: fixtureUrl } }),
+            call(client, "add_smoke_photo", {
+              smokeId,
+              image: { download_url: fixtureUrl, file_id: "file_404" },
+            }),
           );
 
           expect(value.isError).not.toBe(true);
@@ -3172,7 +3214,10 @@ describe("@cj/mcp adapter", () => {
         await withClient(ownerFull, async (client) => {
           const smokeId = await saveBareSmoke(client, "intake-too-large");
           const { value, lines } = await captureMcpLog(() =>
-            call(client, "add_smoke_photo", { smokeId, image: { download_url: fixtureUrl } }),
+            call(client, "add_smoke_photo", {
+              smokeId,
+              image: { download_url: fixtureUrl, file_id: "file_big" },
+            }),
           );
 
           const data = payloadOf(value) as { mode: string; delivery: { status: string } };
@@ -3199,7 +3244,10 @@ describe("@cj/mcp adapter", () => {
         await withClient(ownerFull, async (client) => {
           const smokeId = await saveBareSmoke(client, "intake-unreadable");
           const { value, lines } = await captureMcpLog(() =>
-            call(client, "add_smoke_photo", { smokeId, image: { download_url: fixtureUrl } }),
+            call(client, "add_smoke_photo", {
+              smokeId,
+              image: { download_url: fixtureUrl, file_id: "file_prose" },
+            }),
           );
 
           expect(value.isError).not.toBe(true);
@@ -3266,7 +3314,7 @@ describe("@cj/mcp adapter", () => {
       const { value, lines } = await captureMcpLog(() =>
         call(client, "add_smoke_photo", {
           smokeId,
-          image: { download_url: "http://169.254.169.254/latest/meta-data" },
+          image: { download_url: "http://169.254.169.254/latest/meta-data", file_id: "file_ssrf" },
         }),
       );
 
@@ -3310,7 +3358,7 @@ describe("@cj/mcp adapter", () => {
           const followed = await captureMcpLog(() =>
             call(client, "add_smoke_photo", {
               smokeId,
-              image: { download_url: `${origin}/hop` },
+              image: { download_url: `${origin}/hop`, file_id: "file_hop" },
             }),
           );
           expect((payloadOf(followed.value) as { mode: string }).mode).toBe("attached");
@@ -3321,7 +3369,7 @@ describe("@cj/mcp adapter", () => {
           const blocked = await captureMcpLog(() =>
             call(client, "add_smoke_photo", {
               smokeId,
-              image: { download_url: `${origin}/escape` },
+              image: { download_url: `${origin}/escape`, file_id: "file_escape" },
             }),
           );
           const data = payloadOf(blocked.value) as { mode: string; delivery: { status: string } };
@@ -3365,7 +3413,10 @@ describe("@cj/mcp adapter", () => {
             // the payload must not reach a log line on the way there either.
             return (await call(client, "add_smoke_photo", {
               smokeId,
-              image: { download_url: `data:image/png;base64,${PNG_FIXTURE.toString("base64")}` },
+              image: {
+                download_url: `data:image/png;base64,${PNG_FIXTURE.toString("base64")}`,
+                file_id: "file_inline",
+              },
             })) as CallToolResult;
           });
 
@@ -3468,16 +3519,19 @@ describe("@cj/mcp adapter", () => {
   it("emits a probe record carrying the request-_meta file-param shape", async () => {
     await withClient(ownerFull, async (client) => {
       const smokeId = await saveBareSmoke(client, "intake-probe-meta");
+      // No `image` argument: the point here is the `_meta` channel, and a partial
+      // handle in the argument is refused before `run()` since 2026-09-10, which
+      // would leave no `photo_intake` line for the join below.
       const { lines } = await captureMcpLog(() =>
         client.callTool({
           name: "add_smoke_photo",
-          arguments: { smokeId, image: { file_id: "f" } },
+          arguments: { smokeId },
           _meta: { "openai/fileParams": [{ file_id: "f1" }, { file_id: "f2" }] },
         }),
       );
 
       const probe = eventPayload(lines, "photo_intake_request");
-      expect(probe.argImage).toEqual({ type: "object", keys: ["file_id"], filled: ["file_id"] });
+      expect(probe.argImage).toEqual({ type: "absent", keys: [], filled: [] });
       expect(probe.metaFileParams).toEqual({
         type: "object",
         keys: ["file_id"],

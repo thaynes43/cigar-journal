@@ -1307,7 +1307,7 @@ result:
   shareWithUser: "Send the user this link to add photos during the smoke: https://… — every photo of this smoke goes there, and they attach to the review when it is saved. It works for 48 hours."
   delivery:                      # as on add_smoke_photo: why no image arrived with the call
     status: no_image_received
-    detail: "No image arrived with this call. If the host reported a local file path for the attachment, call again with that path in image and the host uploads it; otherwise the upload link is the path — relay it. This is a normal outcome, not a failure."
+    detail: "No image arrived with this call. If the host states that image accepts a local file path and reported the attachment's path, call again with that path in image; the host uploads it. Otherwise relay the upload link. This is a normal outcome, not a failure."
 
 # With a forwarded image (first observed 2026-09-06 — see add_smoke_photo):
 result:
@@ -1422,7 +1422,7 @@ result:
   shareWithUser: "Send the user this link to add their photo: https://… — it works once and is valid for 24 hours."
   delivery:                      # why there is no photo, in terms the model can act on
     status: no_image_received    # | image_reference_unusable | image_fetch_failed | image_unreadable
-    detail: "No image arrived with this call. If the host reported a local file path for the attachment, call again with that path in image and the host uploads it; otherwise the upload link is the path — relay it. This is a normal outcome, not a failure."
+    detail: "No image arrived with this call. If the host states that image accepts a local file path and reported the attachment's path, call again with that path in image; the host uploads it. Otherwise relay the upload link. This is a normal outcome, not a failure."
 
 # Mode A — opportunistic: a host forwarded a file with the call
 result:

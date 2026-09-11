@@ -120,7 +120,19 @@ export async function POST(
     throw error;
   }
 
-  const form = await req.formData();
+  // A truncated or otherwise unparsable multipart body makes formData() THROW —
+  // an uncaught TypeError, so the request became a Next 500 with no
+  // `photo_drop_upload` line at all: the one upload outcome this endpoint could
+  // not describe, on the path the model falls back to when nothing is forwarded.
+  // It is a malformed request, not a server fault, so it answers the envelope the
+  // page already reads for a missing file and leaves its record like every other
+  // rejection. The token endpoint takes the same care for the same reason.
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return done("rejected:malformed_body", uploadErrorResponse("validation_error", 400));
+  }
   const file = form.get("file");
   if (!(file instanceof File)) {
     return done("rejected:no_file", uploadErrorResponse("validation_error", 400));

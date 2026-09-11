@@ -752,10 +752,21 @@ export const recordPurchaseBatchSchema = z
 // obeyed it — `open_photo_drop({})`, argKeys [], nothing forwarded, link fallback
 // — a day after the same host had forwarded three photos.
 //
-// STRICT, and deliberately so — issue #202, experiment 1 (2026-08-31). Every
-// sub-field is optional and `image` itself stays out of `required`, but the object
+// STRICT, and deliberately so — issue #202, experiment 1 (2026-08-31). The object
 // admits exactly these four properties and nothing else, so the published JSON
 // schema carries `additionalProperties: false`.
+//
+// REQUIRED INSIDE THE HANDLE (2026-09-10). The current OpenAI file-input reference
+// (developers.openai.com/plugins/reference, "Define file inputs") specifies a file
+// object whose `download_url` and `file_id` are REQUIRED, with `mime_type` and
+// `file_name` declared and optional, and states that Scan Tools and plugin
+// submission reject a schema that omits those requirements. `image` ITSELF stays
+// optional — a call without a file still returns an upload link, which is the
+// workflow on every host that forwards nothing — but a handle that arrives must
+// carry both fields. Every hydration this server has observed (2026-09-06, 09-08,
+// 09-09 ×2) filled all four, so this refuses nothing a working host has ever sent;
+// a PARTIAL handle now fails validation instead of reaching the handler and
+// falling back, and the raw-body probe still records its shape (below).
 //
 // WHY IT IS STRICT. When this was written ChatGPT had never hydrated `image` for
 // this connector (tool-contract.md, "Open lead"); the Astra model did on 2026-09-06,
@@ -777,10 +788,10 @@ export const recordPurchaseBatchSchema = z
 // delivery's shape.
 //
 // THE COST, STATED PLAINLY. A host that sends `image: null` as its "no file
-// attached" shape, or a URL under a key other than `download_url`, now gets an
-// InvalidParams error instead of a mode-B upload link. The request-level
-// `_meta["openai/fileParams"]` channel is unvalidated and still accepts both, and
-// the probe records either. If the experiment does not move intake, this reverts.
+// attached" shape, a URL under a key other than `download_url`, or a handle
+// missing `download_url` or `file_id`, now gets an InvalidParams error instead of
+// a mode-B upload link. The request-level `_meta["openai/fileParams"]` channel is
+// unvalidated and still accepts all of them, and the probe records any of them. If the experiment does not move intake, this reverts.
 //
 // Do NOT reach for `.catch()` to soften it: `.catch(fn)` throws "Dynamic catch
 // values are not supported in JSON Schema" at emission time in zod 4.4.3, which
@@ -789,12 +800,8 @@ const fileParamHandle = z
   .object({
     download_url: z
       .string()
-      .optional()
       .describe("Host-provided signed download URL for the file. Set by the client, never by you."),
-    file_id: z
-      .string()
-      .optional()
-      .describe("Host-provided file id. Set by the client, never by you."),
+    file_id: z.string().describe("Host-provided file id. Set by the client, never by you."),
     mime_type: z.string().optional().describe("File MIME type, if the host provided one."),
     file_name: z.string().optional().describe("Original file name, if the host provided one."),
   })
