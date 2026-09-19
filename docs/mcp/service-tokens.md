@@ -5,7 +5,7 @@ mint is the `token` role on the app image; it is never reachable over HTTP.
 
 ```
 service-token mint   --client-name <name> --user-email <email> --scope <s>... --reason <text>
-                     [--allow-curation] [--ttl-days N] [--resource <url>] [--yes]
+                     [--allow-curation] [--ttl-days N | --no-expiry] [--resource <url>] [--yes]
 service-token list   [--include-expired] [--include-revoked] [--all-clients]
 service-token revoke --id <uuid> [--reason <text>] [--yes]
 ```
@@ -60,13 +60,13 @@ wrong origin fails fast instead of minting a token `/mcp` will reject.
 ```sh
 … mint --client-name dev-env-pod --user-email <owner> \
     --scope catalog:read --scope journal:read --scope journal:write \
-    --ttl-days 365 --reason "dev-env pod MCP client" --yes
+    --no-expiry --reason "dev-env pod MCP client" --yes
 ```
 
 Run it once without `--yes` first. The dry run resolves the principal, finds
-or reports the client, and applies the scope, TTL and audience checks against
-the same database — so a clean plan means the apply will not fail on any of
-them.
+or reports the client, and applies the scope, lifetime and audience checks
+against the same database — so a clean plan means the apply will not fail on
+any of them.
 
 The token is printed once and is not recoverable. Capture it before the
 terminal scrolls.
@@ -75,8 +75,34 @@ terminal scrolls.
 flag. `offline_access` is refused unconditionally — there is no refresh chain,
 so no flag admits it. `curation:*` is off by default and needs the explicit
 elevation below. Every refusal is enforced in the mint, not left to the
-caller's arguments. `--ttl-days` caps at 365 — 90 for a curation-elevated
-mint — and can only shorten.
+caller's arguments.
+
+**Lifetime.** `--no-expiry` mints a token that is valid until revoked — the
+owner's ruling of 2026-09-19 (ADR-011, "No expiry: the owner override"), and
+the default choice for a standing consumer like the dev-env pod, because every
+expiry there costs a manual re-mint, a 1Password edit and a pod restart that
+ends the running agent session. It is permitted with `--allow-curation`. What
+it gives up is the forced rotation that bounded an undetected theft; what still
+bounds the token is its scopes, its audience, its own client, per-request
+validation, and a revoke that bites on the next call.
+
+Otherwise the token is dated: `--ttl-days` caps at 365 — 90 for a
+curation-elevated mint — and can only shorten. The two flags are mutually
+exclusive (exit 2). Neither output leaves you to infer which you got — the plan
+prints
+
+```
+  ttl        none — valid until revoked
+```
+
+and the report
+
+```
+  expires    never — valid until revoked
+```
+
+where a dated mint prints its TTL and the date it lands on. `list` shows
+`never` in EXPIRES and `-` in DAYS for such a row.
 
 ## Mint the curation lane's token (`--allow-curation`)
 
@@ -102,13 +128,19 @@ kubectl -n frontend exec -it deploy/cigar-journal-main -c app -- \
     --scope curation:read --scope curation:write \
     --scope catalog:read \
     --allow-curation \
+    --no-expiry \
     --reason "daily curation lane (ADR-011 override 2026-08-30)"'
 ```
 
-No `--ttl-days`: an elevated mint defaults to its own ceiling, **90 days**, not
-the ordinary 365. Passing `--ttl-days 365` here is refused (`invalid_request`),
-which is the point — the widest credential in the system is not also the
-longest-lived. `--ttl-days` still shortens it further if you want a probe token.
+`--no-expiry` applies to this token too — the 2026-09-19 ruling covers both the
+ordinary journal token and the curation-elevated one — and it waives nothing
+else: `--allow-curation` is still required, the subject must still be an admin,
+and the elevation is still named in the plan, the report and the audit row.
+
+Drop `--no-expiry` and the mint is dated instead: an elevated mint then defaults
+to its own ceiling, **90 days**, not the ordinary 365, and passing
+`--ttl-days 365` here is refused (`invalid_request`). `--ttl-days` shortens it
+further if you want a probe token; it cannot be combined with `--no-expiry`.
 Re-minting is one interactive exec at a moment you choose, with the old token
 live until you revoke it; that is not the rotation this whole change exists to
 stop losing.
@@ -187,9 +219,15 @@ find an orphan and `revoke --id` to kill it.
 ## Rotate (overlap-safe)
 
 Service tokens are independent rows with no refresh chain, so two are valid at
-once. That is what makes this sequence safe:
+once. That is what makes this sequence safe.
 
-1. `list` — note the active token id for the client and its days remaining.
+A no-expiry token never forces this; you run it on suspicion, on a schedule you
+choose, or when the scopes change. The sequence is identical either way — the
+old token stays live until step 6, so there is no window where the consumer has
+none:
+
+1. `list` — note the active token id for the client (`never` in EXPIRES if it
+   is a no-expiry one, otherwise its days remaining).
 2. `mint --client-name <same-name> … --yes` — capture the value. The client row
    is reused; both tokens are now valid.
 3. Update the `CIGAR_JOURNAL_TOKEN` field on the 1Password `dev-env` item.
@@ -205,10 +243,16 @@ once. That is what makes this sequence safe:
 
 The dev-env pod runs on a hand-INSERTed token under the `dev-env-cli` client
 that expires **2026-09-26**. Moving it to a minted one is the rotate sequence
-above with two differences: step 2 uses a new `--client-name` (`dev-env-pod`),
-so a client row is created rather than reused; and at step 6 the legacy
-token's client row is deliberately left in place, because the audit trail
-points at it.
+above with two differences: step 2 uses a new `--client-name` (`dev-env-pod`)
+and `--no-expiry`, so a client row is created rather than reused and the pod
+never has to do this again; and at step 6 the legacy token's client row is
+deliberately left in place, because the audit trail points at it.
+
+```sh
+… mint --client-name dev-env-pod --user-email <owner> \
+    --scope catalog:read --scope journal:read --scope journal:write \
+    --no-expiry --reason "dev-env pod MCP client (ADR-011 override 2026-09-19)" --yes
+```
 
 Both preconditions are met (verified 2026-09-19): the deployed image carries
 the `token` role, and haynes-ops#2681 has landed, so the expiry monitor follows
@@ -261,8 +305,9 @@ do.
 A `--allow-curation` token is the widest of these: it can curate the shared
 catalog, not just its own subject's journal. Give it its own `--client-name`
 so it is revocable without touching the pod's ordinary journal credential, and
-revoke it the moment the lane stops needing it. Its shorter ceiling (90 days)
-bounds the window if neither happens.
+revoke it the moment the lane stops needing it. A dated one has its shorter
+ceiling (90 days) as a backstop if neither happens; a `--no-expiry` one does
+not, so revoking it when the lane retires is the whole control.
 
 **If one leaks, revoke it by id** — `revoke --id <uuid> --yes`, which bites on
 the next MCP call and touches nothing else. Do *not* reach for demoting the
@@ -275,8 +320,18 @@ allowlisted address, so the owner's next sign-in silently re-arms the token he
 was trying to neutralize. Find the id with `list` (or from the mint report) and
 revoke it.
 
-Expiry is a cliff. The daily `cigar-journal-credential-expiry` CronJob in
-haynes-ops is the alert: a failing Job pages at 7 days left. It selects every
-unrevoked token whose lifetime exceeds 24h (haynes-ops#2681), so it follows a
-re-mint under a new client with no edit, and a rotation is not finished until
-the old token is revoked. `list` remains the pull-based view.
+For a **dated** token, expiry is a cliff. The daily
+`cigar-journal-credential-expiry` CronJob in haynes-ops is the alert: a failing
+Job pages at 7 days left. It selects every unrevoked token whose lifetime
+exceeds 24h (haynes-ops#2681), so it follows a re-mint under a new client with
+no edit, and a rotation is not finished until the old token is revoked.
+
+A `--no-expiry` token has no cliff, so there is nothing to count down and
+nothing to page about. The monitor lists it as `no-expiry` rather than
+computing days remaining, and it still counts as a live credential — "no dated
+token is near expiry" must not be read as "no credential exists", or the check
+that exists to fail loudly when the credential is missing starts failing
+because it is permanent. Rotation becomes something you do on suspicion or on a
+schedule you pick, through the same overlap-safe sequence above. `list` remains
+the pull-based view, and shows `never` in EXPIRES and `-` in DAYS for such a
+row.

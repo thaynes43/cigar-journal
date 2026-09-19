@@ -22,6 +22,20 @@ import type {
 export const CURATION_NOTICE =
   "ELEVATED — this token may curate the SHARED catalog for its whole life";
 
+/**
+ * The two lines that name a no-expiry mint, in the plan's `ttl` field and the
+ * report's `expires` field (ADR-011 amendment 2026-09-19). Both say it in words
+ * rather than leaving a blank or a far-off date: "for its whole life" now means
+ * until someone revokes it, and that is the one fact an operator must not have
+ * to infer.
+ */
+export const NO_EXPIRY_TTL = "none — valid until revoked";
+export const NO_EXPIRY_EXPIRES = "never — valid until revoked";
+
+/** The EXPIRES and DAYS cells for a no-expiry row; the table stays columnar. */
+const NEVER = "never";
+const NO_DAYS = "-";
+
 export function field(label: string, value: string): string {
   return `  ${label.padEnd(11)}${value}`;
 }
@@ -32,6 +46,8 @@ function pad(value: string, width: number): string {
 
 export function tokenState(row: Pick<ServiceTokenSummary, "revokedAt" | "expiresAt">): string {
   if (row.revokedAt) return "revoked";
+  // A null expiry is active until revoked — revocation is the only end it has.
+  if (row.expiresAt === null) return "active";
   return row.expiresAt.getTime() <= Date.now() ? "expired" : "active";
 }
 
@@ -44,8 +60,8 @@ export function formatList(rows: ServiceTokenSummary[]): string {
     row.isService ? "yes" : "no",
     row.userEmail,
     row.scopes.join(","),
-    String(row.daysRemaining),
-    row.expiresAt.toISOString(),
+    row.daysRemaining === null ? NO_DAYS : String(row.daysRemaining),
+    row.expiresAt?.toISOString() ?? NEVER,
     tokenState(row),
   ]);
   const widths = header.map((_, column) =>
@@ -73,7 +89,12 @@ export function formatMintPlan(plan: ServiceTokenMintPlan, runId: string, reason
     // boilerplate — the elevation must not be discoverable only by decoding the
     // scope list above.
     ...(plan.curationElevated ? [field("curation", CURATION_NOTICE)] : []),
-    field("ttl", `${plan.ttlDays}d → ${plan.expiresAt.toISOString()}`),
+    field(
+      "ttl",
+      plan.expiresAt === null
+        ? NO_EXPIRY_TTL
+        : `${plan.ttlDays}d → ${plan.expiresAt.toISOString()}`,
+    ),
     field("resource", plan.resource),
     field("reason", reason),
     "nothing written — re-run with --yes to mint.",
@@ -98,7 +119,12 @@ export function formatMintReport(minted: MintedServiceToken, runId: string): str
     field("scopes", minted.scopes.join(" ")),
     ...(minted.curationElevated ? [field("curation", CURATION_NOTICE)] : []),
     field("resource", minted.resource),
-    field("expires", `${minted.expiresAt.toISOString()} (${minted.ttlDays}d)`),
+    field(
+      "expires",
+      minted.expiresAt === null
+        ? NO_EXPIRY_EXPIRES
+        : `${minted.expiresAt.toISOString()} (${minted.ttlDays}d)`,
+    ),
     "the value below is not recoverable — capture it into 1Password now.",
   ].join("\n");
 }

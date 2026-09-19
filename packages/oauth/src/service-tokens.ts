@@ -9,10 +9,11 @@ import { authEventTo, type AuthEventWriter } from "./logger.js";
 import { revokeFamily } from "./provider.js";
 
 // Operator-minted service tokens (ADR-011). A service token is an ORDINARY
-// `oauth_access_token` row that happens to live a year: validation, the grants,
-// and /oauth/token are untouched. What lives here is the supported, audited,
-// server-side writer for such a row — replacing the hand-INSERT that issue #129
-// is about.
+// `oauth_access_token` row that happens to live a year — or, since the
+// 2026-09-19 amendment, not to expire at all: validation, the grants, and
+// /oauth/token are untouched either way. What lives here is the supported,
+// audited, server-side writer for such a row — replacing the hand-INSERT that
+// issue #129 is about.
 //
 // INVARIANT: minting is never reachable over the network. These functions are
 // deliberately NOT re-exported from ./index.js, so the package surface that
@@ -33,6 +34,10 @@ export const DEFAULT_SERVICE_TOKEN_TTL_DAYS = 365;
  * live until he revokes it. The cliff is watched: the daily
  * `cigar-journal-credential-expiry` CronJob selects by lifetime (> 24h), so a
  * 90-day token is covered by the same alert with no edit.
+ *
+ * AMENDED 2026-09-19: this ceiling still governs every DATED elevated mint, but
+ * the owner extended `--no-expiry` to the curation token too, so it is no longer
+ * the outer bound on such a credential's life — revocation is.
  */
 export const CURATION_SERVICE_TOKEN_TTL_DAYS = 90;
 const MIN_TTL_DAYS = 1;
@@ -45,7 +50,12 @@ const MIN_TTL_DAYS = 1;
  */
 const MAX_TTL_DAYS = DEFAULT_SERVICE_TOKEN_TTL_DAYS;
 
-/** The TTL ceiling — and, absent `--ttl-days`, the default — for this scope set. */
+/**
+ * The TTL ceiling — and, absent `--ttl-days`, the default — for this scope set.
+ * Both ceilings survive the no-expiry ruling: a DATED mint is still bounded the
+ * way it always was, and `--no-expiry` is the explicit opt-out, never a widening
+ * of what `--ttl-days` may ask for.
+ */
 export function serviceTokenTtlCeiling(curationElevated: boolean): number {
   return curationElevated ? CURATION_SERVICE_TOKEN_TTL_DAYS : DEFAULT_SERVICE_TOKEN_TTL_DAYS;
 }
@@ -127,9 +137,28 @@ export interface MintServiceTokenInput {
   /**
    * Days until expiry. Omitted, it defaults to the ceiling for the scope set —
    * 365, or CURATION_SERVICE_TOKEN_TTL_DAYS for a curation-elevated mint — and
-   * it can only ever shorten from there.
+   * it can only ever shorten from there. Mutually exclusive with `noExpiry`.
    */
   ttlDays?: number;
+  /**
+   * Mint with NO expiry: `expiresAt` null, valid until revoked (owner ruling
+   * 2026-09-19, ADR-011 "No expiry: the owner override").
+   *
+   * The ruling covers BOTH the ordinary journal token and the curation-elevated
+   * one, so this composes with `allowCuration` — the admin-subject gate and
+   * everything else about the elevation are untouched. What drove it: every
+   * expiry is a manual re-mint, a 1Password edit and a pod restart that kills
+   * the running agent session, and the owner's standing precedent for that pod
+   * is non-expiring machine credentials.
+   *
+   * What is given up is real — the forced rotation that bounded an undetected
+   * theft. What still bounds the credential: explicit scopes, the RFC 8707
+   * audience, one client per consumer, per-request validation with no cache (a
+   * revoke bites on the next call), revoke-by-id, and `client_id` on every audit
+   * row. NULL `expires_at` alongside NULL `family_id` is the durable marker of
+   * such a row; migration 0041's CHECK keeps that pair inseparable.
+   */
+  noExpiry?: boolean;
   /** Assert the audience. Must equal this server's own /mcp resource. */
   resource?: string;
   correlationId?: string;
@@ -151,8 +180,10 @@ export interface MintedServiceToken {
   /** True when the granted set reaches the shared catalog — see the audit row. */
   curationElevated: boolean;
   resource: string;
-  ttlDays: number;
-  expiresAt: Date;
+  /** Null when the mint carried `--no-expiry` — nullable, never a sentinel. */
+  ttlDays: number | null;
+  /** Null when the mint carried `--no-expiry`: valid until revoked. */
+  expiresAt: Date | null;
 }
 
 export interface ListServiceTokensInput {
@@ -172,9 +203,11 @@ export interface ServiceTokenSummary {
   scopes: string[];
   resource: string;
   createdAt: Date;
-  expiresAt: Date;
+  /** Null on a no-expiry token — the listing renders it as `never`. */
+  expiresAt: Date | null;
   revokedAt: Date | null;
-  daysRemaining: number;
+  /** Null on a no-expiry token: there is no countdown to report. */
+  daysRemaining: number | null;
 }
 
 export interface ServiceTokenMintPlan {
@@ -188,8 +221,10 @@ export interface ServiceTokenMintPlan {
   /** True when the planned set reaches the shared catalog — surfaced in the plan. */
   curationElevated: boolean;
   resource: string;
-  ttlDays: number;
-  expiresAt: Date;
+  /** Null when the plan is for a `--no-expiry` mint — see MintServiceTokenInput. */
+  ttlDays: number | null;
+  /** Null likewise; the plan says so in words rather than printing a date. */
+  expiresAt: Date | null;
 }
 
 export interface RevocableToken {
@@ -201,7 +236,8 @@ export interface RevocableToken {
   scopes: string[];
   resource: string;
   createdAt: Date;
-  expiresAt: Date;
+  /** Null on a no-expiry token; the CHECK guarantees `hasFamily` is false then. */
+  expiresAt: Date | null;
   revokedAt: Date | null;
   /** True when a refresh chain would be revoked alongside this row. */
   hasFamily: boolean;
@@ -314,6 +350,34 @@ function checkTtlDays(ttlDays: number, curationElevated: boolean): number {
 }
 
 /**
+ * The lifetime a mint would write: `{ ttlDays: null, expiresAt: null }` for
+ * `--no-expiry`, or the checked TTL and the date it lands on.
+ *
+ * Shared by the plan and the apply so a clean dry run keeps meaning something,
+ * and bounded HERE rather than by the caller's arguments — the same reason the
+ * scopes and the TTL are. `noExpiry` with a `ttlDays` is refused rather than
+ * silently preferring one: the operator asked for two different lifetimes, and
+ * guessing which he meant is how a year-long token gets minted as immortal.
+ * (The CLI refuses the same pair at argv, so both paths exit 2.)
+ */
+function resolveLifetime(
+  input: Pick<MintServiceTokenInput, "ttlDays" | "noExpiry">,
+  curationElevated: boolean,
+): { ttlDays: number | null; expiresAt: Date | null } {
+  if (input.noExpiry) {
+    if (input.ttlDays !== undefined) {
+      throw invalidRequest("noExpiry and ttlDays are mutually exclusive — pass one or the other");
+    }
+    return { ttlDays: null, expiresAt: null };
+  }
+  const ttlDays = checkTtlDays(
+    input.ttlDays ?? serviceTokenTtlCeiling(curationElevated),
+    curationElevated,
+  );
+  return { ttlDays, expiresAt: new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000) };
+}
+
+/**
  * The audience assertion. `--resource` exists to ASSERT the audience, never to
  * widen it: a mismatch means the mint environment's BETTER_AUTH_URL is wrong,
  * and failing here beats minting a token the resource server will reject.
@@ -374,7 +438,7 @@ export async function mintServiceToken(
   // the TTL ceiling it lowers applies to the DEFAULT too: an elevated mint with
   // no --ttl-days gets 90 days, not a year silently clamped.
   const elevated = isCurationElevated(scopes);
-  const ttlDays = checkTtlDays(input.ttlDays ?? serviceTokenTtlCeiling(elevated), elevated);
+  const { ttlDays, expiresAt } = resolveLifetime(input, elevated);
   const resource = checkResource(input.resource);
   if (!input.clientName) throw invalidRequest("clientName is required");
   if (!input.reason) throw invalidRequest("reason is required");
@@ -437,10 +501,10 @@ export async function mintServiceToken(
     }
 
     const token = randomToken();
-    const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
     // familyId NULL: no refresh chain exists, and it is a durable marker that no
     // grant issued this row. `provider.revoke` already treats a null family as a
-    // single-row revoke.
+    // single-row revoke. Since migration 0041 it is also the CHECKed companion of
+    // a null `expiresAt` — a no-expiry row can never belong to a family.
     const inserted = await tx
       .insert(oauthAccessToken)
       .values({
@@ -458,11 +522,11 @@ export async function mintServiceToken(
     // No token material and no hash in the audit row — `tokenId` is the join key
     // back to oauth_access_token.
     //
-    // `curationElevated` and `subjectRole` are recorded on EVERY mint, not only
-    // an elevated one: a boolean that is present-and-false says the mint was
-    // ordinary, where a missing field would only say this code did not write it.
-    // Without them the elevation could be discovered solely by decoding a scope
-    // list months later.
+    // `curationElevated`, `noExpiry` and `subjectRole` are recorded on EVERY
+    // mint, not only the elevated or immortal ones: a boolean that is
+    // present-and-false says the mint was ordinary, where a missing field would
+    // only say this code did not write it. Without them either property could be
+    // discovered solely by decoding a scope list or a null months later.
     await tx.insert(auditLog).values({
       userId: user.id,
       ...auditActor(undefined, "system"), // operator CLI; the subject client stays in `after` (#183)
@@ -475,8 +539,9 @@ export async function mintServiceToken(
         curationElevated,
         subjectRole: user.role,
         resource,
+        noExpiry: expiresAt === null,
         ttlDays,
-        expiresAt: expiresAt.toISOString(),
+        expiresAt: expiresAt?.toISOString() ?? null,
         reason: input.reason,
       },
       correlationId: input.correlationId ?? null,
@@ -490,8 +555,9 @@ export async function mintServiceToken(
       scopes,
       curationElevated,
       resource,
+      noExpiry: expiresAt === null,
       ttlDays,
-      expiresAt: expiresAt.toISOString(),
+      expiresAt: expiresAt?.toISOString() ?? null,
     });
 
     return {
@@ -528,7 +594,7 @@ export async function planServiceTokenMint(
 ): Promise<ServiceTokenMintPlan> {
   const scopes = checkScopes(input.scopes, input.allowCuration ?? false);
   const elevated = isCurationElevated(scopes);
-  const ttlDays = checkTtlDays(input.ttlDays ?? serviceTokenTtlCeiling(elevated), elevated);
+  const { ttlDays, expiresAt } = resolveLifetime(input, elevated);
   const resource = checkResource(input.resource);
   if (!input.clientName) throw invalidRequest("clientName is required");
   if (!input.reason) throw invalidRequest("reason is required");
@@ -549,7 +615,7 @@ export async function planServiceTokenMint(
     curationElevated,
     resource,
     ttlDays,
-    expiresAt: new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000),
+    expiresAt,
   };
 }
 
@@ -604,6 +670,12 @@ export async function describeTokenForRevoke(
  * "every token that did not come from the 1h grant", so it doubles as a detector
  * for the legacy hand-INSERTed row and any future one, without dumping thousands
  * of ordinary flow tokens.
+ *
+ * EVERY predicate on `expires_at` here admits NULL explicitly. A no-expiry token
+ * (migration 0041) is the longest-lived credential the system issues, so it is
+ * the last row a listing may silently drop — and three-valued logic drops it by
+ * default: `expires_at > now()` and `expires_at - created_at > …` both evaluate
+ * to NULL, which is not true.
  */
 export async function listServiceTokens(
   db: Database,
@@ -612,15 +684,20 @@ export async function listServiceTokens(
   const filters = [
     input.allClients
       ? // A strict superset of the default, so widening can never HIDE a service
-        // token (a 1-day service token's lifetime is not > 24h).
+        // token (a 1-day service token's lifetime is not > 24h). A no-expiry row
+        // qualifies on lifetime by definition — it outlives every dated one.
         or(
           eq(oauthClient.isService, true),
+          isNull(oauthAccessToken.expiresAt),
           sql`${oauthAccessToken.expiresAt} - ${oauthAccessToken.createdAt} > make_interval(hours => ${LONG_LIVED_HOURS})`,
         )
       : eq(oauthClient.isService, true),
   ];
   if (!input.includeRevoked) filters.push(isNull(oauthAccessToken.revokedAt));
-  if (!input.includeExpired) filters.push(sql`${oauthAccessToken.expiresAt} > now()`);
+  if (!input.includeExpired) {
+    // Not expired = no expiry at all, or one still in the future.
+    filters.push(or(isNull(oauthAccessToken.expiresAt), sql`${oauthAccessToken.expiresAt} > now()`));
+  }
 
   const rows = await db
     .select({
@@ -645,7 +722,12 @@ export async function listServiceTokens(
   const now = Date.now();
   return rows.map((row) => ({
     ...row,
-    daysRemaining: Math.floor((row.expiresAt.getTime() - now) / (24 * 60 * 60 * 1000)),
+    // Null, not a large number: a no-expiry token has no countdown, and any
+    // stand-in value would be a date the monitor or the operator could act on.
+    daysRemaining:
+      row.expiresAt === null
+        ? null
+        : Math.floor((row.expiresAt.getTime() - now) / (24 * 60 * 60 * 1000)),
   }));
 }
 
@@ -718,7 +800,8 @@ export async function revokeServiceToken(
         clientId: row.clientId,
         clientName: row.clientName,
         scopes: row.scopes,
-        expiresAt: row.expiresAt.toISOString(),
+        // Null for a no-expiry token — the revoke is what ends it.
+        expiresAt: row.expiresAt?.toISOString() ?? null,
       },
       after: { revokedAt: revokedAt.toISOString(), familyRevoked, reason: input.reason ?? null },
       correlationId: input.correlationId ?? null,

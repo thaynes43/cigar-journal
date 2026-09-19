@@ -592,3 +592,20 @@ init container at startup (ADR-003).
   `token_hash` is DROPPED from `photo_drops`: a column that meant "the drop's one
   valid hash" cannot also mean "one of its valid hashes", and leaving it would
   give `loadDropByToken` two places to read.
+- `0041_service_token_no_expiry.sql` — `oauth_access_token.expires_at` becomes
+  nullable, where NULL means "no expiry, valid until revoked" (ADR-011 amendment,
+  owner ruling 2026-09-19). Every expiry on an operator-minted service token was
+  a manual re-mint, a 1Password edit and a pod restart; the 7-days-left page
+  fired for the dev-env pod on 2026-09-19 and bought nothing the owner wanted.
+  Only the `token` role's new `--no-expiry` mint writes NULL — the grants set a
+  date on every token they issue — and **a CHECK,
+  `oauth_access_token_no_expiry_shape`, forbids a no-expiry row from belonging to
+  a refresh family** (`expires_at IS NOT NULL OR family_id IS NULL`). No existing
+  row can violate it, since every one predates the nullable column; what it
+  forecloses is a future refresh rotation minting an immortal token from inside a
+  grant. No backfill and no default: a dated token keeps its date, and NULL is a
+  deliberate per-mint choice. The other three token tables — authorization codes,
+  refresh tokens, authorization transactions — keep NOT NULL, each being a step
+  in a flow that must time out. `oauth_access_token_expires_idx` still applies
+  (Postgres indexes NULLs) and the reads that filter on expiry admit them
+  explicitly, because `expires_at > now()` silently drops a NULL.

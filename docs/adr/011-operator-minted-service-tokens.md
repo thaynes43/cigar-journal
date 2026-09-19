@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-29 (amended 2026-08-30 — see "Curation scopes: the owner
-  override")
+  override"; amended 2026-09-19 — see "No expiry: the owner override")
 
 ## Context
 
@@ -23,9 +23,10 @@ consumer cannot render a consent screen.
 ## Decision
 
 **A service token is an ordinary `oauth_access_token` row that happens to live
-a year.** Validation, the grants, `/oauth/token`, and every route adapter are
-untouched. What is added is a supported, audited, server-side *writer* for
-such a row, replacing the hand-INSERT.
+a year** — or, since the 2026-09-19 amendment below, not to expire at all.
+Validation, the grants, `/oauth/token`, and every route adapter are untouched.
+What is added is a supported, audited, server-side *writer* for such a row,
+replacing the hand-INSERT.
 
 - **`packages/oauth/src/service-tokens.ts`** — `mintServiceToken`,
   `listServiceTokens`, `revokeServiceToken`. The mint sits beside the
@@ -59,7 +60,9 @@ such a row, replacing the hand-INSERT.
   `client_id` on every audit row.
 - **No refresh chain.** `offline_access` is refused; `family_id` is NULL. That
   is both correct (nothing to rotate) and a durable marker that no grant
-  issued the row.
+  issued the row. Since migration 0041 a CHECK makes it load-bearing: a row
+  with no expiry must have no family, so an immortal token can never be issued
+  from inside a grant.
 - **Audited.** `oauth.service_client.create`, `oauth.service_token.mint`, and
   `oauth.service_token.revoke` write `audit_log` rows (actor `system`) in the
   mint/revoke transaction, carrying the reason and the `tokenId` join key —
@@ -68,8 +71,12 @@ such a row, replacing the hand-INSERT.
   `catalog:read`, `journal:read` and `journal:write` are mintable by default;
   `offline_access` is refused unconditionally (no refresh chain). `curation:*`
   is off by default and reachable only through the explicit elevation below.
-  TTL defaults to 365 days **and caps there**, so `--ttl-days` can only
-  shorten — 90 days for a curation-elevated mint, see the override below.
+  A **dated** mint defaults to 365 days **and caps there**, so `--ttl-days` can
+  only shorten — 90 days for a curation-elevated mint, see the override below.
+  `--no-expiry` is the one way out of those ceilings, and it is an explicit
+  opt-out rather than a widening of what `--ttl-days` may ask for: the two
+  flags are mutually exclusive (usage error), see "No expiry: the owner
+  override".
 - **One delivery path, and no other is possible.** `mint --yes` refuses to run
   unless stdout is an interactive terminal, and refuses before writing
   anything. A container's stdout is collected into Loki for the whole
@@ -141,7 +148,9 @@ The elevation is **narrow and explicit**, not a widening of the default set:
   one `kubectl exec -it` at a moment the operator picks, with the old token
   live until he revokes it. The expiry cliff is already watched: the daily
   `cigar-journal-credential-expiry` CronJob selects by lifetime (> 24h), so a
-  90-day token is covered with no edit.
+  90-day token is covered with no edit. *(Amended 2026-09-19: this ceiling
+  still governs every **dated** elevated mint, but the owner extended
+  `--no-expiry` to the curation token as well — see the next section.)*
 - **Audited writes name the credential that made them.** `audit_log.client_id`
   (migration 0024) records the OAuth client of the calling token on every audit
   row the application writes — curation, journal, inventory, photos, settings,
@@ -165,12 +174,81 @@ What we accept, on top of the bearer already accepted below: for the curation
 lane's token specifically, that bearer can curate the shared catalog for its
 whole life without a consent screen. It is bounded by the same revocation,
 audience, per-consumer attribution and per-request validation as every other
-service token, by a 90-day rather than a 365-day life, and the curation tools'
-own `assertAdmin` still gates each call. The attribution is per *credential*,
+service token, by a 90-day rather than a 365-day life (or, under the
+2026-09-19 override, by revocation alone), and the curation tools' own
+`assertAdmin` still gates each call. The attribution is per *credential*,
 not per holder: a leak of the lane's own token is indistinguishable from the
 lane until it is revoked, and revoke-by-id is the response — **not** demoting
 the subject, which in this deployment is the owner himself and is undone by his
 next sign-in (`packages/auth/src/auth.ts` re-asserts admin on session create).
+
+## No expiry: the owner override (2026-09-19)
+
+The decision above bounds every service token by a TTL — 365 days, 90 for a
+curation elevation. **The owner overrode that on 2026-09-19, for both.** A
+service token may now be minted with `--no-expiry`: `expires_at` NULL, valid
+until revoked.
+
+The trigger was the 7-days-left page firing for the dev-env pod's token. Each
+expiry is not a rotation the system performs; it is a ceremony the owner
+performs — an interactive `kubectl exec -it` re-mint, a 1Password field edit,
+an ESO sync, and a pod restart that kills whatever agent session was running
+in it. His standing precedent for that hands-off pod is non-expiring machine
+credentials: the release-please PAT, the GCP service-account key, the Claude
+setup token. A credential whose renewal reliably costs a human interruption
+and whose absence stalls the consumer is, in his judgement, worse than one
+that persists.
+
+**What is given up.** The forced rotation that bounded an undetected theft.
+The Decision above argues that "the widest credential the system can issue
+must not also be the longest-lived", and the curation elevation was capped at
+90 days on exactly that reasoning. The owner overrode it. The argument has not
+become wrong and is not retracted here: a stolen no-expiry token works until
+someone notices and revokes it, with no deadline that would end it on its own,
+and that is a real reduction in the system's defence in depth. It was traded
+knowingly for a credential the operator does not have to re-issue.
+
+**What still bounds the credential**, unchanged by this amendment:
+
+- explicit scopes, enforced in the mint (`offline_access` still refused in
+  every combination; `curation:*` still behind `--allow-curation` and an admin
+  subject checked at mint time);
+- the RFC 8707 audience — the token is valid at this server's `/mcp` and
+  nowhere else;
+- one service client per consumer, so a leak is attributable and revocable
+  without touching any other credential;
+- per-request validation with no cache, so **a revoke bites on the next call**
+  — revocation, not expiry, is the kill switch, and it always was;
+- revoke-by-id, and `client_id` on every audit row the credential writes
+  (migration 0024), so its activity is separable after the fact.
+
+**The durable marker is NULL `expires_at` alongside NULL `family_id`.**
+Migration 0041 makes `expires_at` nullable on `oauth_access_token` only — the
+authorization codes, refresh tokens and authorization transactions keep NOT
+NULL, each being a step in a flow that must time out — and adds a CHECK,
+`expires_at IS NOT NULL OR family_id IS NULL`. No existing row can violate it
+(the grants set a date on every token they issue), and it forecloses the
+future mistake: a refresh rotation that dropped the expiry would mint an
+immortal token from inside a grant, which is the one credential this system
+does not issue. Every read that filters on expiry admits NULL explicitly,
+because `expires_at > now()` silently drops it.
+
+`--no-expiry` is an explicit per-mint opt-out, not a new default and not a
+widening of `--ttl-days`:
+
+- the two flags are **mutually exclusive** (usage error, exit 2, refused in
+  the mint as well as at argv) — two lifetimes in one command, one of them
+  immortal, is not something to resolve by precedence;
+- without the flag nothing changes: 365 default and cap, 90 for an elevated
+  mint, `--ttl-days` only ever shortening;
+- the dry-run plan prints `ttl  none — valid until revoked` and the mint
+  report `expires  never — valid until revoked`, so the operator cannot
+  discover it by noticing an absent date;
+- the mint's audit row records `noExpiry` on **every** mint — present-and-false
+  on a dated one — alongside `ttlDays: null` and `expiresAt: null`, the same
+  reasoning as `curationElevated`;
+- `list` shows `never` in EXPIRES and `-` in DAYS, and such a row is included
+  by the default listing and by `--all-clients`.
 
 ## Consequences
 
@@ -181,14 +259,18 @@ next MCP call: `packages/mcp/src/auth.ts` validates per request with no cache.
 24h regardless of client, which doubles as a detector for the legacy row and
 any future hand-INSERT.
 
-What we accept: a year-long bearer that acts as its user, with no
-refresh-rotation heartbeat that would reveal theft, held by whoever can read
-the secret store or the pod env. Expiry is a cliff, not a gradual failure —
-`list` reports days-remaining, but that is a pull; the alert is the daily
-`cigar-journal-credential-expiry` CronJob in haynes-ops. That Job currently
-pins the legacy `client_id`, so haynes-ops#2681 re-points it at every live
-token whose lifetime exceeds 24h — following the credential across this
-cutover with no edit, and failing when none exists at all.
+What we accept: a year-long bearer — or, since 2026-09-19, a non-expiring one
+— that acts as its user, with no refresh-rotation heartbeat that would reveal
+theft, held by whoever can read the secret store or the pod env. For a **dated**
+token, expiry is a cliff rather than a gradual failure: `list` reports
+days-remaining, but that is a pull; the alert is the daily
+`cigar-journal-credential-expiry` CronJob in haynes-ops, re-pointed by
+haynes-ops#2681 at every live token whose lifetime exceeds 24h, so it follows
+the credential across a re-mint with no edit. A **no-expiry** token has no
+cliff to watch, so the monitor must list it as such rather than count it down,
+and must not read "no dated token is near expiry" as "no credential exists" —
+otherwise the job that was meant to fail loudly when the credential is missing
+starts failing because it is permanent.
 
 Containment of the mint is enforced three ways: it is absent from
 `index.ts`, the package's `exports` map blocks subpath imports, and an
@@ -224,6 +306,17 @@ a production credential. Recommended: shown, read-only, admin-revocable.
   a forgotten re-mint stalls the lane, which is why the expiry CronJob's
   lifetime-based selector (haynes-ops#2681) is a precondition and not a
   nice-to-have.
+- Keeping the ceilings and automating the re-mint instead (2026-09-19) — the
+  mint has exactly one delivery path, an interactive TTY, precisely so the
+  credential never reaches a log sink. Automating it means a second delivery
+  path, which is a second copy of the secret; that trade is worse than the one
+  the override makes. A shorter TTL with a louder alert was also rejected: the
+  alert already fires correctly, and the cost it surfaces is the owner's time,
+  not a system failure.
+- A very long TTL (say 10 years) instead of NULL — the same exposure with none
+  of the honesty. A far-off date reads as a bound in `list`, in the monitor and
+  in the ADR while being one in name only, and it still ends abruptly on a day
+  nobody planned for. NULL says what is true.
 - Recording the credential in the audit row's `after` JSONB instead of a
   column — no migration, but the incident query ("what did this credential
   write") becomes a JSONB probe over every row, and the field would be mixed
