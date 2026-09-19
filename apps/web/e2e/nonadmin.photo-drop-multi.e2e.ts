@@ -29,11 +29,6 @@ const PNG_1X1 = Buffer.from(
   "base64",
 );
 
-// Where the screenshots this spec is asked for land. Absolute, because the
-// harness's cwd is the e2e directory.
-const SHOTS =
-  "/tmp/claude-1000/-home-dev-work-cigar-journal-0901-213901/b49620d2-2f36-4e71-b2ac-6a453bd3560c/scratchpad/laneA";
-
 interface PhotoView {
   photoId: string;
   kind: string;
@@ -60,10 +55,46 @@ async function query<T>(page: Page, path: string, input: unknown): Promise<T> {
   return ((await res.json()) as { result: { data: T } }).result.data;
 }
 
+// The drop as the link reports it — the read the page itself makes.
+interface DropView {
+  photoDropId: string;
+  status: string;
+  photos: PhotoView[];
+}
+
+async function dropView(page: Page, token: string): Promise<DropView> {
+  const res = await page.request.get(`/api/photo-drops/${token}`);
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as DropView;
+}
+
+// A caption commits with no Save button: Enter and blur fire a PATCH and nothing
+// on the page waits for it. The reload below cancels one still on the wire, which
+// is how the second caption went missing in CI run 35448429250 — the blur was the
+// statement before it, so that PATCH had no grace at all. So each commit is paired
+// with its response, the way admin.cigar-detail.e2e.ts pairs its own writes.
+function captionSaved(page: Page): Promise<unknown> {
+  return page.waitForResponse(
+    (res) => res.request().method() === "PATCH" && res.url().includes("/photos/"),
+  );
+}
+
 test("a drop collects several photos, a save claims them all, and the link keeps taking more", async ({
   page,
-}) => {
+}, testInfo) => {
   const { token, cigarId } = h.multiPhotoDrop;
+
+  // Retries run in the SAME harness against the SAME seeded drop, and every count
+  // below is absolute — so a failed attempt leaves its photos behind and fails the
+  // next one on the first count. Empty the drop before the walk.
+  const before = await dropView(page, token);
+  expect(before.status, "a previous attempt claimed the drop; this walk needs an open one").toBe(
+    "open",
+  );
+  for (const photo of before.photos) {
+    const removed = await page.request.delete(`/api/photo-drops/${token}/photos/${photo.photoId}`);
+    expect(removed.status(), await removed.text()).toBe(204);
+  }
 
   await page.goto(`/d/${token}`);
   const tile = page.getByRole("button", { name: "Add photo" });
@@ -107,10 +138,10 @@ test("a drop collects several photos, a save claims them all, and the link keeps
   // blank, which must stay null rather than becoming an empty string.
   const firstCaption = rows.nth(0).getByRole("textbox", { name: "Caption" });
   await firstCaption.fill("First light");
-  await firstCaption.press("Enter");
+  await Promise.all([captionSaved(page), firstCaption.press("Enter")]);
   const secondCaption = rows.nth(1).getByRole("textbox", { name: "Caption" });
   await secondCaption.fill("The second band");
-  await secondCaption.blur();
+  await Promise.all([captionSaved(page), secondCaption.blur()]);
 
   // Reload rather than trust the local state: the captions must be on the SERVER.
   await page.reload();
@@ -118,11 +149,10 @@ test("a drop collects several photos, a save claims them all, and the link keeps
   await expect(rows.nth(0).getByRole("textbox", { name: "Caption" })).toHaveValue("First light");
   await expect(rows.nth(1).getByRole("textbox", { name: "Caption" })).toHaveValue("The second band");
   await expect(rows.nth(2).getByRole("textbox", { name: "Caption" })).toHaveValue("");
-  await page.screenshot({ path: `${SHOTS}/drop-three-photos.png`, fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("drop-three-photos.png"), fullPage: true });
 
   // The order the link reports, before anything claims it.
-  const opened = await (await page.request.get(`/api/photo-drops/${token}`)).json();
-  const staged = opened as { photoDropId: string; photos: PhotoView[] };
+  const staged = await dropView(page, token);
   expect(staged.photos.map((p) => [p.kind, p.caption])).toEqual([
     ["cigar", "First light"],
     ["band", "The second band"],
@@ -189,5 +219,5 @@ test("a drop collects several photos, a save claims them all, and the link keeps
       ),
     )
     .toBe(true);
-  await page.screenshot({ path: `${SHOTS}/smoke-four-photos.png`, fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("smoke-four-photos.png"), fullPage: true });
 });
