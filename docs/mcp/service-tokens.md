@@ -24,11 +24,9 @@ that contains ADR-011 onward. Check before anything else:
 kubectl -n frontend exec deploy/cigar-journal-main -c app -- ls /app
 ```
 
-`token` must appear in that listing. It does not in `v0.26.1` (the tag
-deployed on 2026-08-30) — that image predates the role, and the exec below
-fails with `can't cd to /app/token`. The fix is the ordinary release path:
-release-please cuts a release, `publish-image` ships the tag, the
-haynes-ops HelmRelease bump deploys it.
+`token` must appear in that listing (verified on `v0.45.2`, 2026-09-19). An
+image older than `v0.27.0` predates the role, and the exec below fails with
+`can't cd to /app/token`.
 
 ## Running it
 
@@ -212,9 +210,10 @@ so a client row is created rather than reused; and at step 6 the legacy
 token's client row is deliberately left in place, because the audit trail
 points at it.
 
-Two preconditions, both outside this repo: the release carrying the `token`
-role must be deployed (see Precondition), and haynes-ops#2681 must have landed
-so the expiry monitor is not still pinned to `dev-env-cli`.
+Both preconditions are met (verified 2026-09-19): the deployed image carries
+the `token` role, and haynes-ops#2681 has landed, so the expiry monitor follows
+the new client with no edit. The monitor keeps failing on the legacy token
+until step 6 revokes it — a revoked token leaves its watch list.
 
 ## Revoke
 
@@ -241,14 +240,13 @@ The credential reaches the dev-env pod as `CIGAR_JOURNAL_TOKEN`:
 
 1. 1Password item `dev-env`, top-level field `CIGAR_JOURNAL_TOKEN`.
 2. haynes-ops ExternalSecret `dev-env-cigar` → Secret `dev-env-cigar-secret`
-   (haynes-ops#2673, a held draft).
+   (haynes-ops#2673).
 3. The dev-env HelmRelease mounts that Secret `envFrom`, and `dev-init.sh`'s
    `envsubst` expands `Bearer ${CIGAR_JOURNAL_TOKEN}` into the registered MCP
    header.
 
-Merging that HelmRelease change **restarts the dev-env pod**, so it lands as a
-held draft at a natural break, and only after the 1Password field holds the
-new value.
+A changed Secret value **restarts the dev-env pod** (reloader) and ends every
+agent session in it, so update the 1Password field at a natural break.
 
 ## Exposure
 
@@ -278,8 +276,7 @@ was trying to neutralize. Find the id with `list` (or from the mint report) and
 revoke it.
 
 Expiry is a cliff. The daily `cigar-journal-credential-expiry` CronJob in
-haynes-ops is the alert: a failing Job pages. Today it watches one pinned
-`client_id`, so it must land haynes-ops#2681 — which selects every live token
-whose lifetime exceeds 24h instead, and so follows a re-mint under a new
-client with no edit — before this cutover, or it will report the retired
-client as expired every morning. `list` remains the pull-based view.
+haynes-ops is the alert: a failing Job pages at 7 days left. It selects every
+unrevoked token whose lifetime exceeds 24h (haynes-ops#2681), so it follows a
+re-mint under a new client with no edit, and a rotation is not finished until
+the old token is revoked. `list` remains the pull-based view.
