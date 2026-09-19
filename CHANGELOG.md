@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.46.0](https://github.com/thaynes43/cigar-journal/compare/v0.45.2...v0.46.0) (2026-09-19)
+
+
+### Features
+
+* **oauth:** service tokens can be minted with no expiry (ADR-011 amendment) ([#331](https://github.com/thaynes43/cigar-journal/issues/331)) ([d3ae586](https://github.com/thaynes43/cigar-journal/commit/d3ae58607b8d825d62aeb0f854504acd1cb9ecdc))
+
+
+### Bug Fixes
+
+* **photos:** a drop caption or kind change survives leaving the page ([#329](https://github.com/thaynes43/cigar-journal/issues/329)) ([eac9f14](https://github.com/thaynes43/cigar-journal/commit/eac9f14b1a8489bb5c6fd39b31585fabf7e43854))
+
 ## [0.45.2](https://github.com/thaynes43/cigar-journal/compare/v0.45.1...v0.45.2) (2026-09-11)
 
 
