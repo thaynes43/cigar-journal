@@ -150,10 +150,13 @@ export function PhotoDrop({ token }: { token: string }) {
     setBusyId(photoId);
     setMessage(null);
     try {
+      // keepalive: a caption commits on blur, and on a phone the blur is often
+      // the user switching back to the chat — the write must outlive the page.
       const res = await fetch(`/api/photo-drops/${token}/photos/${photoId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        keepalive: true,
       });
       if (res.status === 410) {
         setPhase("closed");
