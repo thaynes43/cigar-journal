@@ -103,6 +103,9 @@ async function runMint(
     // ordinary (365). Defaulting here would hand an elevated mint a year and get
     // it refused.
     ttlDays: options.ttlDays ?? undefined,
+    // The mutual exclusion with --ttl-days is already a usage error (exit 2);
+    // the mint re-checks it, so a library caller cannot ask for both either.
+    noExpiry: options.noExpiry,
     resource: options.resource ?? undefined,
     correlationId: RUN_ID,
     log: NARRATE,

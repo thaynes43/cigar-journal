@@ -55,7 +55,13 @@ export async function validateAccessToken(
   const rec = rows[0];
   if (!rec) return { ok: false, error: "invalid_token" };
   if (rec.revokedAt) return { ok: false, error: "invalid_token" };
-  if (rec.expiresAt.getTime() <= Date.now()) return { ok: false, error: "expired" };
+  // A NULL expiry is not an expired one: it is a `--no-expiry` service token,
+  // valid until revoked (ADR-011 amendment 2026-09-19, migration 0041). The
+  // revocation check above still runs first, so such a token dies on a revoke
+  // exactly like a dated one — per request, with no cache.
+  if (rec.expiresAt !== null && rec.expiresAt.getTime() <= Date.now()) {
+    return { ok: false, error: "expired" };
+  }
 
   // RFC 8707 audience binding: a token minted for another resource (e.g. a web
   // session audience) is not valid at /mcp.

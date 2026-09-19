@@ -44,7 +44,15 @@ import {
   ServiceTokenError,
 } from "./service-tokens.js";
 import { mintDeliveryRefusal, parseArgs, UsageError, USAGE } from "./cli-args.js";
-import { CURATION_NOTICE, formatMintPlan, formatMintReport } from "./cli-report.js";
+import {
+  CURATION_NOTICE,
+  NO_EXPIRY_EXPIRES,
+  NO_EXPIRY_TTL,
+  formatList,
+  formatMintPlan,
+  formatMintReport,
+  tokenState,
+} from "./cli-report.js";
 import { validateAccessToken } from "./validate.js";
 
 // Operator-minted service tokens (ADR-011) against a real embedded Postgres 16,
@@ -209,7 +217,7 @@ describe("service tokens", () => {
     const before = Date.now();
     const minted = await mint({ ttlDays: 30 });
     const expected = before + 30 * 24 * 60 * 60 * 1000;
-    expect(Math.abs(minted.expiresAt.getTime() - expected)).toBeLessThan(1000);
+    expect(Math.abs(minted.expiresAt!.getTime() - expected)).toBeLessThan(1000);
 
     const defaulted = await mint();
     expect(defaulted.ttlDays).toBe(365);
@@ -233,7 +241,7 @@ describe("service tokens", () => {
     expect(elevated.ttlDays).toBe(CURATION_SERVICE_TOKEN_TTL_DAYS);
     expect(CURATION_SERVICE_TOKEN_TTL_DAYS).toBeLessThan(DEFAULT_SERVICE_TOKEN_TTL_DAYS);
     const expected = Date.now() + CURATION_SERVICE_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
-    expect(Math.abs(elevated.expiresAt.getTime() - expected)).toBeLessThan(5000);
+    expect(Math.abs(elevated.expiresAt!.getTime() - expected)).toBeLessThan(5000);
 
     // A year is refused for this scope set — the value an ordinary mint gets by
     // default — and the message says which ceiling bit.
@@ -276,6 +284,276 @@ describe("service tokens", () => {
       "invalid_request",
     );
   });
+
+  // ---- no expiry (owner ruling 2026-09-19, ADR-011) ---------------------------
+  //
+  // A service token may carry NO expiry: `expires_at` NULL, valid until revoked.
+  // The ruling covers the ordinary token AND the curation-elevated one. What the
+  // cases below pin is that "no expiry" is a real null everywhere — the row, the
+  // result, the plan, the report, the listing and the audit row — rather than a
+  // far-off date that would quietly behave like a very long TTL.
+
+  it("mints with no expiry — a null row that validateAccessToken accepts", async () => {
+    const minted = await mint({ noExpiry: true });
+    expect(minted.expiresAt).toBeNull();
+    expect(minted.ttlDays).toBeNull();
+
+    const rows = await db
+      .select({ expiresAt: oauthAccessToken.expiresAt, familyId: oauthAccessToken.familyId })
+      .from(oauthAccessToken)
+      .where(eq(oauthAccessToken.id, minted.tokenId));
+    // NULL `expires_at` alongside NULL `family_id` is the durable marker of such
+    // a row — migration 0041's CHECK keeps the pair inseparable.
+    expect(rows[0]!.expiresAt).toBeNull();
+    expect(rows[0]!.familyId).toBeNull();
+
+    const result = await validateAccessToken(db, minted.token, ["journal:write"]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.principal.userId).toBe(userId);
+  });
+
+  it("still dies on a revoke — the only end a no-expiry token has", async () => {
+    const minted = await mint({ noExpiry: true });
+    expect((await validateAccessToken(db, minted.token, [])).ok).toBe(true);
+
+    await revokeServiceToken(db, { tokenId: minted.tokenId, reason: "leaked", log: quiet });
+    // invalid_token, not expired: revocation is checked before the expiry, and a
+    // revoked immortal token is exactly as dead as a revoked dated one.
+    expect(await validateAccessToken(db, minted.token, [])).toEqual({
+      ok: false,
+      error: "invalid_token",
+    });
+  });
+
+  it("keeps rejecting a token whose date HAS passed", async () => {
+    // The expiry check did not go away; it learned to read NULL. A dated token
+    // past its date is still `expired`, which is the regression that would
+    // otherwise hide behind "null is not expired".
+    const minted = await mint();
+    await db
+      .update(oauthAccessToken)
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(oauthAccessToken.id, minted.tokenId));
+    expect(await validateAccessToken(db, minted.token, [])).toEqual({
+      ok: false,
+      error: "expired",
+    });
+  });
+
+  it("refuses --no-expiry together with a TTL, in the mint and in the plan", async () => {
+    // Two different lifetimes in one command, one of them immortal. Resolved by
+    // precedence it would silently mint something nobody typed.
+    for (const ttlDays of [30, DEFAULT_SERVICE_TOKEN_TTL_DAYS]) {
+      await expectOAuthError(mint({ noExpiry: true, ttlDays }), "invalid_request");
+      await expectOAuthError(
+        planServiceTokenMint(db, {
+          clientName: consumer(),
+          userEmail: OWNER_EMAIL,
+          scopes: ["journal:read"],
+          reason: "test",
+          noExpiry: true,
+          ttlDays,
+        }),
+        "invalid_request",
+      );
+    }
+  });
+
+  it("permits no expiry on a curation-elevated mint, with the admin gate intact", async () => {
+    // The owner ruled on BOTH tokens (2026-09-19), so the 90-day ceiling is no
+    // longer the last word on an elevated mint — but the elevation's own gates
+    // are untouched.
+    const elevated = await mint({
+      scopes: ["curation:read", "curation:write"],
+      allowCuration: true,
+      noExpiry: true,
+      reason: "daily curation lane",
+    });
+    expect(elevated.curationElevated).toBe(true);
+    expect(elevated.expiresAt).toBeNull();
+    expect((await validateAccessToken(db, elevated.token, ["curation:write"])).ok).toBe(true);
+
+    // Still refused without the flag, and still refused for a non-admin subject:
+    // --no-expiry admits no scope and waives no check.
+    await expectOAuthError(mint({ scopes: ["curation:write"], noExpiry: true }), "invalid_scope");
+    const refused = await mint({
+      userEmail: MEMBER_EMAIL,
+      scopes: ["curation:write"],
+      allowCuration: true,
+      noExpiry: true,
+    }).catch((e: unknown) => e);
+    expect((refused as ServiceTokenError).code).toBe("subject_not_admin");
+  });
+
+  it("records the no-expiry mint on its audit row, and its absence too", async () => {
+    const auditFor = async (tokenId: string): Promise<Record<string, unknown>> => {
+      const rows = await db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.action, "oauth.service_token.mint"));
+      const row = rows.find(
+        (candidate) => (candidate.after as { tokenId?: string }).tokenId === tokenId,
+      );
+      expect(row, `no mint audit row for ${tokenId}`).toBeDefined();
+      return row!.after as Record<string, unknown>;
+    };
+
+    // Explicit on the row, not inferable from two nulls that could equally mean
+    // "some older code did not write these" — the curationElevated precedent.
+    const immortal = await mint({ noExpiry: true, reason: "dev-env pod MCP client" });
+    expect(await auditFor(immortal.tokenId)).toMatchObject({
+      noExpiry: true,
+      ttlDays: null,
+      expiresAt: null,
+      reason: "dev-env pod MCP client",
+    });
+
+    const dated = await mint({ ttlDays: 30 });
+    const row = await auditFor(dated.tokenId);
+    expect(row).toMatchObject({ noExpiry: false, ttlDays: 30 });
+    expect(row.expiresAt).toBe(dated.expiresAt!.toISOString());
+  });
+
+  it("lists a no-expiry token everywhere a dated one appears", async () => {
+    // `expires_at > now()` and `expires_at - created_at > interval` both evaluate
+    // to NULL for a no-expiry row, so every predicate had to learn to admit it.
+    // The longest-lived credential the system issues is the last one a listing
+    // may silently drop.
+    const minted = await mint({ noExpiry: true });
+
+    for (const input of [{}, { allClients: true }, { includeExpired: true }]) {
+      const rows = await listServiceTokens(db, input);
+      const row = rows.find((candidate) => candidate.tokenId === minted.tokenId);
+      expect(row, `missing from listServiceTokens(${JSON.stringify(input)})`).toBeDefined();
+      expect(row!.expiresAt).toBeNull();
+      expect(row!.daysRemaining).toBeNull();
+      expect(tokenState(row!)).toBe("active");
+    }
+
+    // The table says so in words rather than leaving the cells blank.
+    const listed = formatList(
+      (await listServiceTokens(db)).filter((row) => row.tokenId === minted.tokenId),
+    );
+    expect(listed).toContain("never");
+    expect(listed).toMatch(/ {2}- {2,}never/);
+
+    // Revoked, it leaves the default listing like any other token, and reads
+    // `revoked` rather than `active` when asked for.
+    await revokeServiceToken(db, { tokenId: minted.tokenId, log: quiet });
+    expect((await listServiceTokens(db)).map((row) => row.tokenId)).not.toContain(minted.tokenId);
+    const revoked = (await listServiceTokens(db, { includeRevoked: true })).find(
+      (row) => row.tokenId === minted.tokenId,
+    );
+    expect(tokenState(revoked!)).toBe("revoked");
+  });
+
+  it("names the no-expiry mint in the plan and the report the operator reads", async () => {
+    const plan = await planServiceTokenMint(db, {
+      clientName: consumer(),
+      userEmail: OWNER_EMAIL,
+      scopes: ["journal:read"],
+      reason: "dev-env pod MCP client",
+      noExpiry: true,
+    });
+    expect(plan).toMatchObject({ ttlDays: null, expiresAt: null });
+    expect(formatMintPlan(plan, RUN, "dev-env pod MCP client")).toContain(NO_EXPIRY_TTL);
+
+    const minted = await mint({ noExpiry: true });
+    const report = formatMintReport(minted, RUN);
+    expect(report).toContain(NO_EXPIRY_EXPIRES);
+    expect(report).not.toContain(minted.token);
+
+    // A dated mint is unchanged — it still prints its TTL and its date.
+    const dated = await planServiceTokenMint(db, {
+      clientName: consumer(),
+      userEmail: OWNER_EMAIL,
+      scopes: ["journal:read"],
+      reason: "test",
+      ttlDays: 30,
+    });
+    const printed = formatMintPlan(dated, RUN, "test");
+    expect(printed).toContain("30d → ");
+    expect(printed).not.toContain(NO_EXPIRY_TTL);
+  });
+
+  it("leaves the grants writing a date — no flow can issue an immortal token", async () => {
+    // Nothing about provider.ts changed, and nothing may: a NULL expiry is the
+    // operator's deliberate act, never a side effect of a grant.
+    const { tokens } = await fullGrant(["journal:read", "offline_access"]);
+    const row = (
+      await db
+        .select({ id: oauthAccessToken.id, expiresAt: oauthAccessToken.expiresAt })
+        .from(oauthAccessToken)
+        .where(eq(oauthAccessToken.tokenHash, hashToken(tokens.access_token)))
+    )[0]!;
+    expect(row.expiresAt).not.toBeNull();
+
+    // And the database itself forecloses the future mistake: a row in a refresh
+    // family cannot have its expiry dropped (migration 0041's CHECK).
+    const error = await db
+      .update(oauthAccessToken)
+      .set({ expiresAt: null })
+      .where(eq(oauthAccessToken.id, row.id))
+      .catch((e: unknown) => e);
+    expect((error as { cause?: { constraint?: string } }).cause?.constraint).toBe(
+      "oauth_access_token_no_expiry_shape",
+    );
+  });
+
+  it("carries --no-expiry through the real entrypoint, plan and list alike", async () => {
+    // The flag has to survive argv → cli.ts → the mint, which types alone do not
+    // prove. Spawned, exactly as a container runs the `token` role.
+    const plan = await runCli(
+      [
+        "mint",
+        "--client-name",
+        consumer(),
+        "--user-email",
+        OWNER_EMAIL,
+        "--scope",
+        "journal:write",
+        "--reason",
+        "dev-env pod MCP client",
+        "--no-expiry",
+      ],
+      { BETTER_AUTH_URL: ORIGIN },
+    );
+    expect(plan.code).toBe(0);
+    expect(plan.stderr).toContain(NO_EXPIRY_TTL);
+    expect(plan.stderr).toContain("nothing written");
+
+    // Two lifetimes is a usage error before the database is opened at all.
+    const both = await runCli(
+      [
+        "mint",
+        "--client-name",
+        consumer(),
+        "--user-email",
+        OWNER_EMAIL,
+        "--scope",
+        "journal:write",
+        "--reason",
+        "r",
+        "--no-expiry",
+        "--ttl-days",
+        "30",
+      ],
+      { BETTER_AUTH_URL: ORIGIN },
+    );
+    expect(both.code).toBe(2);
+    expect(both.stderr).toContain("exclusive");
+
+    // `list` is the operator's pull-based view, and a no-expiry row is the one
+    // it must never render as a blank or a countdown.
+    const minted = await mint({ noExpiry: true });
+    const listed = await runCli(["list"]);
+    expect(listed.code).toBe(0);
+    const row = listed.stdout.split("\n").find((line) => line.startsWith(minted.tokenId));
+    expect(row, `${minted.tokenId} missing from list`).toBeDefined();
+    expect(row).toContain("never");
+    expect(row).toContain("active");
+  }, 60_000);
 
   // ---- scopes ----------------------------------------------------------------
 
@@ -1182,11 +1460,42 @@ describe("service-token argv", () => {
         allowCuration: false,
         reason: "dev-env pod MCP client",
         ttlDays: 180,
+        noExpiry: false,
         resource: null,
         yes: true,
         databaseUrl: null,
       },
     });
+  });
+
+  it("parses --no-expiry and refuses it alongside --ttl-days", () => {
+    const base = [
+      "mint",
+      "--client-name",
+      "dev-env-pod",
+      "--user-email",
+      "owner@example.com",
+      "--scope",
+      "journal:write",
+      "--reason",
+      "r",
+    ];
+    const off = parseArgs(base);
+    expect(off.command === "mint" && off.options.noExpiry).toBe(false);
+    const on = parseArgs([...base, "--no-expiry"]);
+    expect(on.command === "mint" && on.options.noExpiry).toBe(true);
+    // A boolean: it consumes no value, so the next flag still parses.
+    const trailing = parseArgs([...base, "--no-expiry", "--yes"]);
+    expect(trailing.command === "mint" && trailing.options.yes).toBe(true);
+
+    // Two different lifetimes in one command is a usage error (exit 2), in
+    // either order — never a precedence rule that picks one silently.
+    expect(() => parseArgs([...base, "--no-expiry", "--ttl-days", "30"])).toThrow(UsageError);
+    expect(() => parseArgs([...base, "--ttl-days", "30", "--no-expiry"])).toThrow(UsageError);
+
+    // A typo cannot produce it, the way --allow-curation cannot.
+    expect(() => parseArgs([...base, "--no-expire"])).toThrow(UsageError);
+    expect(() => parseArgs([...base, "--noexpiry"])).toThrow(UsageError);
   });
 
   it("defaults a mint to dry-run — --yes is the gate on every write", () => {
@@ -1268,6 +1577,12 @@ describe("service-token argv", () => {
     expect(USAGE).toContain("only with --allow-curation");
     expect(USAGE).toContain("subject must be an admin");
     expect(USAGE).toContain("default and maximum 365");
+    // The opt-out is advertised beside the ceiling it opts out of, and says in
+    // words what it costs — an operator must not meet "valid until revoked" for
+    // the first time in the mint report.
+    expect(USAGE).toContain("--no-expiry");
+    expect(USAGE).toContain("valid until revoked");
+    expect(USAGE).toContain("exclusive with --ttl-days");
     // The gate keys on the scopes GRANTED, not on the flag — USAGE must say so,
     // because "--allow-curation makes it admin-only" is the wrong mental model
     // and would have an operator expect a refusal that never comes.

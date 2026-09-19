@@ -25,6 +25,8 @@ export interface MintOptions {
   allowCuration: boolean;
   reason: string;
   ttlDays: number | null;
+  /** Mint with no expiry at all — mutually exclusive with `ttlDays`. */
+  noExpiry: boolean;
   resource: string | null;
   yes: boolean;
   databaseUrl: string | null;
@@ -54,8 +56,8 @@ export const USAGE = `service tokens (ADR-011)
 
 usage:
   service-token mint   --client-name <name> --user-email <email> --scope <s> [--scope <s>...]
-                       --reason <text> [--allow-curation] [--ttl-days N] [--resource <url>] [--yes]
-                       [--database-url <url>]
+                       --reason <text> [--allow-curation] [--ttl-days N | --no-expiry]
+                       [--resource <url>] [--yes] [--database-url <url>]
   service-token list   [--include-expired] [--include-revoked] [--all-clients] [--database-url <url>]
   service-token revoke --id <uuid> [--reason <text>] [--yes] [--database-url <url>]
 
@@ -74,6 +76,10 @@ usage:
                   days — the widest credential is not also the longest-lived.
   --ttl-days      default and maximum ${DEFAULT_SERVICE_TOKEN_TTL_DAYS}, or ${CURATION_SERVICE_TOKEN_TTL_DAYS} when a curation
                   scope is granted (it can only shorten)
+  --no-expiry     mint with NO expiry — valid until revoked (owner ruling
+                  2026-09-19). Permitted with --allow-curation; mutually
+                  exclusive with --ttl-days. The token is then bounded only by
+                  its scopes, its audience, its own client, and a revoke.
   --resource      assert the audience; must equal this server's own /mcp resource
   --reason        why this credential exists (recorded in the audit row); required on mint
   --yes           apply. Without it mint/revoke print the plan and write nothing.
@@ -128,6 +134,7 @@ function parseMint(argv: string[]): MintOptions {
   let allowCuration = false;
   let reason: string | null = null;
   let ttlDays: number | null = null;
+  let noExpiry = false;
   let resource: string | null = null;
   let yes = false;
   let databaseUrl: string | null = null;
@@ -159,6 +166,9 @@ function parseMint(argv: string[]): MintOptions {
         ttlDays = raw;
         break;
       }
+      case "--no-expiry":
+        noExpiry = true;
+        break;
       case "--resource":
         resource = value(argv, ++i, flag);
         break;
@@ -177,6 +187,12 @@ function parseMint(argv: string[]): MintOptions {
   if (!userEmail) throw new UsageError("--user-email is required");
   if (scopes.length === 0) throw new UsageError("at least one --scope is required");
   if (!reason) throw new UsageError("--reason is required");
+  // Two different lifetimes asked for in one command. Refused rather than
+  // resolved by precedence: preferring either one silently mints something the
+  // operator did not type, and one of the two candidates never expires.
+  if (noExpiry && ttlDays !== null) {
+    throw new UsageError("--no-expiry and --ttl-days are mutually exclusive");
+  }
   return {
     clientName,
     userEmail,
@@ -184,6 +200,7 @@ function parseMint(argv: string[]): MintOptions {
     allowCuration,
     reason,
     ttlDays,
+    noExpiry,
     resource,
     yes,
     databaseUrl,
