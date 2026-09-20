@@ -152,8 +152,28 @@ The plan prints a line the ordinary mint does not:
 ```
 
 Re-run the same command with `--yes` appended to mint. The report repeats that
-line, then prints the token once. Capture it into 1Password before the terminal
-scrolls.
+line, then prints the token once.
+
+**Delivery.** This token has no 1Password field. Its only consumer is the
+curation lane on the dev-env-ops pod, which reads
+`~/.local/state/cigar-curation/token.json`. Write it there from the same
+terminal before the value scrolls away — run the first line, paste, press
+Enter, then run the second:
+
+```sh
+printf "paste token, then Enter: "; IFS= read -rs T; echo
+printf %s "$T" | kubectl -n upgrade-agent exec -i deploy/dev-env-ops -c app -- \
+  sh -c 'umask 077; t=$(cat); [ ${#t} -ge 20 ] || { echo "empty token - nothing written" >&2; exit 1; }
+         f=~/.local/state/cigar-curation/token.json
+         jq -n --arg t "$t" "{access_token:\$t,expires_at:null}" >$f.new && mv $f.new $f && echo written'
+```
+
+The write refuses an empty value and restarts nothing; the lane reads the file
+on its next run. `read -rs` is deliberate: bash's `read -p` means "coprocess"
+in zsh, where it fails and leaves the variable empty (2026-09-19 — an empty
+`access_token` was written over the working one). Then finish as a rotation
+from step 5: verify an MCP `tools/list` on the new value from the ops pod, and
+revoke the old id.
 
 `--scope catalog:read` is there because the lane also reads the catalog outside
 the curation surface; drop it if the lane only ever triages. `get_cigar`
