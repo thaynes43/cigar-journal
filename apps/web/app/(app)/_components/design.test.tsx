@@ -120,8 +120,19 @@ describe("burnLayout", () => {
     expect(layout.burn).toBe(90);
   });
 
-  it("spaces evenly with no burn extent when any position is missing", () => {
+  it("keeps the positions it has and leaves the rest off the stick", () => {
+    // The ChatGPT app stopped setting approximatePosition on most entries in
+    // September 2026 while still naming the stage, so "any position missing"
+    // used to throw away the positions a save DID carry. Partial mode draws
+    // them and skips the others — no interpolation, ever.
     const layout = burnLayout([0.1, null, 0.9]);
+    expect(layout.mode).toBe("partial");
+    expect(layout.markers).toEqual([10, null, 90]);
+    expect(layout.burn).toBe(90);
+  });
+
+  it("spaces evenly with no burn extent only when no position is known", () => {
+    const layout = burnLayout([null, null, null]);
     expect(layout.mode).toBe("even");
     expect(layout.burn).toBeNull();
     expect(layout.markers).toEqual([8, 50, 92]);
@@ -169,13 +180,49 @@ describe("BurnLine", () => {
     expect(html).toContain("50%");
   });
 
-  it("implies no numeric axis when positions are missing", () => {
+  it("implies no numeric axis when no position is known", () => {
     const html = renderToStaticMarkup(
       <BurnLine entries={[entry({ stage: "Start" }), entry({ stage: "End" })]} />,
     );
     expect(html).toContain("rounded-r-full");
     expect(html).not.toContain("linear-gradient");
     expect(html).not.toContain("%<");
+  });
+
+  it("draws the positions it has and leaves the unpositioned stages off the ribbon", () => {
+    const html = renderToStaticMarkup(
+      <BurnLine
+        entries={[
+          entry({ stage: "Opening", descriptors: ["pepper"] }),
+          entry({ stage: "Developing", descriptors: ["cocoa"] }),
+          entry({ stage: "Final third", approximatePosition: 0.8, descriptors: ["espresso"] }),
+        ]}
+      />,
+    );
+    // Everything above the rail is the ribbon and its labels.
+    const ribbon = html.slice(0, html.indexOf("<ol"));
+
+    // The gradient and the ember run through the furthest positioned entry.
+    expect(ribbon).toContain("linear-gradient");
+    expect(ribbon).toContain("width:80%");
+    expect(ribbon).toContain("bg-ember");
+
+    // One marker, at its own position — the two unpositioned entries get none.
+    const markers = ribbon.match(/size-2 -translate-x-1\/2/g) ?? [];
+    expect(markers).toHaveLength(1);
+    expect(ribbon).toContain("left:80%");
+
+    // A stage with no position gets no label above the ribbon...
+    expect(ribbon).toContain("Final third");
+    expect(ribbon).not.toContain("Developing");
+    expect(ribbon).not.toContain("Opening");
+
+    // ...but the rail below still lists every entry, in order.
+    const rail = html.slice(html.indexOf("<ol"));
+    for (const stage of ["Opening", "Developing", "Final third"]) expect(rail).toContain(stage);
+    expect(rail).toContain("pepper");
+    expect(rail).toContain("cocoa");
+    expect(rail).toContain("espresso");
   });
 });
 

@@ -207,10 +207,14 @@ No competitor shows flavor evolution within a smoke; ours records continuous
   descriptors, specific descriptors, and verbatim line in a card connected
   by a hairline leader. Desktop lays cards below the ribbon; mobile falls
   back to a vertical rail with the same marks.
-- **Degradation is designed, honestly.** Entries without positions space
-  evenly in order — labels only, no percentage axis implied. One entry or
-  overall-descriptors-only: no ribbon at all, just the descriptor chips.
-  Never a fake axis.
+- **Degradation is designed, honestly.** When some entries carry a position
+  and others do not, the positioned ones sit at their real places — gradient
+  and ember through the furthest of them — and the unpositioned are left off
+  the ribbon entirely; the rail below still lists every stage. Only when no
+  entry has a position do they space evenly in order — labels only, no
+  percentage axis implied. One entry or overall-descriptors-only: no ribbon at
+  all, just the descriptor chips. Never a fake axis: a missing position is
+  never interpolated from its neighbours.
 - **Detail page only.** A one-line sparkline miniature originally carried
   the mark onto journal cards, but at 16px with no label it read as a
   strength meter (issue #49). Cards now carry the labeled strength meter;

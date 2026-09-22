@@ -5,18 +5,27 @@ import { Chips } from "./chips";
 // stylized horizontal cigar — foot at the left, band and cap at the right.
 // Detail page only: on journal cards an unlabeled bar read as a strength
 // meter (issue #49), so cards carry the labeled StrengthMeter instead.
-// Degradation is designed, honestly:
+// Degradation is designed, honestly — four modes, and none of them invents a
+// position the save did not carry:
 //   - every entry positioned  → markers at their 0–1 positions, ash-to-ember
 //     gradient through the furthest entry, ember dot at the burn line;
-//   - any position missing    → markers evenly spaced in order, labels only,
+//   - some entries positioned → the positioned ones keep their real places and
+//     the gradient still runs through the furthest of them; an unpositioned
+//     entry gets no marker and no label, because the alternative is either a
+//     fake axis or throwing away the positions we do have. The rail below
+//     still lists every entry;
+//   - no entry positioned     → markers evenly spaced in order, labels only,
 //     no gradient and no numeric axis implied;
 //   - fewer than two entries  → no ribbon (the rail alone carries one entry;
 //     an empty progression renders nothing).
 
 export interface BurnLayout {
-  mode: "positional" | "even" | "none";
-  markers: number[]; // percent along the stick, foot → cap
-  burn: number | null; // smoked extent in percent; positional mode only
+  mode: "positional" | "partial" | "even" | "none";
+  // Percent along the stick, foot → cap, aligned index-for-index to the
+  // entries. null is an entry with no position: it is drawn nowhere, never
+  // interpolated between its neighbours.
+  markers: Array<number | null>;
+  burn: number | null; // smoked extent in percent; null in "even" and "none"
 }
 
 function clamp01(value: number): number {
@@ -25,13 +34,17 @@ function clamp01(value: number): number {
 
 export function burnLayout(positions: Array<number | null>): BurnLayout {
   if (positions.length < 2) return { mode: "none", markers: [], burn: null };
-  if (positions.every((p) => p != null)) {
-    const markers = positions.map((p) => clamp01(p!) * 100);
-    return { mode: "positional", markers, burn: Math.max(...markers) };
+  const markers = positions.map((p) => (p == null ? null : clamp01(p) * 100));
+  const placed = markers.filter((p): p is number => p != null);
+  if (placed.length === markers.length) {
+    return { mode: "positional", markers, burn: Math.max(...placed) };
+  }
+  if (placed.length > 0) {
+    return { mode: "partial", markers, burn: Math.max(...placed) };
   }
   const span = 92 - 8;
-  const markers = positions.map((_, i) => 8 + (i * span) / (positions.length - 1));
-  return { mode: "even", markers, burn: null };
+  const even = positions.map((_, i) => 8 + (i * span) / (positions.length - 1));
+  return { mode: "even", markers: even, burn: null };
 }
 
 function labelShift(percent: number): string {
@@ -48,12 +61,14 @@ const MIN_LABEL_GAP = 12; // percentage points at a typical detail width
 
 export function layoutStageLabels(
   entries: { stage: string | null }[],
-  markers: number[],
+  markers: Array<number | null>,
 ): Array<{ index: number; row: 0 | 1 } | null> {
   const lastShown: [number, number] = [-Infinity, -Infinity];
   return entries.map((entry, index) => {
     if (!entry.stage) return null;
-    const percent = markers[index]!;
+    const percent = markers[index];
+    // No marker, no label: an unpositioned entry has no place on the ribbon.
+    if (percent == null) return null;
     const gap = Math.max(MIN_LABEL_GAP, Math.min(entry.stage.length * 0.9, 22));
     for (const row of [0, 1] as const) {
       if (percent - lastShown[row] >= gap) {
@@ -78,13 +93,15 @@ function Ribbon({ layout }: { layout: BurnLayout }) {
           />
         ) : null}
       </div>
-      {layout.markers.map((percent, i) => (
-        <span
-          key={i}
-          className="absolute top-1/2 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-muted bg-bg"
-          style={{ left: `${percent}%` }}
-        />
-      ))}
+      {layout.markers.map((percent, i) =>
+        percent == null ? null : (
+          <span
+            key={i}
+            className="absolute top-1/2 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-muted bg-bg"
+            style={{ left: `${percent}%` }}
+          />
+        ),
+      )}
       {layout.burn != null ? (
         <span
           className="absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-ember"
@@ -114,19 +131,22 @@ export function BurnLine({ entries }: { entries: ProgressionEntryView[] }) {
           <div aria-hidden className="mt-1">
             <Ribbon layout={layout} />
             <div className={`relative hidden sm:block ${labelRows === 2 ? "h-8" : "h-4"}`}>
-              {labels.map(({ index, row }) => (
-                <span
-                  key={index}
-                  className="absolute text-[0.625rem] font-semibold tracking-[0.14em] whitespace-nowrap text-muted uppercase"
-                  style={{
-                    top: row === 1 ? "1rem" : 0,
-                    left: `${layout.markers[index]}%`,
-                    transform: labelShift(layout.markers[index]!),
-                  }}
-                >
-                  {entries[index]!.stage}
-                </span>
-              ))}
+              {labels.map(({ index, row }) => {
+                const percent = layout.markers[index]!;
+                return (
+                  <span
+                    key={index}
+                    className="absolute text-[0.625rem] font-semibold tracking-[0.14em] whitespace-nowrap text-muted uppercase"
+                    style={{
+                      top: row === 1 ? "1rem" : 0,
+                      left: `${percent}%`,
+                      transform: labelShift(percent),
+                    }}
+                  >
+                    {entries[index]!.stage}
+                  </span>
+                );
+              })}
             </div>
           </div>
         </div>
