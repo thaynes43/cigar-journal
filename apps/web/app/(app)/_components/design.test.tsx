@@ -183,6 +183,12 @@ describe("BurnLine", () => {
     expect(ribbon).toContain("bg-wrapper-leaf");
     expect(ribbon).toContain("width:calc(90% - 3px)"); // ash, stopping short of the ember
     expect(ribbon).toContain("var(--ash)");
+    // Crack periods that do not divide each other (31, 47, and a horizontal 21):
+    // one repeating gradient alone spaced its ticks evenly and the ash read as a
+    // ruler rather than as ash.
+    expect(ribbon).toContain("31px 32px");
+    expect(ribbon).toContain("47px 48px");
+    expect(ribbon).toContain("21px 22px");
     expect(ribbon).toContain("left:calc(90% - 3px)"); // the ember ring
     expect(ribbon).toContain("var(--ember)");
     expect(ribbon).toContain("left:calc(90% + 2px)"); // the char edge past it

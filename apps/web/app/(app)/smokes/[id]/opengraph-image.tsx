@@ -41,7 +41,7 @@ export default async function Image({ params }: { params: Promise<{ id: string }
 
   if (!smoke) {
     return new ImageResponse(
-      <ShareCard eyebrow="CIGAR JOURNAL" title="Cigar Journal" titleSize={84} burn={null} />,
+      <ShareCard eyebrow="cigars.haynesnetwork.com" title="Cigar Journal" titleSize={84} burn={null} />,
       { ...size, fonts },
     );
   }

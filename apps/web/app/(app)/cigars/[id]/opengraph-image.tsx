@@ -33,7 +33,7 @@ export default async function Image({ params }: { params: Promise<{ id: string }
 
   if (!data) {
     return new ImageResponse(
-      <ShareCard eyebrow="CIGAR JOURNAL" title="Cigar Journal" titleSize={84} burn={null} />,
+      <ShareCard eyebrow="cigars.haynesnetwork.com" title="Cigar Journal" titleSize={84} burn={null} />,
       { ...size, fonts },
     );
   }
@@ -47,13 +47,19 @@ export default async function Image({ params }: { params: Promise<{ id: string }
       ? { value: String(scores.critics.score), label: "Critics" }
       : null;
   const vitola = cigarVitolaLine(cigar);
+  // The canonical name almost always opens with the brand ("Drew Estate Liga
+  // Privada No. 9 Toro"), and a brand line above it then prints the same words
+  // twice. It earns its place only when the name does not already say it.
+  const brand = cigar.brand;
+  const overline =
+    brand && !cigar.canonicalName.toLowerCase().startsWith(brand.toLowerCase()) ? brand : null;
 
   return new ImageResponse(
     <ShareCard
       eyebrow="CIGAR JOURNAL · CATALOG"
       title={cigar.canonicalName}
       titleSize={cigar.canonicalName.length <= 24 ? 72 : 64}
-      overline={cigar.brand}
+      overline={overline}
       meta={vitola ? vitola.toUpperCase() : null}
       seal={score}
       burn={null}
