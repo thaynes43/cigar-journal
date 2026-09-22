@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.0](https://github.com/thaynes43/cigar-journal/compare/v0.46.1...v0.47.0) (2026-09-22)
+
+
+### Features
+
+* **web:** the house seal — brand token, favicon and app icon, header mark, burn line redraw with the seal on its band, and OpenGraph share cards ([#335](https://github.com/thaynes43/cigar-journal/issues/335)) ([6f46f4e](https://github.com/thaynes43/cigar-journal/commit/6f46f4ee9546d78be655cf2e41dc99725302da55))
+
 ## [0.46.1](https://github.com/thaynes43/cigar-journal/compare/v0.46.0...v0.46.1) (2026-09-22)
 
 
