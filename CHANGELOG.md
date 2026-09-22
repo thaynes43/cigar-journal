@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.46.1](https://github.com/thaynes43/cigar-journal/compare/v0.46.0...v0.46.1) (2026-09-22)
+
+
+### Bug Fixes
+
+* **mcp,web:** agents set approximatePosition from the user's framing; the burn line draws the positions it has ([#333](https://github.com/thaynes43/cigar-journal/issues/333)) ([bc24b37](https://github.com/thaynes43/cigar-journal/commit/bc24b370b6bbe3d9a668bf2b3a4de6efbceec37d))
+
 ## [0.46.0](https://github.com/thaynes43/cigar-journal/compare/v0.45.2...v0.46.0) (2026-09-19)
 
 
