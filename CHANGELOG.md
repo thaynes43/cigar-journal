@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.1](https://github.com/thaynes43/cigar-journal/compare/v0.47.0...v0.47.1) (2026-09-22)
+
+
+### Bug Fixes
+
+* **web:** ash that reads as ash, and a share card with less dead orange ([#337](https://github.com/thaynes43/cigar-journal/issues/337)) ([25edc62](https://github.com/thaynes43/cigar-journal/commit/25edc628cb624b7bc0260ee8b6732dbec2c13376))
+
 ## [0.47.0](https://github.com/thaynes43/cigar-journal/compare/v0.46.1...v0.47.0) (2026-09-22)
 
 
