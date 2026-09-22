@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { BandTile, bandStop, monogram } from "./band-tile";
+import { HouseSeal } from "./house-seal";
+import { SiteHeader } from "./site-header";
 import { RatingSeal } from "./rating-seal";
 import { BurnLine, burnLayout, layoutStageLabels } from "./burn-line";
 import { StrengthMeter, strengthStep } from "./strength-meter";
@@ -153,6 +155,9 @@ const entry = (over: Partial<Parameters<typeof BurnLine>[0]["entries"][number]>)
 });
 
 describe("BurnLine", () => {
+  // Everything above the rail is the ribbon and its labels.
+  const ribbonOf = (html: string) => html.slice(0, html.indexOf("<ol"));
+
   it("renders nothing for an empty progression", () => {
     expect(renderToStaticMarkup(<BurnLine entries={[]} />)).toBe("");
   });
@@ -162,31 +167,59 @@ describe("BurnLine", () => {
       <BurnLine entries={[entry({ stage: "Opening", descriptors: ["cedar"] })]} />,
     );
     expect(html).toContain("cedar");
-    expect(html).not.toContain("rounded-r-full");
+    expect(html).not.toContain("wrapper-leaf");
   });
 
-  it("renders ribbon, gradient, and stage labels when positioned", () => {
+  it("burns ash to the furthest position and leaves the ember exactly there", () => {
     const html = renderToStaticMarkup(
       <BurnLine
         entries={[
-          entry({ stage: "Opening", approximatePosition: 0.05, descriptors: ["pepper"] }),
-          entry({ stage: "Second third", approximatePosition: 0.5, descriptors: ["cocoa"] }),
+          entry({ stage: "Opening", approximatePosition: 0.1, descriptors: ["pepper"] }),
+          entry({ stage: "Finish", approximatePosition: 0.9, descriptors: ["cocoa"] }),
         ]}
       />,
     );
-    expect(html).toContain("rounded-r-full");
-    expect(html).toContain("linear-gradient");
-    expect(html).toContain("Opening");
-    expect(html).toContain("50%");
+    const ribbon = ribbonOf(html);
+    expect(ribbon).toContain("bg-wrapper-leaf");
+    expect(ribbon).toContain("width:calc(90% - 3px)"); // ash, stopping short of the ember
+    expect(ribbon).toContain("var(--ash)");
+    expect(ribbon).toContain("left:calc(90% - 3px)"); // the ember ring
+    expect(ribbon).toContain("var(--ember)");
+    expect(ribbon).toContain("left:calc(90% + 2px)"); // the char edge past it
+    // The burn is past the band, so the band has come off — the stick is a nub.
+    expect(ribbon).not.toContain("var(--brand)");
+    expect(ribbon).toContain("Opening");
+    expect(ribbon).toContain("Finish");
   });
 
-  it("implies no numeric axis when no position is known", () => {
+  it("keeps the band — seal, engraving and all — while the burn is short of it", () => {
+    const html = renderToStaticMarkup(
+      <BurnLine
+        entries={[
+          entry({ stage: "Opening", approximatePosition: 0.1 }),
+          entry({ stage: "Second third", approximatePosition: 0.6 }),
+        ]}
+      />,
+    );
+    const ribbon = ribbonOf(html);
+    expect(ribbon).toContain("left:82%");
+    expect(ribbon).toContain("var(--brand)"); // the band's orange ground
+    expect(ribbon).toContain("var(--brand-ink)"); // its two espresso rules
+    expect(ribbon).toContain('viewBox="0 0 32 32"'); // the house seal on it
+    expect(ribbon).toContain("var(--parchment-100)"); // engraved at this size
+  });
+
+  it("draws an unlit stick with a foot cut when no position is known", () => {
     const html = renderToStaticMarkup(
       <BurnLine entries={[entry({ stage: "Start" }), entry({ stage: "End" })]} />,
     );
-    expect(html).toContain("rounded-r-full");
-    expect(html).not.toContain("linear-gradient");
-    expect(html).not.toContain("%<");
+    const ribbon = ribbonOf(html);
+    expect(ribbon).toContain("bg-wrapper-leaf");
+    expect(ribbon).toContain("rgb(0 0 0 / .25)"); // the flat foot cut
+    expect(ribbon).not.toContain("var(--ash)");
+    expect(ribbon).not.toContain("var(--ember)");
+    expect(ribbon).toContain("var(--brand)"); // nothing burned, so the band is on
+    expect(html).not.toContain("%<"); // and no numeric axis is implied
   });
 
   it("draws the positions it has and leaves the unpositioned stages off the ribbon", () => {
@@ -199,18 +232,18 @@ describe("BurnLine", () => {
         ]}
       />,
     );
-    // Everything above the rail is the ribbon and its labels.
-    const ribbon = html.slice(0, html.indexOf("<ol"));
+    const ribbon = ribbonOf(html);
 
-    // The gradient and the ember run through the furthest positioned entry.
-    expect(ribbon).toContain("linear-gradient");
-    expect(ribbon).toContain("width:80%");
-    expect(ribbon).toContain("bg-ember");
+    // The ash and the ember run through the furthest positioned entry.
+    expect(ribbon).toContain("width:calc(80% - 3px)");
+    expect(ribbon).toContain("left:calc(80% - 3px)");
 
-    // One marker, at its own position — the two unpositioned entries get none.
-    const markers = ribbon.match(/size-2 -translate-x-1\/2/g) ?? [];
+    // One marker, at its own position — the two unpositioned entries get none —
+    // and it hangs on the stick's bottom edge, not through its middle.
+    const markers = ribbon.match(/rounded-full bg-bg/g) ?? [];
     expect(markers).toHaveLength(1);
     expect(ribbon).toContain("left:80%");
+    expect(ribbon).toContain("top:40px");
 
     // A stage with no position gets no label above the ribbon...
     expect(ribbon).toContain("Final third");
@@ -223,6 +256,39 @@ describe("BurnLine", () => {
     expect(rail).toContain("pepper");
     expect(rail).toContain("cocoa");
     expect(rail).toContain("espresso");
+  });
+});
+
+describe("HouseSeal", () => {
+  it("spends the brand orange as a ground, with the espresso keyline on it", () => {
+    const html = renderToStaticMarkup(<HouseSeal />);
+    expect(html).toContain("var(--brand)");
+    expect(html).toContain("var(--brand-ink)");
+    expect(html).toContain('viewBox="0 0 32 32"');
+  });
+
+  it("engraves the inline only where it can be seen", () => {
+    // Below 48px the cream hairlines close up into mud, so they are dropped.
+    expect(renderToStaticMarkup(<HouseSeal size={22} />)).not.toContain("var(--parchment-100)");
+    expect(renderToStaticMarkup(<HouseSeal size={64} />)).toContain("var(--parchment-100)");
+    // …unless the caller knows better: the band draws it at 32px.
+    expect(renderToStaticMarkup(<HouseSeal size={32} inline />)).toContain("var(--parchment-100)");
+  });
+
+  it("drops its ground on a surface that is already the brand orange", () => {
+    const html = renderToStaticMarkup(<HouseSeal size={32} ground="none" frame inline />);
+    expect(html).not.toContain("var(--brand)");
+    expect(html).toContain("var(--brand-ink)"); // the H and its frame stay
+  });
+});
+
+describe("SiteHeader", () => {
+  it("signs the wordmark with the house seal", () => {
+    const html = renderToStaticMarkup(<SiteHeader viewer={null} />);
+    const wordmark = html.slice(html.indexOf("<a"), html.indexOf("Cigar Journal"));
+    expect(wordmark).toContain('viewBox="0 0 32 32"');
+    expect(wordmark).toContain("var(--brand)");
+    expect(html).toContain("Cigar Journal");
   });
 });
 

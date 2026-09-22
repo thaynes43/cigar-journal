@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { OG } from "./app/_og/palette";
 
 // The measured half of the token contract (DESIGN-001 amendment, issue #49).
 // `design-tokens.test.ts` pins that components only ever *reference* tokens;
@@ -272,3 +273,46 @@ describe("tobacco ramp vs the palette it replaced", () => {
     }
   });
 });
+
+// --- the share cards' palette ----------------------------------------------
+// satori cannot resolve a CSS variable, so app/_og/palette.ts restates the
+// tokens the cards draw with as literals. That is the one sanctioned exception
+// to the no-raw-color rule (design-tokens.test.ts), and it is only safe while it
+// cannot drift: every literal that mirrors a token is pinned to that token here,
+// so a palette edit that forgets the cards fails in this file.
+describe("OG card palette", () => {
+  it("mirrors the tokens it restates", () => {
+    expect(OG.brand).toBe(resolve("--brand", "dark"));
+    expect(OG.brand).toBe(resolve("--brand", "light")); // theme-constant
+    expect(OG.ink).toBe(resolve("--brand-ink", "dark"));
+    expect(OG.cream).toBe(resolve("--parchment-100", "dark"));
+    expect(OG.wrapper).toBe(resolve("--wrapper-leaf", "dark"));
+    expect(OG.ember).toBe(resolve("--ember", "dark"));
+  });
+
+  it("keeps the card's ash a material, not a token copy", () => {
+    // The card's ground is the brand orange — neither of the app's two grounds —
+    // so its ash is picked for that ground rather than inherited. It still has to
+    // behave like ash: separable from the leaf it sits on and from the ember that
+    // ends it, by the same ΔE the live burn line is held to.
+    expect(deltaE(OG.ash, OG.wrapper)).toBeGreaterThanOrEqual(MATERIAL_DELTA_E);
+    expect(deltaE(OG.ash, OG.ember)).toBeGreaterThanOrEqual(MATERIAL_DELTA_E);
+    expect(deltaE(OG.ash, OG.brand)).toBeGreaterThanOrEqual(MATERIAL_DELTA_E);
+  });
+
+  it("carries espresso type on the orange ground", () => {
+    // The card is read at thumbnail size in someone else's timeline: the title
+    // clears full text contrast, and the letterspaced eyebrow — 22px semibold,
+    // large text — clears the large-text floor at its 75% weight.
+    expect(contrast(OG.ink, OG.brand)).toBeGreaterThanOrEqual(INK_FLOOR);
+    const eyebrow = blend(OG.ink, OG.brand, 0.75);
+    expect(contrast(eyebrow, OG.brand)).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// Flatten a translucent ink over its ground — what the eye actually reads.
+function blend(fg: string, bg: string, alpha: number): string {
+  const [f, b] = [channels(fg), channels(bg)];
+  const mix = f.map((v, i) => Math.round(v * alpha + b[i]! * (1 - alpha)));
+  return `#${mix.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}

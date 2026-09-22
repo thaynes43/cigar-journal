@@ -28,9 +28,26 @@ import { NextResponse, type NextRequest } from "next/server";
 // edge gate anonymously: each page authorizes itself (visibility-filtered reads
 // with 404 parity for public detail; requireAuth on the record/edit forms), and
 // an edge redirect here would break shared smoke links.
+// Metadata assets are public by definition, and the gate used to bounce all of
+// them: the favicon and the app icon are fetched by every browser BEFORE anyone
+// signs in (on prod both answered 307 /signin, so the tab had no mark at all),
+// and a share card is fetched by an unfurler that carries no cookie and renders
+// no redirect. Each OG route authorizes its own read — the smoke card goes
+// through the same anonymous public read the page does, and the catalog card
+// falls back to the site default when the read is refused — so passing them
+// leaks nothing, while gating them makes every shared link preview blank.
+// Next appends a build hash to a nested route's segment
+// (`/smokes/<id>/opengraph-image-1qnk2j`), hence the optional suffix.
+const METADATA_ASSET = /^\/(?:icon\.svg|apple-icon\.png)$|\/opengraph-image(?:-[a-zA-Z0-9]+)?$/;
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  if (pathname === "/signin" || pathname === "/journal" || pathname.startsWith("/smokes/")) {
+  if (
+    pathname === "/signin" ||
+    pathname === "/journal" ||
+    pathname.startsWith("/smokes/") ||
+    METADATA_ASSET.test(pathname)
+  ) {
     return NextResponse.next();
   }
 

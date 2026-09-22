@@ -2,6 +2,7 @@ import { db } from "@cj/db";
 import { describeOpenInvite } from "@cj/domain";
 import { ui } from "@/lib/ui";
 import { RedeemForm } from "./redeem-form";
+import { HouseSeal } from "../../(app)/_components/house-seal";
 
 // The invite redemption page (ADR-010, issue #46). Anonymous by definition — its
 // whole audience has no account yet — so it lives outside the authed (app) group
@@ -18,7 +19,8 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
 
   return (
     <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center gap-6 p-6">
-      <h1 className="text-center font-display text-3xl font-semibold tracking-wide text-ink">
+      <h1 className="flex items-center justify-center gap-2.5 font-display text-3xl font-semibold tracking-wide text-ink">
+        <HouseSeal size={28} className="shrink-0" />
         Cigar Journal
       </h1>
       {invite ? (

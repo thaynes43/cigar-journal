@@ -6,6 +6,11 @@ import { describe, expect, it } from "vitest";
 // Token contract (DESIGN-001): globals.css is the only file allowed raw color
 // values. Components style through semantic tokens, so no hex literal and no
 // stock Tailwind palette class may appear in the component tree.
+//
+// One sanctioned exception, and it is not in this tree: app/_og/palette.ts, the
+// share cards' literals, because satori (next/og) resolves no CSS variable and
+// cannot read the token layer at all. It is pinned against the tokens it
+// restates in token-contrast.test.ts, so it cannot drift away from them.
 
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
 

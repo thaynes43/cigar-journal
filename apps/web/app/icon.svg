@@ -1,7 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- The burn-line stick as the mark: flat-cut foot, rounded cap, amber band
-       on the Humidor espresso ground (palette tokens from globals.css). -->
-  <rect width="32" height="32" rx="7" fill="#16110d"/>
-  <path d="M4 12h21a4 4 0 0 1 0 8H4z" fill="#b78f5c"/>
-  <rect x="21" y="12" width="2.5" height="8" fill="#d3a04a"/>
+  <!-- The house seal. Orange is the ground, full bleed; the accents sit on it:
+       an espresso keyline frame, the serif H, and a fine cream inline down the
+       H like an engraved monogram. Brand orange, espresso-950, parchment-100.
+       Drawn as rectangles so no font is needed. -->
+  <rect width="32" height="32" fill="#ea7125"/>
+  <rect x="2" y="2" width="28" height="28" fill="none" stroke="#16110d" stroke-opacity="0.72" stroke-width="0.8"/>
+  <g fill="#16110d">
+    <rect x="8.6" y="7.8" width="3.6" height="16.4"/>
+    <rect x="19.8" y="7.8" width="3.6" height="16.4"/>
+    <rect x="12.2" y="14.8" width="7.6" height="2.4"/>
+    <rect x="6.9" y="7.8" width="7" height="1.2"/>
+    <rect x="6.9" y="23" width="7" height="1.2"/>
+    <rect x="18.1" y="7.8" width="7" height="1.2"/>
+    <rect x="18.1" y="23" width="7" height="1.2"/>
+  </g>
+  <g fill="#eee5d0" fill-opacity="0.9">
+    <rect x="10.1" y="9.6" width="0.6" height="12.8"/>
+    <rect x="21.3" y="9.6" width="0.6" height="12.8"/>
+    <rect x="12.2" y="15.7" width="7.6" height="0.6"/>
+  </g>
 </svg>

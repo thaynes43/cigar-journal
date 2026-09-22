@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { config } from "./middleware";
+import { NextRequest } from "next/server";
+import { config, middleware } from "./middleware";
 
 // The edge gate's matcher decides which paths the optimistic redirect can touch
 // at all. Getting it wrong is silent: an excluded prefix that is not excluded
@@ -35,5 +36,32 @@ describe("middleware matcher", () => {
     expect(matcher.test("/cigars")).toBe(true);
     expect(matcher.test("/settings")).toBe(true);
     expect(matcher.test("/signin")).toBe(true); // matched, then let through by the handler
+  });
+});
+
+// Where the handler — not the matcher — decides. These paths ARE matched, and
+// the gate has to recognize them or they bounce to /signin.
+const anonymous = (path: string) => middleware(new NextRequest(new URL(`http://localhost${path}`)));
+const passes = (path: string) => anonymous(path).headers.get("location") === null;
+
+describe("middleware gate, anonymous", () => {
+  it("serves the brand marks a browser fetches before sign-in", () => {
+    // Both answered 307 /signin on prod until 2026-09-21, so the tab carried no
+    // mark for anyone who was not signed in.
+    expect(passes("/icon.svg")).toBe(true);
+    expect(passes("/apple-icon.png")).toBe(true);
+  });
+
+  it("serves every share card to an unfurler that has no cookie", () => {
+    expect(passes("/opengraph-image")).toBe(true);
+    expect(passes("/smokes/abc/opengraph-image-1qnk2j")).toBe(true);
+    // Under a gated surface: the route itself falls back to the default card
+    // when its authed read is refused, so it must be reached to answer at all.
+    expect(passes("/cigars/abc/opengraph-image-1bboer")).toBe(true);
+  });
+
+  it("still bounces the surfaces those cards belong to", () => {
+    expect(passes("/cigars/abc")).toBe(false);
+    expect(passes("/opengraph-image/../cigars")).toBe(false);
   });
 });
