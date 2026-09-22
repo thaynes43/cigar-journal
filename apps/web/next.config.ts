@@ -9,6 +9,11 @@ const config: NextConfig = {
   // the monorepo root so traced files resolve once workspace packages are used.
   output: "standalone",
   outputFileTracingRoot: rootDir,
+  // The OG cards' font files. Nothing imports them — they are read from disk at
+  // runtime (app/_og/fonts.ts), so the tracer cannot see them and they would be
+  // missing from the standalone output, which fails a card at request time
+  // rather than at build.
+  outputFileTracingIncludes: { "/**": ["./app/_fonts/*.ttf"] },
   // Workspace packages ship raw TS (no build step) — Next must transpile them.
   transpilePackages: ["@cj/auth", "@cj/db", "@cj/domain", "@cj/oauth", "@cj/photos"],
   // The photo pipeline's native/WASM/SDK deps must not be bundled — keep them as

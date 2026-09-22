@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { TRPCError } from "@trpc/server";
@@ -26,14 +27,7 @@ import { PriceSpark } from "../../_components/price-spark";
 import { LocalDate } from "../../_components/local-date";
 import { ProductPhotoAdmin } from "../../_components/product-photo-admin";
 import { ScoreRows } from "../../_components/score-rows";
-
-function vitola(cigar: CigarView): string | null {
-  const dims =
-    cigar.vitola.lengthInches != null && cigar.vitola.ringGauge != null
-      ? `${cigar.vitola.lengthInches}" × ${cigar.vitola.ringGauge}`
-      : null;
-  return [cigar.vitola.name, dims].filter(Boolean).join(" · ") || null;
-}
+import { cigarShareDescription, cigarVitolaLine } from "./share-text";
 
 function origin(part: { country?: string | null; region?: string | null } | null | undefined): string | null {
   if (!part) return null;
@@ -165,6 +159,24 @@ function ScoreSlot({
   return <ScoreRows scores={scores} fallbackBlendName={hierarchy.blend?.name ?? null} />;
 }
 
+// The catalog entry's share text. The read is the ordinary authed one, so an
+// anonymous unfurler gets nothing to say about a catalog it may not browse —
+// the page's own metadata, not an error and not a leak.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  try {
+    const caller = await getServerCaller();
+    const { cigar } = await caller.cigars.get({ cigarId: id });
+    return { title: cigar.canonicalName, description: cigarShareDescription(cigar) };
+  } catch {
+    return {};
+  }
+}
+
 export default async function CigarDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const principal = await requireAuth();
   const isAdmin = principal.role === "admin";
@@ -252,7 +264,7 @@ export default async function CigarDetailPage({ params }: { params: Promise<{ id
               { label: "Brand", value: cigar.brand },
               { label: "Line", value: cigar.line },
               { label: "Edition", value: cigar.edition },
-              { label: "Vitola", value: vitola(cigar) },
+              { label: "Vitola", value: cigarVitolaLine(cigar) },
               { label: "Type", value: cigar.type },
               { label: "Manufacturer", value: cigar.manufacturer },
               { label: "Factory", value: cigar.factory },

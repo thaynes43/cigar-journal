@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { Viewer } from "@cj/auth";
+import { HouseSeal } from "./house-seal";
 import { RecordSmokeButton } from "./record-smoke-button";
 import { UserMenu } from "./user-menu";
 
@@ -23,8 +24,9 @@ export function SiteHeader({ viewer }: { viewer: Viewer | null }) {
         <div className="flex min-w-0 flex-1 items-center gap-3 overflow-x-auto sm:gap-5">
           <Link
             href={viewer ? "/" : "/journal"}
-            className="shrink-0 font-display text-base font-semibold tracking-wide whitespace-nowrap text-ink sm:text-lg"
+            className="inline-flex shrink-0 items-center gap-2.5 font-display text-base font-semibold tracking-wide whitespace-nowrap text-ink sm:text-lg"
           >
+            <HouseSeal size={22} className="shrink-0" />
             Cigar Journal
           </Link>
           {viewer ? (

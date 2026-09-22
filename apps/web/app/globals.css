@@ -37,6 +37,12 @@
   --amber-600: #a86f1f;
   --amber-400: #d3a04a;
 
+  /* The house seal's brand orange — the seal only (mark, favicon, app icon, the
+   * burn line's band, the share cards), never a UI accent: amber stays the
+   * accent. Theme-constant, like the tobacco ramp: the seal is an object. */
+  --brand: #ea7125;
+  --brand-ink: var(--espresso-950);
+
   /* Burn-line materials. */
   --ember-light: #b0491f;
   --ember-dark: #d96b38;
@@ -155,6 +161,8 @@
   --color-muted: var(--muted);
   --color-accent: var(--accent);
   --color-accent-ink: var(--accent-ink);
+  --color-brand: var(--brand);
+  --color-brand-ink: var(--brand-ink);
   --color-ember: var(--ember);
   --color-ash: var(--ash);
   --color-danger: var(--danger);

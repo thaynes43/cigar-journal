@@ -200,19 +200,26 @@ No competitor shows flavor evolution within a smoke; ours records continuous
 0–1 positions, not fixed thirds. Make the timeline the product's signature.
 
 - **The ribbon.** A horizontal stylized cigar as the axis — foot at left,
-  band and cap at the right end. Position 0–1 maps along the stick. The
-  smoked portion (through the last entry) renders as an ash-to-ember
-  gradient with a small ember dot at the last position. Entry markers sit on
-  the stick; stage labels (Opening, First third…) beneath; each marker's
-  descriptors, specific descriptors, and verbatim line in a card connected
-  by a hairline leader. Desktop lays cards below the ribbon; mobile falls
-  back to a vertical rail with the same marks.
+  band and cap at the right end — drawn at 40px (2026-09-21 redraw; at 12px
+  it read as a progress bar with a stray block near the end). Position 0–1
+  maps along the stick. A top highlight, a bottom shadow and faint wrapper
+  veins make it read as a rolled object rather than a bar; the smoked length
+  is grey ash with flake cracks, ending in a glowing ember ring with a
+  charred edge at the exact recorded position, and the cap is a half-round
+  dome with two seam lines. The band at 82–92% is the house seal — the
+  keylined H, brand orange, between two espresso rules — and comes off once
+  the burn reaches it, so a nub with a long ash reads as a nub. Entry markers
+  hang on the underside with stage labels beneath; each marker's descriptors,
+  specific descriptors, and verbatim line in a card connected by a hairline
+  leader. Desktop lays cards below the ribbon; mobile falls back to a
+  vertical rail with the same marks.
 - **Degradation is designed, honestly.** When some entries carry a position
-  and others do not, the positioned ones sit at their real places — gradient
-  and ember through the furthest of them — and the unpositioned are left off
+  and others do not, the positioned ones sit at their real places — ash and
+  ember through the furthest of them — and the unpositioned are left off
   the ribbon entirely; the rail below still lists every stage. Only when no
   entry has a position do they space evenly in order — labels only, no
-  percentage axis implied. One entry or overall-descriptors-only: no ribbon at
+  percentage axis implied, the stick drawn whole and unlit with a flat foot
+  cut. One entry or overall-descriptors-only: no ribbon at
   all, just the descriptor chips. Never a fake axis: a missing position is
   never interpolated from its neighbours.
 - **Detail page only.** A one-line sparkline miniature originally carried
