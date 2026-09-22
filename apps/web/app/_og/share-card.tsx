@@ -34,8 +34,13 @@ const MARK_SIZE = 96;
 const SEAL_SIZE = 96;
 
 const RIBBON_WIDTH = CARD_WIDTH - MARGIN * 2;
-const RIBBON_HEIGHT = 40;
-const RIBBON_BOTTOM = 72;
+// Drawn at 72 rather than the live component's 40: a card is read at thumbnail
+// size in someone else's timeline, and at 40 the cigar was a hairline with a
+// great deal of dead orange under it. The stick's bottom edge sits 104px above
+// the card's, and the markers hang below it — hence the two numbers.
+const RIBBON_HEIGHT = 72;
+const MARKER_OVERHANG = 12;
+const RIBBON_BASELINE = 104;
 
 // The band, in stick percent — the same two numbers the live component uses.
 const BAND_START = 0.82;
@@ -54,7 +59,17 @@ function eyebrowStyle(fontSize = 22) {
 // The cigar, as SVG: satori lays out flex boxes, but the stick is a drawing, and
 // an inline svg is the one place a shape can be a shape. Geometry mirrors
 // burn-line.tsx — dome cap, veins, ash with cracks, ember ring plus char edge,
-// the band with the full seal — translated from percentage divs to user units.
+// the band with the full seal — translated from percentage divs to user units
+// and scaled to the card's taller stick.
+//
+// The ash cracks are an explicit irregular list, not a repeating step: evenly
+// spaced ticks read as a ruler rather than as ash, which is the same reason the
+// live component layers gradients with periods that do not divide each other.
+const CRACKS = [
+  0.06, 0.11, 0.17, 0.21, 0.28, 0.33, 0.39, 0.46, 0.5, 0.57, 0.62, 0.69, 0.74, 0.8, 0.86, 0.91,
+  0.96,
+];
+
 function ribbonSvg({
   width,
   burn,
@@ -80,7 +95,7 @@ function ribbonSvg({
     parts.push(
       <path
         key={`v${i}`}
-        d={`M${vx},0 L${vx + 26},${height}`}
+        d={`M${vx},0 L${vx + 47},${height}`}
         stroke={OG.ink}
         strokeOpacity="0.11"
         strokeWidth="1"
@@ -88,11 +103,11 @@ function ribbonSvg({
       />,
     );
   }
-  for (const seam of [width - radius - 5, width - radius - 13]) {
+  for (const seam of [width - radius - 9, width - radius - 23]) {
     parts.push(
       <path
         key={`s${seam}`}
-        d={`M${seam},2 A8,${radius - 2} 0 0 1 ${seam},${height - 2}`}
+        d={`M${seam},4 A14,${radius - 4} 0 0 1 ${seam},${height - 4}`}
         stroke={OG.ink}
         strokeOpacity="0.28"
         strokeWidth="1"
@@ -103,21 +118,19 @@ function ribbonSvg({
 
   // Unlit: a flat foot cut where the ember would be.
   if (burnX == null) {
-    parts.push(<rect key="foot" x="0" y="0" width="2" height={height} fill={OG.ink} fillOpacity="0.25" />);
+    parts.push(<rect key="foot" x="0" y="0" width="4" height={height} fill={OG.ink} fillOpacity="0.25" />);
   }
 
   if (bandOn) {
     parts.push(
       <rect key="band" x={bandX} y="0" width={bandWidth} height={height} fill={OG.brand} />,
-      // On whole pixels: a rule straddling a half-pixel is antialiased across two
-      // rows and the engraving washes out under the cylinder's highlight.
-      <rect key="rule-top" x={bandX} y="2" width={bandWidth} height="1" fill={OG.ink} fillOpacity="0.8" />,
+      <rect key="rule-top" x={bandX} y="3" width={bandWidth} height="1.5" fill={OG.ink} fillOpacity="0.8" />,
       <rect
         key="rule-bottom"
         x={bandX}
-        y={height - 3}
+        y={height - 4.5}
         width={bandWidth}
-        height="1"
+        height="1.5"
         fill={OG.ink}
         fillOpacity="0.8"
       />,
@@ -125,9 +138,9 @@ function ribbonSvg({
     parts.push(
       houseSealGroup({
         elementKey: "seal",
-        size: 32,
-        x: bandX + bandWidth / 2 - 16,
-        y: height / 2 - 16,
+        size: 56,
+        x: bandX + bandWidth / 2 - 28,
+        y: height / 2 - 28,
         brand: OG.brand,
         ink: OG.ink,
         cream: OG.cream,
@@ -136,19 +149,41 @@ function ribbonSvg({
   }
 
   if (burnX != null) {
-    const ashEnd = burnX - 3;
+    const ashEnd = burnX - 5;
     parts.push(<rect key="ash" x="0" y="0" width={Math.max(ashEnd, 0)} height={height} fill={OG.ash} />);
-    for (let crack = 34; crack < ashEnd - 6; crack += 34) {
+    CRACKS.forEach((fraction, i) => {
+      const cx = x(fraction);
+      if (cx <= 8 || cx >= ashEnd - 8) return;
       parts.push(
-        <rect key={`c${crack}`} x={crack} y="0" width="1" height={height} fill={OG.ink} fillOpacity="0.2" />,
+        <path
+          key={`c${i}`}
+          d={`M${cx},5 L${cx + 3},${height - 5}`}
+          stroke={OG.ink}
+          strokeOpacity="0.16"
+          strokeWidth="1"
+          fill="none"
+        />,
       );
-    }
+      // Every second crack throws a short flake line across the grain.
+      if (i % 2 === 0) {
+        parts.push(
+          <path
+            key={`f${i}`}
+            d={`M${cx},${height * 0.55} L${Math.min(cx + 16, ashEnd - 3)},${height * 0.5}`}
+            stroke={OG.ink}
+            strokeOpacity="0.11"
+            strokeWidth="1"
+            fill="none"
+          />,
+        );
+      }
+    });
     // The glow, as two translucent rects: satori has no blur filter.
     parts.push(
-      <rect key="glow-wide" x={burnX - 11} y="0" width="21" height={height} fill={OG.ember} fillOpacity="0.28" />,
-      <rect key="glow-tight" x={burnX - 7} y="0" width="13" height={height} fill={OG.ember} fillOpacity="0.45" />,
-      <rect key="ember" x={burnX - 3} y="0" width="5" height={height} fill={OG.ember} />,
-      <rect key="char" x={burnX + 2} y="0" width="3" height={height} fill={OG.ink} fillOpacity="0.78" />,
+      <rect key="glow-wide" x={burnX - 20} y="0" width="38" height={height} fill={OG.ember} fillOpacity="0.28" />,
+      <rect key="glow-tight" x={burnX - 13} y="0" width="23" height={height} fill={OG.ember} fillOpacity="0.45" />,
+      <rect key="ember" x={burnX - 5} y="0" width="8" height={height} fill={OG.ember} />,
+      <rect key="char" x={burnX + 3} y="0" width="4" height={height} fill={OG.ink} fillOpacity="0.78" />,
     );
   }
 
@@ -156,7 +191,11 @@ function ribbonSvg({
   parts.push(<rect key="shade" x="0" y="0" width={width} height={height} fill="url(#cylinder)" />);
 
   return (
-    <svg width={width} height={height + 10} viewBox={`0 0 ${width} ${height + 10}`}>
+    <svg
+      width={width}
+      height={height + MARKER_OVERHANG}
+      viewBox={`0 0 ${width} ${height + MARKER_OVERHANG}`}
+    >
       <defs>
         <clipPath id="stick">
           <path d={body} />
@@ -177,10 +216,10 @@ function ribbonSvg({
           key={`m${i}`}
           cx={x(fraction)}
           cy={height}
-          r="4.5"
+          r="6"
           fill={OG.brand}
           stroke={OG.ink}
-          strokeWidth="1.25"
+          strokeWidth="1.5"
         />
       ))}
     </svg>
@@ -319,7 +358,14 @@ export function ShareCard({
 
       {seal ? <ScoreSeal value={seal.value} label={seal.label} /> : null}
 
-      <div style={{ position: "absolute", left: MARGIN, bottom: RIBBON_BOTTOM, display: "flex" }}>
+      <div
+        style={{
+          position: "absolute",
+          left: MARGIN,
+          bottom: RIBBON_BASELINE - MARKER_OVERHANG,
+          display: "flex",
+        }}
+      >
         {ribbonSvg({ width: RIBBON_WIDTH, burn, markers })}
       </div>
     </div>

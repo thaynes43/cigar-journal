@@ -10,8 +10,8 @@ import { HouseSeal } from "./house-seal";
 // What is drawn, foot to cap:
 //   - a CYLINDER, not a bar: wrapper leaf under a top highlight and a bottom
 //     shadow, with faint diagonal veins, so a flat rectangle reads as rolled;
-//   - ASH over the smoked length — grey, with flake cracks — instead of a
-//     gradient;
+//   - ASH over the smoked length — grey, with an irregular field of flake
+//     cracks — instead of a gradient;
 //   - the EMBER as a glowing ring at the burn position, with a charred edge just
 //     past it, so the eye lands on the exact place the save recorded;
 //   - the BAND, brand orange with two espresso rules and the house seal, sitting
@@ -113,7 +113,20 @@ const BAND_WIDTH = 10;
 // Wrapper veins under the ash, ash flake cracks, and the cylinder shading laid
 // over everything inside the stick.
 const VEINS = "repeating-linear-gradient(105deg, transparent 0 15%, rgb(0 0 0 / .11) 15% calc(15% + 1px))";
-const CRACKS = "repeating-linear-gradient(92deg, transparent 0 33px, rgb(0 0 0 / .2) 33px 34px)";
+
+// Ash cracks. THREE layers with periods that do not divide each other (31, 47,
+// and a horizontal 21): one repeating gradient alone lands its ticks at a single
+// even spacing, and the ash read as a ruler rather than as ash. The two vertical
+// periods beat against each other into an irregular field, and the horizontal
+// flake line breaks the verticals' run. They are deliberately fainter than the
+// cylinder's own shading so they read as texture under it, not as drawn lines on
+// top of it.
+const CRACKS = [
+  "repeating-linear-gradient(92deg, transparent 0 31px, rgb(0 0 0 / .16) 31px 32px)",
+  "repeating-linear-gradient(88deg, transparent 0 47px, rgb(0 0 0 / .11) 47px 48px)",
+  "repeating-linear-gradient(to bottom, transparent 0 21px, rgb(0 0 0 / .1) 21px 22px, transparent 22px 40px)",
+].join(", ");
+
 const SHADE =
   "linear-gradient(to bottom, rgb(255 255 255 / .22) 0%, transparent 38%, transparent 62%, rgb(0 0 0 / .34) 100%)";
 
