@@ -3,6 +3,7 @@ import type { PublicSmokeView } from "@cj/domain";
 import { getServerCaller } from "@/lib/trpc/server";
 import { isUnresolvableSmoke } from "@/lib/smoke-lookup";
 import { formatDay } from "@/lib/format";
+import { smokeBurn } from "./share-burn";
 import { ShareCard, CARD_HEIGHT, CARD_WIDTH } from "../../../_og/share-card";
 import { ogFonts } from "../../../_og/fonts";
 
@@ -33,18 +34,6 @@ async function publicSmoke(id: string): Promise<PublicSmokeView | null> {
   }
 }
 
-// The furthest recorded position is where the cigar had burned to. No position
-// anywhere means the save never said, so the cigar is drawn unlit rather than
-// guessed at.
-export function smokeBurn(smoke: PublicSmokeView): { burn: number | null; markers: number[] } {
-  const positions = smoke.progression
-    .map((entry) => entry.approximatePosition)
-    .filter((p): p is number => p != null)
-    .map((p) => Math.min(1, Math.max(0, p)));
-  if (positions.length === 0) return { burn: null, markers: [] };
-  return { burn: Math.max(...positions), markers: positions };
-}
-
 export default async function Image({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const smoke = await publicSmoke(id);
@@ -59,7 +48,7 @@ export default async function Image({ params }: { params: Promise<{ id: string }
 
   const name = smoke.cigar.canonicalName;
   const date = formatDay(smoke.smokedAt.value ?? smoke.endedAt?.value ?? null);
-  const { burn, markers } = smokeBurn(smoke);
+  const { burn, markers } = smokeBurn(smoke.progression);
 
   return new ImageResponse(
     <ShareCard
