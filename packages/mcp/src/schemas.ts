@@ -176,7 +176,7 @@ const progressionEntry = z
       .number()
       .nullish()
       .describe(
-        "How far through the smoke, as a 0-1 fraction (0 = light, 1 = nub). null when unclear.",
+        "How far through the smoke, as a 0-1 fraction (0 = light, 1 = nub). Set it whenever the user's framing places the stage: opening ≈0.05, first third ≈0.2, halfway 0.5, second third ≈0.6, final third ≈0.8, finish or nub ≈0.95. null only when nothing in their words places it (e.g. 'later', 'developing').",
       ),
     descriptors: z
       .array(z.string())

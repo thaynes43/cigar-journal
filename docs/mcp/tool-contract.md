@@ -186,7 +186,7 @@ file id into it. A photo never blocks saving the smoke.
 Field conventions:
 - rating is an integer 0-100; omit unless the user stated a number, never invent one.
 - liked is a stated verdict, never a mood: set it only when the user said in words that they liked or disliked the cigar, and quote those words in likedVerbatim — without them the server drops it. A rating, a score, or praise in the notes never implies liked.
-- approximatePosition and any position is a 0-1 fraction through the smoke (0 = light, 1 = nub).
+- approximatePosition is a 0-1 fraction through the smoke (0 = light, 1 = nub). Set it from the user's framing whenever that framing places the stage (opening ≈0.05, first third ≈0.2, halfway 0.5, second third ≈0.6, final third ≈0.8, finish ≈0.95); leave it null only when nothing in their words places it ('later', 'developing'). The journal's burn line draws only positioned entries.
 - descriptors are normalized kebab-case tags; specificDescriptors are the user's exact, unusual words kept verbatim.
 - smokedAt carries provenance: { source: user, precision: minute } for a stated time, { precision: day } for a date only; omit it entirely when unstated and the server stamps finalize time. Started and ended times are the same: state them only when the user gave them; a save that carries the photo drop takes its start from the drop, and the server derives the duration.
 - get_my_smokes text search covers journal title and narrative, impression, construction notes, imported original markdown, and progression verbatim.
@@ -775,7 +775,7 @@ arguments:
   overallDescriptors: [spice, cream, citrus]
   progression:                   # OPTIONAL — [] / omitted is valid
     - stage: opening             # the user's own framing, free text
-      approximatePosition: 0.05  # 0..1, null when unclear
+      approximatePosition: 0.05  # 0..1 from the user's framing; null only when nothing places it
       descriptors: [black-pepper, cedar]
       verbatim: >
         Spice immediately but not really aggressive.
