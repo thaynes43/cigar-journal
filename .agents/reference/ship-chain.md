@@ -84,13 +84,12 @@ the HelmRelease wedged on `ImagePullBackOff` and needs a second PR to fix.
 
 ## The haynes-ops bump
 
-`kubernetes/main/apps/frontend/cigar-journal/app/` — **three** tag occurrences in
-**two** files, and missing the second file is the usual mistake:
-
-- `helmrelease.yaml` — the single `image: &mainImage` anchor (the `web` and
-  `mcp` roles both reference it via `*mainImage`).
-- `crawler-cronjobs.yaml` — **both** CronJob image pins. A CronJob is a separate
-  manifest and cannot reach the HelmRelease's anchor.
+`kubernetes/main/apps/frontend/cigar-journal/app/helmrelease.yaml` — **one** tag,
+on the `image: &mainImage` anchor. The migrate init container, `web`, `mcp` and
+both crawl controllers reference it via `*mainImage`, so one edit moves every
+role. (Until haynes-ops#2693 the crawl jobs were raw CronJobs in a second file,
+`crawler-cronjobs.yaml`, with their own pins; that file is gone, and
+`scripts/crawl-cronjob-invariants.sh` in haynes-ops asserts the shared tag.)
 
 Then:
 
