@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.2](https://github.com/thaynes43/cigar-journal/compare/v0.47.1...v0.47.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **mcp:** expire idle sessions and answer 404 for unknown session ids ([#340](https://github.com/thaynes43/cigar-journal/issues/340)) ([8363777](https://github.com/thaynes43/cigar-journal/commit/8363777dc2ea7d78abb3b447bda282762a69bff4))
+
 ## [0.47.1](https://github.com/thaynes43/cigar-journal/compare/v0.47.0...v0.47.1) (2026-09-22)
 
 
