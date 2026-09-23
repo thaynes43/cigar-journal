@@ -23,6 +23,8 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
 | SQL injection | Drizzle parameterized queries only; no string-built SQL (raw migrations are static files). |
 | CSRF / session fixation (web) | Better Auth defaults: same-site cookies, CSRF protection on auth routes. |
 | Crawler abuse surface | Adapters fetch only configured vendor domains (no user-supplied URLs → no SSRF path); rate-limited; robots-respecting. |
+| MCP session exhaustion | Each session holds a transport and its own MCP server in the pod's memory. Until issue #339 only a client's DELETE ended one, and most clients never send it, so memory grew until a restart. A once-a-minute sweep now closes any session with no request in flight and none for 30 minutes, and opening one needs a valid bearer token. A request whose client hangs up before it is handled is dropped rather than counted, so it cannot pin a session. Residual: a client that keeps its event stream open, or keeps calling, keeps its session, so the set is bounded by live connections and recent use, not by history; nothing caps how many sessions one client opens within the idle window. |
+| MCP session id reuse | A session is not bound to the principal that opened it, but identity never comes from the session: every request carries its own bearer token, and each tool derives the principal from it. Another user's session id therefore reads and writes nothing; with a valid token of their own, a holder can only keep that session alive or end it, and its owner then re-initializes. Session ids appear in the server's logs, not in any response to another user. |
 | Secrets / private data in logs | No journal prose, tokens, or credentials in logs; ExternalSecrets for config; log fields are ids + codes. |
 
 ## Observability
@@ -87,6 +89,19 @@ an LLM. The MCP adapter never treats the model as an authorization authority.
   refuses never reaches auth, the intake probe or the MCP SDK, so it emits
   `request_rejected` (`path`, parser error `reason`, `status`, `contentLength` —
   nothing from the unparsed body) and answers with a JSON-RPC error envelope.
+- **MCP sessions (2026-09-23, issue #339).** `session_initialized` and
+  `session_closed` carry `live`, the session count after the change, and
+  `session_closed` carries `reason`: `client` (its DELETE), `idle` (the sweep),
+  or `shutdown`. `shutdown` is best effort: it fires when the HTTP server
+  closes, which waits for open event streams, so the 3-second forced exit on
+  SIGTERM usually ends the process first. The sweep emits `session_sweep`
+  every minute with `live`, `connected` (sessions with a request in flight, in
+  practice an open event stream) and `expired`, so the count is a time series
+  in Loki and a missing line means the sweep has stopped. A request whose
+  `Mcp-Session-Id` names no live session emits `session_not_found` (`method`,
+  and the id bounded like every correlation handle) before its 404; it runs
+  after bearer auth, so only an authenticated caller can write one. `startup`
+  records the configured `sessionIdleTimeoutMs`.
 - **Probes:** `/api/health` (process-only, house pattern) for k8s; Gatus for
   the web origin and `/mcp` reachability; crawler CronJobs alert on repeated
   failure, not single misses.

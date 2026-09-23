@@ -9,6 +9,7 @@ import { bearerAuth } from "./auth.js";
 import { jsonResponseEnabled } from "./config.js";
 import { mcpEvent, logScalar } from "./logger.js";
 import { describeRequestMeta, shapeOf } from "./photo-intake.js";
+import type { McpSessions } from "./sessions.js";
 
 // The JSON-RPC body limit for /mcp. See the note on the express.json() call below:
 // this is an UNAUTHENTICATED memory budget, because the body is buffered before
@@ -18,7 +19,26 @@ const MAX_BODY_BYTES = "100kb";
 // The HTTP surface: GET /healthz and the Streamable HTTP MCP transport at /mcp
 // (ADR-005). One transport per MCP session, keyed by the mcp-session-id the SDK
 // assigns on initialize — the spike-proven shape. A fresh initialize with no
-// session id creates a session and its own McpServer over @cj/domain.
+// session id creates a session and its own McpServer over @cj/domain. The live
+// sessions sit in `McpSessions` (sessions.ts), which closes idle ones.
+//
+// An id that names no live session — expired, deleted, or minted by a pod that
+// has since restarted — gets 404 on every method, never 400: the spec makes 404
+// the signal that tells a client to re-initialize, and the body is the SDK's own
+// (code -32001), so a client that matches on either recognizes it. A request with
+// no session id at all stays a 400, as the spec asks.
+const SESSION_NOT_FOUND = {
+  jsonrpc: "2.0",
+  error: { code: -32001, message: "Session not found" },
+  id: null,
+} as const;
+
+function sessionNotFound(req: Request, res: Response, sessionId: string): void {
+  // The id is caller-supplied (an authenticated caller: this runs after
+  // bearerAuth), so it is bounded like every other correlation handle.
+  mcpEvent("session_not_found", { method: req.method, sessionId: logScalar(sessionId) });
+  res.status(404).json(SESSION_NOT_FOUND);
+}
 
 // The photo intake probe (see photo-intake.ts). It runs at the HTTP layer, on the
 // RAW JSON-RPC body, because the MCP SDK validates tool input
@@ -102,12 +122,14 @@ function logPhotoIntakeRequest(
   }
 }
 
-// `storage` is the photo object store (ADR-007), read once from the environment
-// and shared across sessions; null when photos are unconfigured, in which case the
-// photo tools return the contract `unavailable`. Injectable so tests can pass an
-// in-memory store.
+// `sessions` holds the live MCP sessions and sweeps the idle ones; the caller
+// constructs it and closes it with the HTTP server. `storage` is the photo object
+// store (ADR-007), read once from the environment and shared across sessions; null
+// when photos are unconfigured, in which case the photo tools return the contract
+// `unavailable`. Injectable so tests can pass an in-memory store.
 export function buildApp(
   deps: Deps,
+  sessions: McpSessions,
   storage: PhotoStorage | null = photoStorageFromEnv(),
 ): express.Express {
   const app = express();
@@ -118,47 +140,61 @@ export function buildApp(
     res.status(200).json({ status: "ok" });
   });
 
-  const transports = new Map<string, StreamableHTTPServerTransport>();
-
+  // Both handlers first drop a request whose client has already hung up, which
+  // can happen while the body is parsed or the token checked. Its response has
+  // emitted 'close' already and never will again, so counting it as in flight
+  // would pin the session forever, and handing it to the transport would leave a
+  // GET holding the session's one event-stream slot (every later GET gets 409).
   async function handlePost(req: Request, res: Response): Promise<void> {
+    if (res.destroyed) return;
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    let transport = sessionId ? transports.get(sessionId) : undefined;
 
-    if (!transport) {
-      if (sessionId || !isInitializeRequest(req.body)) {
-        res.status(400).json({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Bad Request: no valid session; send an initialize request first" },
-          id: null,
-        });
+    if (sessionId) {
+      const transport = sessions.use(sessionId, res);
+      if (!transport) {
+        sessionNotFound(req, res, sessionId);
         return;
       }
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        enableJsonResponse: jsonResponseEnabled(),
-        onsessioninitialized: (sid: string) => {
-          transports.set(sid, transport as StreamableHTTPServerTransport);
-          mcpEvent("session_initialized", { sessionId: sid });
-        },
-      });
-      transport.onclose = () => {
-        if (transport?.sessionId) {
-          transports.delete(transport.sessionId);
-          mcpEvent("session_closed", { sessionId: transport.sessionId });
-        }
-      };
-      const server = createMcpServer(deps, storage);
-      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      return;
     }
 
+    if (!isInitializeRequest(req.body)) {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Bad Request: no valid session; send an initialize request first" },
+        id: null,
+      });
+      return;
+    }
+    const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      enableJsonResponse: jsonResponseEnabled(),
+      onsessioninitialized: (sid: string) => sessions.add(sid, transport),
+    });
+    // Set before connect(): the McpServer wraps whatever onclose it finds there.
+    transport.onclose = () => {
+      if (transport.sessionId) sessions.closed(transport.sessionId);
+    };
+    const server = createMcpServer(deps, storage);
+    await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   }
 
   async function handleSessionRequest(req: Request, res: Response): Promise<void> {
+    if (res.destroyed) return;
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    const transport = sessionId ? transports.get(sessionId) : undefined;
+    if (!sessionId) {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Bad Request: Mcp-Session-Id header is required" },
+        id: null,
+      });
+      return;
+    }
+    const transport = sessions.use(sessionId, res);
     if (!transport) {
-      res.status(400).send("Invalid or missing mcp-session-id");
+      sessionNotFound(req, res, sessionId);
       return;
     }
     await transport.handleRequest(req, res);
