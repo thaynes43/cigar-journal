@@ -44,7 +44,16 @@ export function dropUrl(token: string): string {
 }
 
 /** When true, /mcp POST replies as application/json instead of an SSE stream.
- *  Off in production (clients negotiate SSE); on in tests for easy assertions. */
+ *  On in production since 2026-08-27 (haynes-ops sets it, to cut per-call stream
+ *  overhead) and in tests for easy assertions; the GET event stream is unaffected. */
 export function jsonResponseEnabled(): boolean {
   return process.env.MCP_JSON_RESPONSE === "true";
+}
+
+/** How long an MCP session may sit idle before the sweep closes it (issue #339),
+ *  in ms. MCP_SESSION_IDLE_MINUTES, default 30; a value that is not a positive
+ *  number falls back to the default, as PORT does. */
+export function sessionIdleTimeoutMs(): number {
+  const minutes = Number(process.env.MCP_SESSION_IDLE_MINUTES);
+  return (Number.isFinite(minutes) && minutes > 0 ? minutes : 30) * 60_000;
 }

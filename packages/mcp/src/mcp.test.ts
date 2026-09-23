@@ -4,8 +4,11 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import {
+  StreamableHTTPClientTransport,
+  StreamableHTTPError,
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { LATEST_PROTOCOL_VERSION, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createMemoryPhotoStorage, processPhoto, type PhotoStorage } from "@cj/photos";
 import {
   registerClient,
@@ -40,8 +43,10 @@ import {
   blenders,
 } from "@cj/db";
 import { buildApp } from "./app.js";
+import { sessionIdleTimeoutMs } from "./config.js";
 import { INSTRUCTIONS, TOOL_SCOPES } from "./constants.js";
 import { splitCigarSchema } from "./schemas.js";
+import { McpSessions } from "./sessions.js";
 
 // End-to-end over the real HTTP surface: an embedded Postgres (domain harness),
 // the app's own OAuth authorization server to mint genuine audience-bound tokens,
@@ -232,8 +237,11 @@ describe("@cj/mcp adapter", () => {
     await h.seedCigar({ canonicalName: "Ambiguity Twin Robusto" });
 
     storage = createMemoryPhotoStorage();
-    const app = buildApp(h.deps, storage);
+    const sessions = new McpSessions();
+    const app = buildApp(h.deps, sessions, storage);
     server = app.listen(0);
+    // As in index.ts: the session sweep stops when the server closes.
+    server.on("close", () => sessions.close());
     const address = server.address() as AddressInfo;
     baseUrl = `http://127.0.0.1:${address.port}`;
 
@@ -286,6 +294,335 @@ describe("@cj/mcp adapter", () => {
     const res = await fetch(`${baseUrl}/healthz`);
     expect(res.status).toBe(200);
     expect((await res.json()) as { status: string }).toEqual({ status: "ok" });
+  });
+
+  // ---- MCP sessions: idle expiry and 404 (issue #339) -----------------------
+  //
+  // Each test runs its own server over its own McpSessions on a hand-driven clock,
+  // so it can age a session past the idle timeout and sweep on demand: no sleeps,
+  // exact counts, and none of the sessions the rest of this file opens. The
+  // periodic timer is parked an hour out; its own test drives it.
+
+  describe("MCP sessions (issue #339)", () => {
+    const IDLE_MS = 30 * 60_000;
+    const SESSION_NOT_FOUND = {
+      jsonrpc: "2.0",
+      error: { code: -32001, message: "Session not found" },
+      id: null,
+    };
+    const INITIALIZE = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: LATEST_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "raw-client", version: "0.0.0" },
+      },
+    };
+    const TOOLS_LIST = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
+
+    interface SessionServer {
+      url: string;
+      sessions: McpSessions;
+      advance: (ms: number) => void;
+    }
+
+    // Wired as index.ts wires it: the server's close closes the sessions.
+    async function withSessionServer<T>(fn: (s: SessionServer) => Promise<T>): Promise<T> {
+      let clock = Date.parse("2026-09-23T12:00:00Z");
+      const sessions = new McpSessions({
+        idleTimeoutMs: IDLE_MS,
+        sweepIntervalMs: 3_600_000,
+        now: () => clock,
+      });
+      const listening = buildApp(h.deps, sessions, storage).listen(0);
+      listening.on("close", () => sessions.close());
+      const url = `http://127.0.0.1:${(listening.address() as AddressInfo).port}/mcp`;
+      try {
+        return await fn({
+          url,
+          sessions,
+          advance: (ms) => {
+            clock += ms;
+          },
+        });
+      } finally {
+        const closed = new Promise<void>((resolve) => listening.close(() => resolve()));
+        // The test is over, so nothing is in flight. Dropping the client's
+        // keep-alive sockets matters after an aborted event stream: Node then stops
+        // counting them as idle, and close() would wait out undici's 4 s timeout.
+        listening.closeAllConnections();
+        await closed;
+      }
+    }
+
+    function mcpHeaders(sessionId?: string): Record<string, string> {
+      return {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${ownerFull}`,
+        ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+      };
+    }
+
+    // A session opened the way every client opens one — initialize, then the
+    // initialized notification — after which nothing is held open: no GET stream,
+    // and no DELETE ever comes. The sessions this change reclaims look like this.
+    async function openSession(url: string): Promise<string> {
+      const init = await fetch(url, {
+        method: "POST",
+        headers: mcpHeaders(),
+        body: JSON.stringify(INITIALIZE),
+      });
+      expect(init.status).toBe(200);
+      await init.text();
+      const sessionId = init.headers.get("mcp-session-id");
+      expect(sessionId).toBeTruthy();
+      const initialized = await fetch(url, {
+        method: "POST",
+        headers: mcpHeaders(sessionId!),
+        body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+      });
+      expect(initialized.status).toBe(202);
+      await initialized.text();
+      return sessionId!;
+    }
+
+    // tools/list on a session; the status, with the body consumed.
+    async function listTools(url: string, sessionId: string): Promise<number> {
+      const res = await fetch(url, { method: "POST", headers: mcpHeaders(sessionId), body: TOOLS_LIST });
+      await res.text();
+      return res.status;
+    }
+
+    // An SDK client transport for a host that keeps no GET stream open between
+    // calls: its GET gets the 405 a server offering no stream would send, which
+    // the SDK client reads as "none offered".
+    function streamlessTransport(url: string): StreamableHTTPClientTransport {
+      return new StreamableHTTPClientTransport(new URL(url), {
+        fetch: (input: string | URL, init?: RequestInit) =>
+          init?.method === "GET"
+            ? Promise.resolve(new Response(null, { status: 405 }))
+            : fetch(input, init),
+        requestInit: { headers: { Authorization: `Bearer ${ownerFull}` } },
+      });
+    }
+
+    it("answers an unknown session id with 404 and the SDK's JSON-RPC error, on POST, GET and DELETE", async () => {
+      await withSessionServer(async ({ url }) => {
+        // The id every client still holds after the pod restarts.
+        const stale = randomUUID();
+        const { value: responses, lines } = await captureMcpLog(async () => [
+          await fetch(url, { method: "POST", headers: mcpHeaders(stale), body: TOOLS_LIST }),
+          await fetch(url, {
+            method: "GET",
+            headers: { ...mcpHeaders(stale), accept: "text/event-stream" },
+          }),
+          await fetch(url, { method: "DELETE", headers: mcpHeaders(stale) }),
+          // A re-initialize is sent WITHOUT the stale id; one that still carries it
+          // is refused the same way rather than quietly given a new session.
+          await fetch(url, {
+            method: "POST",
+            headers: mcpHeaders(stale),
+            body: JSON.stringify(INITIALIZE),
+          }),
+        ]);
+        for (const res of responses) {
+          expect(res.status).toBe(404);
+          expect(await res.json()).toEqual(SESSION_NOT_FOUND);
+        }
+        const records = lines
+          .filter((l) => l.includes("[mcp] session_not_found "))
+          .map((l) => JSON.parse(l.slice(l.indexOf("{"))) as unknown);
+        expect(records).toEqual(
+          ["POST", "GET", "DELETE", "POST"].map((method) => ({ method, sessionId: stale })),
+        );
+      });
+    });
+
+    it("keeps 400 for a request with no session id, and bearer auth ahead of both", async () => {
+      await withSessionServer(async ({ url }) => {
+        const missing = [
+          await fetch(url, { method: "POST", headers: mcpHeaders(), body: TOOLS_LIST }),
+          await fetch(url, {
+            method: "GET",
+            headers: { ...mcpHeaders(), accept: "text/event-stream" },
+          }),
+          await fetch(url, { method: "DELETE", headers: mcpHeaders() }),
+        ];
+        for (const res of missing) {
+          expect(res.status).toBe(400);
+          expect(((await res.json()) as { error: { code: number } }).error.code).toBe(-32000);
+        }
+        // Without a token a stale id is a 401, so the 404 tells nothing to a caller
+        // who could not have used the session anyway.
+        const anonymous = mcpHeaders(randomUUID());
+        delete anonymous.authorization;
+        const unauthenticated = await fetch(url, {
+          method: "POST",
+          headers: anonymous,
+          body: TOOLS_LIST,
+        });
+        expect(unauthenticated.status).toBe(401);
+        await unauthenticated.text();
+      });
+    });
+
+    it("closes a session idle past the timeout; the client holding it gets 404 and re-initializes", async () => {
+      await withSessionServer(async ({ url, sessions, advance }) => {
+        const client = new Client({ name: "test-client", version: "0.0.0" });
+        try {
+          const first = streamlessTransport(url);
+          await client.connect(first);
+          const expiredId = first.sessionId!;
+          expect((await client.listTools()).tools.length).toBeGreaterThan(0);
+
+          // A minute short of the timeout the session survives the sweep…
+          advance(IDLE_MS - 60_000);
+          expect(sessions.sweep()).toEqual({ live: 1, connected: 0, expired: 0 });
+          // …and at the timeout it is closed, with its cause and the live count.
+          advance(60_000);
+          const { value: swept, lines } = await captureMcpLog(async () => sessions.sweep());
+          expect(swept).toEqual({ live: 0, connected: 0, expired: 1 });
+          expect(eventPayload(lines, "session_closed")).toEqual({
+            sessionId: expiredId,
+            reason: "idle",
+            live: 0,
+          });
+          expect(eventPayload(lines, "session_sweep")).toEqual({
+            live: 0,
+            connected: 0,
+            expired: 1,
+          });
+
+          // The client's next call gets the spec's re-initialize signal…
+          const refused = await client.listTools().catch((error: unknown) => error);
+          expect(refused).toBeInstanceOf(StreamableHTTPError);
+          expect((refused as StreamableHTTPError).code).toBe(404);
+
+          // …and a new initialize, sent without the stale id, gets a working session.
+          await client.close();
+          const second = streamlessTransport(url);
+          await client.connect(second);
+          expect(second.sessionId).toBeDefined();
+          expect(second.sessionId).not.toBe(expiredId);
+          expect((await client.listTools()).tools.length).toBeGreaterThan(0);
+          expect(sessions.size).toBe(1);
+        } finally {
+          await client.close();
+        }
+      });
+    });
+
+    it("sweeps only idle sessions: a recent request or an open event stream keeps one", async () => {
+      await withSessionServer(async ({ url, sessions, advance }) => {
+        const idle = await openSession(url);
+        const recent = await openSession(url);
+        const streaming = await openSession(url);
+
+        // `streaming` holds its GET event stream open, as a connected CLI client does.
+        const stream = new AbortController();
+        const sse = await fetch(url, {
+          method: "GET",
+          headers: { ...mcpHeaders(streaming), accept: "text/event-stream" },
+          signal: stream.signal,
+        });
+        expect(sse.status).toBe(200);
+
+        try {
+          advance(20 * 60_000);
+          expect(await listTools(url, recent)).toBe(200);
+          advance(15 * 60_000); // idle and streaming: 35 minutes without a request; recent: 15
+
+          const { value: swept, lines } = await captureMcpLog(async () => sessions.sweep());
+          expect(swept).toEqual({ live: 2, connected: 1, expired: 1 });
+          expect(eventPayload(lines, "session_closed")).toEqual({
+            sessionId: idle,
+            reason: "idle",
+            live: 2,
+          });
+          expect(await listTools(url, idle)).toBe(404);
+          expect(await listTools(url, recent)).toBe(200);
+          expect(await listTools(url, streaming)).toBe(200);
+        } finally {
+          stream.abort();
+        }
+
+        // Once its client lets go of the stream, that session idles like any other.
+        await vi.waitFor(() => expect(sessions.sweep().connected).toBe(0));
+        advance(IDLE_MS);
+        expect(sessions.sweep()).toEqual({ live: 0, connected: 0, expired: 2 });
+      });
+    });
+
+    it("a DELETE closes the session at once, logged as the client's", async () => {
+      await withSessionServer(async ({ url, sessions }) => {
+        const sessionId = await openSession(url);
+        const { value: res, lines } = await captureMcpLog(() =>
+          fetch(url, { method: "DELETE", headers: mcpHeaders(sessionId) }),
+        );
+        expect(res.status).toBe(200);
+        await res.text();
+        expect(eventPayload(lines, "session_closed")).toEqual({
+          sessionId,
+          reason: "client",
+          live: 0,
+        });
+        expect(sessions.size).toBe(0);
+        expect(await listTools(url, sessionId)).toBe(404);
+      });
+    });
+
+    it("closing the server closes every remaining session, logged as shutdown", async () => {
+      let sessionId = "";
+      const { lines } = await captureMcpLog(() =>
+        withSessionServer(async ({ url }) => {
+          sessionId = await openSession(url);
+        }),
+      );
+      expect(eventPayload(lines, "session_closed")).toEqual({
+        sessionId,
+        reason: "shutdown",
+        live: 0,
+      });
+    });
+
+    it("sweeps on its own timer, which close() stops", async () => {
+      const sessions = new McpSessions({ idleTimeoutMs: IDLE_MS, sweepIntervalMs: 5 });
+      const sweep = vi
+        .spyOn(sessions, "sweep")
+        .mockReturnValue({ live: 0, connected: 0, expired: 0 });
+      try {
+        await vi.waitFor(() => expect(sweep.mock.calls.length).toBeGreaterThanOrEqual(2));
+        sessions.close();
+        const calls = sweep.mock.calls.length;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(sweep.mock.calls.length).toBe(calls);
+      } finally {
+        sessions.close();
+      }
+    });
+
+    it("reads the idle timeout from MCP_SESSION_IDLE_MINUTES, 30 minutes by default", () => {
+      const saved = process.env.MCP_SESSION_IDLE_MINUTES;
+      try {
+        delete process.env.MCP_SESSION_IDLE_MINUTES;
+        expect(sessionIdleTimeoutMs()).toBe(30 * 60_000);
+        process.env.MCP_SESSION_IDLE_MINUTES = "5";
+        expect(sessionIdleTimeoutMs()).toBe(5 * 60_000);
+        const fromEnv = new McpSessions();
+        expect(fromEnv.idleTimeoutMs).toBe(5 * 60_000);
+        fromEnv.close();
+        for (const invalid of ["", "0", "-3", "soon"]) {
+          process.env.MCP_SESSION_IDLE_MINUTES = invalid;
+          expect(sessionIdleTimeoutMs()).toBe(30 * 60_000);
+        }
+      } finally {
+        if (saved === undefined) delete process.env.MCP_SESSION_IDLE_MINUTES;
+        else process.env.MCP_SESSION_IDLE_MINUTES = saved;
+      }
+    });
   });
 
   // ---- discovery ------------------------------------------------------------
@@ -3759,6 +4096,7 @@ describe("@cj/mcp adapter", () => {
     // 47h59m59.99s, which flooring would announce as "47 hours" on a drop one
     // millisecond old. This test runs its own server on a clock that ticks.
     let tick = HARNESS_CLOCK.getTime();
+    const movingSessions = new McpSessions();
     const movingApp = buildApp(
       {
         ...h.deps,
@@ -3767,9 +4105,11 @@ describe("@cj/mcp adapter", () => {
           return new Date(tick);
         },
       },
+      movingSessions,
       storage,
     );
     const moving = movingApp.listen(0);
+    moving.on("close", () => movingSessions.close());
     const movingUrl = `http://127.0.0.1:${(moving.address() as AddressInfo).port}`;
     const token = await dropUser();
     const client = new Client({ name: "test-client", version: "0.0.0" });

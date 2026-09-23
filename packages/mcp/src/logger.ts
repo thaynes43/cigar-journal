@@ -8,6 +8,11 @@ export type McpEventName =
   | "shutdown"
   | "session_initialized"
   | "session_closed"
+  // The sweep's once-a-minute record of the live session count (sessions.ts), and
+  // a request whose Mcp-Session-Id names no live session — answered 404, the
+  // client's cue to re-initialize (issue #339).
+  | "session_sweep"
+  | "session_not_found"
   | "auth_rejected"
   | "tool_called"
   | "tool_error"

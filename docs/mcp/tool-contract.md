@@ -65,6 +65,28 @@ viewer) and ride `catalog:read` — with one narrowing inside `scores`: its
 under `journal:read`, so a catalog-only token reads the community number alone.
 Data returned never exceeds the scopes presented.
 
+## Transport sessions
+
+The server speaks stateful Streamable HTTP at `/mcp` (ADR-005). An `initialize`
+sent without an `Mcp-Session-Id` opens a session; the id returns in that header
+and goes on every later request. Bearer auth runs first, so these outcomes reach
+only an authenticated caller (issue #339):
+
+- **Unknown id: 404.** An id that names no live session (expired, deleted, or
+  issued before the pod restarted) gets HTTP 404 on POST, GET and DELETE, with
+  the SDK's JSON-RPC body: code `-32001`, message `Session not found`. The
+  client re-initializes with a new `initialize` that omits the stale id; one
+  that still carries it gets the same 404.
+- **Missing id: 400.** Any request other than `initialize` without an id.
+- **Idle expiry.** A session with no request in flight, and none started or
+  finished in the last 30 minutes (`MCP_SESSION_IDLE_MINUTES`), is closed by a
+  sweep that runs every minute. An open request counts as in flight, so a
+  client holding its GET event stream is never expired.
+- **DELETE** ends a session at once.
+- **One process.** Sessions live in the MCP pod's memory. A restart ends every
+  one (clients then get the 404 above), and a second replica would answer 404
+  to sessions the first one issued, so the `mcp` role runs a single replica.
+
 ## Server instructions (sent to every client at initialize)
 
 ```text

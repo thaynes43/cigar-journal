@@ -8,6 +8,7 @@ import type { Deps } from "@cj/domain";
 import { buildApp } from "./app.js";
 import { port, protectedResourceMetadataUrl, webOrigin } from "./config.js";
 import { mcpEvent } from "./logger.js";
+import { McpSessions } from "./sessions.js";
 
 function main(): void {
   const databaseUrl = process.env.DATABASE_URL;
@@ -26,12 +27,22 @@ function main(): void {
   const { db, pool } = createDatabase(databaseUrl);
   swallowShutdownErrors(pool, { label: "mcp" });
   const deps: Deps = { db, now: () => new Date() };
-  const app = buildApp(deps);
+  // Starts the once-a-minute idle-session sweep (issue #339).
+  const sessions = new McpSessions();
+  const app = buildApp(deps, sessions);
 
   const listenPort = port();
   const httpServer: Server = app.listen(listenPort, () => {
-    mcpEvent("startup", { port: listenPort, webOrigin: webOrigin(), protectedResourceMetadata: prm });
+    mcpEvent("startup", {
+      port: listenPort,
+      webOrigin: webOrigin(),
+      protectedResourceMetadata: prm,
+      sessionIdleTimeoutMs: sessions.idleTimeoutMs,
+    });
   });
+  // The sweep lives exactly as long as the server. 'close' fires once every
+  // connection has ended, so nothing is in flight when the sessions go.
+  httpServer.on("close", () => sessions.close());
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {

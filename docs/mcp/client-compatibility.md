@@ -5,7 +5,7 @@ document goes stale by design** — client products evolve independently of
 this application. Re-verify before relying on any row.
 
 ```yaml
-lastReviewed: 2026-09-10        # phone upload + file-input contract; liked evidence gate
+lastReviewed: 2026-09-23        # session expiry + 404 re-initialize (issue #339)
 clientMatrixVerified: 2026-08-26 # Phase 0 spike, OAuth mode — all three target
                                 # clients driven live against
                                 # https://cigars.haynesnetwork.com. The per-cell
@@ -20,6 +20,34 @@ productionEvidence: 2026-08-31  # live authenticated ChatGPT tool calls captured
 > The Cigar Journal supports journal reads and writes. Whether a particular
 > LLM client exposes those operations to its user is a property of that
 > client, not a limitation of the Cigar Journal domain.
+
+## 2026-09-23 — Session expiry and the 404 re-initialize signal
+
+Through v0.47.1 the server never expired a session and answered an unknown
+`Mcp-Session-Id` with 400. A client still holding an id after a pod restart
+therefore failed instead of recovering (issue #339). The server now closes a
+session idle for 30 minutes with no request in flight, and answers any unknown
+id with 404, the spec's signal to re-initialize
+([tool contract](tool-contract.md#transport-sessions)). A client holding its GET
+event stream open is never expired, so in practice a 404 follows a pod restart,
+or a return after more than 30 minutes without a connection.
+
+ChatGPT appears to open a fresh session for every tool call and never to send
+DELETE: each of its photo calls in the week to 09-23 (09-16, 09-20 twice, 09-23,
+all under the Codex-apps `_meta` signature) was JSON-RPC request 1 of its
+session, two of them twelve seconds apart. That makes it a main source of the
+abandoned sessions, and a client that never returns to an old id cannot be
+disrupted by expiry. Claude Code keeps one session across calls (request 7 of
+one session on 09-22).
+
+Re-initializing is the client's job, and no client has been driven through it
+against this server yet. The shipped binaries of both CLIs contain a recovery
+path keyed to a 404: Claude Code 2.1.280 ("MCP session expired (server no longer
+recognizes session ID), triggering reconnection") and Codex 0.156.1 ("Session
+expired (HTTP 404)"). Neither would have treated the old 400 as expiry. The
+official TypeScript SDK client (1.30.0) does not re-initialize on its own: it
+raises `StreamableHTTPError` with code 404 and leaves the new `initialize` to
+the host.
 
 ## 2026-09-10 — Codex phone upload and file-input contract
 
@@ -67,6 +95,7 @@ spike, since then against production and the Loki record) · `documented`
 | Tool availability late in a long conversation | unverified — a full-length smoke has still never been measured end to end. Real sessions have run since launch, but nothing in the record establishes tool availability late in one, so this stays open rather than being marked green by association | **verified**: tools persist for the session | **verified**: tools persist for the session | client-dependent |
 | Token refresh / long-lived link | **verified** 08-31 — authenticated tool calls from the same connector are in the Loki record on 08-30 and 08-31, days after the 08-26/27 authorization, with no re-consent in between | **verified** 08-26: silent refresh after 10-min token expiry, rotation honored (server `refresh_rotated`) | unverified (session outlived no token in test) | client-dependent |
 | Reconnect after expiry | **verified** 08-31, implied by the row above — the 1h access tokens had long expired, so those calls rode a refresh; not driven as an isolated test | **verified** 08-26: post-expiry call succeeds, no user interaction | unverified | client-dependent |
+| Re-initialize after a session 404 (pod restart, idle expiry) | unverified, likely moot: it appears to open a fresh session per call (2026-09-23 section) | unverified; 2.1.280 ships a 404-keyed reconnect | unverified; 0.156.1 ships a 404-keyed session recovery | spec: MUST re-initialize; the TypeScript SDK client raises `StreamableHTTPError` 404 and leaves it to the host |
 | In-chat file attachment → tool args | **works through ChatGPT Work / the Codex apps pipeline since 2026-09-06, as a host upload of a path the model passes** — four hydrated `open_photo_drop` calls (09-06, 09-08, 09-09 ×2), every one under the Codex-apps `_meta` signature (`callId`, `itemId`, `progressToken`, no `openai/userAgent`); that host shows the model `image` as a string plus "provide the absolute path to that file here", uploads the file and substitutes the handle (argument channel; the `_meta["openai/fileParams"]` channel has never been observed). Nothing is forwarded automatically anywhere: GPT-5.x on ChatGPT web (08-31, 09-01, 09-03) and the iOS app (09-07 ×3) sends nothing, and on 09-09 the Work session sent nothing when the model obeyed our "never … a file path" over the host's sentence (2026-09-09 section). The upload link stays the fallback: the photo drop (ADR-014) for a live smoke, the one-time link for a saved one | **unsupported** — Claude cannot place attachment bytes into tool arguments (Anthropic tracker) | **unsupported for a custom MCP server — verified in source 2026-09-09**: both halves of the adapter (schema masking at listing, upload at call) are gated on the server name `codex_apps`, so a user-configured server publishes `image` as the object and nothing uploads. Through the `codex_apps` server (ChatGPT Work) it is the route that works — see the ChatGPT column | **unsupported** — MCP has no file-input primitive; SEP 2356/1306 unratified |
 
 ¹ Owner's account, Developer Mode, 2026-08-26 (spike). **Production
