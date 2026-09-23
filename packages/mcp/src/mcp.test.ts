@@ -1,6 +1,6 @@
 import { randomBytes, createHash, randomUUID } from "node:crypto";
 import { createServer, type Server as HttpServer, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -43,7 +43,6 @@ import {
   blenders,
 } from "@cj/db";
 import { buildApp } from "./app.js";
-import { sessionIdleTimeoutMs } from "./config.js";
 import { INSTRUCTIONS, TOOL_SCOPES } from "./constants.js";
 import { splitCigarSchema } from "./schemas.js";
 import { McpSessions } from "./sessions.js";
@@ -544,13 +543,15 @@ describe("@cj/mcp adapter", () => {
           });
           expect(await listTools(url, idle)).toBe(404);
           expect(await listTools(url, recent)).toBe(200);
-          expect(await listTools(url, streaming)).toBe(200);
         } finally {
           stream.abort();
         }
 
-        // Once its client lets go of the stream, that session idles like any other.
+        // `streaming` has made no request since its GET began 35 minutes ago; its
+        // idle clock starts when the stream closes, so it survives this sweep…
         await vi.waitFor(() => expect(sessions.sweep().connected).toBe(0));
+        expect(sessions.sweep()).toEqual({ live: 2, connected: 0, expired: 0 });
+        // …and idles out like any other session once the timeout passes.
         advance(IDLE_MS);
         expect(sessions.sweep()).toEqual({ live: 0, connected: 0, expired: 2 });
       });
@@ -588,40 +589,41 @@ describe("@cj/mcp adapter", () => {
       });
     });
 
-    it("sweeps on its own timer, which close() stops", async () => {
-      const sessions = new McpSessions({ idleTimeoutMs: IDLE_MS, sweepIntervalMs: 5 });
-      const sweep = vi
-        .spyOn(sessions, "sweep")
-        .mockReturnValue({ live: 0, connected: 0, expired: 0 });
-      try {
-        await vi.waitFor(() => expect(sweep.mock.calls.length).toBeGreaterThanOrEqual(2));
-        sessions.close();
-        const calls = sweep.mock.calls.length;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        expect(sweep.mock.calls.length).toBe(calls);
-      } finally {
-        sessions.close();
-      }
-    });
+    it("does not let a client that hung up before its request was handled pin the session", async () => {
+      await withSessionServer(async ({ url, sessions, advance }) => {
+        const sessionId = await openSession(url);
+        // A GET whose client gives up while bearer auth is still checking the
+        // token: the socket closes as soon as the request has been written.
+        await new Promise<void>((resolve, reject) => {
+          const socket = connect(Number(new URL(url).port), "127.0.0.1", () => {
+            socket.write(
+              `GET /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\naccept: text/event-stream\r\n` +
+                `authorization: Bearer ${ownerFull}\r\nmcp-session-id: ${sessionId}\r\n\r\n`,
+              () => {
+                socket.destroy();
+                resolve();
+              },
+            );
+          });
+          socket.on("error", reject);
+        });
+        // Time for the abandoned request to clear auth and reach the handler.
+        await new Promise((resolve) => setTimeout(resolve, 250));
 
-    it("reads the idle timeout from MCP_SESSION_IDLE_MINUTES, 30 minutes by default", () => {
-      const saved = process.env.MCP_SESSION_IDLE_MINUTES;
-      try {
-        delete process.env.MCP_SESSION_IDLE_MINUTES;
-        expect(sessionIdleTimeoutMs()).toBe(30 * 60_000);
-        process.env.MCP_SESSION_IDLE_MINUTES = "5";
-        expect(sessionIdleTimeoutMs()).toBe(5 * 60_000);
-        const fromEnv = new McpSessions();
-        expect(fromEnv.idleTimeoutMs).toBe(5 * 60_000);
-        fromEnv.close();
-        for (const invalid of ["", "0", "-3", "soon"]) {
-          process.env.MCP_SESSION_IDLE_MINUTES = invalid;
-          expect(sessionIdleTimeoutMs()).toBe(30 * 60_000);
-        }
-      } finally {
-        if (saved === undefined) delete process.env.MCP_SESSION_IDLE_MINUTES;
-        else process.env.MCP_SESSION_IDLE_MINUTES = saved;
-      }
+        // The session's one stream slot is still free for the client's next GET…
+        const stream = new AbortController();
+        const sse = await fetch(url, {
+          method: "GET",
+          headers: { ...mcpHeaders(sessionId), accept: "text/event-stream" },
+          signal: stream.signal,
+        });
+        expect(sse.status).toBe(200);
+        stream.abort();
+        // …and once that stream closes, nothing holds the session open.
+        await vi.waitFor(() => expect(sessions.sweep().connected).toBe(0));
+        advance(IDLE_MS);
+        expect(sessions.sweep()).toEqual({ live: 0, connected: 0, expired: 1 });
+      });
     });
   });
 

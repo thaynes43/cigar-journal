@@ -140,7 +140,13 @@ export function buildApp(
     res.status(200).json({ status: "ok" });
   });
 
+  // Both handlers first drop a request whose client has already hung up, which
+  // can happen while the body is parsed or the token checked. Its response has
+  // emitted 'close' already and never will again, so counting it as in flight
+  // would pin the session forever, and handing it to the transport would leave a
+  // GET holding the session's one event-stream slot (every later GET gets 409).
   async function handlePost(req: Request, res: Response): Promise<void> {
+    if (res.destroyed) return;
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     if (sessionId) {
@@ -176,6 +182,7 @@ export function buildApp(
   }
 
   async function handleSessionRequest(req: Request, res: Response): Promise<void> {
+    if (res.destroyed) return;
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
     if (!sessionId) {
       res.status(400).json({

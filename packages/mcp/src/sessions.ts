@@ -32,7 +32,8 @@ type CloseReason = "client" | "idle" | "shutdown";
 
 interface Session {
   transport: StreamableHTTPServerTransport;
-  /** Clock time the latest request for this session started or finished. */
+  /** When the latest request for this session started or finished (ms, on the
+   *  registry's clock). */
   lastActivity: number;
   /** Requests for this session whose responses have not closed yet. */
   inFlight: number;
@@ -69,7 +70,9 @@ export class McpSessions {
 
   constructor(options: McpSessionOptions = {}) {
     this.idleTimeoutMs = options.idleTimeoutMs ?? sessionIdleTimeoutMs();
-    this.now = options.now ?? (() => Date.now());
+    // Monotonic, so a wall-clock step can neither expire sessions early nor
+    // keep them late.
+    this.now = options.now ?? (() => performance.now());
     this.timer = setInterval(() => {
       try {
         this.sweep();
@@ -99,11 +102,17 @@ export class McpSessions {
     const session = this.sessions.get(sessionId);
     if (!session) return undefined;
     session.lastActivity = this.now();
-    session.inFlight += 1;
-    res.once("close", () => {
-      session.inFlight -= 1;
-      session.lastActivity = this.now();
-    });
+    // A response that is already closed has emitted 'close' and never will
+    // again, so counting it would leave the session in flight for good. app.ts
+    // drops such requests before they get here; this keeps the count right
+    // regardless.
+    if (!res.destroyed) {
+      session.inFlight += 1;
+      res.once("close", () => {
+        session.inFlight -= 1;
+        session.lastActivity = this.now();
+      });
+    }
     return session.transport;
   }
 

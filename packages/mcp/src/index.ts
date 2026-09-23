@@ -41,7 +41,10 @@ function main(): void {
     });
   });
   // The sweep lives exactly as long as the server. 'close' fires once every
-  // connection has ended, so nothing is in flight when the sessions go.
+  // connection has ended, so nothing is in flight when the sessions go. An open
+  // event stream holds it off, so the forced exit below usually comes first;
+  // closing the transports at the signal instead would drop a pending JSON
+  // response mid-call.
   httpServer.on("close", () => sessions.close());
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
