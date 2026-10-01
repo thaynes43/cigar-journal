@@ -28,6 +28,17 @@ the PR that implements it.
   [`.agents/reference/archive-format.md`](.agents/reference/archive-format.md).
   Do not edit archived reviews except to add new entries.
 
+## Claude PR reviewer
+
+`.github/workflows/claude-code-review.yml` runs an advisory Claude review
+("Claude advisory review") on every ready, same-repo PR; `claude.yml` answers
+`@claude` mentions from actors with write access. The review is not a required
+check, but read its findings before merging. Fix each one, or answer it on the
+PR with a concrete reason it is wrong; never "merging anyway". It needs two
+things in place: the Claude GitHub App has access to this repo, and the
+`CLAUDE_CODE_OAUTH_TOKEN` repo secret exists. Without the secret both jobs skip
+and finish green.
+
 ## Map
 
 - `archive/` — legacy MkDocs journal (still published; imported as seed data).

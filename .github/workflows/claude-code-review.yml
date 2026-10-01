@@ -1,0 +1,160 @@
+name: Claude Code Review
+
+# Advisory PR reviewer (never a required check). Fires on the four types that
+# cover agent-opened, ready PRs; `ready_for_review` alone would miss a PR that
+# was never a draft. Skips cleanly (green) when the CLAUDE_CODE_OAUTH_TOKEN repo
+# secret is absent, on drafts, on fork PRs (no secrets) and on dependency bots.
+# Never `pull_request_target`.
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: read
+
+# Re-review on every push, but only the newest push per PR.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude-review:
+    name: Claude advisory review
+    if: >-
+      ${{ !github.event.pull_request.draft
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+      && github.event.pull_request.user.login != 'renovate[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write # post the review + inline comments
+      id-token: write # OIDC exchange for the Claude GitHub App token
+      actions: read # read CI results for the PR
+
+    steps:
+      # Secrets cannot appear in `if:`, so gate on a step output instead.
+      - name: Check for Claude token
+        id: gate
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Claude review skipped::CLAUDE_CODE_OAUTH_TOKEN is not set for this repository."
+          fi
+
+      - name: Checkout repository
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code Review
+        if: steps.gate.outputs.enabled == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "haynes-dev-bot"
+          track_progress: true
+          use_sticky_comment: true
+          # Automated surfaces pin the newest Opus explicitly, never an alias.
+          # `--allowedTools` merges with tag mode's base set; without the Bash and
+          # inline-comment grants below Claude cannot run `gh` or post line comments.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 60
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)"
+          additional_permissions: |
+            actions: read
+          prompt: |
+            You are the automated reviewer for the cigar journal: a public web app
+            (cigars.haynesnetwork.com) with a catalog, an MCP server that LLM agents
+            use as the primary journal writers, OIDC plus local-user login, and a
+            vendor price crawler. pnpm monorepo: apps/web, packages/{auth,config,
+            crawler,db,domain,importer,mcp,oauth,photos}, docs/ (PRDs, ADRs, flows),
+            archive/ (legacy MkDocs journal, still published). The PR branch is
+            already checked out. Review PR #${{ github.event.pull_request.number }}
+            of ${{ github.repository }}.
+
+            ## Step 1 - context
+            - `gh pr diff ${{ github.event.pull_request.number }}` for the changes
+            - `gh pr view ${{ github.event.pull_request.number }}` for intent
+            - Read `AGENTS.md`, then only what matches the changed paths:
+              `docs/security-and-observability.md` (threat model), the relevant ADR
+              in `docs/adr/`, `docs/mcp/tool-contract.md` for MCP changes,
+              `.agents/reference/` for crawler, catalog and ship-chain changes.
+              Do not repeat feedback already present on the PR.
+
+            ## Step 2 - what this repo cares about
+            **CRITICAL - block the merge**
+            - Identity: a tool, tRPC procedure or route that accepts a user id, or
+              takes provenance `client` from arguments. The principal comes only from
+              the token or session (ADR-004). Every query is owner-scoped, every
+              mutation checks ownership, public paths check the visibility flag.
+            - Secrets and PII: committed credentials or `.env` values; tokens, journal
+              prose or credentials in logs; invite, photo-drop, OAuth or service tokens
+              stored raw instead of as a SHA-256 hash; real emails or personal data in
+              fixtures, docs or this public repo.
+            - Auth (ADR-010, ADR-011): implicit account linking re-enabled,
+              `requireLocalEmailVerified` loosened, OIDC able to create users, invite
+              redemption writing `users.role`, or anything outside `@cj/oauth` able to
+              reach the service-token mint (the eslint import restriction must hold,
+              including relative paths).
+            - Data: SQL built from strings (Drizzle parameterized only); a migration
+              that edits an already-merged file instead of adding the next numbered
+              `packages/db` migration; a non-Postgres database; a mutation that writes
+              outside the domain package or without its audit row in the same
+              transaction (audit rows stamp `client_id` through the shared
+              `auditActor`); a mutation without the idempotency envelope.
+            - MCP surface: any delete tool, tool results that carry instructions, a
+              catalog tool leaking personal fields without `journal:read`, scope
+              widening, or sessions that can leak (idle sweep, 404 on unknown id).
+            - Stored XSS: raw HTML from any journal or catalog field, especially on
+              public pages.
+            - Crawler: fetching a URL that is not a configured vendor domain, ignoring
+              robots or rate limits, or storing raw HTML as catalog fields.
+            - Logic errors: races, off-by-one, unhandled null, and breaking changes
+              whose callers were not updated.
+
+            **HIGH - should fix**
+            - Docs-first violated: a product or architecture change with no PRD, ADR
+              or flow; an accepted ADR edited in place instead of superseded; a changed
+              tool schema, security behavior or ship-chain step with the matching doc
+              (`docs/mcp/tool-contract.md`, `docs/security-and-observability.md`,
+              `.agents/reference/`) left stale.
+            - Missing tests for changed logic, especially cross-user authorization
+              (both visibility states) and anything that mocks or replaces Postgres.
+            - `archive/` reviews edited (only new entries may be added) or its build
+              broken; hand edits to `CHANGELOG.md` or `.release-please-manifest.json`
+              (release-please owns them); a PR title that is not a conventional commit.
+            - CI or workflow changes that expose secrets to untrusted code
+              (`pull_request_target`, secrets in fork-reachable steps).
+            - UI copy that breaks the house style: helper blurbs describing buttons,
+              filler strings, jargon about mechanism. Copy is concise and professional.
+
+            **MEDIUM - consider**
+            - Doc claims that are inaccurate against the code, broken relative links,
+              or an AGENTS.md claim too broad to stay true.
+            - Unchecked access on external API data; missing input validation at a
+              boundary.
+
+            **Ignore entirely:** formatting (prettier and eslint cover it), naming,
+            import order, feature suggestions beyond the PR's intent, and a failing
+            `migrations.test.ts` on its own (a known embedded-Postgres flake).
+
+            ## Step 3 - report
+            - Post each line-specific finding with
+              `mcp__github_inline_comment__create_inline_comment` (`confirmed: true`),
+              prefixing the body with its severity: `CRITICAL:`, `HIGH:` or `MEDIUM:`.
+              Be concise: what is wrong, why, the fix. No praise.
+            - Then post ONE summary comment with `gh pr comment` containing a verdict
+              (`Looks good` / `Needs changes` / `Has critical issues`) and the findings
+              grouped by severity, each naming the file and line.
+            - If the diff is clean, say exactly "No findings." followed by one sentence
+              on what you checked. Never invent a finding to look thorough.
+            - Only review files changed in this PR. Post GitHub comments only; do not
+              return the review as chat text.
