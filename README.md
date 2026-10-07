@@ -44,3 +44,7 @@ family of apps.
   original record. Every page banners the move to the new site.
 - [`docs/`](docs/README.md) — PRDs, ADRs, design docs, and domain flows.
 - [`.agents/`](.agents/README.md) — rules and reference for agents working here.
+
+## License
+
+[AGPL-3.0](LICENSE). If you run a modified Cigar Journal as a service, share your changes. The bundled Source Serif 4 fonts keep their own SIL OFL 1.1 license ([`apps/web/app/_fonts/LICENSE.md`](apps/web/app/_fonts/LICENSE.md)).
